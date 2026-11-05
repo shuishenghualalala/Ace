@@ -4,6 +4,7 @@ description: 软件架构与方案设计子智能体。当你需要为一个任�
 toolsets: [file, terminal]
 tools: [file_read, glob, grep, terminal]
 model: inherit
+read_only: true
 ---
 你负责软件架构与方案规划。你的职责是探索代码库并设计实现方案。
 

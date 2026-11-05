@@ -24,6 +24,7 @@ import {
   openWikiAgent,
   forgetWikiAgentKb,
   initWikiAgent,
+  normalizeWikiCardPages,
 } from '../../src/ui/features/wiki-agent';
 import {
   applyChunk,
@@ -34,13 +35,13 @@ import { openInspectorToTab } from '../../src/ui/features/inspector';
 import { bindFileDrop, bindFilePaste } from '../../src/ui/features/attachments';
 import {
   __resetWikiViewForTest,
+  createWikiPageContribution,
   refreshWikiData,
   renderWikiPage,
   setWikiAgentEntryHandler,
 } from '../../src/ui/features/wiki-page';
 import {
   normalizeChunk,
-  normalizeWikiCardPages,
   reduceChunk,
   type AnyChatChunk,
   type ReducerSnapshot,
@@ -69,6 +70,7 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       wikiUpload: vi.fn(),
       wikiIngest: vi.fn(),
       sessionTodos: vi.fn(),
+      tasks: vi.fn(async () => []),
       getSessionModel: vi.fn(),
       setSessionModel: vi.fn(),
       deleteSession: vi.fn(async () => ({ ok: true })),
@@ -88,7 +90,10 @@ vi.mock('../../src/ui/ui-feedback', () => ({
 }));
 
 // ── chat-controller 的重依赖（与 chat-controller-send.test.ts 一致） ──
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
+vi.mock('../../src/ui/features/running-intro', () => ({
+  syncRunningIntroSlot: vi.fn(),
+  registerRunningIntroTarget: vi.fn(() => () => {}),
+}));
 vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
 vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
 vi.mock('../../src/ui/features/kanban-board', () => ({
@@ -123,6 +128,7 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
 const api = backendApi as unknown as {
   wikiAgentSession: ReturnType<typeof vi.fn>;
   wikiAgentSessions: ReturnType<typeof vi.fn>;
+  tasks: ReturnType<typeof vi.fn>;
   wikiPage: ReturnType<typeof vi.fn>;
   wikiSearch: ReturnType<typeof vi.fn>;
   wikiKBs: ReturnType<typeof vi.fn>;
@@ -283,8 +289,8 @@ beforeEach(() => {
 
 // ── Wiki Agent 结果卡片渲染 ──
 
-describe('wiki_cards 渲染', () => {
-  it('wiki_cards 挂到本回合 assistant 消息并渲染卡片网格（含查看按钮）', async () => {
+describe('wiki.cards 卡片渲染', () => {
+  it('wiki.cards 挂到本回合 assistant 消息并渲染卡片网格（含查看按钮）', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
 
@@ -297,8 +303,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法', tags: ['前端'] })] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法', tags: ['前端'] })] } },
       session_id: WIKI_SID,
       request_id: rid,
       sequence: 3,
@@ -332,8 +338,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] } },
       session_id: WIKI_SID,
       request_id: rid,
       sequence: 3,
@@ -388,7 +394,7 @@ describe('wiki_cards 渲染', () => {
     });
   });
 
-  it('旧 request_id 的迟到 wiki_cards 被 turn gate 丢弃', async () => {
+  it('旧 request_id 的迟到 wiki.cards 被 turn gate 丢弃', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
     applyChunk({
@@ -400,8 +406,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({})] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({})] } },
       session_id: WIKI_SID,
       request_id: 'req-stale',
       sequence: 3,
@@ -492,6 +498,31 @@ describe('wiki-page 入口挂点', () => {
     expect(payload.query).toBe('总结当前知识库');
     expect(payload.wiki_kb_id).toBe('default');
     expect(uiStore.get().activeTab).toBe('wiki');
+  });
+
+  it('重新进入 Wiki 时从持久化任务恢复整理卡片', async () => {
+    api.tasks.mockResolvedValueOnce([{
+      id: 'wiki-task-restored',
+      kind: 'wiki_ingest',
+      session_id: WIKI_SID,
+      title: '深度整理《产品资料》',
+      status: 'running',
+      progress: {
+        source_title: '产品资料',
+        stage: 'analyzing_chunks',
+        label: '已分析第 2/5 个分块',
+      },
+      created_at: NOW,
+      updated_at: NOW,
+    }]);
+
+    await enterWiki();
+
+    expect(api.tasks).toHaveBeenCalledWith(WIKI_SID);
+    const restored = (messageStore.get().messages[WIKI_SID] ?? [])
+      .find((message) => message.id === 'wiki-ingest-wiki-task-restored');
+    expect(restored?.streaming).toBe(true);
+    expect(restored?.toolCalls?.[0]?.progressText).toBe('已分析第 2/5 个分块');
   });
 
   it('面板内消息复制按钮可用（不依赖 #chat-messages 的全局委托）', async () => {
@@ -847,6 +878,27 @@ describe('wiki-page 入口挂点', () => {
     expect(rebuilt.value).toBe('写到一半的草稿');
   });
 
+  it('切出再切回 Wiki 会重新挂载对话面板并保留草稿', async () => {
+    const contribution = createWikiPageContribution();
+    uiStore.set({ activeTab: 'wiki' });
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull());
+
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
+    input.value = '切页前的草稿';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await contribution.deactivate();
+    expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).toBeNull();
+
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull();
+      expect(document.querySelector('[data-wiki-agent-panel] .wiki-agent-pane__void')).not.toBeNull();
+    });
+    expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value)
+      .toBe('切页前的草稿');
+  });
+
   it('IME 合成中按 Enter 不发送，普通 Enter 发送', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
@@ -910,7 +962,7 @@ describe('wiki reducer（纯函数）', () => {
     expect(normalizeWikiCardPages({})).toEqual([]);
   });
 
-  it('wiki_cards patch 到最后一条 assistant；无 assistant 时新建空载体消息', () => {
+  it('wiki.cards patch 到最后一条 assistant；无 assistant 时新建空载体消息', () => {
     const existing = {
       id: 'm-1',
       role: 'assistant' as const,
@@ -918,8 +970,8 @@ describe('wiki reducer（纯函数）', () => {
       timestamp: 1,
     };
     const chunk = normalizeChunk({
-      kind: 'wiki_cards',
-      body: { pages: [{ id: 'p1', title: 'A' }] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [{ id: 'p1', title: 'A' }] } },
       sequence: 9,
     }) as AnyChatChunk;
     const patched = reduceChunk(chunk, snap({ messages: [existing] }));
@@ -936,8 +988,12 @@ describe('wiki reducer（纯函数）', () => {
     expect(appended.finalize).toBe(false);
   });
 
-  it('wiki_cards 空数组 no-op', () => {
-    const chunk = normalizeChunk({ kind: 'wiki_cards', body: { pages: [] }, sequence: 9 }) as AnyChatChunk;
+  it('wiki.cards 空数组 no-op', () => {
+    const chunk = normalizeChunk({
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [] } },
+      sequence: 9,
+    }) as AnyChatChunk;
     const result = reduceChunk(chunk, snap());
     expect(result.messageUpserts).toEqual([]);
   });

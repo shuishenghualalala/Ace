@@ -542,7 +542,6 @@ export class PlaywrightEngine {
     view: WebContentsView,
     options: {
       accept: boolean;
-      expectedType?: string;
       promptText?: string;
       timeoutMs?: number;
     },
@@ -550,7 +549,6 @@ export class PlaywrightEngine {
     type: string;
     message: string;
     defaultValue: string;
-    matched: boolean;
   }> {
     const timeoutMs = options.timeoutMs ?? 5_000;
     // A popup may execute alert() synchronously in document.write before
@@ -569,13 +567,8 @@ export class PlaywrightEngine {
       type: dialog.type(),
       message: dialog.message(),
       defaultValue: dialog.defaultValue(),
-      matched: !options.expectedType || dialog.type() === options.expectedType,
     };
-    // Inspect before applying the recorded choice. A mismatched confirm or
-    // beforeunload must not be accidentally accepted just because the trace
-    // expected an alert at this position.
-    if (!observed.matched) await dialog.dismiss();
-    else if (options.accept) await dialog.accept(options.promptText);
+    if (options.accept) await dialog.accept(options.promptText);
     else await dialog.dismiss();
     return observed;
   }
@@ -611,7 +604,7 @@ export class PlaywrightEngine {
   /**
    * FileChooser interception is automation-only. Leaving a Playwright listener installed while
    * the user owns a visible tab suppresses the native OS chooser, which would make human
-   * recording of uploads impossible.
+   * native uploads impossible.
    */
   private updateFileChooserCapture(
     page: Page,

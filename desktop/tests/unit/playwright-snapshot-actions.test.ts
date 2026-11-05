@@ -12,7 +12,6 @@ import {
   click,
   registerOverlayHandler,
   fill,
-  locateBySelector,
 } from '../../src/main/browser/playwright-actions';
 
 import type { ActionContext } from '../../src/main/browser/playwright-actions';
@@ -739,7 +738,7 @@ describe('playwright action execution semantics', () => {
   });
 
   it('遮挡处理器用 selector 注册并取 first()，不用会失效的 ref', async () => {
-    // 处理器要跨越整场回放存活，而 ref 表每次快照整张替换——用 ref 必然失效。
+    // 处理器要跨越多次快照存活，而 ref 表每次快照整张替换——用 ref 可能失效。
     // first() 是因为多个弹窗排队时关闭按钮会有同名兄弟，strict 模式下多匹配
     // 会抛，而抛在处理器里会让**触发它的那个动作**失败。
     const fixture = actionFixture();
@@ -898,57 +897,4 @@ describe('playwright action execution semantics', () => {
     ]);
   });
 
-  it('locate 只做 exact selector strict count，不制造安全指纹', async () => {
-    const fixture = actionFixture();
-    const state = materialState('located', {
-      navigation: 'https://example.test/next',
-      downloadNavigation: 'https://example.test/next',
-      actionKind: 'navigate',
-      accessibleRole: 'link',
-      accessibleName: 'Next step',
-      documentBaseURI: 'https://example.test/',
-      documentURL: 'https://frame.example.test/',
-      tag: 'a',
-      inputType: '',
-      contentEditable: false,
-    });
-    state.fieldProbe = {
-      type: '',
-      autocomplete: '',
-      name: '',
-      id: '',
-      placeholder: '',
-      ariaLabel: '',
-      labelText: '',
-    };
-    vi.mocked(fixture.locator.evaluate).mockResolvedValue(state);
-    vi.mocked(fixture.locator.ariaSnapshot).mockResolvedValue('- link "Next step"');
-    const ctx = { ...fixture.ctx, refs: new Map<string, RefRecord>() };
-
-    const record = await locateBySelector(
-      ctx,
-      '@s1',
-      'internal:role=link[name="Next step"i]',
-      ctx.hash,
-    );
-
-    expect(record).toMatchObject({
-      role: 'generic',
-      name: '',
-      navigation: '',
-      actionKind: 'activate',
-      semanticRole: 'generic',
-      documentBaseURI: '',
-      documentURL: '',
-      tag: '',
-      inputType: '',
-      contentEditable: false,
-      fieldTier: 'plain',
-    });
-    expect(record.security).toBe('');
-    expect(record.securityKey).toBe('@s1');
-    expect(ctx.refs.get('@s1')).toBe(record);
-    expect(fixture.locator.evaluate).not.toHaveBeenCalled();
-    expect(fixture.locator.ariaSnapshot).not.toHaveBeenCalled();
-  });
 });

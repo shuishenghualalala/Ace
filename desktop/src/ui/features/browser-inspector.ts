@@ -65,7 +65,7 @@ export function replaceBrowserTabs(
 
 export function createBrowserInspector(
   value: BrowserPageState,
-  options: { maximized: boolean; nativeViewMounted: boolean },
+  options: { maximized: boolean; nativeViewMounted: boolean; zoomFactor?: number },
 ): HTMLElement {
   const hasPage = Boolean(value.tab_id);
   const blankPage = !hasPage || isBlankUrl(value.url);
@@ -132,39 +132,24 @@ export function createBrowserInspector(
   address.inputMode = 'url';
   address.readOnly = value.mode !== 'human' && hasPage;
 
-  const note = document.createElement('form');
-  note.className = 'browser-note';
-  note.dataset.browserNote = '';
-  note.hidden = true;
-  const noteInput = document.createElement('input');
-  noteInput.className = 'browser-note__input';
-  noteInput.dataset.browserNoteInput = '';
-  noteInput.type = 'text';
-  noteInput.autocomplete = 'off';
-  noteInput.setAttribute('aria-label', '给这一步加说明');
-  noteInput.placeholder = '这一步要说明什么？例如：这个工单号每次都不同';
-  const saveNote = document.createElement('button');
-  saveNote.type = 'submit';
-  saveNote.className = 'browser-note__btn browser-note__btn--primary';
-  saveNote.textContent = '保存';
-  const cancelNote = document.createElement('button');
-  cancelNote.type = 'button';
-  cancelNote.className = 'browser-note__btn';
-  cancelNote.dataset.browserNoteCancel = '';
-  cancelNote.textContent = '取消';
-  note.append(noteInput, saveNote, cancelNote);
-
-  const recordingStatus = document.createElement('div');
-  recordingStatus.className = 'browser-recording';
-  recordingStatus.dataset.browserRecording = '';
-  recordingStatus.setAttribute('role', 'status');
-  recordingStatus.setAttribute('aria-live', 'polite');
-  recordingStatus.hidden = true;
-
-  const recordingControls = document.createElement('span');
-  recordingControls.className = 'browser-rec-slot';
-  recordingControls.dataset.browserRecControls = '';
-  toolbar.append(navigation, address, returnToAi, note, recordingStatus, recordingControls);
+  const zoom = document.createElement('div');
+  zoom.className = 'browser-zoom';
+  zoom.setAttribute('role', 'group');
+  zoom.setAttribute('aria-label', '网页缩放');
+  for (const [action, label, text] of [
+    ['out', '缩小网页', '−'], ['reset', '恢复网页缩放至 100%', `${Math.round((options.zoomFactor ?? 1) * 100)}%`], ['in', '放大网页', '+'],
+  ]) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = action === 'reset' ? 'browser-zoom__reset' : 'browser-icon-btn';
+    button.dataset.browserZoom = action;
+    button.textContent = text;
+    button.setAttribute('aria-label', label);
+    button.title = action === 'reset' ? '恢复 100%（Ctrl/Cmd+0）' : `${label}（Ctrl/Cmd+${action === 'in' ? '+' : '-'}）`;
+    button.disabled = !hasPage;
+    zoom.appendChild(button);
+  }
+  toolbar.append(navigation, address, zoom, returnToAi);
 
   const takeover = document.createElement('div');
   takeover.className = 'browser-takeover';

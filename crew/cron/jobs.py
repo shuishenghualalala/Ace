@@ -26,11 +26,18 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from crew.state._migration import CRON_DB_TABLES, backfill_empty_owner_rows
 from crew.state.logging import get_logger
+from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 log = get_logger("cron")
 BJ_TZ = ZoneInfo("Asia/Shanghai")
+
+# Feature 级 schema 版本（6H）：cron 域共用一张 cron_schema_version 表，
+# 当前结构登记为基线 v1；表结构演进在此号上递增并配迁移步骤。
+CRON_SCHEMA_FEATURE = "cron"
+CRON_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -397,20 +404,44 @@ def parse_schedule(schedule: str, *, now: datetime | None = None) -> dict[str, A
 # ---------------------------------------------------------------------------
 
 class CronJobStore:
-    """cron 任务的持久化存储。表：cron_jobs。"""
+    """cron 任务的持久化存储。表：cron_jobs、cron_job_runs（独立库 crew_data/cron.db）。"""
 
-    def __init__(self, db_path: str = "crew_data/crew.db", *, wal_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: str = "crew_data/cron.db",
+        *,
+        wal_enabled: bool = True,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        if legacy_db_path is not None:
+            self._migrate_legacy_rows(Path(legacy_db_path))
 
     def close(self) -> None:
         """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
         with self._lock:
             self._conn.close()
+
+    def _migrate_legacy_rows(self, legacy_path: Path) -> None:
+        """copy-on-first-activate：目标库为空时从旧主库整表复制 cron 行。
+
+        gate 在 ensure-schema + cron_schema_version stamp 之后（构造顺序保证）。
+        旧表保留在旧库不删（ADR-0038 回退备份）；目标库已有行即整体跳过，
+        重复启动幂等零重复；复制走单事务，失败不半写。
+        """
+
+        if legacy_path.resolve() == self._path.resolve():
+            return
+        copied = self._writer.execute(
+            lambda conn: copy_legacy_feature_rows(legacy_path, conn, CRON_DB_TABLES)
+        )
+        if any(copied.values()):
+            log.info("已从 %s 迁移 cron 历史数据: %s", legacy_path, copied)
 
     def _init_schema(self, conn) -> None:
         conn.execute(
@@ -540,6 +571,11 @@ class CronJobStore:
             WHERE fire_key <> ''
             """
         )
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主任务/运行记录）。
+        backfill_empty_owner_rows(conn, list(CRON_DB_TABLES))
+        # 6H：Feature 级 schema 版本登记（幂等），必须先于 legacy 行复制，
+        # 保证 copy-on-first-activate 的 gate 顺序（ensure-schema → stamp → copy）。
+        stamp_baseline(conn, CRON_SCHEMA_FEATURE, version=CRON_SCHEMA_VERSION)
         self._conn.commit()
 
     @staticmethod
@@ -576,7 +612,7 @@ class CronJobStore:
         workspace_id: str = "default",
         deliver: str = "",
         origin_source: dict[str, Any] | None = None,
-        owner_account_id: str = "",
+        owner_account_id: str,
     ) -> dict[str, Any]:
         """按 schedule 创建任务，返回任务 dict。schedule 解析失败抛 ValueError。"""
         now_dt = _local_now()
@@ -629,7 +665,7 @@ class CronJobStore:
         self,
         job_id: str,
         enabled: bool,
-        owner_account_id: str = "",
+        owner_account_id: str,
         *,
         _all_owners: bool = False,
     ) -> bool:
@@ -667,7 +703,7 @@ class CronJobStore:
             return cur.rowcount
         return self._writer.execute(_write) > 0
 
-    def delete(self, job_id: str, owner_account_id: str = "", *, _all_owners: bool = False) -> bool:
+    def delete(self, job_id: str, owner_account_id: str, *, _all_owners: bool = False) -> bool:
         """删除任务，返回任务是否存在。"""
         def _write(conn):
             sql = "DELETE FROM cron_jobs WHERE id = ?"
@@ -1039,7 +1075,7 @@ class CronJobStore:
 
         self._writer.execute(_write)
 
-    def session_has_running_job_run(self, session_id: str, owner_account_id: str = "") -> bool:
+    def session_has_running_job_run(self, session_id: str, owner_account_id: str) -> bool:
         """该会话下是否仍有 status=running 的 cron_job_runs。"""
         sql = (
             "SELECT 1 FROM cron_job_runs r "
@@ -1051,7 +1087,7 @@ class CronJobStore:
             row = self._conn.execute(sql, (session_id, owner_account_id)).fetchone()
         return row is not None
 
-    def delete_jobs_for_session(self, session_id: str, owner_account_id: str = "") -> int:
+    def delete_jobs_for_session(self, session_id: str, owner_account_id: str) -> int:
         """删除某会话下全部 cron_jobs（含已停用），避免删会话后留下指向死 session_id 的孤儿行。
 
         调用方应先用 ``session_has_running_job_run`` / enabled 守卫拦住进行中的任务。
@@ -1182,7 +1218,7 @@ class CronJobStore:
             return "date", {"run_at": run_at}
         raise ValueError("row 缺少可恢复的 trigger 信息")
 
-    def get(self, job_id: str, owner_account_id: str = "", *, _all_owners: bool = False) -> dict[str, Any] | None:
+    def get(self, job_id: str, owner_account_id: str, *, _all_owners: bool = False) -> dict[str, Any] | None:
         sql = "SELECT * FROM cron_jobs WHERE id = ?"
         params: tuple[Any, ...] = (job_id,)
         if not _all_owners:
@@ -1195,8 +1231,8 @@ class CronJobStore:
     def list(
         self,
         session_id: str | None = None,
-        owner_account_id: str = "",
         *,
+        owner_account_id: str,
         _all_owners: bool = False,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM cron_jobs"

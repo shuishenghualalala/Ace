@@ -8,18 +8,25 @@ import shutil
 import subprocess
 from pathlib import Path
 
-_SKIP_DIRECTORIES = {".git", ".venv", "dist", "node_modules", "target"}
-
 
 def package_lock_directories(repo_root: Path) -> list[Path]:
-    """Return every source directory containing a package-lock.json."""
-    found: list[Path] = []
-    for current, directories, files in os.walk(repo_root):
-        directories[:] = sorted(
-            name for name in directories if name not in _SKIP_DIRECTORIES
-        )
-        if "package-lock.json" in files:
-            found.append(Path(current))
+    """Return every source directory containing a committed package-lock.json.
+
+    以 git 追踪范围为事实来源（审计对象 = 提交进仓库的 lockfile）：内嵌
+    worktree、构建产物等未跟踪目录天然被排除——既避免对同一份 lockfile 的
+    重复审计，也不需要随目录布局漂移维护 skip 列表。
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    found = {
+        (repo_root / entry).parent
+        for entry in result.stdout.split("\0")
+        if os.path.basename(entry) == "package-lock.json"
+    }
     return sorted(found)
 
 

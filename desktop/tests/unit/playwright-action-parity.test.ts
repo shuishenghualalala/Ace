@@ -14,14 +14,12 @@ import {
   hover,
   keyDown,
   keyUp,
-  locateBySelector,
   mouseClick,
   mouseDown,
   mouseDrag,
   mouseMove,
   mouseUp,
   mouseWheel,
-  pointerGesture,
   press,
   reload,
   resize,
@@ -35,7 +33,6 @@ import {
 
 import type { ActionContext } from '../../src/main/browser/playwright-actions';
 import type {
-  CDPSession,
   FileChooser,
   Locator,
   Page,
@@ -70,9 +67,6 @@ function actionFixture(): {
   start: Locator;
   end: Locator;
   page: Page;
-  cdp: CDPSession;
-  cdpSend: ReturnType<typeof vi.fn>;
-  cdpDetach: ReturnType<typeof vi.fn>;
 } {
   const start = {
     _selector: '#start',
@@ -106,15 +100,6 @@ function actionFixture(): {
     hover: vi.fn(async () => undefined),
   } as unknown as Locator;
   const byText = new Map<string, ReturnType<typeof vi.fn>>();
-  const cdpSend = vi.fn(async () => ({}));
-  const cdpDetach = vi.fn(async () => undefined);
-  const cdp = {
-    send: cdpSend,
-    detach: cdpDetach,
-  } as unknown as CDPSession;
-  const context = {
-    newCDPSession: vi.fn(async () => cdp),
-  };
   const page = {
     url: vi.fn(() => 'https://example.test/'),
     locator: vi.fn((selector: string) => {
@@ -139,7 +124,6 @@ function actionFixture(): {
     goForward: vi.fn(async () => ({})),
     reload: vi.fn(async () => null),
     waitForTimeout: vi.fn(async () => undefined),
-    context: vi.fn(() => context),
     getByText: vi.fn((text: string) => {
       let waiter = byText.get(text);
       if (!waiter) {
@@ -164,9 +148,6 @@ function actionFixture(): {
     start,
     end,
     page,
-    cdp,
-    cdpSend,
-    cdpDetach,
   };
 }
 
@@ -749,335 +730,6 @@ describe('Playwright MCP action parity', () => {
     });
   });
 
-  it('replays a border-box-relative pointer trajectory with float timing and modifiers', async () => {
-    const { ctx, start, page } = actionFixture();
-
-    await pointerGesture(ctx, '@e1', {
-      button: 'left',
-      modifiers: ['Control', 'Shift'],
-      start: { x: -1.25, y: 2.5 },
-      points: [
-        { x: 3.75, y: 4.125, elapsedMs: 5.5 },
-        { x: 9, y: 8, elapsedMs: 12 },
-      ],
-    });
-
-    expect(start.boundingBox).toHaveBeenCalledOnce();
-    expect(page.keyboard.down).toHaveBeenNthCalledWith(1, 'Control');
-    expect(page.keyboard.down).toHaveBeenNthCalledWith(2, 'Shift');
-    expect(page.mouse.move).toHaveBeenNthCalledWith(1, 99.25, 202.75);
-    expect(page.mouse.down).toHaveBeenCalledWith({ button: 'left' });
-    expect(page.mouse.move).toHaveBeenNthCalledWith(2, 104.25, 204.375);
-    expect(page.mouse.move).toHaveBeenNthCalledWith(3, 109.5, 208.25);
-    expect(page.mouse.up).toHaveBeenCalledWith({ button: 'left' });
-    expect(page.keyboard.up).toHaveBeenNthCalledWith(1, 'Shift');
-    expect(page.keyboard.up).toHaveBeenNthCalledWith(2, 'Control');
-    expect(page.waitForTimeout).toHaveBeenNthCalledWith(1, 5.5);
-    expect(page.waitForTimeout).toHaveBeenNthCalledWith(2, 6.5);
-    expect(page.waitForTimeout).toHaveBeenNthCalledWith(3, 500);
-    expect(
-      vi.mocked(page.keyboard.up).mock.invocationCallOrder.at(-1),
-    ).toBeLessThan(
-      vi.mocked(page.waitForTimeout).mock.invocationCallOrder.at(-1) ?? 0,
-    );
-  });
-
-  it('best-effort releases the pointer button and modifiers after a move failure', async () => {
-    const { ctx, page } = actionFixture();
-    vi.mocked(page.mouse.move)
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('CDP move failed after dispatch'));
-
-    await expect(pointerGesture(ctx, '@e1', {
-      button: 'right',
-      modifiers: ['Alt', 'Meta'],
-      start: { x: 1, y: 2 },
-      points: [{ x: -10.5, y: 20.25, elapsedMs: 3 }],
-    })).rejects.toBeInstanceOf(ActionError);
-
-    expect(page.mouse.up).toHaveBeenCalledWith({ button: 'right' });
-    expect(page.keyboard.up).toHaveBeenNthCalledWith(1, 'Meta');
-    expect(page.keyboard.up).toHaveBeenNthCalledWith(2, 'Alt');
-  });
-
-  it('replays pen samples through a public CDPSession without mouse fallback', async () => {
-    const { ctx, page, cdpSend, cdpDetach } = actionFixture();
-
-    await pointerGesture(ctx, '@e1', {
-      pointerType: 'pen',
-      button: 'right',
-      modifiers: ['Alt'],
-      start: {
-        x: 1,
-        y: 2,
-        pressure: 0.25,
-        tangentialPressure: -0.4,
-        tiltX: 11,
-        tiltY: -12,
-        twist: 33,
-        width: 8,
-        height: 6,
-      },
-      points: [{
-        x: 9,
-        y: 10,
-        elapsedMs: 4.5,
-        pressure: 0.75,
-        tangentialPressure: 0.2,
-        tiltX: 21,
-        tiltY: -22,
-        twist: 44,
-        width: 9,
-        height: 7,
-      }],
-    });
-
-    expect(page.context().newCDPSession).toHaveBeenCalledWith(page);
-    expect(page.mouse.move).not.toHaveBeenCalled();
-    expect(page.mouse.down).not.toHaveBeenCalled();
-    expect(page.mouse.up).not.toHaveBeenCalled();
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      1,
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({
-        type: 'mouseMoved',
-        x: 101.5,
-        y: 202.25,
-        modifiers: 1,
-        button: 'none',
-        buttons: 0,
-        pointerType: 'pen',
-        force: 0.25,
-        tangentialPressure: -0.4,
-        tiltX: 11,
-        tiltY: -12,
-        twist: 33,
-      }),
-    );
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      2,
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({
-        type: 'mousePressed',
-        button: 'right',
-        buttons: 2,
-        pointerType: 'pen',
-        force: 0.25,
-      }),
-    );
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      3,
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({
-        type: 'mouseMoved',
-        x: 109.5,
-        y: 210.25,
-        button: 'none',
-        buttons: 2,
-        pointerType: 'pen',
-        force: 0.75,
-        tiltX: 21,
-        tiltY: -22,
-        twist: 44,
-      }),
-    );
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      4,
-      'Input.dispatchMouseEvent',
-      expect.objectContaining({
-        type: 'mouseReleased',
-        x: 109.5,
-        y: 210.25,
-        button: 'right',
-        buttons: 0,
-        pointerType: 'pen',
-        force: 0,
-      }),
-    );
-    // CDP has no pen contact width/height input fields; they remain preserved
-    // in the trace but must not be invented as unrelated protocol fields.
-    expect(cdpSend.mock.calls.some((call) => (
-      'width' in (call[1] as Record<string, unknown>)
-      || 'height' in (call[1] as Record<string, unknown>)
-    ))).toBe(false);
-    expect(cdpDetach).toHaveBeenCalledOnce();
-  });
-
-  it('replays one primary touch with contact geometry and a clean touchEnd', async () => {
-    const { ctx, page, cdpSend, cdpDetach } = actionFixture();
-
-    await pointerGesture(ctx, '@e1', {
-      pointerType: 'touch',
-      button: 'left',
-      modifiers: ['Control', 'Shift'],
-      start: {
-        x: 3,
-        y: 4,
-        pressure: 0.6,
-        tangentialPressure: -0.25,
-        tiltX: 5,
-        tiltY: -6,
-        twist: 17,
-        width: 12,
-        height: 10,
-      },
-      points: [
-        {
-          x: 13,
-          y: 14,
-          elapsedMs: 3,
-          pressure: 0.8,
-          width: 14,
-          height: 8,
-        },
-        {
-          x: 20,
-          y: 22,
-          elapsedMs: 8,
-          pressure: 0,
-          width: 16,
-          height: 6,
-        },
-      ],
-    });
-
-    expect(page.mouse.move).not.toHaveBeenCalled();
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      1,
-      'Input.dispatchTouchEvent',
-      {
-        type: 'touchStart',
-        modifiers: 10,
-        touchPoints: [{
-          x: 103.5,
-          y: 204.25,
-          id: 1,
-          force: 0.6,
-          radiusX: 6,
-          radiusY: 5,
-          tangentialPressure: -0.25,
-          tiltX: 5,
-          tiltY: -6,
-          twist: 17,
-        }],
-      },
-    );
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      2,
-      'Input.dispatchTouchEvent',
-      expect.objectContaining({
-        type: 'touchMove',
-        modifiers: 10,
-        touchPoints: [expect.objectContaining({
-          x: 113.5,
-          y: 214.25,
-          id: 1,
-          force: 0.8,
-          radiusX: 7,
-          radiusY: 4,
-        })],
-      }),
-    );
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      3,
-      'Input.dispatchTouchEvent',
-      expect.objectContaining({
-        type: 'touchMove',
-        touchPoints: [expect.objectContaining({
-          x: 120.5,
-          y: 222.25,
-          id: 1,
-          // pointerup samples record pressure=0; the active endpoint move must
-          // retain contact until the following touchEnd releases it.
-          force: 0.8,
-          radiusX: 8,
-          radiusY: 3,
-        })],
-      }),
-    );
-    expect(cdpSend).toHaveBeenNthCalledWith(
-      4,
-      'Input.dispatchTouchEvent',
-      { type: 'touchEnd', modifiers: 10, touchPoints: [] },
-    );
-    expect(cdpSend.mock.calls.some((call) => call[1]?.type === 'touchCancel'))
-      .toBe(false);
-    expect(cdpDetach).toHaveBeenCalledOnce();
-  });
-
-  it('cancels an uncertain touch and detaches its CDPSession after failure', async () => {
-    const { ctx, page, cdpSend, cdpDetach } = actionFixture();
-    cdpSend.mockImplementation(async (
-      _method: string,
-      params: Record<string, unknown>,
-    ) => {
-      if (params.type === 'touchMove') {
-        throw new Error('touch move failed after dispatch');
-      }
-      return {};
-    });
-
-    await expect(pointerGesture(ctx, '@e1', {
-      pointerType: 'touch',
-      button: 'left',
-      modifiers: ['Meta'],
-      start: { x: 1, y: 2 },
-      points: [{ x: 3, y: 4, elapsedMs: 1 }],
-    })).rejects.toBeInstanceOf(ActionError);
-
-    expect(cdpSend).toHaveBeenLastCalledWith(
-      'Input.dispatchTouchEvent',
-      { type: 'touchCancel', touchPoints: [] },
-    );
-    expect(page.keyboard.up).toHaveBeenCalledWith('Meta');
-    expect(cdpDetach).toHaveBeenCalledOnce();
-  });
-
-  it('lets a retained dialog operation own its pen cleanup until it settles', async () => {
-    const { ctx, page, cdpSend, cdpDetach } = actionFixture();
-    const emitter = new EventEmitter();
-    Object.assign(page as object, {
-      on: emitter.on.bind(emitter),
-      off: emitter.off.bind(emitter),
-    });
-    let releasePressed!: () => void;
-    const pressedGate = new Promise<void>((resolve) => {
-      releasePressed = resolve;
-    });
-    cdpSend.mockImplementation(async (
-      _method: string,
-      params: Record<string, unknown>,
-    ) => {
-      if (params.type === 'mousePressed') {
-        emitter.emit('dialog', {});
-        await pressedGate;
-      }
-      return {};
-    });
-    let retained: Promise<void> | undefined;
-    ctx.onModalActionPending = (pending) => {
-      retained = pending;
-    };
-
-    await expect(pointerGesture(ctx, '@e1', {
-      pointerType: 'pen',
-      button: 'left',
-      modifiers: ['Alt'],
-      start: { x: 1, y: 2, pressure: 0.3 },
-      points: [{ x: 3, y: 4, elapsedMs: 1, pressure: 0 }],
-    })).rejects.toMatchObject({ code: 'dialog_pending' });
-
-    expect(retained).toBeDefined();
-    expect(cdpDetach).not.toHaveBeenCalled();
-    expect(page.keyboard.up).not.toHaveBeenCalled();
-    releasePressed();
-    await retained;
-    expect(cdpSend.mock.calls.some((call) => call[1]?.type === 'mouseReleased'))
-      .toBe(true);
-    expect(page.keyboard.up).toHaveBeenCalledWith('Alt');
-    expect(cdpDetach).toHaveBeenCalledOnce();
-  });
-
   it('preserves file/data/combined/explicit-empty drop payloads exactly', async () => {
     const { ctx, start } = actionFixture();
 
@@ -1277,28 +929,4 @@ describe('Playwright MCP action parity', () => {
     });
   });
 
-  it('keeps a strict unique locate executable when optional metadata probing fails', async () => {
-    const { ctx, start } = actionFixture();
-    // This minimal locator intentionally has no evaluate/ariaSnapshot methods,
-    // so rich fingerprint collection fails after count() proved uniqueness.
-    const located = await locateBySelector(
-      ctx,
-      '@s1',
-      '#start',
-      (value) => `hash:${value}`,
-    );
-
-    expect(start.count).toHaveBeenCalledOnce();
-    expect(located).toMatchObject({
-      selector: '#start',
-      role: 'generic',
-      name: '',
-      actionKind: 'activate',
-      fieldTier: 'plain',
-      documentURL: '',
-      securityKey: '@s1',
-      security: '',
-    });
-    expect(ctx.refs.get('@s1')).toBe(located);
-  });
 });

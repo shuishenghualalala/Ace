@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from crew.core.envelope import Envelope
 from crew.core.types import ToolCall, ToolPermissionDecision
+from crew.features import (
+    ExecutionDriverUnavailableError,
+    FeatureLeaseUnavailableError,
+    FeatureState,
+    RegistrationPhase,
+)
 from crew.plugins.manager import PluginManager
 from crew.state.plugin_preferences import (
     PluginPreferencesStore,
@@ -90,6 +99,184 @@ def _load(tmp_path):
     return registry, plugins
 
 
+async def test_startup_phase_is_discovered_without_installing_contributions(tmp_path):
+    plugin_dir = tmp_path / "startup_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: startup-plugin\nactivation_phase: startup\nprovides_tools:\n  - startup_tool\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+CALLED = False
+
+def register(ctx):
+    global CALLED
+    CALLED = True
+    ctx.register_tool(
+        name="startup_tool",
+        toolset="startup",
+        schema={"name": "startup_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    try:
+        await plugins.discover_and_load_async([tmp_path], enabled=["startup-plugin"])
+
+        loaded = plugins.get_plugin("startup-plugin")
+        assert loaded is not None and not loaded.enabled
+        assert loaded.feature_record is not None
+        assert loaded.feature_record.state is FeatureState.DISCOVERED
+        assert loaded.feature_record.scope is None
+        assert loaded.tools_registered == []
+        assert registry.names() == []
+        assert plugins.resolve_service("startup.service") is None
+        assert "crew_runtime_plugins.startup_plugin" not in __import__("sys").modules
+
+        activated = await plugins.activate_phase_async("startup")
+        assert activated == (loaded,)
+        assert loaded.enabled
+        assert loaded.feature_record.state is FeatureState.ACTIVE
+        assert registry.names() == ["startup_tool"]
+    finally:
+        await plugins.aclose()
+
+
+async def test_failed_activation_rolls_back_all_contributions_and_global_binding(tmp_path):
+    plugin_dir = tmp_path / "rollback_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "skills").mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        """
+name: rollback-plugin
+activation_phase: startup
+provides:
+  - rollback.service
+provides_tools:
+  - rollback_tool
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+CURRENT = None
+
+class Candidate:
+    pass
+
+async def contribute(*args, **kwargs):
+    return None
+
+def register(ctx):
+    global CURRENT
+    candidate = Candidate()
+    CURRENT = candidate
+
+    async def dispose():
+        global CURRENT
+        if CURRENT is candidate:
+            CURRENT = None
+
+    ctx.register_disposer(dispose)
+    ctx.register_service("rollback.service", candidate)
+    ctx.register_tool(
+        name="rollback_tool",
+        toolset="rollback",
+        schema={"name": "rollback_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+    ctx.register_context_contributor("rollback.context", contribute)
+    ctx.register_skill_root("skills")
+    raise RuntimeError("activation failed after all contributions")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["rollback-plugin"])
+    await plugins.activate_phase_async("startup")
+
+    loaded = plugins.get_plugin("rollback-plugin")
+    assert loaded is not None and not loaded.enabled
+    assert "activation failed after all contributions" in str(loaded.error)
+    assert registry.names() == []
+    assert plugins.resolve_service("rollback.service") is None
+    assert plugins.feature_runtime.context_contributors.bindings() == ()
+    assert plugins.plugin_skill_roots() == []
+    module = __import__("crew_runtime_plugins.rollback_plugin", fromlist=["CURRENT"])
+    assert module.CURRENT is None
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.scope is not None
+    assert loaded.feature_record.scope.state is FeatureState.DISPOSED
+
+
+async def test_unload_before_startup_activation_is_idempotent_and_resource_free(tmp_path):
+    plugin_dir = tmp_path / "deferred_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: deferred-plugin\nactivation_phase: startup\nprovides_tools:\n  - deferred_tool\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+CALLED = False
+
+def register(ctx):
+    global CALLED
+    CALLED = True
+    ctx.register_tool(
+        name="deferred_tool",
+        toolset="deferred",
+        schema={"name": "deferred_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["deferred-plugin"])
+    loaded = plugins.get_plugin("deferred-plugin")
+    assert loaded is not None and loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.DISCOVERED
+
+    assert await plugins.unload_plugin_async("deferred-plugin") is True
+    assert await plugins.unload_plugin_async("deferred-plugin") is False
+    assert loaded.feature_record.scope is None
+    assert loaded.feature_record.state is FeatureState.DISCOVERED
+    assert loaded.enabled is False
+    assert loaded.activation_suppressed is True
+    assert registry.names() == []
+    assert "crew_runtime_plugins.deferred_plugin" not in __import__("sys").modules
+    assert await plugins.activate_phase_async("startup") == ()
+    assert "crew_runtime_plugins.deferred_plugin" not in __import__("sys").modules
+
+
+def test_invalid_activation_phase_is_reported_on_discovery(tmp_path):
+    plugin_dir = tmp_path / "bad_phase"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: bad-phase\nactivation_phase: never\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text("def register(ctx): pass\n", encoding="utf-8")
+    plugins = PluginManager()
+
+    plugins.discover_and_load([tmp_path], enabled=["bad-phase"])
+
+    loaded = plugins.get_plugin("bad_phase")
+    assert loaded is not None and loaded.enabled is False
+    assert loaded.feature_record is None
+    assert loaded.error is not None
+    assert "activation_phase must be one of: build, startup" in loaded.error
+
+
 async def test_register_tool_passthrough_permission_and_ui(tmp_path):
     registry, plugins = _load(tmp_path)
 
@@ -124,7 +311,7 @@ async def test_unload_plugin_removes_registrations_and_runs_disposers(tmp_path):
     assert registry.names() == ["lifecycle_echo"]
     assert plugins.plugin_skill_roots() != []
 
-    assert plugins.unload_plugin("lifecycle_plugin") is True
+    assert await plugins.unload_plugin_async("lifecycle_plugin") is True
 
     assert registry.names() == []
     # hook 不再触发：pre_tool_call 列表已空
@@ -141,8 +328,8 @@ async def test_unload_plugin_removes_registrations_and_runs_disposers(tmp_path):
     assert loaded.enabled is False
     assert loaded.error is None
     # 重复卸载返回 False
-    assert plugins.unload_plugin("lifecycle_plugin") is False
-    assert plugins.unload_plugin("nonexistent") is False
+    assert await plugins.unload_plugin_async("lifecycle_plugin") is False
+    assert await plugins.unload_plugin_async("nonexistent") is False
 
 
 async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
@@ -150,6 +337,540 @@ async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
     roots = plugins.plugin_skill_roots()
     assert len(roots) == 1
     assert roots[0].endswith("lifecycle_plugin/skills")
+
+
+async def test_plugin_execution_driver_is_owned_and_removed_on_unload(tmp_path):
+    plugin_dir = tmp_path / "mode_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: mode_plugin\nversion: 1.0.0\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+from crew.core.envelope import ResponseChunk
+
+async def execute(envelope):
+    yield ResponseChunk.final(envelope.request_id, envelope.query.upper())
+
+def register(ctx):
+    ctx.register_execution_driver(
+        "plugin.echo",
+        execute,
+        capabilities=("demo.echo",),
+        description="Plugin echo driver",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    plugins = PluginManager(registry=Registry(), services={"config": object()})
+    await plugins.discover_and_load_async([tmp_path], enabled=["mode_plugin"])
+
+    envelope = Envelope.of("hello", session_id="s1", mode="plugin.echo")
+    chunks = [
+        chunk
+        async for chunk in plugins.feature_runtime.execution_drivers.dispatch(envelope)
+    ]
+    assert chunks[-1].body["text"] == "HELLO"
+    assert await plugins.unload_plugin_async("mode_plugin")
+
+    with pytest.raises(ExecutionDriverUnavailableError):
+        plugins.feature_runtime.execution_drivers.resolve("plugin.echo")
+
+
+async def test_failed_install_rolls_back_contributions_and_async_resource(tmp_path):
+    plugin_dir = tmp_path / "broken_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: broken-plugin\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "skills").mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        """
+import asyncio
+
+EVENTS = []
+
+async def dispose_resource():
+    await asyncio.sleep(0)
+    EVENTS.append("resource")
+
+def hook(**kwargs):
+    return None
+
+def handler(args):
+    return "ok"
+
+def register(ctx):
+    ctx.register_disposer(dispose_resource)
+    ctx.register_tool(
+        name="broken_tool",
+        toolset="broken",
+        schema={"name": "broken_tool", "parameters": {"type": "object"}},
+        handler=handler,
+    )
+    ctx.register_hook("pre_tool_call", hook)
+    ctx.register_command("broken", handler)
+    ctx.register_skill_root("skills")
+    raise RuntimeError("install failed after contributions")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["broken-plugin"])
+
+    loaded = plugins.get_plugin("broken-plugin")
+    assert loaded is not None and not loaded.enabled
+    assert "install failed after contributions" in str(loaded.error)
+    assert registry.names() == []
+    assert plugins._hooks == {}
+    assert plugins.plugin_commands == {}
+    assert plugins.plugin_skill_roots() == []
+    module = __import__("crew_runtime_plugins.broken_plugin", fromlist=["EVENTS"])
+    assert module.EVENTS == ["resource"]
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.scope is not None
+    assert loaded.feature_record.scope.state is FeatureState.DISPOSED
+
+
+async def test_repeated_discovery_replaces_generation_without_duplicates(tmp_path):
+    _write_lifecycle_plugin(tmp_path)
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["lifecycle_plugin"])
+    first = plugins.get_plugin("lifecycle_plugin")
+    assert first is not None and first.feature_record is not None
+    first_scope = first.feature_record.scope
+    first_module = __import__(
+        "crew_runtime_plugins.lifecycle_plugin",
+        fromlist=["DISPOSED"],
+    )
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["lifecycle_plugin"])
+
+    second = plugins.get_plugin("lifecycle_plugin")
+    assert second is not None and second.feature_record is not None
+    assert first_scope is not None and first_scope.state is FeatureState.DISPOSED
+    assert first_module.DISPOSED == ["sync"]
+    assert second.feature_record.generation is not None
+    assert second.feature_record.generation.key == "lifecycle_plugin@g2"
+    assert registry.names() == ["lifecycle_echo"]
+    assert len(plugins._hooks["pre_tool_call"]) == 1
+    assert len(plugins.plugin_skill_roots()) == 1
+
+
+async def test_async_unload_closes_contributions_before_waiting_for_resource(tmp_path):
+    plugin_dir = tmp_path / "slow_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: slow-plugin\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+import asyncio
+
+STARTED = asyncio.Event()
+RELEASE = asyncio.Event()
+
+def handler(args):
+    return "ok"
+
+def hook(**kwargs):
+    return None
+
+async def dispose_resource():
+    STARTED.set()
+    await RELEASE.wait()
+
+def register(ctx):
+    ctx.register_tool(
+        name="slow_tool",
+        toolset="slow",
+        schema={"name": "slow_tool", "parameters": {"type": "object"}},
+        handler=handler,
+    )
+    ctx.register_hook("pre_tool_call", hook)
+    ctx.register_disposer(dispose_resource)
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["slow-plugin"])
+    loaded = plugins.get_plugin("slow-plugin")
+    module = __import__("crew_runtime_plugins.slow_plugin", fromlist=["STARTED"])
+
+    unloading = asyncio.create_task(plugins.unload_plugin_async("slow-plugin"))
+    await module.STARTED.wait()
+
+    assert loaded is not None and loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.STOPPING
+    assert not unloading.done()
+    assert registry.names() == []
+    assert plugins._hooks == {}
+
+    module.RELEASE.set()
+    assert await unloading is True
+    assert not loaded.enabled
+    assert loaded.error is None
+
+
+async def test_cleanup_failure_is_aggregated_after_other_resources_stop(tmp_path):
+    plugin_dir = tmp_path / "cleanup_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: cleanup-plugin\nkind: standalone\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+EVENTS = []
+
+def broken():
+    EVENTS.append("broken")
+    raise RuntimeError("close failed")
+
+def healthy():
+    EVENTS.append("healthy")
+
+def register(ctx):
+    ctx.register_disposer(broken)
+    ctx.register_disposer(healthy)
+    ctx.register_tool(
+        name="cleanup_tool",
+        toolset="cleanup",
+        schema={"name": "cleanup_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["cleanup-plugin"])
+
+    assert await plugins.unload_plugin_async("cleanup-plugin") is False
+
+    loaded = plugins.get_plugin("cleanup-plugin")
+    module = __import__("crew_runtime_plugins.cleanup_plugin", fromlist=["EVENTS"])
+    assert module.EVENTS == ["healthy", "broken"]
+    assert registry.names() == []
+    assert loaded is not None and not loaded.enabled
+    assert "resource:broken" in str(loaded.error)
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.FAILED
+
+
+async def test_registration_phases_are_visible_in_plugin_diagnostics(tmp_path):
+    registry, plugins = _load(tmp_path)
+    loaded = plugins.get_plugin("lifecycle_plugin")
+
+    assert loaded is not None and loaded.feature_record is not None
+    scope = loaded.feature_record.scope
+    assert scope is not None
+    phases = {token.label: token.phase for token in scope.registrations}
+    assert phases["tool:lifecycle_echo"] is RegistrationPhase.CONTRIBUTION
+    assert phases["hook:pre_tool_call"] is RegistrationPhase.CONTRIBUTION
+    assert phases["resource:dispose"] is RegistrationPhase.RESOURCE
+
+
+async def test_plugin_tool_invocations_hold_generation_lease_during_drain(tmp_path):
+    plugin_dir = tmp_path / "leased_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: leased-plugin\nkind: standalone\nstop_policy: drain\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+import asyncio
+
+STARTED = asyncio.Event()
+RELEASE = asyncio.Event()
+
+async def handler(args):
+    STARTED.set()
+    await RELEASE.wait()
+    return "done"
+
+def register(ctx):
+    ctx.register_tool(
+        name="leased_tool",
+        toolset="leased",
+        schema={"name": "leased_tool", "parameters": {"type": "object"}},
+        handler=handler,
+        is_async=True,
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["leased-plugin"])
+    module = __import__("crew_runtime_plugins.leased_plugin", fromlist=["STARTED"])
+    tool = registry.get("leased_tool")
+
+    running = asyncio.create_task(tool.run({}))
+    await module.STARTED.wait()
+    unloading = asyncio.create_task(plugins.unload_plugin_async("leased-plugin"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    loaded = plugins.get_plugin("leased-plugin")
+    assert loaded is not None and loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.DRAINING
+    assert not unloading.done()
+    with pytest.raises(
+        FeatureLeaseUnavailableError,
+        match="does not accept new requests while draining",
+    ):
+        await tool.run({})
+
+    module.RELEASE.set()
+    assert await running == "done"
+    assert await unloading is True
+    assert registry.names() == []
+
+
+async def test_cancel_does_not_release_sync_tool_lease_before_worker_finishes(tmp_path):
+    plugin_dir = tmp_path / "sync_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "name: sync-plugin",
+                "kind: standalone",
+                "stop_policy: cancel",
+                "drain_timeout_seconds: 0.01",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+from threading import Event
+
+STARTED = Event()
+RELEASE = Event()
+
+def handler(args):
+    STARTED.set()
+    RELEASE.wait()
+    return "done"
+
+def register(ctx):
+    ctx.register_tool(
+        name="sync_tool",
+        toolset="sync",
+        schema={"name": "sync_tool", "parameters": {"type": "object"}},
+        handler=handler,
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["sync-plugin"])
+    module = __import__("crew_runtime_plugins.sync_plugin", fromlist=["STARTED"])
+    running = asyncio.create_task(registry.get("sync_tool").run({}))
+    while not module.STARTED.is_set():
+        await asyncio.sleep(0)
+
+    assert await plugins.unload_plugin_async("sync-plugin") is False
+
+    loaded = plugins.get_plugin("sync-plugin")
+    assert loaded is not None and loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.DRAINING
+    assert registry.names() == ["sync_tool"]
+
+    module.RELEASE.set()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert await plugins.unload_plugin_async("sync-plugin") is True
+    assert registry.names() == []
+
+
+async def test_restart_required_plugin_is_retained_until_host_shutdown(tmp_path):
+    plugin_dir = tmp_path / "route_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: route-plugin\nkind: standalone\nstop_policy: restart_required\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+def register(ctx):
+    ctx.register_tool(
+        name="route_tool",
+        toolset="route",
+        schema={"name": "route_tool", "parameters": {"type": "object"}},
+        handler=lambda args: "ok",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    registry = Registry()
+    plugins = PluginManager(registry=registry)
+    await plugins.discover_and_load_async([tmp_path], enabled=["route-plugin"])
+
+    assert await plugins.unload_plugin_async("route-plugin") is False
+
+    loaded = plugins.get_plugin("route-plugin")
+    assert loaded is not None and loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.restart_required
+    assert registry.names() == ["route_tool"]
+
+    assert await plugins.aclose() == ()
+    assert not loaded.enabled
+    assert registry.names() == []
+
+
+async def test_manifest_services_drive_plugin_activation_order(tmp_path):
+    consumer = tmp_path / "a_consumer"
+    consumer.mkdir()
+    (consumer / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "name: a-consumer",
+                "requires:",
+                "  - catalog",
+                "optional:",
+                "  - enhancer",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (consumer / "__init__.py").write_text(
+        """
+VALUE = None
+
+def register(ctx):
+    global VALUE
+    VALUE = ctx.resolve_service("catalog")["origin"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    provider = tmp_path / "z_provider"
+    provider.mkdir()
+    (provider / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "name: z-provider",
+                "provides:",
+                "  - catalog",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (provider / "__init__.py").write_text(
+        """
+def register(ctx):
+    ctx.register_service("catalog", {"origin": "provider"})
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    plugins = PluginManager()
+    await plugins.discover_and_load_async(
+        [tmp_path],
+        enabled=["a-consumer", "z-provider"],
+    )
+
+    assert plugins.get_plugin("a-consumer").enabled
+    assert plugins.get_plugin("z-provider").enabled
+    module = __import__("crew_runtime_plugins.a_consumer", fromlist=["VALUE"])
+    assert module.VALUE == "provider"
+    report = plugins.startup_audit()
+    assert report.healthy
+    consumer_diagnostic = next(
+        item for item in report.features if item.feature_id == "a_consumer"
+    )
+    assert consumer_diagnostic.missing_optional == ("enhancer",)
+
+
+async def test_missing_manifest_service_waits_without_running_plugin(tmp_path):
+    plugin_dir = tmp_path / "waiting_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: waiting-plugin\nrequires:\n  - security_service\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        "CALLED = False\n\ndef register(ctx):\n    global CALLED\n    CALLED = True\n",
+        encoding="utf-8",
+    )
+    plugins = PluginManager()
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["waiting-plugin"])
+
+    loaded = plugins.get_plugin("waiting-plugin")
+    assert loaded is not None and not loaded.enabled
+    assert loaded.feature_record is not None
+    assert loaded.feature_record.state is FeatureState.WAITING
+    assert loaded.error == "missing required services: security_service"
+    assert plugins.startup_audit().as_dict()["issues"] == ["waiting_plugin"]
+    assert "crew_runtime_plugins.waiting_plugin" not in __import__("sys").modules
+
+
+async def test_late_host_service_retries_waiting_plugin(tmp_path):
+    plugin_dir = tmp_path / "late_consumer"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: late-consumer\nrequires:\n  - security_service\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        """
+VALUE = None
+
+def register(ctx):
+    global VALUE
+    VALUE = ctx.resolve_service("security_service")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    plugins = PluginManager()
+    await plugins.discover_and_load_async([tmp_path], enabled=["late-consumer"])
+    service = object()
+
+    plugins.publish_host_services({"security_service": service})
+    await plugins.retry_waiting_async()
+
+    loaded = plugins.get_plugin("late-consumer")
+    assert loaded is not None and loaded.enabled
+    assert loaded.error is None
+    module = __import__("crew_runtime_plugins.late_consumer", fromlist=["VALUE"])
+    assert module.VALUE is service
+    assert plugins.startup_audit().healthy
+
+
+async def test_plugin_cannot_publish_undeclared_service(tmp_path):
+    plugin_dir = tmp_path / "hidden_provider"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: hidden-provider\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        "def register(ctx):\n    ctx.register_service('hidden', object())\n",
+        encoding="utf-8",
+    )
+    plugins = PluginManager()
+
+    await plugins.discover_and_load_async([tmp_path], enabled=["hidden-provider"])
+
+    loaded = plugins.get_plugin("hidden-provider")
+    assert loaded is not None and not loaded.enabled
+    assert "must declare provided service 'hidden'" in str(loaded.error)
 
 
 # ---- PluginPreferencesStore ----

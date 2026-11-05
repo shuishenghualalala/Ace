@@ -2,12 +2,14 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __resetAllStoresForTest, messageStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, messageStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
 import { createSessionInWorkspace, ensureComposerDraftSession } from '../../src/ui/features/workspaces';
 import { syncComposerWorkspaceLabel } from '../../src/ui/features/composer-toolbar';
 
 beforeEach(() => {
   __resetAllStoresForTest();
+  // auth-gate 为真实登录判定：local 桌面会话由 initAuthFlow 置为已登录，测试模拟该态。
+  authStore.set({ isLoggedIn: true });
   document.body.innerHTML = `
     <div class="composer-workspace-slot" id="chat-workspace-row" hidden>
       <button type="button" id="chat-workspace-btn">
@@ -32,7 +34,7 @@ describe('composer workspace picker', () => {
     const row = document.getElementById('chat-workspace-row')!;
     const label = document.getElementById('chat-workspace-btn-label')!;
     expect(row.hidden).toBe(false);
-    expect(label.textContent).toBe('不在项目中工作');
+    expect(label.textContent).toBe('在默认目录中工作');
   });
 
   it('shows project name when a project draft is selected', () => {

@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.memory.simple import SQLiteMemory
 from crew.state.session_store import SQLiteSessionStore
@@ -52,8 +52,10 @@ def test_session_store_roundtrip(tmp_path):
         assistant,
         Message.tool("c1", "out"),
     ]
-    store.save("s1", msgs)
-    loaded = store.load("s1")
+    store.save("s1", msgs, owner_account_id="local")
+
+    loaded = store.load("s1", owner_account_id="local")
+
     assert len(loaded) == 3
     assert loaded[0].timestamp == 10.0
     assert loaded[1].tool_calls[0].name == "terminal"
@@ -109,9 +111,12 @@ def test_session_store_ignores_legacy_tool_source():
 
 def test_list_sessions(tmp_path):
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s1", [Message.user("第一个会话的问题"), Message.assistant("回答")])
-    store.save("s2", [Message.user("第二个会话")])
-    sessions = store.list_sessions()
+    store.save("s1", [Message.user("第一个会话的问题"), Message.assistant("回答")], owner_account_id="local")
+
+    store.save("s2", [Message.user("第二个会话")], owner_account_id="local")
+
+    sessions = store.list_sessions(owner_account_id="local")
+
     assert len(sessions) == 2
     ids = {s["session_id"] for s in sessions}
     assert ids == {"s1", "s2"}
@@ -123,8 +128,10 @@ def test_list_sessions(tmp_path):
 def test_list_sessions_metadata(tmp_path):
     """list_sessions 返回 created_at / token_count，并按列计数。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s1", [Message.user("问题很长" * 20), Message.assistant("回答")])
-    s1 = next(s for s in store.list_sessions() if s["session_id"] == "s1")
+    store.save("s1", [Message.user("问题很长" * 20), Message.assistant("回答")], owner_account_id="local")
+
+    s1 = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s1")
+
     assert s1["created_at"] > 0
     assert s1["message_count"] == 2
 
@@ -132,15 +139,19 @@ def test_list_sessions_metadata(tmp_path):
 def test_created_at_preserved_on_resave(tmp_path):
     """二次 save 不应改写 created_at，但 updated_at 与消息数应更新。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s1", [Message.user("a")])
-    first = next(s for s in store.list_sessions() if s["session_id"] == "s1")
+    store.save("s1", [Message.user("a")], owner_account_id="local")
+
+    first = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s1")
+
     created0, updated0 = first["created_at"], first["updated_at"]
 
     import time as _t
 
     _t.sleep(0.01)
-    store.save("s1", [Message.user("a"), Message.assistant("b")])
-    second = next(s for s in store.list_sessions() if s["session_id"] == "s1")
+    store.save("s1", [Message.user("a"), Message.assistant("b")], owner_account_id="local")
+
+    second = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s1")
+
     assert second["created_at"] == created0  # 保留
     assert second["updated_at"] >= updated0  # 刷新
     assert second["message_count"] == 2
@@ -149,10 +160,14 @@ def test_created_at_preserved_on_resave(tmp_path):
 def test_explicit_title_not_overwritten_by_resave(tmp_path):
     """set_title 后再 save，标题不应被首条 user 消息 fallback 覆盖。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s1", [Message.user("原始问题")])
-    store.set_title("s1", "自定义标题")
-    store.save("s1", [Message.user("原始问题"), Message.assistant("回答")])
-    s1 = next(s for s in store.list_sessions() if s["session_id"] == "s1")
+    store.save("s1", [Message.user("原始问题")], owner_account_id="local")
+
+    store.set_title("s1", "自定义标题", owner_account_id="local")
+
+    store.save("s1", [Message.user("原始问题"), Message.assistant("回答")], owner_account_id="local")
+
+    s1 = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s1")
+
     assert s1["title"] == "自定义标题"
 
 
@@ -171,40 +186,47 @@ def test_migration_from_legacy_schema(tmp_path):
     conn.close()
 
     store = SQLiteSessionStore(str(db))  # 触发迁移
-    loaded = store.load("old")
+    # 迁移产生的历史行经 owner 回填归属本机 local；访问需显式带 owner。
+    loaded = store.load("old", owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
     assert len(loaded) == 1 and loaded[0].content == "旧消息"
     # 迁移后新会话功能正常
-    store.save("new", [Message.user("新问题")])
-    assert {s["session_id"] for s in store.list_sessions()} == {"old", "new"}
+    store.save("new", [Message.user("新问题")], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
+    assert {s["session_id"] for s in store.list_sessions(owner_account_id=LOCAL_OWNER_ACCOUNT_ID)} == {"old", "new"}
 
 
 def test_set_status_and_not_overwritten_by_save(tmp_path):
     """set_status 写入 last_status/last_error；后续 save() 不应覆盖它们。"""
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.save("s1", [Message.user("hi")])
-    store.set_status("s1", "failed", "boom")
-    assert store.get_status("s1") == ("failed", "boom")
+    store.save("s1", [Message.user("hi")], owner_account_id="local")
+    store.set_status("s1", "failed", owner_account_id="local", error="boom")
+    assert store.get_status("s1", owner_account_id="local") == ("failed", "boom")
 
-    # 再保存一轮消息，状态列应保持不变
-    store.save("s1", [Message.user("hi"), Message.assistant("再答")])
-    assert store.get_status("s1") == ("failed", "boom")
+    # 再保存一轮消息，状态列应保持不变（同 owner 覆盖保存不碰状态列）
+    store.save("s1", [Message.user("hi"), Message.assistant("再答")], owner_account_id="local")
+    assert store.get_status("s1", owner_account_id="local") == ("failed", "boom")
     # list_sessions 也带出 last_status
-    s1 = next(s for s in store.list_sessions() if s["session_id"] == "s1")
+    s1 = next(s for s in store.list_sessions(owner_account_id="local") if s["session_id"] == "s1")
     assert s1["last_status"] == "failed"
 
 
 def test_get_status_unknown_session(tmp_path):
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    assert store.get_status("nope") == ("", "")
+    assert store.get_status("nope", owner_account_id="local") == ("", "")
+
 
 
 def test_session_append_and_clear(tmp_path):
     store = SQLiteSessionStore(str(tmp_path / "s.db"))
-    store.append("s1", [Message.user("a")])
-    store.append("s1", [Message.user("b")])
-    assert len(store.load("s1")) == 2
-    store.clear("s1")
-    assert store.load("s1") == []
+    store.append("s1", [Message.user("a")], owner_account_id="local")
+
+    store.append("s1", [Message.user("b")], owner_account_id="local")
+
+    assert len(store.load("s1", owner_account_id="local")) == 2
+
+    store.clear("s1", owner_account_id="local")
+
+    assert store.load("s1", owner_account_id="local") == []
+
 
 
 async def test_memory_recall_same_session(tmp_path):
@@ -299,3 +321,28 @@ def test_load_config_resolves_memory_db_path_under_crew_home(tmp_path, monkeypat
     cfg = load_config()
     assert cfg.memory_db_path == str(home / "crew_data" / "memory.db")
     assert Path(cfg.memory_db_path).is_absolute()
+
+
+def test_memory_enabled_defaults_to_off(tmp_path, monkeypatch):
+    """内置记忆默认关闭（H4）：默认装配 NullMemory，不产生 demo 级召回。"""
+    from crew.state.config import load_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("CREW_HOME", str(home))
+    cfg = load_config()
+    assert cfg.memory_enabled is False
+
+
+def test_memory_enabled_explicit_on_via_yaml(tmp_path, monkeypatch):
+    """显式开启路径：runtime.memory_enabled: true 仍可用（装配 SQLiteMemory）。"""
+    from crew.state.config import load_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("CREW_HOME", str(home))
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(
+        "runtime:\n  memory_enabled: true\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(config_path=str(yaml_path))
+    assert cfg.memory_enabled is True

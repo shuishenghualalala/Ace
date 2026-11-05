@@ -106,6 +106,7 @@ def register_plan_tools(registry: Registry, manager: PlanModeManager) -> None:
         ui_label_template="进入计划模式",
         always_load=True,
         search_hint="enter plan mode planning approval",
+        result_retention="temporary",
     )
     registry.register(
         name="exit_plan_mode",
@@ -117,6 +118,7 @@ def register_plan_tools(registry: Registry, manager: PlanModeManager) -> None:
         ui_label_template="提交计划",
         always_load=True,
         search_hint="exit plan mode submit approval",
+        result_retention="temporary",
     )
     registry.register(
         name="todo",
@@ -128,4 +130,5 @@ def register_plan_tools(registry: Registry, manager: PlanModeManager) -> None:
         ui_label_template="更新待办",
         always_load=True,
         search_hint="todo task checklist progress update",
+        result_retention="temporary",
     )

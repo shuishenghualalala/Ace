@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.core.errors import ToolError
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.state.home import get_owner_runtime_home
 from crew.tools.registry import Registry, tool_result
 
@@ -78,6 +79,15 @@ def handle_memory(args: dict[str, Any]) -> str:
 
 
 def register_memory_tools(registry: Registry) -> None:
+    def _result_policy(args: dict[str, Any]) -> ToolResultPolicy:
+        action = str(args.get("action") or "").strip().casefold()
+        retention = (
+            ToolResultRetention.TEMPORARY
+            if action in {"search", "list"}
+            else ToolResultRetention.IMPORTANT
+        )
+        return ToolResultPolicy(retention)
+
     registry.register(
         name="memory",
         toolset="memory",
@@ -88,4 +98,5 @@ def register_memory_tools(registry: Registry) -> None:
         ui_label_template="记忆 {action}",
         always_load=True,
         search_hint="memory remember search list clear persistent notes",
+        result_policy_resolver=_result_policy,
     )

@@ -28,12 +28,20 @@ const TUNNEL_MAX_LIFETIME: Duration = Duration::from_secs(600);
 // HTTP/HTTPS payloads while still bounding memory/bandwidth abuse.
 const TUNNEL_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Windows pins the managed proxy to a fixed loopback port enforced by the WFP
+/// filter (see `windows::managed_proxy_port`), so its callers already know the
+/// address and only ever use `start_on`. Linux/macOS bind an ephemeral port and
+/// must read the address back. `start` and `address` therefore exist only for
+/// non-Windows callers (plus this crate's tests), which trips `dead_code` on a
+/// Windows build.
+#[cfg_attr(windows, allow(dead_code))]
 pub struct ProxyHandle {
     address: SocketAddr,
     stopped: Arc<AtomicBool>,
 }
 
 impl ProxyHandle {
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn start(policy: NetworkPolicy) -> Result<Self, NetworkError> {
         Self::start_on(policy, 0)
     }
@@ -80,6 +88,7 @@ impl ProxyHandle {
         Ok(Self { address, stopped })
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn address(&self) -> SocketAddr {
         self.address
     }

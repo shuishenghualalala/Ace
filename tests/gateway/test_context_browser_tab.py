@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from crew.agent.runtime import _format_browser_tab_references
-from crew.gateway.context import (
-    _BROWSER_TAB_TEXT_LIMIT,
+from crew.browser.tab_reading import (
+    BROWSER_TAB_CONTEXT_LIMIT,
+    format_browser_tab_references,
     resolve_browser_tab_references,
 )
 from tests.gateway.conftest import make_browser_manager
@@ -38,7 +38,7 @@ async def test_resolve_truncates_long_text():
         session_id="session",
     )
 
-    assert len(refs[0]["text"]) == _BROWSER_TAB_TEXT_LIMIT
+    assert len(refs[0]["text"]) == BROWSER_TAB_CONTEXT_LIMIT
 
 
 async def test_resolve_missing_tab_returns_placeholder_without_raising():
@@ -96,7 +96,7 @@ async def test_resolve_dedupes_repeated_tab_ids():
 
 
 def test_format_browser_tab_references_renders_content_and_placeholder():
-    block = _format_browser_tab_references([
+    block = format_browser_tab_references([
         {"tab_id": "a", "title": "文档", "url": "https://example.com/a", "text": "正文"},
         {"tab_id": "b", "error": "标签页不存在或已关闭"},
     ])
@@ -106,5 +106,5 @@ def test_format_browser_tab_references_renders_content_and_placeholder():
     assert "URL: https://example.com/a" in block
     assert "正文" in block
     assert "（浏览器标签页内容不可用：标签页不存在或已关闭）" in block
-    assert _format_browser_tab_references([]) == ""
-    assert _format_browser_tab_references("not-a-list") == ""
+    assert format_browser_tab_references([]) == ""
+    assert format_browser_tab_references("not-a-list") == ""

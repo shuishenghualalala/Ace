@@ -66,6 +66,7 @@ const RUNTIME_TOKENS = new Set([
   '--mw-font-code-size',
   '--mw-font-sans',
   '--mw-inspector-width',
+  '--mw-browser-workbench-width',
   '--mw-task-board-width',
 ]);
 

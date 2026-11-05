@@ -100,6 +100,15 @@ function renderEvidence(parent: HTMLElement, pageIds: string[]): void {
   parent.appendChild(evidence);
 }
 
+function dispatchInteractionSubmit(card: HTMLElement, interactionId: string, text: string): void {
+  const answer = text.trim();
+  if (!answer || card.classList.contains('interaction-card--disabled')) return;
+  card.dispatchEvent(new CustomEvent('crew:interaction-submit', {
+    bubbles: true,
+    detail: { interactionId, text: answer },
+  }));
+}
+
 function renderActivityCard(tool: ToolCallInfo): HTMLElement | null {
   if (tool.status !== 'done') return null;
   const args = parseObject(tool.args);
@@ -180,7 +189,42 @@ function renderActivityCard(tool: ToolCallInfo): HTMLElement | null {
     });
     question.appendChild(choices);
   } else {
-    appendText(question, 'followup-card__subtitle interaction-card__hint', '在下方输入你的回答');
+    const answerInput = document.createElement('textarea');
+    answerInput.className = 'interaction-card__answer-input';
+    answerInput.rows = 4;
+    answerInput.placeholder = '在下方输入你的回答…';
+    answerInput.dataset.interactionAnswer = '1';
+    answerInput.dataset.interactionId = activityId;
+    answerInput.setAttribute('aria-label', '你的回答');
+
+    const answerActions = document.createElement('div');
+    answerActions.className = 'interaction-card__answer-actions';
+    const submitButton = document.createElement('button');
+    submitButton.type = 'button';
+    submitButton.className = 'interaction-card__answer-submit';
+    submitButton.dataset.interactionSubmit = '1';
+    submitButton.dataset.interactionId = activityId;
+    submitButton.textContent = '提交回答';
+    submitButton.disabled = true;
+    const submitAnswer = (): void => {
+      dispatchInteractionSubmit(card, activityId, answerInput.value);
+    };
+    answerInput.addEventListener('input', () => {
+      submitButton.disabled = !answerInput.value.trim();
+    });
+    answerInput.addEventListener('keydown', (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+        event.preventDefault();
+        if (!submitButton.disabled) submitAnswer();
+      }
+    });
+    submitButton.addEventListener('click', submitAnswer);
+    answerActions.appendChild(submitButton);
+    question.append(answerInput);
+    card.appendChild(question);
+    card.appendChild(answerActions);
+    renderEvidence(card, pageIds);
+    return card;
   }
   card.appendChild(question);
 
@@ -264,7 +308,7 @@ export function markInteractionSubmitted(interactionId: string): void {
   if (interactionId) submittedInteractions.add(interactionId);
 }
 
-/** Keep only the latest unanswered choice card interactive after history reloads. */
+/** Keep only the latest unanswered interaction card interactive after history reloads. */
 export function syncInteractionCards(container: HTMLElement): void {
   const completed = new Set(
     Array.from(container.querySelectorAll<HTMLElement>('[data-interaction-completion]'))
@@ -281,8 +325,10 @@ export function syncInteractionCards(container: HTMLElement): void {
     const id = card.dataset.interactionId || '';
     const disabled = card !== active || completed.has(id) || submittedInteractions.has(id);
     card.classList.toggle('interaction-card--disabled', disabled);
-    card.querySelectorAll<HTMLInputElement>('[data-interaction-option]').forEach((input) => {
-      input.disabled = disabled;
+    card.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>(
+      '[data-interaction-option], [data-interaction-answer], [data-interaction-submit]',
+    ).forEach((control) => {
+      control.disabled = disabled;
     });
   });
 }

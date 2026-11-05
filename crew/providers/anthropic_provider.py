@@ -15,12 +15,16 @@ from crew.core.errors import (
     is_unsupported_image_input_error,
 )
 from crew.core.interfaces import LLMProvider
+from crew.core.observability import capture_payload, event
+from crew.providers.classify import classify_provider_error
+from crew.providers.keying import ApiKeyResolver
 from crew.core.types import (
     IMAGE_INPUT_UNAVAILABLE_NOTICE,
     ChatResponse,
     Message,
     StreamChunk,
     ToolCall,
+    coerce_tool_arguments,
 )
 from crew.state.logging import llm_trace
 
@@ -41,28 +45,6 @@ def _current_session() -> str:
 def _endpoint(base_url: str | None) -> str:
     base = (base_url or _DEFAULT_BASE_URL).rstrip("/")
     return f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
-
-
-def _category(exc: Exception, status: int | None = None) -> str:
-    if isinstance(exc, (httpx.TimeoutException,)):
-        return "timeout"
-    if isinstance(exc, httpx.TransportError):
-        return "connection"
-    if status == 401:
-        return "auth"
-    if status == 403:
-        return "forbidden"
-    if status == 429:
-        return "rate_limit"
-    if isinstance(status, int) and status >= 500:
-        return "server"
-    return "provider"
-
-
-def _retryable(exc: Exception, status: int | None = None) -> bool:
-    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError)) or status == 429 or (
-        isinstance(status, int) and status >= 500
-    )
 
 
 def _text_blocks(text: str) -> list[dict[str, Any]]:
@@ -197,6 +179,8 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         timeout: float | httpx.Timeout = 120.0,
         vision: bool = True,
+        vision_max_pixels: int | None = None,
+        api_key_resolver: ApiKeyResolver | None = None,
     ) -> None:
         if isinstance(timeout, (int, float)):
             timeout = httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=5.0)
@@ -220,6 +204,23 @@ class AnthropicProvider(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.vision = vision
+        # 视觉输入像素预算（装配层按厂商档案注入）；None = 工具层默认预算
+        self.vision_max_pixels = vision_max_pixels
+        self._api_key_resolver = api_key_resolver
+        self._current_api_key = api_key
+
+    def _sync_api_key(self) -> None:
+        """resolver 模式下每次请求取一次凭据快照，变化时整体替换请求头。
+
+        替换成新 dict 而非原地改键：已发起的请求持有旧 headers 对象，
+        飞行中的流不受配置变更影响。无 resolver 时保持构造时的静态 key。
+        """
+        if self._api_key_resolver is None:
+            return
+        key = self._api_key_resolver()
+        if key != self._current_api_key:
+            self._current_api_key = key
+            self._headers = {**self._headers, "x-api-key": key}
 
     async def aclose(self) -> None:
         """Close the owned HTTP client exactly once, including concurrent callers."""
@@ -267,10 +268,14 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
+        self._sync_api_key()
         payload = self._payload(messages, tools, max_tokens_override=max_tokens)
         session = _current_session()
-        llm_trace("request", {"session_id": session, "model": self.model, "stream": False, "messages": payload["messages"]})
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "anthropic", "model": self.model})
+        llm_trace("request", {"session_id": session, "model": self.model, "stream": False, "purpose": purpose or "", "messages": payload["messages"]})
         try:
             response = await self._client.post(self._url, headers=self._headers, json=payload)
             response.raise_for_status()
@@ -283,18 +288,31 @@ class AnthropicProvider(LLMProvider):
                 request_has_images=contains_image_input(payload["messages"]),
                 status=status,
             )
+            if unsupported_image:
+                raise ProviderError(
+                    f"Anthropic 调用失败: HTTP {status}: {exc.response.text}",
+                    retryable=False,
+                    category="unsupported_capability",
+                    capability="vision",
+                    status=status,
+                ) from exc
+            c = classify_provider_error(exc, status=status)
             raise ProviderError(
                 f"Anthropic 调用失败: HTTP {status}: {exc.response.text}",
-                retryable=False if unsupported_image else _retryable(exc, status),
-                category="unsupported_capability" if unsupported_image else _category(exc, status),
-                capability="vision" if unsupported_image else None,
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
         except Exception as exc:  # noqa: BLE001
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
+            c = classify_provider_error(exc)
             raise ProviderError(
                 f"Anthropic 调用失败: {exc}",
-                retryable=_retryable(exc),
-                category=_category(exc),
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
         result = _parse_response(data)
         llm_trace(
@@ -309,6 +327,17 @@ class AnthropicProvider(LLMProvider):
                 "usage": result.usage,
             },
         )
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": result.text,
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls],
+                "finish_reason": result.finish_reason,
+                "usage": result.usage,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
         return result
 
     async def stream_chat(
@@ -320,8 +349,11 @@ class AnthropicProvider(LLMProvider):
         response_format: dict[str, Any] | None = None,
         reasoning_mode: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
+        self._sync_api_key()
         payload = {**self._payload(messages, tools, max_tokens_override=max_tokens), "stream": True}
         session = _current_session()
+        request_capture = capture_payload("llm.request", payload, attributes={"capture_layer": "provider_arguments"})
+        event("llm.request.provider", attributes={"payload_id": request_capture.payload_id, "capture_state": request_capture.capture_state, "provider": "anthropic", "model": self.model})
         tool_acc: dict[int, dict[str, Any]] = {}
         assembled: list[ToolCall] = []
         text = ""
@@ -334,7 +366,7 @@ class AnthropicProvider(LLMProvider):
                 return None
             raw = acc.get("input_json") or "{}"
             try:
-                args = json.loads(raw)
+                args = coerce_tool_arguments(json.loads(raw))
             except json.JSONDecodeError:
                 args = {"_raw": raw}
             tool = ToolCall(id=acc.get("id", ""), name=acc.get("name", ""), arguments=args)
@@ -347,7 +379,7 @@ class AnthropicProvider(LLMProvider):
         try:
             async with self._client.stream("POST", self._url, headers=self._headers, json=payload) as response:
                 response.raise_for_status()
-                event = ""
+                event_name = ""
                 data_lines: list[str] = []
                 async for line in response.aiter_lines():
                     if not line:
@@ -358,12 +390,12 @@ class AnthropicProvider(LLMProvider):
                         if raw_data == "[DONE]":
                             break
                         item = json.loads(raw_data)
-                        if event == "message_start":
+                        if event_name == "message_start":
                             raw_usage = item.get("message", {}).get("usage") or {}
                             usage["prompt_tokens"] = int(raw_usage.get("input_tokens") or 0)
                             usage["cache_creation_input_tokens"] = int(raw_usage.get("cache_creation_input_tokens") or 0)
                             usage["cache_read_input_tokens"] = int(raw_usage.get("cache_read_input_tokens") or 0)
-                        elif event == "content_block_start":
+                        elif event_name == "content_block_start":
                             block = item.get("content_block") or {}
                             if block.get("type") == "tool_use":
                                 idx = int(item.get("index") or 0)
@@ -373,7 +405,7 @@ class AnthropicProvider(LLMProvider):
                                 # name 一出现即通知 executor 显示「工具参数生成中」卡片。
                                 if bid and bname:
                                     yield StreamChunk(tool_call_generating=ToolCall(id=bid, name=bname, arguments={}))
-                        elif event == "content_block_delta":
+                        elif event_name == "content_block_delta":
                             idx = int(item.get("index") or 0)
                             delta = item.get("delta") or {}
                             if delta.get("type") == "text_delta":
@@ -383,11 +415,11 @@ class AnthropicProvider(LLMProvider):
                                     yield StreamChunk(delta_text=piece)
                             elif delta.get("type") == "input_json_delta" and idx in tool_acc:
                                 tool_acc[idx]["input_json"] += str(delta.get("partial_json") or "")
-                        elif event == "content_block_stop":
+                        elif event_name == "content_block_stop":
                             ready = flush_tool(int(item.get("index") or 0))
                             if ready is not None:
                                 yield StreamChunk(ready_tool_call=ready)
-                        elif event == "message_delta":
+                        elif event_name == "message_delta":
                             delta = item.get("delta") or {}
                             finish_reason = delta.get("stop_reason") or finish_reason
                             raw_usage = item.get("usage") or {}
@@ -395,10 +427,10 @@ class AnthropicProvider(LLMProvider):
                             # message_delta 的 usage 也可能更新 cache_read（累积值）
                             if raw_usage.get("cache_read_input_tokens") is not None:
                                 usage["cache_read_input_tokens"] = int(raw_usage.get("cache_read_input_tokens") or 0)
-                        event = ""
+                        event_name = ""
                         continue
                     if line.startswith("event:"):
-                        event = line[6:].strip()
+                        event_name = line[6:].strip()
                     elif line.startswith("data:"):
                         data_lines.append(line[5:].strip())
         except httpx.HTTPStatusError as exc:
@@ -408,17 +440,30 @@ class AnthropicProvider(LLMProvider):
                 request_has_images=contains_image_input(payload["messages"]),
                 status=status,
             )
+            if unsupported_image:
+                raise ProviderError(
+                    f"Anthropic 流式调用失败: HTTP {status}: {exc.response.text}",
+                    retryable=False,
+                    category="unsupported_capability",
+                    capability="vision",
+                    status=status,
+                ) from exc
+            c = classify_provider_error(exc, status=status)
             raise ProviderError(
                 f"Anthropic 流式调用失败: HTTP {status}: {exc.response.text}",
-                retryable=False if unsupported_image else _retryable(exc, status),
-                category="unsupported_capability" if unsupported_image else _category(exc, status),
-                capability="vision" if unsupported_image else None,
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
         except Exception as exc:  # noqa: BLE001
+            c = classify_provider_error(exc)
             raise ProviderError(
                 f"Anthropic 流式调用失败: {exc}",
-                retryable=_retryable(exc),
-                category=_category(exc),
+                retryable=c.retryable,
+                kind=c.kind,
+                status=c.status,
+                retry_delay=c.retry_delay,
             ) from exc
 
         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
@@ -434,4 +479,15 @@ class AnthropicProvider(LLMProvider):
                 "usage": usage,
             },
         )
+        response_capture = capture_payload(
+            "llm.response",
+            {
+                "text": text,
+                "tool_calls": [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in assembled],
+                "finish_reason": finish_reason,
+                "usage": usage,
+            },
+            attributes={"capture_layer": "assembled_response"},
+        )
+        event("llm.response.provider", attributes={"payload_id": response_capture.payload_id, "capture_state": response_capture.capture_state})
         yield StreamChunk(delta_text="", done=True, tool_calls=assembled, finish_reason=finish_reason, usage=usage)

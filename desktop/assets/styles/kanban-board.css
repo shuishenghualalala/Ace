@@ -1309,7 +1309,7 @@ body.inspector-open .task-board-toggle {
 .team-collaboration-board .team-member__model-select {
   min-width: 0;
   max-width: 180px;
-  padding: 2px var(--mw-space-1);
+  padding: var(--mw-space-fine-2) var(--mw-space-1);
   border: 1px solid var(--mw-border-subtle);
   border-radius: var(--mw-radius-2);
   background: var(--mw-white);

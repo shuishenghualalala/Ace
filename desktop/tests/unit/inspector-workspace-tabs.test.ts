@@ -10,6 +10,7 @@ import {
 } from '../../src/ui/features/inspector';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 import { setActiveSessionId } from '../../src/ui/state';
+import { STORAGE_KEYS } from '../../src/shared/storage-keys';
 
 vi.mock('../../src/ui/backend-client', () => ({
   backendApi: {
@@ -68,6 +69,10 @@ function workspaceFixture(): string {
 describe('Inspector browser-style workspace tabs', () => {
   beforeEach(() => {
     __resetAllStoresForTest();
+    localStorage.removeItem(STORAGE_KEYS.inspectorWidth);
+    localStorage.removeItem(STORAGE_KEYS.browserWorkbenchWidth);
+    document.documentElement.style.removeProperty('--mw-inspector-width');
+    document.documentElement.style.removeProperty('--mw-browser-workbench-width');
     document.body.innerHTML = workspaceFixture();
     document.body.className = '';
     setActiveSessionId('sess-workspace');
@@ -143,6 +148,15 @@ describe('Inspector browser-style workspace tabs', () => {
     (document.querySelector('[data-workspace-entry="browser:new"]') as HTMLButtonElement).click();
     expect(document.querySelector('[data-browser-panel]')).toBeTruthy();
     expect(document.querySelector('[data-browser-tab-strip]')?.textContent).toContain('新标签页');
+    const browserMaximize = document.querySelector<HTMLButtonElement>('[data-browser-shell="maximize"]');
+    expect(browserMaximize?.getAttribute('aria-pressed')).toBe('true');
+    expect(browserMaximize?.getAttribute('aria-label')).toBe('还原浏览器');
+    browserMaximize?.click();
+    expect(document.body.classList.contains('inspector-workspace-maximized')).toBe(false);
+    expect(browserMaximize?.getAttribute('aria-label')).toBe('展开浏览器');
+    browserMaximize?.click();
+    expect(document.body.classList.contains('inspector-workspace-maximized')).toBe(true);
+    expect(browserMaximize?.getAttribute('aria-label')).toBe('还原浏览器');
     await vi.waitFor(() => {
       expect(backendApi.browserControl).toHaveBeenCalledWith('sess-workspace', 'new_tab', '');
     });
@@ -182,5 +196,53 @@ describe('Inspector browser-style workspace tabs', () => {
     handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
     expect(document.body.classList.contains('inspector-surface-auto-width')).toBe(false);
     expect(handle.getAttribute('aria-valuenow')).toBeTruthy();
+  });
+
+  it('resizes and remembers the browser independently when switching inspector views', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1600, configurable: true });
+    bindInspectorUi();
+    const panel = document.getElementById('chat-inspector') as HTMLElement;
+    const handle = document.getElementById('chat-inspector-resize-handle') as HTMLElement;
+    const tokenWidth = (token: string, fallback: number): number =>
+      parseInt(document.documentElement.style.getPropertyValue(token), 10) || fallback;
+    vi.spyOn(panel, 'getBoundingClientRect').mockImplementation(() => ({
+      width: document.body.classList.contains('browser-workbench-open')
+        ? tokenWidth('--mw-browser-workbench-width', 512)
+        : tokenWidth('--mw-inspector-width', 320),
+    } as DOMRect));
+    handle.setPointerCapture = vi.fn();
+    handle.hasPointerCapture = vi.fn(() => true);
+    handle.releasePointerCapture = vi.fn();
+
+    openInspectorToTab('browser');
+    handle.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, button: 0, clientX: 1000 }));
+    handle.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 880 }));
+    handle.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1 }));
+    expect(tokenWidth('--mw-browser-workbench-width', 0)).toBe(632);
+    expect(localStorage.getItem(STORAGE_KEYS.browserWorkbenchWidth)).toBe('632');
+    expect(tokenWidth('--mw-inspector-width', 0)).toBe(320);
+    expect(document.body.classList.contains('inspector-resizing')).toBe(false);
+
+    openInspectorToTab('context');
+    handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    expect(tokenWidth('--mw-inspector-width', 0)).toBe(344);
+    expect(localStorage.getItem(STORAGE_KEYS.inspectorWidth)).toBe('344');
+    openInspectorToTab('browser');
+    handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(tokenWidth('--mw-browser-workbench-width', 0)).toBe(608);
+    expect(localStorage.getItem(STORAGE_KEYS.browserWorkbenchWidth)).toBe('608');
+
+    handle.dispatchEvent(new MouseEvent('dblclick'));
+    expect(document.documentElement.style.getPropertyValue('--mw-browser-workbench-width')).toBe('');
+    expect(localStorage.getItem(STORAGE_KEYS.browserWorkbenchWidth)).toBeNull();
+    expect(localStorage.getItem(STORAGE_KEYS.inspectorWidth)).toBe('344');
+  });
+
+  it('restores the saved browser width separately from the ordinary inspector', () => {
+    localStorage.setItem(STORAGE_KEYS.browserWorkbenchWidth, '600');
+    localStorage.setItem(STORAGE_KEYS.inspectorWidth, '360');
+    bindInspectorUi();
+    expect(document.documentElement.style.getPropertyValue('--mw-browser-workbench-width')).toBe('600px');
+    expect(document.documentElement.style.getPropertyValue('--mw-inspector-width')).toBe('360px');
   });
 });

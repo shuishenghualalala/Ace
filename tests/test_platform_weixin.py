@@ -14,8 +14,8 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
+from crew.channels.platform_registry import PlatformConfig, platform_registry
 from crew.core.envelope import ResponseChunk
-from crew.gateway.platform_registry import PlatformConfig, platform_registry
 from crew.gateway.routers.channels import create_channels_router
 from crew.plugins.manager import PluginManager
 from crew.tools.registry import Registry
@@ -380,6 +380,8 @@ async def test_send_to_target_without_session_returns_false():
 
 
 async def test_start_requires_account_and_token(monkeypatch):
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.delenv("WEIXIN_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("WEIXIN_TOKEN", raising=False)
     ch = WeixinChannel(PlatformConfig(name="weixin", extra={}))
@@ -397,6 +399,8 @@ async def test_start_requires_account_and_token(monkeypatch):
 
 async def test_start_probe_marks_connected(tmp_path, monkeypatch):
     """启动握手成功：status_detail 报 connected，stop 后回落。"""
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
 
     async def fake_get_updates(session, *, base_url, token, sync_buf, timeout_ms):
@@ -423,6 +427,8 @@ async def test_start_probe_marks_connected(tmp_path, monkeypatch):
 
 async def test_start_probe_session_expired_raises(tmp_path, monkeypatch):
     """握手发现会话过期：启动直接报错，提示重新扫码。"""
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
 
     async def fake_get_updates(session, *, base_url, token, sync_buf, timeout_ms):
@@ -443,6 +449,8 @@ async def test_start_probe_session_expired_raises(tmp_path, monkeypatch):
 
 async def test_poll_failure_marks_disconnected(tmp_path, monkeypatch):
     """长轮询持续失败：connected 回落并记录 last_error。"""
+    # start() 依赖 ilink 运行时（aiohttp），未装 weixin extra 时干净跳过而非报错
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
     calls = {"n": 0}
 
@@ -472,6 +480,39 @@ async def test_poll_failure_marks_disconnected(tmp_path, monkeypatch):
         assert "boom" in detail["last_error"]
     finally:
         await ch.stop()
+
+
+async def test_stop_cancels_fire_and_forget_tasks():
+    """stop() 应 cancel 并等待 _fire_and_forget_tasks 中的任务。"""
+    ch = _channel()
+    ch._stopped = False
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def tracked_task():
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(tracked_task())
+    ch._track_fire_and_forget(task)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert len(ch._fire_and_forget_tasks) == 1
+        await ch.stop()
+        assert cancelled.is_set()
+        assert len(ch._fire_and_forget_tasks) == 0
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -573,11 +614,13 @@ def test_weixin_qr_login_redirect_tracks_base_url(monkeypatch):
 # 注册
 # --------------------------------------------------------------------------- #
 def test_weixin_platform_registers(monkeypatch):
+    # 插件加载经 check_weixin_requirements 门禁（aiohttp），未装 weixin extra 时干净跳过
+    pytest.importorskip("aiohttp", reason="weixin 平台运行依赖 aiohttp（pip install .[weixin]）")
     monkeypatch.setenv("WEIXIN_ACCOUNT_ID", "bot_env")
     monkeypatch.setenv("WEIXIN_TOKEN", "tok_env")
     plugins = PluginManager(registry=Registry())
     plugins.discover_and_load([Path("plugins")], enabled=["weixin-platform"])
-    loaded = [p for p in plugins.loaded_plugins if p.manifest.name == "weixin-platform"][0]
+    loaded = next(p for p in plugins.loaded_plugins if p.manifest.name == "weixin-platform")
     assert loaded.enabled and loaded.platforms_registered == ["weixin"]
 
     entry = platform_registry.get("weixin")

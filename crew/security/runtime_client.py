@@ -10,12 +10,12 @@ import logging
 import os
 import re
 import secrets
-import signal
 import subprocess
-import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+
+from crew.security.process_lifecycle import terminate_process_tree
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 
@@ -315,7 +315,7 @@ class NativeInteractiveSession:
         if self._closed:
             return
         self._closed = True
-        await self._client._terminate_tree(self.process)
+        await terminate_process_tree(self.process)
         await self._finish_helper()
 
     async def _send_request(self, payload: dict[str, Any], *, nonce: str | None = None) -> None:
@@ -347,7 +347,7 @@ class NativeInteractiveSession:
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=2.0)
             except asyncio.TimeoutError:
-                await self._client._terminate_tree(self.process)
+                await terminate_process_tree(self.process)
         await self._stderr_task
 
 
@@ -413,7 +413,7 @@ class NativeRuntimeClient:
             return _parse_classification(result.get("classification"), shell_kind, raw_command)
         except (asyncio.TimeoutError, NativeRuntimeError, OSError):
             if process is not None:
-                await self._terminate_tree(process)
+                await terminate_process_tree(process)
             return _ask_classification(shell_kind, raw_command, "classifier_unavailable")
         finally:
             if stderr_task is not None:
@@ -509,16 +509,16 @@ class NativeRuntimeClient:
             )
             await asyncio.wait_for(process.wait(), timeout=_remaining(deadline))
         except asyncio.TimeoutError as exc:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise NativeRuntimeError(RuntimeErrorCode.TIMEOUT, "native runtime timed out") from exc
         except asyncio.CancelledError:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise
         except NativeRuntimeError:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise
         except (BrokenPipeError, ConnectionError, OSError) as exc:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise NativeRuntimeError(
                 RuntimeErrorCode.RUNTIME_CRASHED, "native runtime terminated unexpectedly"
             ) from exc
@@ -611,11 +611,11 @@ class NativeRuntimeClient:
             await process.stdin.drain()
             return session
         except asyncio.CancelledError:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             await stderr_task
             raise
         except Exception:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             await stderr_task
             raise
 
@@ -869,29 +869,6 @@ class NativeRuntimeClient:
             raise NativeRuntimeError(
                 RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH, "native runtime handshake mismatch"
             )
-
-    @staticmethod
-    async def _terminate_tree(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        if sys.platform == "darwin":
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=0.5)
-                return
-            except (ProcessLookupError, asyncio.TimeoutError):
-                pass
-        try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
-            pass
 
 
 def _ask_classification(shell_kind: str, raw_command: str, reason: str) -> ShellClassification:

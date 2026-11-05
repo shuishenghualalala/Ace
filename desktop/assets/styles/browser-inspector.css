@@ -64,7 +64,7 @@
 .mw-browser-inspector .browser-control-btn {
   flex: 0 0 auto;
   min-height: 30px;
-  padding: 0 10px;
+  padding: 0 var(--mw-space-fine-10);
   border: 1px solid var(--mw-border-default);
   border-radius: var(--mw-radius-2);
   background: var(--mw-bg-surface);

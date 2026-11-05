@@ -7,14 +7,28 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from crew.core.runctx import current_request_id, current_session_id, current_tool_call_id
+from crew.agent.loop.tool_runner import ToolRunner
+from crew.agent.subagent.tools import _run_children
+from crew.core.runctx import (
+    current_request_id,
+    current_session_id,
+    current_tool_call_id,
+    current_tool_progress_fn,
+    emit_tool_progress,
+    touch_current_task_activity,
+)
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.mocks import InMemorySessionStore
+from crew.core.types import ToolCall
 from crew.gateway.dispatcher import SessionDispatcher
+from crew.security.models import ConversationPermissionMode
 from crew.tasks.runtime import TaskRuntime
 from crew.tools.builtin import handle_terminal
 from crew.tools.process_registry import process_registry
@@ -35,6 +49,19 @@ def _runtime(tmp_path, **kwargs) -> TaskRuntime:
     return runtime
 
 
+def _agent_turn_controller(*, inactivity_timeout: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            tasks_agent_turn_inactivity_timeout_seconds=inactivity_timeout,
+            tasks_agent_turn_execution_timeout_seconds=0,
+        )
+    )
+
+
+def _agent_turn_tasks(runtime: TaskRuntime, *, owner: str = "owner") -> list[dict]:
+    return runtime.list_tasks(session_id="s1", owner_account_id=owner)
+
+
 @pytest.mark.asyncio
 async def test_activity_and_heartbeat_are_independent(tmp_path):
     runtime = _runtime(tmp_path, monitor_interval=0.01)
@@ -44,6 +71,7 @@ async def test_activity_and_heartbeat_are_independent(tmp_path):
             kind="subagent",
             session_id="s1",
             title="idle",
+            owner_account_id="local",
             inactivity_timeout=0.08,
             execution_timeout=0,
             backgrounded=True,
@@ -53,10 +81,188 @@ async def test_activity_and_heartbeat_are_independent(tmp_path):
             runtime.heartbeat(task["task_id"])
             await asyncio.sleep(0.03)
         for _ in range(10):
-            if runtime.get(task["task_id"])["status"] == "timed_out":
+            if runtime.get(task["task_id"], owner_account_id="local")["status"] == "timed_out":
                 break
             await asyncio.sleep(0.02)
-        assert runtime.get(task["task_id"])["status"] == "timed_out"
+        assert runtime.get(task["task_id"], owner_account_id="local")["status"] == "timed_out"
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_tool_progress_keeps_watchdog_alive(tmp_path):
+    """工具旁路进度也必须刷新 parent agent_turn 的业务活动时间。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+
+    async def inner(envelope):
+        runner = ToolRunner(None, None, None, session_id=envelope.session_id)
+        token = runner._install_progress_sink(ToolCall("tool-1", "terminal", {}))
+        try:
+            for index in range(12):
+                await emit_tool_progress(f"running {index}")
+                await asyncio.sleep(0.025)
+        finally:
+            current_tool_progress_fn.reset(token)
+        yield ResponseChunk.final(envelope.request_id, "done")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=0.08),
+        task_runtime=runtime,
+    )
+    await runtime.start()
+    try:
+        chunks = [
+            chunk
+            async for chunk in dispatcher.run(
+                Envelope.of("run", session_id="s1", user_id="owner", mode="dynamic_kanban")
+            )
+        ]
+        task = _agent_turn_tasks(runtime)[0]
+        assert task["status"] == "completed"
+        assert task["last_activity_at"] > task["started_at"]
+        assert chunks[-1].kind == "final"
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_synchronous_subagent_progress_keeps_parent_watchdog_alive(tmp_path):
+    """同步 delegate_task 等待子 agent 时，其子 chunk 也属于父回合活动。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+
+    class StreamingChild:
+        async def run(self, envelope):
+            for index in range(12):
+                await asyncio.sleep(0.025)
+                yield ResponseChunk.delta(envelope.request_id, f"step {index}")
+            yield ResponseChunk.final(envelope.request_id, "child done")
+
+        async def aclose(self):
+            return None
+
+    async def inner(envelope):
+        await _run_children(
+            [{"label": "child", "goal_text": "work", "spec": {}}],
+            build_child=lambda _spec: StreamingChild(),
+            max_concurrent=1,
+            active=None,
+            idle_timeout=1,
+            max_runtime=1,
+            progress_callback=touch_current_task_activity,
+        )
+        yield ResponseChunk.final(envelope.request_id, "done")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=0.08),
+        task_runtime=runtime,
+    )
+    await runtime.start()
+    try:
+        chunks = [
+            chunk
+            async for chunk in dispatcher.run(
+                Envelope.of("run", session_id="s1", user_id="owner", mode="dynamic_kanban")
+            )
+        ]
+        task = _agent_turn_tasks(runtime)[0]
+        assert task["status"] == "completed"
+        assert task["last_activity_at"] > task["started_at"]
+        assert chunks[-1].kind == "final"
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_watchdog_preserves_timeout_reason_and_terminal_state(tmp_path, monkeypatch):
+    """watchdog 取消回合后，最终状态与前端错误都必须保留超时原因。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+    blocked = asyncio.Event()
+
+    async def inner(envelope):
+        await blocked.wait()
+        yield ResponseChunk.final(envelope.request_id, "unreachable")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=0.08),
+        task_runtime=runtime,
+    )
+    monkeypatch.setattr("crew.state.home.get_owner_runtime_home", lambda _owner: tmp_path)
+    await runtime.start()
+    try:
+        chunks = [
+            chunk
+            async for chunk in dispatcher.run(
+                Envelope.of("run", session_id="s1", user_id="owner")
+            )
+        ]
+        task = _agent_turn_tasks(runtime)[0]
+        status, error = store.get_status("s1", owner_account_id="owner")
+        assert task["status"] == "timed_out"
+        assert task["error"].startswith("无业务活动超过")
+        assert chunks[-1].kind == "error"
+        assert chunks[-1].body["message"] == task["error"]
+        assert status == "failed"
+        assert error == task["error"]
+    finally:
+        await runtime.stop()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_cancel_preserves_cancelled_terminal_state(tmp_path):
+    """通过 TaskRuntime 取消正在运行的回合时，不能被 dispatcher 覆盖为 failed。"""
+    runtime = _runtime(tmp_path, monitor_interval=0.1)
+    store = InMemorySessionStore()
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def inner(envelope):
+        started.set()
+        await blocked.wait()
+        yield ResponseChunk.final(envelope.request_id, "unreachable")
+
+    dispatcher = SessionDispatcher(
+        inner,
+        store,
+        controller=_agent_turn_controller(inactivity_timeout=10),
+        task_runtime=runtime,
+    )
+    await runtime.start()
+    try:
+        async def drain() -> list[ResponseChunk]:
+            return [
+                chunk
+                async for chunk in dispatcher.run(
+                    Envelope.of("run", session_id="s1", user_id="owner", mode="dynamic_kanban")
+                )
+            ]
+
+        run_task = asyncio.create_task(drain())
+        await started.wait()
+        task_id = _agent_turn_tasks(runtime)[0]["task_id"]
+        cancelled = await runtime.cancel(task_id, reason="测试取消", owner_account_id="owner")
+        chunks = await run_task
+        task = runtime.get(task_id, owner_account_id="owner")
+        status, error = store.get_status("s1", owner_account_id="owner")
+        assert cancelled["status"] == "cancelled"
+        assert task["status"] == "cancelled"
+        assert task["error"] == "测试取消"
+        assert chunks[-1].kind == "error"
+        assert chunks[-1].body["message"] == "测试取消"
+        assert status == "stopped"
+        assert error == "测试取消"
     finally:
         await runtime.stop()
         runtime.close()
@@ -65,22 +271,51 @@ async def test_activity_and_heartbeat_are_independent(tmp_path):
 @pytest.mark.asyncio
 async def test_wait_timeout_does_not_cancel_task(tmp_path):
     runtime = _runtime(tmp_path, wait_timeout=0.02)
-    task = runtime.create_runtime(kind="team", session_id="s1", title="wait")
+    task = runtime.create_runtime(kind="team", session_id="s1", title="wait", owner_account_id="local")
     runtime.mark_running(task["task_id"])
-    result = await runtime.wait(task["task_id"])
+    result = await runtime.wait(task["task_id"], owner_account_id="local")
     assert result["retrieval_status"] == "timeout"
-    assert runtime.get(task["task_id"])["status"] == "running"
+    assert runtime.get(task["task_id"], owner_account_id="local")["status"] == "running"
     runtime.finish(
         task["task_id"],
-        owner_account_id="",
+        owner_account_id="local",
         status="completed",
         result="ok",
     )
     runtime.close()
 
 
+class _FullAccessSecurityService:
+    """最小授权服务桩：FULL_ACCESS 模式下 authorize 直接放行。"""
+
+    db_path = Path("crew.db")
+    audit = None
+
+    @staticmethod
+    def mode_for(_context):
+        return ConversationPermissionMode.FULL_ACCESS
+
+    @staticmethod
+    def authorize_exec_action(*_args, **_kwargs):
+        return True, None
+
+
 @pytest.mark.asyncio
-async def test_shell_auto_background_reuses_running_process(tmp_path):
+async def test_shell_auto_background_reuses_running_process(tmp_path, monkeypatch):
+    from crew.security.context import SecurityContext
+
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=tmp_path,
+        session_id="shell-session",
+        request_id="req-1",
+        task_id="",
+        cwd=tmp_path,
+    )
+    monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+    monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
     runtime = _runtime(tmp_path, auto_background_after=0.05)
     process_registry.configure_task_runtime(runtime)
     tok_sid = current_session_id.set("shell-session")
@@ -91,14 +326,16 @@ async def test_shell_auto_background_reuses_running_process(tmp_path):
             await handle_terminal(
                 {
                     "command": "echo start; sleep 0.2; echo end"
-                }
+                },
+                workspace_store=object(),
+                security_service=_FullAccessSecurityService(),
             )
         )
         assert payload["background"] is True
         assert payload["auto_backgrounded"] is True
         task_id = payload["task_id"]
         pid = payload["pid"]
-        completed = await runtime.wait(task_id, timeout=2)
+        completed = await runtime.wait(task_id, timeout=2, owner_account_id="local")
         assert completed["status"] == "completed"
         assert completed["progress"]["pid"] == pid
         assert "end" in completed["result"]
@@ -113,9 +350,9 @@ async def test_shell_auto_background_reuses_running_process(tmp_path):
 @pytest.mark.asyncio
 async def test_restart_reconciliation(tmp_path):
     runtime = _runtime(tmp_path)
-    agent = runtime.create_runtime(kind="agent_turn", session_id="s1", title="agent")
+    agent = runtime.create_runtime(kind="agent_turn", session_id="s1", title="agent", owner_account_id="local")
     runtime.mark_running(agent["task_id"])
-    shell = runtime.create_runtime(kind="shell", session_id="s1", title="shell")
+    shell = runtime.create_runtime(kind="shell", session_id="s1", title="shell", owner_account_id="local")
     runtime.mark_running(shell["task_id"])
     # Windows 无 sleep 可执行文件；用当前解释器挂起进程以模拟长驻 shell。
     process_options = (
@@ -139,13 +376,13 @@ async def test_restart_reconciliation(tmp_path):
 
     recovered = _runtime(tmp_path)
     recovered.reconcile_after_restart()
-    assert recovered.get(agent["task_id"])["status"] == "failed"
-    shell_row = recovered.get(shell["task_id"])
+    assert recovered.get(agent["task_id"], owner_account_id="local")["status"] == "failed"
+    shell_row = recovered.get(shell["task_id"], owner_account_id="local")
     assert shell_row["status"] == "running"
     assert shell_row["progress"]["detached"] is True
-    await recovered.cancel(shell["task_id"], "restart cancel")
+    await recovered.cancel(shell["task_id"], "restart cancel", owner_account_id="local")
     await asyncio.wait_for(process.wait(), timeout=2)
-    assert recovered.get(shell["task_id"])["status"] == "cancelled"
+    assert recovered.get(shell["task_id"], owner_account_id="local")["status"] == "cancelled"
     recovered.close()
 
 
@@ -169,7 +406,7 @@ async def test_background_agent_turn_releases_foreground_via_sidechain(tmp_path)
 
     first = asyncio.create_task(drain(Envelope.of("first", session_id="s1", user_id="local")))
     await asyncio.sleep(0.03)
-    first_task_id = dispatcher.background("s1", owner_account_id="local")
+    first_task_id = await dispatcher.background("s1", owner_account_id="local")
     assert first_task_id
     second = asyncio.create_task(drain(Envelope.of("second", session_id="s1", user_id="local")))
     await asyncio.sleep(0.03)
@@ -194,7 +431,7 @@ def test_task_get_is_owner_scoped(tmp_path):
     with pytest.raises(KeyError):
         runtime.get(task["task_id"], owner_account_id="B:uid-b")
     with pytest.raises(KeyError):
-        runtime.get(task["task_id"])
+        runtime.get(task["task_id"], owner_account_id="local")
     runtime.close()
 
 
@@ -333,3 +570,110 @@ def test_late_completion_cannot_overwrite_logout_cancellation(tmp_path):
     assert late["result"] == ""
     runtime_a.close()
     runtime_b.close()
+
+
+# --------------------------------------------------------------------------- #
+# async 门面（ADRs-0046 批次1）：事件循环上的同步写全部迁移到 xxx_async
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_async_facade_writes_match_sync_writes(tmp_path):
+    sync_rt = _runtime(tmp_path / "sync")
+    async_rt = _runtime(tmp_path / "async")
+    try:
+        sync_task = sync_rt.create_runtime(
+            kind="subagent", session_id="s1", title="sync", owner_account_id="local"
+        )
+        async_task = await async_rt.create_runtime_async(
+            kind="subagent", session_id="s1", title="sync", owner_account_id="local",
+            task_id=sync_task["task_id"],
+        )
+        assert async_task["task_id"] == sync_task["task_id"]
+
+        await async_rt.mark_running_async(async_task["task_id"])
+        assert (await async_rt.get_async(async_task["task_id"], owner_account_id="local"))["status"] == "running"
+
+        touched = await async_rt.touch_activity_async(async_task["task_id"], {"step": 1})
+        assert touched["progress"] == {"step": 1}
+        assert await async_rt.heartbeat_async(async_task["task_id"])
+
+        finished = await async_rt.finish_async(
+            async_task["task_id"], owner_account_id="local", status="completed", result="ok"
+        )
+        assert finished["status"] == "completed"
+        assert finished["result"] == "ok"
+
+        listed = await async_rt.list_tasks_async(session_id="s1", owner_account_id="local")
+        assert [t["task_id"] for t in listed] == [async_task["task_id"]]
+        listed_legacy = await async_rt.list_async("s1", owner_account_id="local")
+        assert listed_legacy == listed
+    finally:
+        sync_rt.close()
+        async_rt.close()
+
+
+@pytest.mark.asyncio
+async def test_async_facade_concurrent_writes_do_not_tear_state(tmp_path):
+    runtime = _runtime(tmp_path)
+    try:
+        created = await runtime.create_runtime_async(
+            kind="subagent", session_id="s1", title="并发", owner_account_id="local"
+        )
+        task_id = created["task_id"]
+        await runtime.mark_running_async(task_id)
+
+        # 两个协程并发 async 写同一任务：RLock + BEGIN IMMEDIATE 串行化，
+        # 每次写都必须读到完整的前序状态（updated_at 单调、progress 不撕裂）。
+        async def _writer(offset: int) -> None:
+            for i in range(20):
+                await runtime.touch_activity_async(task_id, {"writer": offset, "i": i})
+
+        await asyncio.gather(_writer(0), _writer(1))
+        final = await runtime.get_async(task_id, owner_account_id="local")
+        assert final["status"] == "running"
+        assert set(final["progress"]) == {"writer", "i"}
+        rows = await runtime.list_tasks_async(session_id="s1", owner_account_id="local")
+        assert len(rows) == 1
+        assert rows[0]["updated_at"] >= created["updated_at"]
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_async_facade_does_not_block_event_loop(tmp_path):
+    """回归：async 门面等待持锁写时，事件循环上的 ticker 必须持续推进。
+
+    从工作线程持有 store 锁制造竞争窗口：若写落在事件循环上（旧行为），
+    ticker 会被整个锁窗口卡住；走 to_thread 的 async 门面则让出 loop。
+    """
+    runtime = _runtime(tmp_path)
+    ticks: list[float] = []
+    done = asyncio.Event()
+
+    async def _ticker() -> None:
+        while not done.is_set():
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.002)
+
+    def _hold_store_lock() -> None:
+        with runtime._lock:  # noqa: SLF001 - 回归测试需要制造 store 锁竞争
+            time.sleep(0.2)
+
+    try:
+        created = await runtime.create_runtime_async(
+            kind="subagent", session_id="s1", title="ticker", owner_account_id="local"
+        )
+        task_id = created["task_id"]
+        ticker = asyncio.create_task(_ticker())
+        holder = asyncio.ensure_future(asyncio.to_thread(_hold_store_lock))
+        await asyncio.sleep(0)  # 让持锁线程先拿到锁
+        for i in range(5):
+            await runtime.touch_activity_async(task_id, {"i": i})
+        await holder
+        done.set()
+        await ticker
+        # 0.2s 锁窗口内 ticker 至少推进数十次；若同步写阻塞 loop，ticker 会整窗停滞
+        assert len(ticks) >= 30, f"ticker 推进不足（{len(ticks)} 次），事件循环疑似被阻塞"
+        gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+        assert max(gaps) < 0.05, f"ticker 出现大间隔（{max(gaps):.3f}s），事件循环疑似被阻塞"
+    finally:
+        runtime.close()

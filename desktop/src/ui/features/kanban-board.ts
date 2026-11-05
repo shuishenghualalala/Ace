@@ -10,6 +10,14 @@ import { backendApi, type DynamicKanbanStatus, type Task } from '../backend-clie
 import { taskStatusLabel } from '../../shared/task-status';
 import { $, escapeHtml, isDynamicKanbanSession, notify, saveToStorage, state } from '../state';
 import { clearRuntimeStyle, setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
+import type { ChatMessage, WorkflowProgressPayload } from '../chat-render';
+import {
+  featureEventRegistry,
+  emptyFeatureReducerResult,
+  type FeatureReducerContext,
+  type FeatureReducerResult,
+} from './event-reducer-registry';
+import { registerKanbanBoardCallbacks } from './board-hooks';
 import {
   activateWorkflowTimeline,
   buildWorkflowTimelineHtml,
@@ -80,11 +88,15 @@ export async function refreshKanbanBoard(sessionId?: string | null): Promise<voi
     renderKanbanBoard();
     return;
   }
+  const generation = kanbanGeneration;
   const [board, status, tasks] = await Promise.all([
     backendApi.dynamicKanbanBoard(sid).catch(() => ({ tasks: [], dependencies: [], events: [] })),
     backendApi.dynamicKanbanStatus(sid).catch(() => null),
     backendApi.tasks(sid).catch(() => []),
   ]);
+  // 在途守卫：请求期间看板被卸载/重装（代际变化）或会话已切换时，
+  // 迟到响应整体丢弃 —— 不回写 state、不渲染、不重启轮询。
+  if (generation !== kanbanGeneration || sid !== state.activeSessionId) return;
   state.kanbanBoard = board as unknown as KanbanBoard;
   latestStatus = status;
   // 过滤掉整轮对话的 agent_turn 容器任务，避免用户 query / 流式 chunk 摘要混入看板。
@@ -102,12 +114,17 @@ function shouldKeepPollingStatus(status: DynamicKanbanStatus | null): boolean {
   return wfStatus === 'active' || wfStatus === 'paused' || wfStatus === 'running';
 }
 
-async function refreshKanbanStatusOnly(sessionId: string): Promise<void> {
+async function refreshKanbanStatusOnly(sessionId: string, generation: number): Promise<void> {
+  // 代际守卫（入口）：tick 回调携带发起轮询那一代的安装代数，
+  // 卸载/重装后旧代残余触发直接失效，不再发起新请求。
+  if (generation !== kanbanGeneration) return;
   if (sessionId !== state.activeSessionId) return;
   if (!isDynamicKanbanSession(sessionId)) return;
   const status = await backendApi.dynamicKanbanStatus(sessionId).catch(() => null);
-  // 异步请求期间用户可能已切换会话，返回前再次校验
-  if (sessionId !== state.activeSessionId) return;
+  // 代际 + 会话双重守卫（返回前）：请求期间看板可能被卸载/重装或切换会话，
+  // 过期响应不回写 latestStatus、不刷新 DOM；旧代的「终态」也不得走到
+  // stopKanbanStatusPolling —— 否则停掉的是新代的轮询定时器。
+  if (generation !== kanbanGeneration || sessionId !== state.activeSessionId) return;
   latestStatus = status;
   refreshWorkflowTimelineDom(status);
   if (!shouldKeepPollingStatus(status)) {
@@ -123,8 +140,11 @@ function startKanbanStatusPolling(sessionId: string): void {
     stopKanbanStatusPolling();
   }
   kanbanStatusPollingSessionId = sessionId;
+  // 轮询句柄随代绑定：tick 回调闭包捕获发起时的安装代数，
+  // 旧代定时器在清理竞态下残余触发一次时也会因代际不匹配而整体失效。
+  const generation = kanbanGeneration;
   kanbanStatusPollingTimer = window.setInterval(() => {
-    void refreshKanbanStatusOnly(sessionId);
+    void refreshKanbanStatusOnly(sessionId, generation);
   }, KANBAN_STATUS_POLL_MS);
 }
 
@@ -159,41 +179,51 @@ export function isRelevantRuntimeTask(task: Task): boolean {
   return true;
 }
 
-export function bindTaskBoardResize(): void {
-  if (resizeBound) return;
+export function bindTaskBoardResize(): () => void {
+  if (resizeBound) return () => {};
   const handle = $('#task-board-resize-handle') as HTMLElement | null;
-  if (!handle) return;
+  if (!handle) return () => {};
 
   let resizing = false;
   let startX = 0;
   let startWidth = state.taskBoardWidth;
 
-  handle.addEventListener('mousedown', (e) => {
+  const onMouseDown = (e: MouseEvent): void => {
     resizing = true;
     startX = e.clientX;
     startWidth = state.taskBoardWidth;
     setRuntimeStyle(document.body, 'cursor', 'col-resize');
     setRuntimeStyle(document.body, 'userSelect', 'none');
     e.preventDefault();
-  });
+  };
 
-  window.addEventListener('mousemove', (e) => {
+  const onMouseMove = (e: MouseEvent): void => {
     if (!resizing) return;
     const delta = startX - e.clientX;
     const next = Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, startWidth + delta));
     state.taskBoardWidth = next;
     applyTaskBoardWidth(next);
-  });
+  };
 
-  window.addEventListener('mouseup', () => {
+  const onMouseUp = (): void => {
     if (!resizing) return;
     resizing = false;
     clearRuntimeStyle(document.body, 'cursor');
     clearRuntimeStyle(document.body, 'userSelect');
     saveToStorage(STORAGE_KEY, state.taskBoardWidth);
-  });
+  };
+
+  handle.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
 
   resizeBound = true;
+  return () => {
+    handle.removeEventListener('mousedown', onMouseDown);
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+    resizeBound = false;
+  };
 }
 
 function applyTaskBoardWidth(width: number): void {
@@ -453,4 +483,251 @@ function runtimeTasksHtml(tasks: Task[]): string {
 export function renderKanbanBoard(): void {
   hideLegacyTaskBoardPanel();
   refreshKanbanInspectorIfMounted();
+}
+
+interface WorkflowProgressPhase {
+  id: string;
+  name: string;
+  description?: string;
+  status: string;
+}
+
+interface WorkflowProgressCall {
+  call_id: string;
+  role: string;
+  phase_id?: string;
+}
+
+interface WorkflowProgressBody {
+  workflow_id: string;
+  status: string;
+  current_phase?: WorkflowProgressPhase;
+  completed_phases?: WorkflowProgressPhase[];
+  active_calls?: WorkflowProgressCall[];
+  message?: string;
+}
+
+export function workflowProgressReducer(
+  body: WorkflowProgressBody,
+  ctx: FeatureReducerContext,
+): FeatureReducerResult {
+  const workflow_id = typeof body.workflow_id === 'string' ? body.workflow_id : '';
+  if (!workflow_id) return emptyFeatureReducerResult();
+
+  const messageId = `wp-${workflow_id}`;
+  const existing = ctx.messages.find((m) => m.id === messageId);
+
+  const current_phase = body.current_phase && typeof body.current_phase === 'object'
+    ? {
+        id: String(body.current_phase.id ?? ''),
+        name: String(body.current_phase.name ?? ''),
+        description: typeof body.current_phase.description === 'string' ? body.current_phase.description : '',
+        status: String(body.current_phase.status ?? 'running'),
+      }
+    : undefined;
+
+  const completed_phases = Array.isArray(body.completed_phases)
+    ? body.completed_phases.map((p) => ({
+        id: String(p.id ?? ''),
+        name: String(p.name ?? ''),
+        description: typeof p.description === 'string' ? p.description : '',
+        status: String(p.status ?? 'done'),
+      }))
+    : [];
+
+  const active_calls = Array.isArray(body.active_calls)
+    ? body.active_calls.map((c) => {
+        const call: { call_id: string; role: string; phase_id?: string } = {
+          call_id: String(c.call_id ?? ''),
+          role: String(c.role ?? ''),
+        };
+        if (typeof c.phase_id === 'string') call.phase_id = c.phase_id;
+        return call;
+      })
+    : [];
+
+  const payload: WorkflowProgressPayload = {
+    workflow_id,
+    status: typeof body.status === 'string' ? body.status : 'running',
+    completed_phases,
+    active_calls,
+    message: typeof body.message === 'string' ? body.message : '',
+  };
+  if (current_phase) payload.current_phase = current_phase;
+
+  const upserts: FeatureReducerResult['messageUpserts'] = [];
+  if (existing) {
+    upserts.push({ op: 'patch', messageId, patch: { workflowProgress: payload } });
+  } else {
+    upserts.push({
+      op: 'append',
+      message: {
+        id: messageId,
+        role: 'status',
+        content: '',
+        timestamp: ctx.now,
+        workflowProgress: payload,
+      } as ChatMessage,
+    });
+  }
+
+  let statusHint: FeatureReducerResult['statusHint'] = payload.status === 'running' ? 'running' : undefined;
+  let replaceBook: FeatureReducerResult['replaceBook'] = null;
+  if (payload.status === 'done' || payload.status === 'failed' || payload.status === 'paused') {
+    statusHint = payload.status === 'failed' ? 'error' : 'idle';
+    if (payload.status === 'done') {
+      const lastAgentRoleIdx = [...ctx.messages].reverse().findIndex(
+        (m) => m.role === 'status' && m.agentName && m.content?.trim(),
+      );
+      if (lastAgentRoleIdx >= 0) {
+        const idx = ctx.messages.length - 1 - lastAgentRoleIdx;
+        const msg = ctx.messages[idx];
+        upserts.push({
+          op: 'patch',
+          messageId: msg.id,
+          patch: {
+            role: 'assistant',
+            segmentRole: 'answer',
+          },
+        });
+        replaceBook = { ...ctx.book, assistantId: msg.id };
+      }
+    }
+  }
+
+  return {
+    messageUpserts: upserts,
+    toolUpserts: [],
+    replaceBook,
+    statusHint,
+    queueHint: undefined,
+    finalize: false,
+  };
+}
+
+let kanbanInitDisposer: (() => void) | null = null;
+
+// 安装代计数：initKanbanBoard 装新一代、dispose/测试重置销毁一代时各 +1。
+// refreshKanbanBoard 发起请求前快照当前代，响应返回后若代已变则整体丢弃，
+// 保证卸载/重装后的在途迟到响应不回写状态、不渲染、不重启轮询。
+let kanbanGeneration = 0;
+
+function resetKanbanBoardState(): void {
+  // 代际 +1：使本代所有在途请求在 await 检查点失效。
+  kanbanGeneration += 1;
+  state.kanbanBoard = { tasks: [], dependencies: [], events: [] };
+  latestStatus = null;
+  state.tasks = [];
+  stopKanbanStatusPolling();
+  if (kanbanRefreshTimer !== null) {
+    window.clearTimeout(kanbanRefreshTimer);
+    kanbanRefreshTimer = null;
+  }
+}
+
+/**
+ * 单 Feature 安装事务：安装步骤即时收集本次获得的 disposer，
+ * 任一步失败则逆序撤销已收集的贡献（每个清理单独兜底，一个失败不阻断其余）；
+ * 成功后发布的 disposer 复用同一条清理链，且幂等（二次调用 no-op，
+ * 不重复清理、不造成代际语义漂移）。
+ */
+function createKanbanInstallTransaction(scope: string): {
+  collect: (disposer: () => void) => void;
+  rollback: () => void;
+  publish: (finalize: () => void) => () => void;
+} {
+  const contributions: Array<() => void> = [];
+  const undoAll = (): void => {
+    for (let index = contributions.length - 1; index >= 0; index -= 1) {
+      try {
+        contributions[index]?.();
+      } catch (err) {
+        console.warn(`[${scope}] 安装贡献清理失败（已跳过，继续其余清理）`, err);
+      }
+    }
+  };
+  return {
+    collect: (disposer) => {
+      contributions.push(disposer);
+    },
+    rollback: undoAll,
+    publish: (finalize) => {
+      let disposed = false;
+      return (): void => {
+        if (disposed) return;
+        disposed = true;
+        undoAll();
+        finalize();
+      };
+    },
+  };
+}
+
+/** 不产生消息变更的 kanban 事件：注册空 reducer 显式消费，避免 registry 的 unhandled 告警噪声。 */
+const KANBAN_NOOP_EVENTS = ['started', 'board_changed', 'call_completed'] as const;
+
+/**
+ * 初始化 Dynamic Kanban 看板生命周期：
+ * - 注册 feature event reducer（kanban/workflow_progress@1 与空实现的 started /
+ *   board_changed / call_completed@1）；
+ * - 向 board-hooks 注册中心调用回调；
+ * - 绑定任务面板 resize。
+ * 返回的 disposer 与 disposeKanbanBoard() 共享同一条清理路径。
+ *
+ * started / board_changed / call_completed 不写消息：回合 gate 按 turn-scoped 分类后，
+ * chat-controller 在看板会话守卫内触发 scheduleRefreshKanbanBoard，reducer 侧空实现
+ * ——与「收到事件、看板数据以 REST 拉取为准」的语义一致；不注册则会触发 registry
+ * 的 unhandled 告警，故显式消费。
+ */
+export function initKanbanBoard(): () => void {
+  if (kanbanInitDisposer) return kanbanInitDisposer;
+
+  // 新一代安装：与上一代（含其在途请求）彻底隔离。
+  // 幂等早退不递增代际；安装失败的回滚不额外递增（本次开始时已递增过，
+  // 该代的在途请求已全部失效），避免代际语义漂移。
+  kanbanGeneration += 1;
+
+  const tx = createKanbanInstallTransaction('kanban-board');
+  try {
+    tx.collect(featureEventRegistry.register({
+      feature: 'kanban',
+      event: 'workflow_progress',
+      version: 1,
+      reducer: (payload, ctx) => workflowProgressReducer(payload as WorkflowProgressBody, ctx),
+    }));
+    for (const event of KANBAN_NOOP_EVENTS) {
+      tx.collect(featureEventRegistry.register({
+        feature: 'kanban',
+        event,
+        version: 1,
+        reducer: () => emptyFeatureReducerResult(),
+      }));
+    }
+    tx.collect(bindTaskBoardResize());
+    tx.collect(registerKanbanBoardCallbacks({
+      refresh: refreshKanbanBoard,
+      scheduleRefresh: scheduleRefreshKanbanBoard,
+      render: renderKanbanBoard,
+    }));
+  } catch (err) {
+    // 中途失败：逆序撤销本次已获得的贡献，安装前已存在的贡献不受影响，
+    // kanbanInitDisposer 保持 null（本次安装视为未发生），重试可干净重装。
+    tx.rollback();
+    throw err;
+  }
+
+  kanbanInitDisposer = tx.publish(resetKanbanBoardState);
+  return kanbanInitDisposer;
+}
+
+/** 显式销毁 Dynamic Kanban 看板：撤销 reducer、注销回调、释放计时器与状态。 */
+export function disposeKanbanBoard(): void {
+  kanbanInitDisposer?.();
+  kanbanInitDisposer = null;
+}
+
+/** 测试隔离用：重置模块级状态并清理生命周期。 */
+export function __resetKanbanBoardForTest(): void {
+  disposeKanbanBoard();
+  resetKanbanBoardState();
 }

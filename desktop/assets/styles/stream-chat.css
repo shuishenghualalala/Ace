@@ -95,6 +95,17 @@
   word-break: normal;
 }
 
+/* 旁白项通栏：不占 28px 图标列，文字与折叠区外正文顶格对齐；虚线连接也不穿过文字 */
+.process-timeline__item--narration {
+  grid-template-columns: minmax(0, 1fr);
+}
+.process-timeline__item--narration .process-timeline__icon {
+  display: none;
+}
+.process-timeline__item--narration::after {
+  display: none;
+}
+
 /* 旁白/思考块内 markdown 段落去首尾边距，保持时间线紧凑 */
 .process-timeline__narration > :first-child,
 .process-timeline__thinking > :first-child {
@@ -151,9 +162,10 @@
 
 .process-timeline__chevron {
   flex-shrink: 0;
+  display: block;
+  width: 14px;
+  height: 14px;
   color: var(--mw-text-muted);
-  font-size: var(--mw-font-2xl);
-  line-height: 1;
   transition: var(--mw-transition-interactive);
 }
 
@@ -285,18 +297,34 @@
   width: 100%;
   min-width: 0;
   margin-top: var(--mw-space-1);
-  padding: var(--mw-space-2) var(--mw-space-3);
-  border-radius: var(--mw-radius-3);
-  background: var(--mw-bg-subtle);
-  color: var(--mw-text-secondary);
+  padding: var(--mw-space-1) var(--mw-space-3);
+  border-left: 2px solid var(--mw-border-default);
+  border-radius: 0 var(--mw-radius-3) var(--mw-radius-3) 0;
+  color: var(--mw-text-muted);
   font-size: var(--mw-type-caption-size);
   line-height: 1.65;
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: break-word;
   word-break: break-word;
   max-height: 240px;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* 思考区走 markdown 渲染后，压住通用 .md-body 正文规则，保持思考区弱化配色与字号。 */
+.chat-messages.web-flow .process-timeline__thinking.md-body,
+.process-timeline__thinking.md-body {
+  color: var(--mw-text-muted);
+  font-size: var(--mw-type-caption-size);
+  line-height: 1.65;
+}
+
+.chat-messages.web-flow .process-timeline__thinking.md-body p,
+.process-timeline__thinking.md-body p,
+.process-timeline__thinking.md-body li,
+.process-timeline__thinking.md-body strong,
+.process-timeline__thinking.md-body b {
+  color: var(--mw-text-muted);
 }
 
 .process-timeline__error {
@@ -588,10 +616,10 @@
   --mw-context-compaction-accent: var(--mw-context-compaction-accent-light);
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--mw-space-fine-9);
   width: 100%;
   min-height: 28px;
-  margin: 0 0 8px;
+  margin: 0 0 var(--mw-space-2);
   color: var(--mw-text-primary);
   font-size: var(--mw-type-compact-size);
   line-height: 1.45;
@@ -647,6 +675,35 @@
 
 @keyframes chat-queue-spin {
   to { transform: rotate(360deg); }
+}
+
+/* 渲染降级错误卡：历史加载失败（带重试）/ 单元构建失败占位 */
+.render-error-card {
+  display: flex;
+  align-items: center;
+  gap: var(--mw-space-2);
+  margin: var(--mw-space-2) calc(var(--mw-space-12) + var(--mw-space-1));
+  padding: var(--mw-space-2) var(--mw-space-3);
+  border-radius: var(--mw-radius-4);
+  border: 1px dashed color-mix(in srgb, var(--mw-status-danger) 40%, transparent);
+  background: var(--mw-status-danger-bg);
+  font-size: var(--mw-type-caption-size);
+  color: var(--mw-text-primary);
+}
+
+.render-error-card__retry {
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-3);
+  background: transparent;
+  color: var(--mw-text-primary);
+  font-size: var(--mw-type-caption-size);
+  padding: var(--mw-space-1) var(--mw-space-3);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.render-error-card__retry:hover {
+  background: color-mix(in srgb, var(--mw-text-primary) 6%, transparent);
 }
 
 .history-item-status-dot {

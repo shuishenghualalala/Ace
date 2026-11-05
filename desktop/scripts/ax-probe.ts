@@ -108,100 +108,6 @@ async function probe(host: BrowserHost, profile: string, url: string, first: boo
   }
 }
 
-/**
- * 录制链路端到端验证。
- *
- * 用 CDP `Input` 域派发真实输入 —— 它产生的事件 `isTrusted` 为 true，和用户手动
- * 操作走的是同一条路径（正因如此宿主的 before-input-event 才拦得住它）。页面用
- * `dispatchEvent` 合成的事件 `isTrusted` 为 false，会被录制器直接忽略。
- */
-async function probeRecording(
-  host: BrowserHost,
-  profile: string,
-  url: string,
-  window: BrowserWindow,
-): Promise<void> {
-  const captured: Array<Record<string, unknown>> = [];
-  host.on('recording', (event: unknown) => captured.push(event as Record<string, unknown>));
-
-  const call = (command: string, args: string[]) =>
-    host.handleRpc({
-      runtime_key: RUNTIME_KEY,
-      method: 'execute',
-      params: { profile_dir: profile, proxy_url: PROXY_URL, command, args },
-    }) as Promise<{ success: boolean; data: any }>;
-
-  await call('tab', ['new', '--label', TAB_LABEL, url]);
-  const tabs = (await call('tab', ['list'])).data;
-  const targetId = tabs.tabs[0].targetId;
-
-  // 视图必须真的挂到可见窗口上：点击走的是坐标命中测试，没有布局就没有命中点。
-  // 走宿主自己的 setPanel（桌面端用的同一条路），而不是自己往窗口塞子视图。
-  window.show();
-  host.setPanel({
-    runtimeKey: RUNTIME_KEY,
-    sessionId: SESSION_ID,
-    tabLabel: TAB_LABEL,
-    mode: 'ai',
-    bounds: { x: 0, y: 0, width: 1024, height: 720 },
-    visible: true,
-  });
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
-  const setRecording = (action: string) =>
-    host.handleRpc({
-      runtime_key: RUNTIME_KEY,
-      method: 'set_recording',
-      params: { profile_dir: profile, proxy_url: PROXY_URL, target_id: targetId, action },
-    });
-
-  console.log(`\n${'='.repeat(78)}\n录制链路验证：${url}\n${'='.repeat(78)}`);
-  await setRecording('start');
-  console.log('  已开始录制，派发真实输入事件……');
-
-  const refOf = (text: string, snapshot: string): string =>
-    /\[ref=(@e\d+)\]/.exec(snapshot.split('\n').find((item) => item.includes(text)) ?? '')?.[1] ?? '';
-
-  // 先点一个同文档的分类标签：这是 currentPageIdentity 看不见、只有内容摘要
-  // 能识别的那类变化，必须验证轨迹里确实带上了新的页面态。
-  const first = (await call('snapshot', ['--compact'])).data.snapshot as string;
-  const tabRef = refOf('tab "数码"', first);
-  if (tabRef) {
-    await call('click', [tabRef]);
-    await new Promise((resolve) => setTimeout(resolve, 600));
-  }
-
-  // 必须重新观察：切换标签后内容全换，旧 ref 会被 assertRefCurrent 以
-  // stale_ref_security 拒绝——这正是 ref 生命周期该有的 fail-closed 行为。
-  const second = (await call('snapshot', ['--compact'])).data.snapshot as string;
-  const detailRef = refOf('link "详情"', second);
-  console.log(`  切换分类后重新观察，目标 ref：${detailRef || '(没找到)'}`);
-  if (detailRef) {
-    await call('click', [detailRef]);
-    await new Promise((resolve) => setTimeout(resolve, 800));
-  }
-
-  await setRecording('stop');
-  console.log(`\n  捕获到 ${captured.length} 条录制事件：`);
-  for (const event of captured) {
-    const target = event.target as Record<string, unknown> | null;
-    console.log(
-      `    #${event.step} ${event.action} backendNodeId=${event.backendNodeId} `
-      + `tier=${event.tier} value=${JSON.stringify(event.value)}`,
-    );
-    console.log(
-      `        target=${target
-        ? `<${target.tag}> text=${JSON.stringify(target.text)} `
-          + `ordinal=${target.ordinal} href=${JSON.stringify(target.href)}`
-        : '(无)'}`,
-    );
-    const page = String(event.page ?? '');
-    console.log(
-      `        page=${page ? `${page.split('\n').length} 行 / ${page.length} 字符` : '(与上一步相同，未重发)'}`,
-    );
-  }
-}
-
 async function main(): Promise<void> {
   const urls = process.argv.slice(2).filter((arg) => /^https?:\/\//.test(arg));
   if (urls.length === 0) {
@@ -227,12 +133,8 @@ async function main(): Promise<void> {
   const host = new BrowserHost(() => window);
 
   try {
-    if (process.argv.includes('--record')) {
-      await probeRecording(host, profile, urls[0], window);
-    } else {
-      for (const [index, url] of urls.entries()) {
-        await probe(host, profile, url, index === 0);
-      }
+    for (const [index, url] of urls.entries()) {
+      await probe(host, profile, url, index === 0);
     }
   } finally {
     await host.dispose();

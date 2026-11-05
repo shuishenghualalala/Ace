@@ -12,14 +12,19 @@ from fastapi.testclient import TestClient
 from crew.gateway.auth import AccountContext
 from crew.gateway.context import complete_path
 from crew.gateway.routers.misc import create_misc_router
-from crew.state.home import owner_path_segment
+from crew.state.home import get_owner_runtime_home
 
 
 @pytest.fixture
 def crew_home(tmp_path, monkeypatch):
-    """隔离的 Crew home，含若干文件/目录用于补全。"""
-    home = tmp_path / ".crew"
-    (home / "task_workspaces" / "default").mkdir(parents=True)
+    """隔离的 Crew home（本机 owner 视角），含若干文件/目录用于补全。
+
+    owner 统一后 local 的运行时 home 在 accounts/<hash>/，路径安全边界以它为 base。
+    """
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    home = get_owner_runtime_home("local", create=False)
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "task_workspaces" / "default").mkdir(parents=True, exist_ok=True)
     (home / "uploads").mkdir(parents=True)
     # 一些可补全的条目
     (home / "README.md").write_text("hi", encoding="utf-8")
@@ -27,7 +32,6 @@ def crew_home(tmp_path, monkeypatch):
     (home / "subdir").mkdir()
     (home / "subdir" / "a.txt").write_text("a", encoding="utf-8")
     (home / "subdir" / "b.txt").write_text("b", encoding="utf-8")
-    monkeypatch.setenv("CREW_HOME", str(home))
     # load_config 会写 CREW_TASK_WORKSPACE_ROOT 到 os.environ，不清理会导致
     # task_workspace_path 指向别的测试的目录，影响 complete_path 的 workspace_id 分支。
     monkeypatch.delenv("CREW_TASK_WORKSPACE_ROOT", raising=False)
@@ -105,8 +109,9 @@ def test_complete_nested_workspace_path_query(crew_home):
 
 
 def test_complete_workspace_id_is_owner_scoped(crew_home):
-    ws_a = crew_home / "accounts" / owner_path_segment("A:uid-a") / "task_workspaces" / "same"
-    ws_b = crew_home / "accounts" / owner_path_segment("B:uid-b") / "task_workspaces" / "same"
+    # 用 get_owner_runtime_home 取规范位置（与 complete_path 内部解析一致）
+    ws_a = get_owner_runtime_home("A:uid-a", create=False) / "task_workspaces" / "same"
+    ws_b = get_owner_runtime_home("B:uid-b", create=False) / "task_workspaces" / "same"
     ws_a.mkdir(parents=True)
     ws_b.mkdir(parents=True)
     (ws_a / "a.txt").write_text("a", encoding="utf-8")
@@ -169,7 +174,7 @@ def test_complete_prefix_search_skips_generated_trees(crew_home):
 def test_complete_route_default_workspace_ignores_configured_root_path(crew_home, tmp_path):
     """默认「对话」只补全 default task workspace，不应误读项目 workspace root_path。"""
     owner_id = "A:uid-a"
-    default_dir = crew_home / "accounts" / owner_path_segment(owner_id) / "task_workspaces" / "default"
+    default_dir = get_owner_runtime_home(owner_id, create=False) / "task_workspaces" / "default"
     default_dir.mkdir(parents=True, exist_ok=True)
     (default_dir / "chat.txt").write_text("chat", encoding="utf-8")
     project_root = tmp_path / "project"

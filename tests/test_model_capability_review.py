@@ -49,10 +49,11 @@ def test_removing_non_active_global_model_clears_all_agent_cache(
     app.agents = AgentManager(lambda _config, owner_account_id="": object())
     app.agents.get("bound-to-removed", owner_account_id="owner-a")
     app.agents.get("other-session", owner_account_id="owner-b")
-    monkeypatch.setattr(cfg, "persist_model_profiles", lambda: tmp_path / "config.yaml")
+    # remove_model 是候选值事务（候选值 → 持久化 → 发布），需要 yaml 落点
+    cfg.config_path = str(tmp_path / "config.yaml")
     monkeypatch.setattr("crew.app.remove_env_key", lambda *_args, **_kwargs: None)
 
-    app.remove_model("removed")
+    app.remove_model("removed", owner_account_id="")
 
     assert app.agents.peek("bound-to-removed", owner_account_id="owner-a") is None
     assert app.agents.peek("other-session", owner_account_id="owner-b") is None
@@ -89,26 +90,34 @@ def test_removing_owner_model_drops_only_that_owners_agent_cache(
     assert app.agents.peek("other-session", owner_account_id="owner-b") is other_agent
 
 
-def test_inherited_text_only_subagent_cannot_use_browser_vision() -> None:
+@pytest.mark.asyncio
+async def test_inherited_text_only_subagent_cannot_use_browser_vision() -> None:
     cfg = Config(
         active_model_id="text",
         model_profiles={"text": _profile("text", capabilities=["text", "tools"])},
     )
     app = build_app(config=cfg, enable_team=False)
-    app.browser_manager.driver.available = lambda: True
-    token = current_model_capabilities.set(("text", "tools"))
+    # browser 插件 activation_phase=startup（c147420 迁入宿主事件循环生命周期），
+    # 必须先走 startup 才有 browser_manager 与 browser_use 工具。
+    await app.startup(start_cron=False)
     try:
-        child = app._make_subagent({"model": "inherit"})
+        app.browser_manager.driver.available = lambda: True
+        token = current_model_capabilities.set(("text", "tools"))
+        try:
+            child = app._make_subagent({"model": "inherit"})
+        finally:
+            current_model_capabilities.reset(token)
+
+        assert "browser_use" in (child.tool_filter or [])
+        assert "browser_vision" not in (child.tool_filter or [])
+        assert child.model_capabilities == ("text", "tools")
     finally:
-        current_model_capabilities.reset(token)
-
-    assert "browser_use" in (child.tool_filter or [])
-    assert "browser_vision" not in (child.tool_filter or [])
-    assert child.model_capabilities == ("text", "tools")
+        await app.shutdown()
 
 
-def test_explicit_no_tools_subagent_has_empty_tool_filter() -> None:
-    no_tools = _profile("plain", capabilities=["text"])
+def test_explicit_no_tools_subagent_has_empty_tool_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEY_PLAIN", "k-plain")
+    no_tools = _profile("plain", capabilities=["text"], builtin=True)
     cfg = Config(active_model_id="plain", model_profiles={"plain": no_tools})
     app = build_app(config=cfg, enable_team=False)
 

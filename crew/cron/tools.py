@@ -14,10 +14,11 @@ from crew.core.runctx import (
     current_workspace_id,
 )
 from crew.cron.jobs import CronJobStore, format_bj_timestamp
-from crew.tools.registry import Registry, tool_error, tool_result
+from crew.tools.registry import FunctionTool, Registry, tool_error, tool_result
 
 if TYPE_CHECKING:
     from crew.cron.scheduler import CronService
+
 
 
 # origin 投递只对「已注册外部 sender 的渠道」有效（见 gateway 装配的 DeliveryRouter）。
@@ -198,12 +199,11 @@ CRON_RESUME_SCHEMA = {
 }
 
 
-def register_cron_tools(
-    registry: Registry,
+def build_cron_tools(
     store: CronJobStore,
     service: "CronService | None" = None,
-) -> None:
-    """把 cron 工具注册进 Registry（toolset=cron）。"""
+) -> tuple[FunctionTool, ...]:
+    """构造 Cron 工具而不注册，供 FeatureScope 逐项取得所有权。"""
 
     async def handle_create(args: dict[str, Any]) -> str:
         name = str(args.get("name", "")).strip()
@@ -243,7 +243,7 @@ def register_cron_tools(
             return tool_error(str(exc))
 
         if service is not None:
-            service.sync_job(str(job["id"]))
+            service.sync_job(str(job["id"]), owner_account_id=owner)
             refreshed = store.get(str(job["id"]), owner_account_id=owner)
             if refreshed is not None:
                 job = refreshed
@@ -314,14 +314,14 @@ def register_cron_tools(
         owner = current_owner_account_id.get()
         ok = store.delete(job_id, owner_account_id=owner)
         if ok and service is not None:
-            service.sync_job(job_id)
+            service.sync_job(job_id, owner_account_id=owner)
         return tool_result(deleted=ok, id=job_id) if ok else tool_error(f"任务不存在: {job_id}")
 
     async def handle_pause(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
         ok = store.set_enabled(job_id, False, owner_account_id=current_owner_account_id.get())
         if ok and service is not None:
-            service.sync_job(job_id)
+            service.sync_job(job_id, owner_account_id=current_owner_account_id.get())
         return tool_result(paused=ok, id=job_id) if ok else tool_error(f"任务不存在: {job_id}")
 
     async def handle_resume(args: dict[str, Any]) -> str:
@@ -329,7 +329,7 @@ def register_cron_tools(
         owner = current_owner_account_id.get()
         ok = store.set_enabled(job_id, True, owner_account_id=owner)
         if ok and service is not None:
-            service.sync_job(job_id)
+            service.sync_job(job_id, owner_account_id=current_owner_account_id.get())
         refreshed = store.get(job_id, owner_account_id=owner) if ok else None
         if ok:
             next_run_at = refreshed["next_run_at"] if refreshed else 0
@@ -350,16 +350,36 @@ def register_cron_tools(
         (CRON_PAUSE_SCHEMA, handle_pause, "暂停定时任务", "暂停定时任务 {job_id}"),
         (CRON_RESUME_SCHEMA, handle_resume, "恢复定时任务", "恢复定时任务 {job_id}"),
     ]
+    tools: list[FunctionTool] = []
     for schema, handler, display_name, ui_label_template in specs:
-        registry.register(
-            name=schema["name"],
-            toolset="cron",
-            schema=schema,
-            handler=handler,
-            is_async=True,
-            override=True,
-            display_name=display_name,
-            ui_label_template=ui_label_template,
-            should_defer=True,
-            search_hint="cron schedule recurring automation reminder job list pause resume delete",
+        result_retention = (
+            "temporary"
+            if schema["name"] in {"cron_list", "cron_get"}
+            else "important"
         )
+        tools.append(
+            FunctionTool(
+                name=schema["name"],
+                toolset="cron",
+                schema=schema,
+                handler=handler,
+                is_async=True,
+                display_name=display_name,
+                ui_label_template=ui_label_template,
+                should_defer=True,
+                search_hint="cron schedule recurring automation reminder job list pause resume delete",
+                result_retention=result_retention,
+            )
+        )
+    return tuple(tools)
+
+
+def register_cron_tools(
+    registry: Registry,
+    store: CronJobStore,
+    service: "CronService | None" = None,
+) -> None:
+    """兼容入口：把 Cron 工具直接注册进 Registry。"""
+
+    for tool in build_cron_tools(store, service):
+        registry.register(tool, override=True)

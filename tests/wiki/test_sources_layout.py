@@ -13,6 +13,9 @@ from crew.wiki.store import FileSystemWikiStore
 from crew.wiki.store._serde import serialize_page
 
 
+OWNER = "owner"
+
+
 @pytest.mark.parametrize(
     ("filename", "expected"),
     [
@@ -60,7 +63,7 @@ def test_youtube_video_id_formats():
 
 def test_raw_source_metadata_and_content_use_v2_layout(tmp_path: Path):
     store = FileSystemWikiStore(base_dir=tmp_path)
-    store.init_kb()
+    store.init_kb(OWNER)
     raw = RawSource(
         id="src_pdf",
         title="paper.pdf",
@@ -71,13 +74,13 @@ def test_raw_source_metadata_and_content_use_v2_layout(tmp_path: Path):
         adapter_name="builtin-file",
         original_ref="paper.pdf",
     )
-    store.save_raw(raw)
-    parsed = Path(store.save_parsed_markdown(raw.id, "# Paper"))
-    base = store._dir()
+    store.save_raw(raw, OWNER)
+    parsed = Path(store.save_parsed_markdown(raw.id, "# Paper", OWNER))
+    base = store._dir(OWNER)
 
     assert parsed == base / "raw" / "pdfs" / "src_pdf.md"
     assert (base / ".crew" / "sources" / "src_pdf.json").exists()
-    loaded = store.load_raw(raw.id)
+    loaded = store.load_raw(raw.id, OWNER)
     assert loaded is not None
     assert loaded.source_kind == "pdf"
     assert loaded.source_platform == "local"
@@ -85,8 +88,8 @@ def test_raw_source_metadata_and_content_use_v2_layout(tmp_path: Path):
 
 def test_layout_migration_moves_legacy_pages_without_changing_id(tmp_path: Path):
     store = FileSystemWikiStore(base_dir=tmp_path)
-    store.init_kb()
-    base = store._dir()
+    store.init_kb(OWNER)
+    base = store._dir(OWNER)
     legacy_dir = base / "entities"
     legacy_dir.mkdir()
     page = WikiPage(
@@ -98,12 +101,12 @@ def test_layout_migration_moves_legacy_pages_without_changing_id(tmp_path: Path)
     )
     (legacy_dir / "Legacy.md").write_text(serialize_page(page), encoding="utf-8")
 
-    preview = store.layout_migration_preview()
-    result = store.migrate_layout()
+    preview = store.layout_migration_preview(OWNER)
+    result = store.migrate_layout(OWNER)
 
     assert preview["required"] is True
     assert result["pages"] == 1
-    migrated = store.get("ent_legacy")
+    migrated = store.get("ent_legacy", OWNER)
     assert migrated is not None
     assert migrated.id == "ent_legacy"
     assert migrated.file_path == "wiki/entities/Legacy.md"
@@ -111,8 +114,8 @@ def test_layout_migration_moves_legacy_pages_without_changing_id(tmp_path: Path)
 
 def test_layout_migration_collision_leaves_legacy_page_in_place(tmp_path: Path):
     store = FileSystemWikiStore(base_dir=tmp_path)
-    store.init_kb()
-    base = store._dir()
+    store.init_kb(OWNER)
+    base = store._dir(OWNER)
     legacy_dir = base / "entities"
     legacy_dir.mkdir()
     legacy = legacy_dir / "Same.md"
@@ -120,7 +123,7 @@ def test_layout_migration_collision_leaves_legacy_page_in_place(tmp_path: Path):
     (base / "wiki" / "entities" / "Same.md").write_text("# current", encoding="utf-8")
 
     with pytest.raises(FileExistsError):
-        store.migrate_layout()
+        store.migrate_layout(OWNER)
 
     assert legacy.exists()
     assert legacy.read_text(encoding="utf-8") == "# legacy"
@@ -128,8 +131,8 @@ def test_layout_migration_collision_leaves_legacy_page_in_place(tmp_path: Path):
 
 def test_layout_migration_ignores_unsupported_concept_directory(tmp_path: Path):
     store = FileSystemWikiStore(base_dir=tmp_path)
-    store.init_kb()
-    base = store._dir()
+    store.init_kb(OWNER)
+    base = store._dir(OWNER)
     concept_dir = base / "wiki" / "concepts"
     concept_dir.mkdir()
     (concept_dir / "知识编译.md").write_text(
@@ -137,19 +140,19 @@ def test_layout_migration_ignores_unsupported_concept_directory(tmp_path: Path):
         encoding="utf-8",
     )
 
-    preview = store.layout_migration_preview()
-    result = store.migrate_layout()
+    preview = store.layout_migration_preview(OWNER)
+    result = store.migrate_layout(OWNER)
 
     assert preview["required"] is False
     assert result["migrated"] is False
-    assert store.get("con_legacy") is None
+    assert store.get("con_legacy", OWNER) is None
     assert concept_dir.exists()
 
 
 def test_layout_migration_classifies_flat_source_summary(tmp_path: Path):
     store = FileSystemWikiStore(base_dir=tmp_path)
-    store.init_kb()
-    base = store._dir()
+    store.init_kb(OWNER)
+    base = store._dir(OWNER)
     raw = RawSource(
         id="src_pdf",
         title="论文",
@@ -157,7 +160,7 @@ def test_layout_migration_classifies_flat_source_summary(tmp_path: Path):
         parsed_path="",
         source_kind="pdf",
     )
-    store.save_raw(raw)
+    store.save_raw(raw, OWNER)
     page = WikiPage(
         id="src_paper",
         page_type="source",
@@ -169,12 +172,12 @@ def test_layout_migration_classifies_flat_source_summary(tmp_path: Path):
     flat_path = base / page.file_path
     flat_path.write_text(serialize_page(page), encoding="utf-8")
 
-    preview = store.layout_migration_preview()
-    result = store.migrate_layout()
+    preview = store.layout_migration_preview(OWNER)
+    result = store.migrate_layout(OWNER)
 
     assert preview["source_pages_to_classify"] == 1
     assert result["source_pages_classified"] == 1
-    moved = store.get(page.id)
+    moved = store.get(page.id, OWNER)
     assert moved is not None
     assert moved.file_path == "wiki/sources/pdfs/论文.md"
     assert not flat_path.exists()
@@ -183,7 +186,7 @@ def test_layout_migration_classifies_flat_source_summary(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_digest_requires_multiple_sources_and_writes_synthesis(tmp_path: Path):
     store = FileSystemWikiStore(base_dir=tmp_path)
-    store.init_kb()
+    store.init_kb(OWNER)
     for source_id in ("s1", "s2"):
         store.save_raw(
             RawSource(
@@ -191,7 +194,8 @@ async def test_digest_requires_multiple_sources_and_writes_synthesis(tmp_path: P
                 title=source_id,
                 source_type="paste",
                 parsed_path="",
-            )
+            ),
+            OWNER,
         )
     for index, source_id in enumerate(("s1", "s2"), 1):
         store.save_page(
@@ -202,7 +206,8 @@ async def test_digest_requires_multiple_sources_and_writes_synthesis(tmp_path: P
                 content=f"# Crew 观点 {index}\n\nCrew 架构观点",
                 file_path="",
                 sources=[source_id],
-            )
+            ),
+            OWNER,
         )
     compiler = WikiCompiler(
         store=store,
@@ -211,10 +216,10 @@ async def test_digest_requires_multiple_sources_and_writes_synthesis(tmp_path: P
         ),
     )
 
-    page = await compiler.digest("Crew", mode="synthesis")
+    page = await compiler.digest("Crew", mode="synthesis", owner_account_id=OWNER)
 
     assert page.page_type == "synthesis"
     assert page.file_path.startswith("wiki/synthesis/")
     assert page.sources == ["s1", "s2"]
-    assert "[[Crew-深度综合]]" in (store._dir() / "index.md").read_text(encoding="utf-8")
-    assert "| 综合报告 | 1 |" in (store._dir() / "Home.md").read_text(encoding="utf-8")
+    assert "[[Crew-深度综合]]" in (store._dir(OWNER) / "index.md").read_text(encoding="utf-8")
+    assert "| 综合报告 | 1 |" in (store._dir(OWNER) / "Home.md").read_text(encoding="utf-8")

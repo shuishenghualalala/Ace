@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from crew.agent.skills import SkillActivation
 from crew.core.envelope import ResponseChunk
@@ -41,10 +41,15 @@ class ExecutionContext:
     enforce_tool_scope: bool = False
     cwd: str | None = None
     max_iterations: int | None = None  # None=继承 executor 默认；0=无限
+    # Gateway TaskRuntime 注入的整回合截止时间（秒，0=未提供）。它是
+    # agent_turn 的唯一根截止时间；executor 的同名配置只作为直接调用时的兼容回退。
+    deadline_seconds: float = 0.0
     # 本轮可控性句柄（steer / interrupt）；None 表示不接受外部干预
     control: "TurnControl | None" = None
     # 只控制“已授权工具如何向模型披露”，不改变授权范围。
     tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE
+    # 回合内关键 durable boundary 的异步写入口；None 表示 CLI/轻量执行器不落盘。
+    durable_event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)

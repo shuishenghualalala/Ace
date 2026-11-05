@@ -31,7 +31,10 @@ assembled by a swarm writing skill — i.e. there is a `*.agent.final.md` or
 several `*_sec{NN}.md` files produced by sub-agents, with standard Markdown
 footnotes (`[^id]` + `[^id]: Title. Date. URL`) for citations. For a one-off PDF
 the user asks you to write, author it natively via the **ReportLab** route;
-hand-authored layout is cleaner than converted Markdown.
+hand-authored layout is cleaner than converted Markdown. For converting an
+existing, already-finished Markdown file to PDF outside this swarm scenario,
+use the **md-to-pdf** skill instead (pandoc/xelatex stack, no citation
+normalization).
 
 ### MANDATORY: Read Route File Before Implementation
 

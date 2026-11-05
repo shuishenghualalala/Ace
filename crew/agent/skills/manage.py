@@ -1,0 +1,1687 @@
+"""Skill 变更面：安装/卸载/更新/校验/审计/修复。
+
+只写不读缓存：所有变更完成后经 ``_invalidate_cache()`` 让 SkillIndex 立即失效。
+包级可 monkeypatch 的钩子（审计、metadata 生成、containment 写回、目录 getter）
+一律经 ``_patched()`` 走包命名空间解析。
+"""
+
+from __future__ import annotations
+
+import contextlib
+import ctypes
+import difflib
+import errno
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from crew.providers import stream_aux
+
+from .core import (
+    SKILL_CATEGORY_NAMES,
+    SkillPathError,
+    _contains_cjk,
+    _extract_query_examples,
+    _first_text,
+    _format_skill_markdown,
+    _is_link_or_reparse,
+    _is_trusted_local_link,
+    _metadata_dict,
+    _normalize_skill_category,
+    _parse_frontmatter,
+    _registered_skill_dir,
+    _skill_category_from_frontmatter,
+    _slugify,
+    _validate_skill_tree,
+    _walk_contained,
+    _zh_description_from_frontmatter,
+    _display_name_from_frontmatter,
+    _REPAIRABLE_TEXT_SUFFIXES,
+    logger,
+    patched as _patched,
+    read_skill_text,
+    resolve_skill_path,
+)
+from .index import _invalidate_cache, get_skills, scan_skills
+from .scanner import _iter_skill_files
+
+# 安装事实是宿主级全局状态。同步装卸只持有短锁；异步 repair 在生成内容阶段不持锁，
+# 发布前用树指纹检测并发修改，避免长时间阻塞事件循环。
+_SKILL_MUTATION_LOCK = threading.RLock()
+_SKILL_AUDIT_LOCK = threading.Lock()
+
+
+def _retire_published_skill_if_same(
+    target: Path,
+    *,
+    target_root: Path,
+    identity: tuple[int, int],
+    label: str,
+) -> Path | None:
+    """只回滚本事务发布的 inode，绝不能清理并发胜者或既有目标。"""
+    try:
+        current = os.lstat(target)
+    except FileNotFoundError:
+        return None
+    if (current.st_dev, current.st_ino) != identity:
+        raise SkillPathError(
+            "skill_target_changed",
+            target,
+            f"Skill 目标已被其它事务替换，拒绝回滚: {target}",
+        )
+    return _hide_published_skill(target, target_root=target_root, label=label)
+
+
+def _rename_directory_noreplace(source: Path, target: Path) -> None:
+    """原子发布目录且绝不替换目标；缺少平台原语时 fail-closed。"""
+    if os.name == "nt":
+        # Windows MoveFile/rename 默认不替换已存在目标。
+        os.rename(source, target)
+        return
+
+    source_raw = os.fsencode(source)
+    target_raw = os.fsencode(target)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        renamex_np = getattr(libc, "renamex_np", None)
+        if renamex_np is None:
+            raise OSError(errno.ENOTSUP, "renamex_np unavailable")
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        # <stdio.h> RENAME_EXCL：目标存在时返回 EEXIST，绝不替换。
+        result = renamex_np(source_raw, target_raw, 0x00000004)
+    elif sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise OSError(errno.ENOTSUP, "renameat2 unavailable")
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        # AT_FDCWD=-100；RENAME_NOREPLACE=1。
+        result = renameat2(-100, source_raw, -100, target_raw, 1)
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace directory rename unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), target)
+
+
+def _install_skill_tree(
+    source: Path,
+    target: Path,
+    *,
+    source_root: Path,
+    target_root: Path,
+) -> tuple[int, int]:
+    """分阶段发布 Skill，返回本事务最终发布目录的 ``(dev, ino)`` 身份。"""
+    source_resolved = resolve_skill_path(source, source_root)
+    _validate_skill_tree(source, source_root)
+    resolve_skill_path(target, target_root, must_exist=False)
+    if os.path.lexists(target):
+        raise SkillPathError("skill_target_exists", target, f"Skill 目标已存在: {target}")
+
+    staging_root = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target_root))
+    staged = staging_root / "skill"
+    published_identity: tuple[int, int] | None = None
+    try:
+        shutil.copytree(source_resolved, staged)
+        _validate_skill_tree(staged, staging_root)
+        resolve_skill_path(target, target_root, must_exist=False)
+        if os.path.lexists(target):
+            raise SkillPathError("skill_target_exists", target, f"Skill 目标已存在: {target}")
+        try:
+            _rename_directory_noreplace(staged, target)
+        except OSError as exc:
+            if exc.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise SkillPathError(
+                    "skill_target_exists",
+                    target,
+                    f"Skill 目标已存在: {target}",
+                ) from exc
+            raise
+        published = os.lstat(target)
+        published_identity = (published.st_dev, published.st_ino)
+        _validate_skill_tree(target, target_root)
+        return published_identity
+    except (OSError, SkillPathError):
+        # rename 之前的 target_exists 属于并发胜者，绝不能碰。只有已经记录了
+        # 本事务发布 inode 的路径，才允许按同一身份回滚。
+        if published_identity is not None:
+            retired = _retire_published_skill_if_same(
+                target,
+                target_root=target_root,
+                identity=published_identity,
+                label="publish-failed",
+            )
+            if retired is not None:
+                shutil.rmtree(retired, ignore_errors=True)
+        raise
+    finally:
+        if staging_root.exists():
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _install_local_skill_link(source: Path, target: Path, *, target_root: Path) -> None:
+    """在 target_root 内为本地 skill 建立软链 -> source（~/.agents/skills/<name>）。
+
+    与 _install_skill_tree（copytree）对应：本地 skill 以软链发布，源更新自动同步。
+    安全校验：source 必须位于本地源根内；target 必须尚未存在；建链后用
+    _validate_skill_tree 验证（受信任软链根放行其内文件；skill 内越界软链则失败抛出）。
+    失败时已建的软链由调用方清理。
+    """
+    local_root = _patched("get_local_skills_dir")()
+    source_resolved = resolve_skill_path(source, local_root)
+    resolve_skill_path(target, target_root, must_exist=False)
+    if os.path.lexists(target):
+        raise SkillPathError("skill_target_exists", target, f"Skill 目标已存在: {target}")
+    try:
+        os.symlink(source_resolved, target)
+    except OSError as exc:
+        raise SkillPathError(
+            "skill_link_failed",
+            target,
+            f"建立本地 skill 软链失败: {target} -> {source_resolved}: {exc}",
+        ) from exc
+    _validate_skill_tree(target, target_root)
+
+
+def _skill_operator(operator_account_id: str | None) -> str:
+    """Resolve the auditable operator without changing the global Skill storage path."""
+    if operator_account_id:
+        return str(operator_account_id).strip()
+    from crew.core.runctx import current_owner_account_id
+
+    return current_owner_account_id.get()
+
+
+def _safe_audit_value(value: Any, *, limit: int = 160) -> str:
+    """Keep audit fields single-line and bounded; mutation APIs never pass credentials."""
+    return str(value or "").replace("\r", " ").replace("\n", " ")[:limit]
+
+
+def _append_global_skill_audit(
+    *,
+    action: str,
+    slug: str,
+    operator_account_id: str | None,
+    source: str,
+    version: str | None,
+    result: str,
+    error_code: str = "",
+) -> None:
+    """Append one credential-free host-level Skill mutation event as JSONL."""
+    audit_path = _patched("get_user_skills_dir")().parent / "logs" / "global-skills-audit.jsonl"
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": _safe_audit_value(action),
+        "operator_account_id": _safe_audit_value(_skill_operator(operator_account_id)),
+        "source": _safe_audit_value(source),
+        "slug": _safe_audit_value(slug),
+        "version": _safe_audit_value(version),
+        "result": _safe_audit_value(result),
+        "error_code": _safe_audit_value(error_code),
+    }
+    with _SKILL_AUDIT_LOCK:
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def _append_failed_global_skill_audit(
+    *,
+    action: str,
+    slug: str,
+    operator_account_id: str | None,
+    source: str,
+    version: str | None,
+    error_code: str,
+) -> None:
+    """Best-effort failure audit after a mutation has already been rejected or rolled back."""
+    try:
+        _patched("_append_global_skill_audit")(
+            action=action,
+            slug=slug,
+            operator_account_id=operator_account_id,
+            source=source,
+            version=version,
+            result="failed",
+            error_code=error_code,
+        )
+    except OSError:
+        logger.exception("记录全局 Skill 失败审计时出错 action=%s slug=%s", action, slug)
+
+
+def _declared_skill_version(skill_dir: Path) -> str | None:
+    """Read a Skill version for audit; malformed metadata is recorded as absent."""
+    try:
+        frontmatter, _ = _parse_frontmatter(read_skill_text(skill_dir / "SKILL.md", skill_dir))
+    except (OSError, SkillPathError):
+        return None
+    metadata = frontmatter.get("metadata")
+    raw = metadata.get("version") if isinstance(metadata, dict) else None
+    raw = raw or frontmatter.get("version")
+    return str(raw).strip() if raw else None
+
+
+def _skill_tree_fingerprint(skill_dir: Path) -> str:
+    """Hash a validated Skill snapshot so async repair cannot overwrite concurrent changes."""
+    _validate_skill_tree(skill_dir, skill_dir.parent)
+    digest = hashlib.sha256()
+    for _root, files in _walk_contained(skill_dir):
+        for path in files:
+            safe_path = resolve_skill_path(path, skill_dir)
+            digest.update(safe_path.relative_to(skill_dir).as_posix().encode("utf-8"))
+            with safe_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _hide_published_skill(target: Path, *, target_root: Path, label: str) -> Path | None:
+    """Atomically remove a published Skill name and return its hidden cleanup tree."""
+    if not os.path.lexists(target):
+        return None
+    resolve_skill_path(target, target_root)
+    hidden = target_root / f".{target.name}.{label}-{uuid.uuid4().hex}"
+    resolve_skill_path(hidden, target_root, must_exist=False)
+    target.rename(hidden)
+    return hidden
+
+
+def _replace_skill_tree(staged: Path, target: Path, *, target_root: Path) -> Path:
+    """Publish a repaired tree by rename and keep a rollback tree until commit completes."""
+    resolve_skill_path(staged, staged.parent)
+    resolve_skill_path(target, target_root)
+    backup = target_root / f".{target.name}.rollback-{uuid.uuid4().hex}"
+    resolve_skill_path(backup, target_root, must_exist=False)
+    target.rename(backup)
+    try:
+        staged.rename(target)
+        _validate_skill_tree(target, target_root)
+    except Exception:
+        failed = target_root / f".{target.name}.failed-{uuid.uuid4().hex}"
+        if os.path.lexists(target):
+            target.rename(failed)
+        backup.rename(target)
+        if failed.exists():
+            shutil.rmtree(failed, ignore_errors=True)
+        raise
+    return backup
+
+def _set_metadata(frontmatter: dict, generated: dict[str, Any]) -> list[str]:
+    """写入缺失的中文 metadata，返回被写入字段名。"""
+    meta = frontmatter.get("metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+        frontmatter["metadata"] = meta
+
+    changed: list[str] = []
+    zh_name = str(generated.get("zh_name") or "").strip()
+    zh_description = str(generated.get("zh_description") or "").strip()
+    examples_raw = generated.get("query_examples")
+    examples = [str(item).strip() for item in examples_raw] if isinstance(examples_raw, list) else []
+    examples = [item for item in examples if item]
+    skill_category_name = _normalize_skill_category(generated.get("skillCategoryName"))
+
+    if not (isinstance(meta.get("zh_name"), str) and _contains_cjk(meta.get("zh_name"))):
+        if zh_name and _contains_cjk(zh_name):
+            meta["zh_name"] = zh_name
+            changed.append("metadata.zh_name")
+
+    if not (isinstance(meta.get("zh_description"), str) and _contains_cjk(meta.get("zh_description"))):
+        if zh_description and _contains_cjk(zh_description):
+            meta["zh_description"] = zh_description
+            changed.append("metadata.zh_description")
+
+    normalized_examples = _extract_query_examples({"metadata": {"query_examples": meta.get("query_examples")}})
+    if not normalized_examples or not any(_contains_cjk(item) for item in normalized_examples):
+        if examples and any(_contains_cjk(item) for item in examples):
+            meta["query_examples"] = examples[:5]
+            changed.append("metadata.query_examples")
+
+    current_skill_category = _normalize_skill_category(meta.get("skillCategoryName"))
+    if meta.get("skillCategoryName") not in SKILL_CATEGORY_NAMES:
+        normalized_category = current_skill_category or skill_category_name
+        if normalized_category:
+            meta["skillCategoryName"] = normalized_category
+            changed.append("metadata.skillCategoryName")
+
+    return changed
+
+
+def _existing_chinese_metadata(frontmatter: dict) -> dict[str, Any]:
+    """从 skill 现有 frontmatter 中复用中文字段，避免不必要的模型生成。"""
+    generated: dict[str, Any] = {}
+    zh_name = _first_text(
+        frontmatter,
+        ("zh_name", "name_zh", "display_name_zh", "display_name", "title_zh", "title", "name"),
+    )
+    if zh_name and _contains_cjk(zh_name):
+        generated["zh_name"] = zh_name
+
+    zh_description = _first_text(
+        frontmatter,
+        ("zh_description", "description_zh", "display_description_zh", "summary_zh"),
+    )
+    if zh_description and _contains_cjk(zh_description):
+        generated["zh_description"] = zh_description
+
+    examples = [item for item in _extract_query_examples(frontmatter) if _contains_cjk(item)]
+    if examples:
+        generated["query_examples"] = examples[:5]
+
+    category = _skill_category_from_frontmatter(frontmatter)
+    raw_category = _metadata_dict(frontmatter).get("skillCategoryName") or frontmatter.get("category")
+    if (
+        category in SKILL_CATEGORY_NAMES
+        and str(raw_category or "").strip()
+    ):
+        generated["skillCategoryName"] = category
+
+    return generated
+
+
+def _make_unified_patch(path: Path, old_text: str, new_text: str) -> str:
+    """生成最小上下文 diff，供 repair 结果展示和审计。"""
+    return "".join(
+        difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path.name}",
+            tofile=f"b/{path.name}",
+            n=3,
+        )
+    )
+
+
+def _write_text_via_patch(
+    path: Path,
+    old_text: str,
+    new_text: str,
+    *,
+    allowed_root: Path,
+) -> str:
+    """校验最终目标后按已知 old_text 写回，并在写后再次验证 containment。"""
+    if old_text == new_text:
+        return ""
+    safe_path = resolve_skill_path(path, allowed_root)
+    patch = _make_unified_patch(path, old_text, new_text)
+    safe_path.write_text(new_text, encoding="utf-8")
+    resolve_skill_path(path, allowed_root)
+    return patch
+
+def _parse_listing_skill(skill_md: Path, content_root: Path) -> dict | None:
+    """解析单个 SKILL.md 为展示用 dict（不含 source 字段，由调用方补充）。
+
+    供 list_optional_skills / list_local_skills 共用。返回 None 表示跳过
+    （缺 SKILL.md、格式错、或无法安全解析）。
+    """
+    try:
+        safe_skill_dir = resolve_skill_path(skill_md.parent, content_root)
+        content = read_skill_text(skill_md, safe_skill_dir)
+        fm, body = _parse_frontmatter(content)
+        name = str(fm.get("name") or skill_md.parent.name).strip()
+        slug = _slugify(name) or _slugify(skill_md.parent.name)
+        if not slug:
+            return None
+        description = str(fm.get("description") or "").strip()
+        if not description:
+            for line in body.strip().splitlines():
+                line = line.strip().lstrip("#").strip()
+                if line:
+                    description = line[:80]
+                    break
+        return {
+            "name": name,
+            "display_name": _display_name_from_frontmatter(fm, name),
+            "slug": slug,
+            "description": description or f"激活 {name} skill",
+            "description_zh": _zh_description_from_frontmatter(fm, description),
+            "query_examples": _extract_query_examples(fm),
+            "category": _skill_category_from_frontmatter(fm),
+            "skill_dir": str(skill_md.parent),
+        }
+    except Exception as exc:
+        logger.debug("跳过 listing skill %s: %s", skill_md, exc)
+        return None
+
+
+def list_optional_skills() -> list[dict]:
+    """列出 optional-skills 目录中尚未激活的 skills。
+
+    已安装（在用户目录或内置目录中同名）的 skill 不再出现在列表里。
+    """
+    installed_slugs = set(get_skills().keys())  # e.g. {"/coding", "/writing"}
+    result: list[dict] = []
+
+    optional_root = _patched("get_optional_skills_dir")()
+    for skill_md in _iter_skill_files(optional_root):
+        info = _parse_listing_skill(skill_md, optional_root)
+        if info is None:
+            continue
+        if f"/{info['slug']}" in installed_slugs:
+            continue
+        result.append({**info, "source": "optional"})
+
+    return result
+
+
+def list_local_skills() -> list[dict]:
+    """列出 ~/.agents/skills 中尚未激活的本地 skills。
+
+    本地 skill 是跨 agent 共享的可安装源（如 ``npx skills add`` 安装的飞书 skills）。
+    已安装（在用户目录或内置目录中同名）的 skill 不再出现在列表里。返回 item 的
+    source 为 "local"；安装时以软链发布到用户目录（见 install_skill）。
+    """
+    installed_slugs = set(get_skills().keys())
+    result: list[dict] = []
+
+    local_root = _patched("get_local_skills_dir")()
+    for skill_md in _iter_skill_files(local_root):
+        info = _parse_listing_skill(skill_md, local_root)
+        if info is None:
+            continue
+        if f"/{info['slug']}" in installed_slugs:
+            continue
+        result.append({**info, "source": "local"})
+
+    return result
+
+
+def install_skill(
+    slug: str,
+    *,
+    operator_account_id: str | None = None,
+    source: str = "optional-catalog",
+) -> bool:
+    """将 optional 或本地 skill 发布到宿主级全局用户目录并记录操作者。
+
+    optional skill 用原子复制（copytree）；本地 skill（~/.agents/skills）用软链，
+    源更新自动同步。两者均经 _validate_skill_tree 校验、写审计日志。
+    """
+    try:
+        _patched("_append_global_skill_audit")(
+            action="install",
+            slug=slug,
+            operator_account_id=operator_account_id,
+            source=source,
+            version=None,
+            result="started",
+        )
+    except OSError as exc:
+        logger.warning("Skill 审计不可写，拒绝安装 slug=%s: %s", slug, exc)
+        return False
+
+    with _SKILL_MUTATION_LOCK:
+        optional = list_optional_skills()
+        info = next((s for s in optional if s["slug"] == slug), None)
+        is_local_source = False
+        if not info:
+            local = list_local_skills()
+            info = next((s for s in local if s["slug"] == slug), None)
+            is_local_source = info is not None
+        if not info:
+            _patched("_append_failed_global_skill_audit")(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=None,
+                error_code="not_found_or_installed",
+            )
+            return False
+
+        src = Path(info["skill_dir"])
+        user_dir = _patched("get_user_skills_dir")()
+        user_dir.mkdir(parents=True, exist_ok=True)
+        dst = user_dir / src.name
+        version = _declared_skill_version(src)
+
+        # 本地 skill：在用户目录建软链指向 ~/.agents/skills/<name>，源更新自动同步
+        if is_local_source:
+            try:
+                _install_local_skill_link(src, dst, target_root=user_dir)
+                _patched("_append_global_skill_audit")(
+                    action="install",
+                    slug=slug,
+                    operator_account_id=operator_account_id,
+                    source=source,
+                    version=version,
+                    result="success",
+                )
+            except (OSError, SkillPathError) as exc:
+                # 清理可能残留的半成品软链（_validate_skill_tree 失败时软链已建）
+                if os.path.lexists(dst) and dst.is_symlink():
+                    try:
+                        os.unlink(dst)
+                    except OSError:
+                        logger.exception("清理失败的本地 skill 软链 %s", dst)
+                _patched("_append_failed_global_skill_audit")(
+                    action="install",
+                    slug=slug,
+                    operator_account_id=operator_account_id,
+                    source=source,
+                    version=version,
+                    error_code=exc.code if isinstance(exc, SkillPathError) else type(exc).__name__,
+                )
+                logger.warning("本地 skill 软链安装失败 '%s': %s", slug, exc)
+                return False
+            _invalidate_cache()
+            logger.info("已安装本地 skill（软链）'%s' -> %s operator=%s", slug, dst, _skill_operator(operator_account_id))
+            return True
+
+        # 仓库 optional skill：原子复制
+        optional_root = _patched("get_optional_skills_dir")()
+        published_identity: tuple[int, int] | None = None
+        try:
+            published_identity = _install_skill_tree(
+                src,
+                dst,
+                source_root=optional_root,
+                target_root=user_dir,
+            )
+            _patched("_append_global_skill_audit")(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                result="success",
+            )
+        except (OSError, SkillPathError) as exc:
+            retired = None
+            if published_identity is not None:
+                try:
+                    retired = _retire_published_skill_if_same(
+                        dst,
+                        target_root=user_dir,
+                        identity=published_identity,
+                        label="audit-failed",
+                    )
+                except (OSError, SkillPathError):
+                    logger.exception("隐藏未提交的全局 Skill 失败 slug=%s", slug)
+            _invalidate_cache()
+            if retired is not None:
+                shutil.rmtree(retired, ignore_errors=True)
+            _patched("_append_failed_global_skill_audit")(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                error_code=exc.code if isinstance(exc, SkillPathError) else type(exc).__name__,
+            )
+            logger.warning("全局 skill 安装事务失败 '%s': %s", slug, exc)
+            return False
+        _invalidate_cache()
+
+    logger.info("已安装全局 skill '%s' -> %s operator=%s", slug, dst, _skill_operator(operator_account_id))
+    return True
+
+#: SKILL.md 正文的最大体积。只管模型自己写的这一份——bundled 的 scripts/assets
+#: 大到 1MB 是正常的（xlsx / docx 就是），拿整棵树设限会误伤一大片。这条要挡的
+#: 是「把整份录制轨迹或整页内容粘进 SKILL.md」。
+_GENERATED_SKILL_MD_MAX_BYTES = 128 * 1024
+
+#: 疑似真凭据的赋值。故意收得很紧——这是**阻断性**检查，误报一次就会被整个关掉。
+#: 只认「密钥名 = 长的高熵串」，且排除占位符与代码表达式。
+_LIKELY_SECRET_ASSIGNMENT = re.compile(
+    r"\b(?:access[_-]?token|api[_-]?key|client[_-]?secret|id[_-]?token|"
+    r"refresh[_-]?token|secret[_-]?key|private[_-]?key)\b\s*[=:]\s*"
+    r"[\"']?([A-Za-z0-9_\-+/]{20,})[\"']?",
+    re.IGNORECASE,
+)
+
+#: 占位符特征。文档里教人「别硬编码」时写的示例值必须放行，否则仓库里现成的
+#: bocha-search / video-understanding 这类技能全会被判成泄漏。
+_SECRET_PLACEHOLDER = re.compile(
+    r"^(?:x+|y+|z+|0+|1+|a+|\.+|-+|_+)$"
+    r"|your|example|placeholder|sample|dummy|change[_-]?me|to[_-]?be|todo|"
+    r"^\$|^os[._]|^process[._]|env|getenv",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_real_secret(value: str) -> bool:
+    """判断一个赋值右侧是不是真的像凭据。
+
+    判据是「长 + 混合字母数字 + 不像占位符」。宁可漏报也不能误报：阻断性检查
+    一旦误伤合法技能，实际结果是这道门被整个关掉，比没有更糟。
+    """
+    if len(value) < 20:
+        return False
+    if _SECRET_PLACEHOLDER.search(value):
+        return False
+    has_digit = any(c.isdigit() for c in value)
+    has_alpha = any(c.isalpha() for c in value)
+    return has_digit and has_alpha
+
+
+def validate_generated_skill(source_dir: Path | str, slug: str = "") -> list[str]:
+    """校验一份**生成的**技能是否可以发布。返回问题列表，空列表表示通过。
+
+    存在的理由是「agent 说完成 ≠ 完成」。模型声称技能写好了之后，服务端必须自己
+    验一遍再发布——ai_mime 的 build 流程就是这么做的：agent 写完终止信号，服务端
+    跑校验，不过就删掉信号、把错误喂回去继续迭代。
+
+    每条问题都写成模型能直接据以修改的话，不要只说"格式错误"。
+    """
+    src = Path(source_dir).expanduser()
+    slug = slug or src.name
+    problems: list[str] = []
+
+    skill_md = src / "SKILL.md"
+    if not skill_md.is_file():
+        return [f"{src} 下没有 SKILL.md。技能必须是一个含 SKILL.md 的目录。"]
+
+    try:
+        size = skill_md.stat().st_size
+    except OSError as exc:
+        return [f"无法读取 SKILL.md：{exc}"]
+    if size > _GENERATED_SKILL_MD_MAX_BYTES:
+        problems.append(
+            f"SKILL.md 有 {size} 字节，超过上限 {_GENERATED_SKILL_MD_MAX_BYTES}。"
+            "技能正文应当是步骤指令，不要把录制轨迹或页面内容整份粘进去。"
+        )
+
+    try:
+        text = skill_md.read_text("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return [f"SKILL.md 无法按 UTF-8 读取：{exc}"]
+
+    frontmatter, body = _parse_frontmatter(text)
+    name = str(frontmatter.get("name") or "").strip()
+    description = str(frontmatter.get("description") or "").strip()
+    if not name:
+        problems.append("frontmatter 缺少 name。")
+    elif _slugify(name) != _slugify(slug):
+        # 不会导致索引不到——`_scan_dir` 的 slug 取自 frontmatter.name，目录名只是
+        # fallback。真实后果是安装目录与索引名对不上，用户按技能名去 skills/ 下
+        # 找不到对应目录。生成的技能没有理由让这两者不一致。
+        problems.append(
+            f"frontmatter 的 name「{name}」与目录名「{slug}」不一致。"
+            "技能会以 name 为索引名、以目录名落盘，两者对不上会让人按名字找不到目录；"
+            "把目录名改成与 name 一致。"
+        )
+    if len(description) < 10:
+        problems.append(
+            "frontmatter 的 description 太短或缺失。description 是技能被触发的唯一依据，"
+            "要写清楚做什么、什么时候用，并列出用户可能的说法。"
+        )
+    if len(body.strip()) < 50:
+        problems.append("SKILL.md 正文太短，看起来没有写出可执行的步骤。")
+
+    metadata = frontmatter.get("metadata")
+    category = ""
+    if isinstance(metadata, dict):
+        category = str(metadata.get("skillCategoryName") or "").strip()
+    if category and category not in SKILL_CATEGORY_NAMES:
+        problems.append(
+            f"metadata.skillCategoryName「{category}」不是合法分类，"
+            f"必须是：{'、'.join(SKILL_CATEGORY_NAMES)}。"
+        )
+
+    # 凭据泄漏检测：技能目录是本机全局共享的，写进去就是对所有登录账号可见。
+    #
+    # 判据故意收得很紧（见 _looks_like_real_secret）。用展示边界那套脱敏器做判据
+    # 试过，误报率高到不可用——仓库里 bocha-search、video-understanding 等技能的
+    # SKILL.md 会被判成泄漏，而它们命中的其实是「别硬编码 key」这类**教学示例**
+    # （`export VLM_API_KEY=your_api_key`）。阻断性检查一旦误伤合法技能，实际
+    # 结果是这道门被整个关掉，比没有更糟。
+    for path in sorted(src.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        leaked = [m.group(1) for m in _LIKELY_SECRET_ASSIGNMENT.finditer(content)]
+        if any(_looks_like_real_secret(value) for value in leaked):
+            problems.append(
+                f"{path.relative_to(src)} 里含疑似真实凭据。技能目录对本机所有登录账号可见，"
+                "凭据必须改成技能入参或由认证工具在运行时注入，不能写进文件。"
+            )
+    return problems
+
+
+def install_skill_from_dir(
+    source_dir: Path | str,
+    *,
+    slug: str = "",
+    operator_account_id: str | None = None,
+    source: str = "generated",
+    validate: bool = True,
+) -> bool:
+    """把一个已经准备好的 Skill 目录发布到宿主级全局用户目录。
+
+    与 `install_skill` 的区别只在来源：那个只能从 optional 目录装，这个接受任意
+    源目录（录制编译、自动生成的产物落在临时目录里）。**治理是同一套**：互斥锁、
+    路径 containment、审计日志、失败回滚，一样不少。
+
+    存在的理由：技能目录是本机全局共享的，写进去就是对所有登录账号生效的
+    Gateway 级变更。`crew.evolution` 现在用裸 `write_text` 绕过了这一整套，
+    结果是自动生成的技能静默出现、无审计记录、无并发保护。新增的写入方一律
+    走这里，不要再复制那条捷径。
+    """
+    src = Path(source_dir).expanduser()
+    slug = slug or src.name
+    try:
+        _patched("_append_global_skill_audit")(
+            action="install",
+            slug=slug,
+            operator_account_id=operator_account_id,
+            source=source,
+            version=None,
+            result="started",
+        )
+    except OSError as exc:
+        logger.warning("Skill 审计不可写，拒绝安装 slug=%s: %s", slug, exc)
+        return False
+
+    with _SKILL_MUTATION_LOCK:
+        if not (src / "SKILL.md").is_file():
+            _patched("_append_failed_global_skill_audit")(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=None,
+                error_code="missing_skill_md",
+            )
+            return False
+
+        # 「agent 说完成 ≠ 完成」：发布前服务端自己验一遍。
+        problems = validate_generated_skill(src, slug) if validate else []
+        if problems:
+            _patched("_append_failed_global_skill_audit")(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=None,
+                error_code="validation_failed",
+            )
+            logger.warning("生成的 skill '%s' 未通过发布校验：%s", slug, "；".join(problems))
+            return False
+
+        user_dir = _patched("get_user_skills_dir")()
+        user_dir.mkdir(parents=True, exist_ok=True)
+        dst = user_dir / slug
+        version = _declared_skill_version(src)
+        published_identity: tuple[int, int] | None = None
+        try:
+            # source_root 取源目录的父级：产物在临时目录里，父级就是它的边界。
+            published_identity = _install_skill_tree(
+                src,
+                dst,
+                source_root=src.parent,
+                target_root=user_dir,
+            )
+            _patched("_append_global_skill_audit")(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                result="success",
+            )
+        except (OSError, SkillPathError) as exc:
+            retired = None
+            if published_identity is not None:
+                try:
+                    retired = _retire_published_skill_if_same(
+                        dst,
+                        target_root=user_dir,
+                        identity=published_identity,
+                        label="audit-failed",
+                    )
+                except (OSError, SkillPathError):
+                    logger.exception("隐藏未提交的全局 Skill 失败 slug=%s", slug)
+            _invalidate_cache()
+            if retired is not None:
+                shutil.rmtree(retired, ignore_errors=True)
+            _patched("_append_failed_global_skill_audit")(
+                action="install",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                error_code=exc.code if isinstance(exc, SkillPathError) else type(exc).__name__,
+            )
+            logger.warning("全局 skill 安装事务失败 '%s': %s", slug, exc)
+            return False
+        _invalidate_cache()
+
+    logger.info(
+        "已安装全局 skill '%s' -> %s operator=%s source=%s",
+        slug, dst, _skill_operator(operator_account_id), source,
+    )
+    return True
+
+
+def update_skill_markdown(
+    slug: str,
+    new_content: str,
+    *,
+    operator_account_id: str | None = None,
+    source: str = "generated",
+) -> bool:
+    """受治理地原地改写一个已安装 Skill 的 SKILL.md。
+
+    与 `install_skill_from_dir` 的分工：那个负责**发布新技能**（目标已存在即拒绝），
+    这个负责**改已存在的技能**。`crew.evolution` 的 `evolve_skill` 与
+    `optimizer.apply` 属于后者，此前都是裸 `write_text`。
+
+    治理与安装同一套：互斥锁、路径 containment（**内置技能不可改**，只有 user 目录
+    下的才行）、审计日志、失败回滚。写入用 temp + `os.replace` 原子替换——直接
+    `write_text` 在写到一半崩溃时会留下半个文件，而 SKILL.md 是每次对话都要解析的。
+    """
+    text = str(new_content or "")
+    if not text.strip():
+        logger.warning("拒绝把 skill %s 的 SKILL.md 改写成空内容", slug)
+        return False
+
+    try:
+        _patched("_append_global_skill_audit")(
+            action="update",
+            slug=slug,
+            operator_account_id=operator_account_id,
+            source=source,
+            version=None,
+            result="started",
+        )
+    except OSError as exc:
+        logger.warning("Skill 审计不可写，拒绝更新 slug=%s: %s", slug, exc)
+        return False
+
+    with _SKILL_MUTATION_LOCK:
+        user_dir = _patched("get_user_skills_dir")()
+        target = user_dir / slug / "SKILL.md"
+        try:
+            # containment 失败即拒绝：内置目录、越界路径、符号链接都走这条。
+            # 静默改掉一个内置技能比改失败严重得多。
+            resolve_skill_path(target.parent, user_dir)
+        except SkillPathError as exc:
+            _patched("_append_failed_global_skill_audit")(
+                action="update", slug=slug, operator_account_id=operator_account_id,
+                source=source, version=None, error_code=exc.code,
+            )
+            logger.warning("拒绝更新非 user 目录下的 skill '%s': %s", slug, exc)
+            return False
+        if not target.is_file():
+            _patched("_append_failed_global_skill_audit")(
+                action="update", slug=slug, operator_account_id=operator_account_id,
+                source=source, version=None, error_code="skill_not_found",
+            )
+            return False
+
+        backup = target.with_name(f".SKILL.md.prev-{uuid.uuid4().hex[:8]}")
+        staged = target.with_name(f".SKILL.md.next-{uuid.uuid4().hex[:8]}")
+        try:
+            shutil.copy2(target, backup)
+            staged.write_text(text, encoding="utf-8")
+            os.replace(staged, target)
+            resolve_skill_path(target.parent, user_dir)
+            version = _declared_skill_version(target.parent)
+            _patched("_append_global_skill_audit")(
+                action="update", slug=slug, operator_account_id=operator_account_id,
+                source=source, version=version, result="success",
+            )
+        except (OSError, SkillPathError) as exc:
+            try:
+                if backup.is_file():
+                    os.replace(backup, target)
+            except OSError:
+                logger.exception("skill %s 更新回滚失败", slug)
+            _patched("_append_failed_global_skill_audit")(
+                action="update", slug=slug, operator_account_id=operator_account_id,
+                source=source, version=None,
+                error_code=exc.code if isinstance(exc, SkillPathError) else type(exc).__name__,
+            )
+            logger.warning("全局 skill 更新事务失败 '%s': %s", slug, exc)
+            return False
+        finally:
+            for leftover in (staged, backup):
+                with contextlib.suppress(OSError):
+                    if leftover.exists():
+                        leftover.unlink()
+        _invalidate_cache()
+
+    logger.info("已更新全局 skill '%s' operator=%s source=%s",
+                slug, _skill_operator(operator_account_id), source)
+    return True
+
+
+def uninstall_skill(
+    slug: str,
+    *,
+    operator_account_id: str | None = None,
+    source: str = "api",
+) -> bool:
+    """从全局用户目录原子移除 skill；内置 skill 不可卸载。"""
+    try:
+        _patched("_append_global_skill_audit")(
+            action="uninstall",
+            slug=slug,
+            operator_account_id=operator_account_id,
+            source=source,
+            version=None,
+            result="started",
+        )
+    except OSError as exc:
+        logger.warning("Skill 审计不可写，拒绝卸载 slug=%s: %s", slug, exc)
+        return False
+
+    tombstone: Path | None = None
+    with _SKILL_MUTATION_LOCK:
+        skills = _patched("get_skills")()
+        info = skills.get(f"/{slug}")
+        if not info:
+            _patched("_append_failed_global_skill_audit")(
+                action="uninstall",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=None,
+                error_code="not_found",
+            )
+            return False
+
+        skill_path = Path(info["skill_dir"])
+        user_dir = _patched("get_user_skills_dir")()
+        try:
+            resolve_skill_path(skill_path, user_dir)
+        except SkillPathError:
+            _patched("_append_failed_global_skill_audit")(
+                action="uninstall",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=None,
+                error_code="builtin_or_outside_user_dir",
+            )
+            return False
+        version = _declared_skill_version(skill_path)
+
+        # 本地 skill 软链：直接 unlink 软链本身，绝不递归删源目录（源仍归 ~/.agents/skills）
+        if _is_trusted_local_link(skill_path):
+            try:
+                os.unlink(skill_path)
+            except OSError as exc:
+                _patched("_append_failed_global_skill_audit")(
+                    action="uninstall",
+                    slug=slug,
+                    operator_account_id=operator_account_id,
+                    source=source,
+                    version=version,
+                    error_code=type(exc).__name__,
+                )
+                logger.warning("全局 skill 卸载（软链）失败 slug=%s: %s", slug, exc)
+                return False
+            _patched("_append_global_skill_audit")(
+                action="uninstall",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                result="success",
+            )
+            _invalidate_cache()
+            logger.info("已卸载全局 skill（软链）'%s' operator=%s", slug, _skill_operator(operator_account_id))
+            return True
+
+        if not skill_path.exists() or _is_link_or_reparse(skill_path):
+            _patched("_append_failed_global_skill_audit")(
+                action="uninstall",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                error_code="unsafe_or_missing_skill_root",
+            )
+            return False
+
+        try:
+            tombstone = _hide_published_skill(skill_path, target_root=user_dir, label="removed")
+            assert tombstone is not None
+            _patched("_append_global_skill_audit")(
+                action="uninstall",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                result="success",
+            )
+        except (OSError, SkillPathError) as exc:
+            if tombstone is not None and tombstone.exists() and not skill_path.exists():
+                tombstone.rename(skill_path)
+            _patched("_append_failed_global_skill_audit")(
+                action="uninstall",
+                slug=slug,
+                operator_account_id=operator_account_id,
+                source=source,
+                version=version,
+                error_code=exc.code if isinstance(exc, SkillPathError) else type(exc).__name__,
+            )
+            logger.warning("全局 skill 卸载事务失败 slug=%s: %s", slug, exc)
+            return False
+        _invalidate_cache()
+
+    try:
+        shutil.rmtree(tombstone)
+    except OSError as exc:
+        # 安装事实已通过同文件系统 rename 原子移除；隐藏 tombstone 可在后续维护中清理。
+        logger.warning("全局 skill 已卸载，但旧树清理失败 path=%s: %s", tombstone, exc)
+    logger.info("已卸载全局 skill '%s' operator=%s", slug, _skill_operator(operator_account_id))
+    return True
+
+# ── Skills 审计 ──────────────────────────────────────────────────────────
+
+
+def _iter_skill_text_files(skill_dir: Path):
+    """遍历 skill 目录内已通过 resolved containment 的文本文件。"""
+    yield from _iter_skill_text_files_with_findings(skill_dir, None)
+
+
+def _iter_skill_text_files_with_findings(
+    skill_dir: Path,
+    findings: list[dict[str, Any]] | None,
+):
+    for _root, files in _walk_contained(skill_dir, findings):
+        for path in files:
+            filename = path.name
+            if path.suffix.lower() not in _REPAIRABLE_TEXT_SUFFIXES and filename != "SKILL.md":
+                continue
+            try:
+                if path.stat().st_size > 2_000_000:
+                    continue
+            except OSError:
+                continue
+            yield path
+
+
+def _audit_skill_paths(skill_dir: Path) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    # 遍历本身会把越界目录、文件和符号链接记录到 findings；文件内容不参与审计。
+    for _path in _iter_skill_text_files_with_findings(skill_dir, findings):
+        pass
+    return findings
+
+
+def _audit_skill_metadata(frontmatter: dict) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    meta = _metadata_dict(frontmatter)
+    findings: list[dict[str, Any]] = []
+
+    zh_name = _first_text(
+        frontmatter,
+        ("zh_name", "name_zh", "display_name_zh", "display_name", "title_zh", "title"),
+    )
+    zh_desc = _first_text(
+        frontmatter,
+        ("zh_description", "description_zh", "display_description_zh", "summary_zh"),
+    )
+    examples = _extract_query_examples(frontmatter)
+
+    preferred_name = meta.get("zh_name")
+    if not (isinstance(preferred_name, str) and _contains_cjk(preferred_name)):
+        findings.append({
+            "code": "missing_metadata_zh_name",
+            "severity": "error",
+            "field": "metadata.zh_name",
+            "suggestion": "在 SKILL.md frontmatter 的 metadata 下增加 zh_name，例如 metadata: {zh_name: 中文技能名}。",
+        })
+
+    preferred_desc = meta.get("zh_description")
+    if not (isinstance(preferred_desc, str) and _contains_cjk(preferred_desc)):
+        findings.append({
+            "code": "missing_metadata_zh_description",
+            "severity": "error",
+            "field": "metadata.zh_description",
+            "suggestion": "在 metadata.zh_description 写中文简介，前端展示优先使用该字段。",
+        })
+
+    preferred_examples = meta.get("query_examples")
+    normalized_preferred = _extract_query_examples({"metadata": {"query_examples": preferred_examples}})
+    if not normalized_preferred or not any(_contains_cjk(item) for item in normalized_preferred):
+        findings.append({
+            "code": "missing_metadata_query_examples",
+            "severity": "error",
+            "field": "metadata.query_examples",
+            "suggestion": "在 metadata.query_examples 增加 2-3 条中文用户 query 示例，用于前端展示和路由评估。",
+        })
+
+    preferred_category = str(meta.get("skillCategoryName") or "").strip()
+    if preferred_category not in SKILL_CATEGORY_NAMES:
+        findings.append({
+            "code": "missing_or_invalid_metadata_skill_category",
+            "severity": "error",
+            "field": "metadata.skillCategoryName",
+            "suggestion": (
+                "在 metadata.skillCategoryName 填写固定分类之一："
+                + "、".join(SKILL_CATEGORY_NAMES)
+                + "。"
+            ),
+        })
+
+    extracted = {
+        "zh_name": zh_name if _contains_cjk(zh_name) else "",
+        "zh_description": zh_desc if _contains_cjk(zh_desc) else "",
+        "query_examples": examples,
+        "skillCategoryName": (
+            preferred_category if preferred_category in SKILL_CATEGORY_NAMES else ""
+        ),
+    }
+    return findings, extracted
+
+
+def _is_metadata_finding(finding: dict[str, Any]) -> bool:
+    return str(finding.get("field") or "").startswith("metadata.")
+
+
+def _skill_generation_context(skill_md: Path, frontmatter: dict, body: str) -> str:
+    snippets: list[str] = []
+    snippets.append(f"name: {frontmatter.get('name') or skill_md.parent.name}")
+    if frontmatter.get("description"):
+        snippets.append(f"description: {frontmatter.get('description')}")
+    meta = _metadata_dict(frontmatter)
+    for key in ("zh_name", "zh_description", "query_examples", "skillCategoryName"):
+        if meta.get(key):
+            snippets.append(f"metadata.{key}: {meta.get(key)}")
+    body_preview = body.strip()
+    if len(body_preview) > 5000:
+        body_preview = body_preview[:5000] + "\n...[截断]"
+    snippets.append("body:\n" + body_preview)
+    evals = skill_md.parent / "evals" / "evals.json"
+    if evals.is_file():
+        try:
+            text = read_skill_text(evals, skill_md.parent, errors="replace")
+            snippets.append("evals:\n" + text[:3000])
+        except OSError:
+            pass
+    return "\n\n".join(snippets)
+
+
+def _parse_metadata_json_response(text: str) -> Any:
+    """尽量从模型回复中解析 JSON object，兼容代码块和额外解释文本。"""
+    import json
+
+    candidate = (text or "").strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = re.sub(r"\s*```$", "", candidate).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    start = candidate.find("{")
+    if start < 0:
+        raise ValueError("模型返回中没有 JSON object")
+    decoder = json.JSONDecoder()
+    try:
+        data, _ = decoder.raw_decode(candidate[start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"模型返回 JSON 解析失败: {exc}") from exc
+    return data
+
+
+def _validate_generated_metadata(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("模型返回不是 JSON object")
+    zh_name = str(data.get("zh_name") or "").strip()
+    zh_description = str(data.get("zh_description") or "").strip()
+    examples = data.get("query_examples")
+    if not _contains_cjk(zh_name):
+        raise ValueError("模型返回缺少中文 zh_name")
+    if not _contains_cjk(zh_description):
+        raise ValueError("模型返回缺少中文 zh_description")
+    if not isinstance(examples, list):
+        raise ValueError("模型返回 query_examples 不是列表")
+    normalized = [str(item).strip() for item in examples if str(item).strip()]
+    if not normalized or not any(_contains_cjk(item) for item in normalized):
+        raise ValueError("模型返回缺少中文 query_examples")
+    skill_category_name = str(data.get("skillCategoryName") or "").strip()
+    if skill_category_name not in SKILL_CATEGORY_NAMES:
+        raise ValueError(
+            "模型返回 skillCategoryName 不在允许分类中："
+            + "、".join(SKILL_CATEGORY_NAMES)
+        )
+    return {
+        "zh_name": zh_name,
+        "zh_description": zh_description,
+        "query_examples": normalized[:5],
+        "skillCategoryName": skill_category_name,
+    }
+
+
+async def generate_skill_metadata_with_model(skill_md: Path, frontmatter: dict, body: str) -> dict[str, Any]:
+    """调用 Crew 当前模型生成中文 metadata。测试可 monkeypatch 此函数。"""
+    from crew.core.types import Message
+    from crew.providers.openai_provider import OpenAIProvider
+    from crew.state.config import load_config
+
+    cfg = load_config()
+    profile = cfg.active_model
+    if not profile.has_key:
+        raise RuntimeError("当前模型未配置 API Key，无法自动生成 skill 中文 metadata")
+
+    provider = OpenAIProvider(
+        api_key=profile.api_key,
+        base_url=profile.base_url or None,
+        model=profile.model,
+        temperature=0.2,
+        max_tokens=profile.max_tokens,
+        timeout=profile.timeout,
+    )
+    prompt = (
+        "你要为 Crew 平台的一个 skill 补全前端展示 metadata。\n"
+        "你只负责 metadata JSON，不要改写 skill 正文，不要输出 patch。\n"
+        "只返回 JSON，不要 Markdown，不要解释。\n"
+        "JSON schema:\n"
+        "{\n"
+        '  "zh_name": "简短中文技能名",\n'
+        '  "zh_description": "一句中文描述，说明何时使用该技能",\n'
+        '  "query_examples": ["中文用户请求示例1", "中文用户请求示例2", "中文用户请求示例3"],\n'
+        '  "skillCategoryName": "固定分类名"\n'
+        "}\n\n"
+        "要求：\n"
+        "- 如果原始 name 已经是中文，zh_name 必须直接复用原始 name。\n"
+        "- 请自行阅读并判断原始 description 是否是中文描述，不要依赖是否夹杂少量中文词。\n"
+        "- 如果原始 description 是中文描述，zh_description 必须原样复制原始 description，不要压缩、不要改写。\n"
+        "- 如果原始 description 不是中文描述，或只是英文中夹杂少量中文词，不能复制到 zh_description，必须基于 skill 内容生成中文描述。\n"
+        "- 如果原始 examples/query_examples 已有中文用户请求，query_examples 优先复用，可补充但不要改写含义。\n"
+        "- zh_name 不超过 16 个中文字符。\n"
+        "- zh_description 用中文，避免营销话术。\n"
+        "- query_examples 必须是 2-3 条用户自然语言 query，不是命令行。\n"
+        "- skillCategoryName 只能从以下 7 个值选择一个："
+        + "、".join(SKILL_CATEGORY_NAMES)
+        + "。\n"
+        "- 不要包含密钥、内部接口、绝对路径。\n\n"
+        f"Skill 内容：\n{_skill_generation_context(skill_md, frontmatter, body)}"
+    )
+    resp = await stream_aux(
+        provider,
+        [
+            Message.system("你是 Crew skill 元数据生成器，只输出严格 JSON。"),
+            Message.user(prompt),
+        ],
+        purpose="skill-metadata",
+        timeout=profile.timeout,
+    )
+    text = (resp.text or "").strip()
+    return _validate_generated_metadata(_parse_metadata_json_response(text))
+
+
+def audit_skills(
+    *,
+    include_optional: bool = False,
+    only: str | None = None,
+) -> dict[str, Any]:
+    """审计 skills 的中文展示元数据和旧项目路径引用。
+
+    首选元数据写法：
+
+    metadata:
+      zh_name: 中文技能名
+      zh_description: 中文描述
+      query_examples:
+        - 帮我...
+    """
+    scan_skills()
+    skills = list(get_skills().values())
+
+    if include_optional:
+        for opt in list_optional_skills():
+            skills.append({
+                "name": opt["name"],
+                "slug": opt["slug"],
+                "skill_dir": opt["skill_dir"],
+                "skill_md_path": str(Path(opt["skill_dir"]) / "SKILL.md"),
+                "source": "optional",
+            })
+
+    if only:
+        target = _slugify(only.lstrip("/"))
+        skills = [
+            info for info in skills
+            if info.get("slug") == target
+            or info.get("name") == only
+            or Path(str(info.get("skill_dir", ""))).name == only
+        ]
+
+    items: list[dict[str, Any]] = []
+    total_errors = 0
+    total_warnings = 0
+
+    for info in sorted(skills, key=lambda item: str(item.get("slug") or item.get("name") or "")):
+        skill_dir = Path(str(info["skill_dir"]))
+        skill_md = Path(str(info["skill_md_path"]))
+        extracted = {
+            "zh_name": "",
+            "zh_description": "",
+            "query_examples": [],
+            "skillCategoryName": "",
+        }
+        try:
+            safe_skill_dir = _registered_skill_dir(skill_dir)
+            safe_skill_md = resolve_skill_path(skill_md, safe_skill_dir)
+            content = read_skill_text(safe_skill_md, safe_skill_dir, errors="replace")
+        except (OSError, SkillPathError) as exc:
+            findings = [{
+                "code": exc.code if isinstance(exc, SkillPathError) else "skill_md_unreadable",
+                "severity": "error",
+                "file": str(skill_md),
+                "suggestion": f"修复 SKILL.md 读取错误: {exc}",
+            }]
+            fm = {}
+        else:
+            fm, _ = _parse_frontmatter(content)
+            metadata_findings, extracted = _audit_skill_metadata(fm)
+            findings = metadata_findings + _audit_skill_paths(safe_skill_dir)
+
+        errors = sum(1 for f in findings if f.get("severity") == "error")
+        warnings = sum(1 for f in findings if f.get("severity") == "warning")
+        total_errors += errors
+        total_warnings += warnings
+        items.append({
+            "name": info.get("name") or skill_md.parent.name,
+            "slug": info.get("slug") or _slugify(str(info.get("name") or skill_md.parent.name)),
+            "skill_dir": str(info["skill_dir"]),
+            "skill_md_path": str(skill_md),
+            "ok": errors == 0 and warnings == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "metadata": extracted,
+            "findings": findings,
+        })
+
+    return {
+        "ok": total_errors == 0 and total_warnings == 0,
+        "count": len(items),
+        "errors": total_errors,
+        "warnings": total_warnings,
+        "schema": {
+            "metadata.zh_name": "中文技能名，前端标题优先使用",
+            "metadata.zh_description": "中文技能描述，前端描述优先使用",
+            "metadata.query_examples": "中文用户 query 示例列表",
+            "metadata.skillCategoryName": "技能分类，只能使用平台定义的 7 个固定值",
+        },
+        "skill_categories": list(SKILL_CATEGORY_NAMES),
+        "runtime_env": {
+            "CREW_HOME": "Crew 家目录",
+            "CREW_SKILLS_DIR": "用户 skills 目录",
+            "CREW_ENV_FILE": "Crew 可写 .env 路径",
+        },
+        "skills": items,
+    }
+
+
+async def repair_skills(
+    *,
+    include_optional: bool = False,
+    only: str | None = None,
+    dry_run: bool = False,
+    operator_account_id: str | None = None,
+    source: str = "agent-tool",
+) -> dict[str, Any]:
+    """修复 skill 展示 metadata 和分类。
+
+    - 缺少中文 metadata 或合法分类时调用当前 Crew 模型生成并写回 SKILL.md。
+    - 可识别的旧顶层 category 会直接迁移到 metadata.skillCategoryName。
+    - 非 dry-run 在隐藏 staging 树完成全部写入，发布前检测并发变化并可回滚替换。
+    """
+    before = audit_skills(include_optional=include_optional, only=only)
+    repaired: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for item in before["skills"]:
+        findings = item.get("findings") or []
+        containment_findings = [
+            finding for finding in findings if str(finding.get("code") or "").startswith("skill_path_")
+        ]
+        if containment_findings:
+            errors.append({
+                "slug": item["slug"],
+                "name": item["name"],
+                "skill_dir": str(item["skill_dir"]),
+                "error": "Skill 路径 containment 校验失败",
+                "findings": containment_findings,
+            })
+            continue
+        metadata_needed = any(_patched("_is_metadata_finding")(f) for f in findings)
+        if not metadata_needed:
+            continue
+
+        try:
+            original_skill_dir = _registered_skill_dir(Path(str(item["skill_dir"])))
+            original_skill_md = resolve_skill_path(
+                Path(str(item["skill_md_path"])), original_skill_dir
+            )
+        except SkillPathError as exc:
+            errors.append({
+                "slug": item["slug"],
+                "name": item["name"],
+                "skill_dir": str(item["skill_dir"]),
+                "error": str(exc),
+            })
+            continue
+        skill_dir = original_skill_dir
+        skill_md = original_skill_md
+        staging_root: Path | None = None
+        original_fingerprint: str | None = None
+        version = _declared_skill_version(original_skill_dir)
+
+        if not dry_run:
+            try:
+                _patched("_append_global_skill_audit")(
+                    action="repair",
+                    slug=str(item["slug"]),
+                    operator_account_id=operator_account_id,
+                    source=source,
+                    version=version,
+                    result="started",
+                )
+                with _SKILL_MUTATION_LOCK:
+                    original_fingerprint = _skill_tree_fingerprint(original_skill_dir)
+                    staging_root = Path(
+                        tempfile.mkdtemp(
+                            prefix=f".{original_skill_dir.name}-repair-",
+                            dir=original_skill_dir.parent,
+                        )
+                    )
+                    staged_skill_dir = staging_root / "skill"
+                    shutil.copytree(original_skill_dir, staged_skill_dir)
+                    _validate_skill_tree(staged_skill_dir, staging_root)
+                skill_dir = staged_skill_dir
+                relative_skill_md = original_skill_md.relative_to(original_skill_dir)
+                skill_md = resolve_skill_path(skill_dir / relative_skill_md, skill_dir)
+            except (OSError, SkillPathError) as exc:
+                if staging_root is not None:
+                    shutil.rmtree(staging_root, ignore_errors=True)
+                _patched("_append_failed_global_skill_audit")(
+                    action="repair",
+                    slug=str(item["slug"]),
+                    operator_account_id=operator_account_id,
+                    source=source,
+                    version=version,
+                    error_code=type(exc).__name__,
+                )
+                errors.append({
+                    "slug": item["slug"],
+                    "name": item["name"],
+                    "skill_dir": str(original_skill_dir),
+                    "error": f"Skill repair staging 失败: {exc}",
+                })
+                continue
+        skill_changes: dict[str, Any] = {
+            "slug": item["slug"],
+            "name": item["name"],
+            "skill_dir": str(original_skill_dir),
+            "metadata_fields": [],
+            "metadata_sources": [],
+            "metadata_errors": [],
+            "metadata_patch": "",
+            "path_changes": [],
+            "dry_run": dry_run,
+        }
+
+        try:
+            content = read_skill_text(skill_md, skill_dir, errors="replace")
+            fm, body = _parse_frontmatter(content)
+            if not fm:
+                fm = {"name": item["name"]}
+
+            if metadata_needed:
+                local_generated = _existing_chinese_metadata(fm)
+                local_fields = _set_metadata(fm, local_generated)
+                if local_fields:
+                    skill_changes["metadata_fields"].extend(local_fields)
+                    skill_changes["metadata_sources"].extend(
+                        {"field": field, "source": "existing_frontmatter"}
+                        for field in local_fields
+                    )
+
+                remaining_findings, _ = _audit_skill_metadata(fm)
+                remaining_metadata_needed = any(_patched("_is_metadata_finding")(f) for f in remaining_findings)
+
+                if dry_run:
+                    for finding in remaining_findings:
+                        if _patched("_is_metadata_finding")(finding):
+                            field = str(finding.get("field"))
+                            if field not in skill_changes["metadata_fields"]:
+                                skill_changes["metadata_fields"].append(field)
+                    if local_fields:
+                        new_content = _format_skill_markdown(fm, body)
+                        skill_changes["metadata_patch"] = _make_unified_patch(skill_md, content, new_content)
+                else:
+                    fields: list[str] = []
+                    if remaining_metadata_needed:
+                        try:
+                            generated = await _patched("generate_skill_metadata_with_model")(skill_md, fm, body)
+                        except Exception as exc:  # noqa: BLE001 - repair 需要继续处理路径修复
+                            skill_changes["metadata_errors"].append({
+                                "code": "metadata_generation_failed",
+                                "error": str(exc),
+                            })
+                            generated = {}
+                        if generated.get("skillCategoryName") not in SKILL_CATEGORY_NAMES:
+                            generated = {
+                                **generated,
+                                "skillCategoryName": _skill_category_from_frontmatter(fm),
+                            }
+                        fields = _set_metadata(fm, generated)
+                        if fields:
+                            skill_changes["metadata_fields"].extend(fields)
+                            skill_changes["metadata_sources"].extend(
+                                {"field": field, "source": "llm"} for field in fields
+                            )
+
+                    if skill_changes["metadata_fields"]:
+                        new_content = _format_skill_markdown(fm, body)
+                        skill_changes["metadata_patch"] = _patched("_write_text_via_patch")(
+                            skill_md,
+                            content,
+                            new_content,
+                            allowed_root=skill_dir,
+                        )
+
+            if not dry_run:
+                assert staging_root is not None and original_fingerprint is not None
+                _validate_skill_tree(skill_dir, staging_root)
+                with _SKILL_MUTATION_LOCK:
+                    if _skill_tree_fingerprint(original_skill_dir) != original_fingerprint:
+                        raise RuntimeError("Skill 在 repair 期间被其他操作修改，已拒绝覆盖")
+                    backup = _replace_skill_tree(
+                        skill_dir,
+                        original_skill_dir,
+                        target_root=original_skill_dir.parent,
+                    )
+                    try:
+                        _patched("_append_global_skill_audit")(
+                            action="repair",
+                            slug=str(item["slug"]),
+                            operator_account_id=operator_account_id,
+                            source=source,
+                            version=version,
+                            result="success",
+                        )
+                    except OSError:
+                        failed = original_skill_dir.parent / (
+                            f".{original_skill_dir.name}.audit-failed-{uuid.uuid4().hex}"
+                        )
+                        original_skill_dir.rename(failed)
+                        backup.rename(original_skill_dir)
+                        shutil.rmtree(failed, ignore_errors=True)
+                        raise
+                    try:
+                        shutil.rmtree(backup)
+                    except OSError as exc:
+                        logger.warning("repair 已提交但旧树清理失败 path=%s: %s", backup, exc)
+                original_prefix = str(skill_dir)
+                for change in skill_changes["path_changes"]:
+                    if isinstance(change, dict) and isinstance(change.get("file"), str):
+                        change["file"] = change["file"].replace(
+                            original_prefix,
+                            str(original_skill_dir),
+                            1,
+                        )
+
+            repaired.append(skill_changes)
+        except Exception as exc:  # noqa: BLE001 - 工具层需要结构化返回失败项
+            if not dry_run:
+                _patched("_append_failed_global_skill_audit")(
+                    action="repair",
+                    slug=str(item["slug"]),
+                    operator_account_id=operator_account_id,
+                    source=source,
+                    version=version,
+                    error_code=type(exc).__name__,
+                )
+            errors.append({
+                "slug": item["slug"],
+                "name": item["name"],
+                "skill_dir": str(original_skill_dir),
+                "error": str(exc),
+            })
+        finally:
+            if staging_root is not None and staging_root.exists():
+                shutil.rmtree(staging_root, ignore_errors=True)
+
+    if not dry_run:
+        _invalidate_cache()
+    after = audit_skills(include_optional=include_optional, only=only) if not dry_run else before
+    return {
+        "ok": not errors and after.get("errors", 0) == 0 and after.get("warnings", 0) == 0,
+        "dry_run": dry_run,
+        "repaired_count": len(repaired),
+        "error_count": len(errors),
+        "repaired": repaired,
+        "errors": errors,
+        "before": {
+            "count": before["count"],
+            "errors": before["errors"],
+            "warnings": before["warnings"],
+        },
+        "after": {
+            "count": after["count"],
+            "errors": after["errors"],
+            "warnings": after["warnings"],
+        },
+        "remaining": after["skills"],
+    }

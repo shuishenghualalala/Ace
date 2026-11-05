@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from crew.browser.driver import BrowserDriverError
 from crew.browser.electron_bridge import electron_browser_bridge
 from crew.browser.electron_driver import runtime_doctor
+from crew.browser.types import BrowserConfig
 from crew.gateway.auth import (
     AuthenticationError,
     account_from_request,
@@ -162,7 +163,9 @@ def create_browser_router(crew) -> APIRouter:
         if not _browser_instance_token_matches(request.headers):
             return JSONResponse({"ok": False, "error": "实例校验失败"}, status_code=401)
         runtime_key = f"crew_{_opaque(account.owner_account_id)}"
-        result = runtime_doctor(crew.config.browser, runtime_key)
+        result = runtime_doctor(
+            BrowserConfig.from_raw(crew.config.browser_config), runtime_key
+        )
         return JSONResponse(result)
 
     @router.get("/api/browser/{session_id}/state")
@@ -246,26 +249,6 @@ def create_browser_router(crew) -> APIRouter:
                     new_tab=action == "new_tab",
                 )
                 return JSONResponse({"ok": True, "state": state})
-            if action == "record_discard":
-                # 「丢弃」必须真的删盘：轨迹里有用户看到的真实业务数据，
-                # 只把按钮藏起来等于骗人——用户以为丢了，文件还在。
-                #
-                # 走线程：`discard_recording` 内部是同步 `shutil.rmtree`，
-                # 一段长录制的目录里可能有上千个文件，在 async 端点里直接跑
-                # 会把整个事件循环卡住——同一个 Gateway 上所有会话一起卡。
-                removed = await asyncio.to_thread(
-                    mgr.discard_recording, owner, session_id, value
-                )
-                return JSONResponse({"ok": True, "discarded": removed})
-            if action in {
-                "record_start", "record_pause", "record_resume", "record_stop",
-                "record_note", "record_status",
-            }:
-                # 录制由用户从面板发起，模型不持有任何录制控制工具（见设计文档）。
-                recording = await mgr.user_recording(
-                    owner, session_id, action.removeprefix("record_"), value
-                )
-                return JSONResponse({"ok": True, "recording": recording})
             if action in {"takeover", "return", "pause", "stop"}:
                 result = await mgr.user_control(owner, session_id, action)
                 return JSONResponse(
@@ -350,11 +333,14 @@ def create_browser_router(crew) -> APIRouter:
         async def registered() -> None:
             # Reset the newly authenticated Host first. This is idempotent when
             # it has no owner and closes stale WebContents after a reconnect.
+            bridge_timeout = BrowserConfig.from_raw(
+                crew.config.browser_config
+            ).command_timeout_seconds
             await electron_browser_bridge.request(
                 runtime_key,
                 "close_owner",
                 {},
-                timeout=crew.config.browser.command_timeout_seconds,
+                timeout=bridge_timeout,
                 mutating=True,
                 _allow_unready=True,
             )
@@ -367,19 +353,7 @@ def create_browser_router(crew) -> APIRouter:
             if mgr is None:
                 return
             target_id = str(event.get("targetId") or "")
-            # 录制只发生在 human 模式，必须用包含 human 会话的解析器；用 debug 那个
-            # 会让每条录制事件在这里被静默丢弃（功能看似跑通、轨迹永远是空的）。
-            if event.get("type") == "recording":
-                recording_id = str(event.get("recordingId") or "")
-                by_ledger = mgr.session_for_recording_id(owner, recording_id)
-                by_target = mgr.session_for_recording_target(owner, target_id)
-                # Existing pages should agree on both identities. A newly
-                # created popup is not yet in Manager's tab cache, so its
-                # authenticated shared ledger is the authoritative route.
-                if by_ledger is not None and by_target is not None and by_ledger != by_target:
-                    return
-                session_id = by_ledger or by_target
-            elif event.get("type") == "download":
+            if event.get("type") == "download":
                 by_hash = mgr.session_for_hash(
                     owner,
                     str(event.get("sessionHash") or ""),
@@ -393,17 +367,6 @@ def create_browser_router(crew) -> APIRouter:
             if session_id is None:
                 return
             if not tool_allowed(session_id, owner, "browser_use"):
-                return
-            if event.get("type") == "recording":
-                # 录制事件只落盘，**不进模型历史、不走 publish**。这是对
-                # 「用户接管期间页面内容绝不进模型上下文」那条不变量的遵守：
-                # 轨迹只在用户显式要求编译技能时，由模型用文件工具主动读入。
-                await mgr.append_recording_step(
-                    owner,
-                    session_id,
-                    event,
-                    recording_id=str(event.get("recordingId") or ""),
-                )
                 return
             if event.get("type") == "download":
                 await mgr.publish_host_download(

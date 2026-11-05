@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>companion · Ace 后端模块</title>
+<style>
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:28px;font-weight:800;margin:0 0 4px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:19px;font-weight:700;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  .logo{width:28px;height:28px;border-radius:7px;background:var(--black);color:#fff;display:inline-grid;place-items:center;font-weight:800;vertical-align:middle;margin-right:8px}
+  ul{padding-left:20px}
+  .ok{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:12px 16px}
+  .nav{margin-top:40px;color:var(--t3);font-size:13px}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 后端模块 / companion</div>
+  <h1><span class="logo">A</span>companion</h1>
+  <div class="sub">状态文档：目前无后端实现；历史原型已废弃，原型数据库表已清理。</div>
+
+  <h2>1. 当前状态</h2>
+  <p>companion（同伴 / 附近会话）在 <b>HEAD 中没有后端实现</b>：不存在 <code>crew/companion/</code> 模块，也没有 <code>crew/gateway/routers/companion.py</code>。本模块文档此前是未填写的模板占位。</p>
+  <p>曾在分叉分支（2db4cb4「feat(companion): integrate pluggable nearby conversations」、9efc3a0「feat(desktop): enhance companion and workspace experience」）原型化，含 <code>crew/companion/service.py</code>、<code>crew/gateway/routers/companion.py</code>、<code>desktop/src/ui/features/companion-composer-presence.ts</code>，但该分支被废弃、代码从未进入 HEAD。</p>
+
+  <h2>2. 原型数据库清理</h2>
+  <p>原型在本地开发库 <code>crew_data/crew.db</code> 创建了 8 张 companion 表，全部为空（0 行），且不在 <code>crew/state/_migration.py</code> 的任何归属清单（<code>OWNER_TABLE_LABELS</code> 与全部 <code>*_DB_TABLES</code>）中。它们会与未来任何 companion 功能产生碰撞，因此已按用户确认范围从主库删除。</p>
+  <table>
+    <thead><tr><th>表</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>companion_profile</code></td><td>companion 账号资料（展示名 / 头像 / 可发现性）</td></tr>
+      <tr><td><code>companion_room</code></td><td>会话房间</td></tr>
+      <tr><td><code>companion_room_member</code></td><td>房间成员</td></tr>
+      <tr><td><code>companion_outbox</code></td><td>待投递事件发件箱</td></tr>
+      <tr><td><code>companion_peer</code></td><td>附近对端</td></tr>
+      <tr><td><code>companion_conversation_binding</code></td><td>会话绑定（conversation ↔ session）</td></tr>
+      <tr><td><code>companion_agent_publication</code></td><td>Agent 公开发布</td></tr>
+      <tr><td><code>companion_agent_run</code></td><td>companion Agent 执行记录</td></tr>
+    </tbody>
+  </table>
+  <p>删除前的完整 schema 存档：</p>
+  <pre><code>=== companion_profile ===
+CREATE TABLE companion_profile (
+              owner_account_id TEXT NOT NULL,
+              display_name TEXT NOT NULL DEFAULT '',
+              avatar TEXT NOT NULL DEFAULT '',
+              discoverable INTEGER NOT NULL DEFAULT 1,
+              revision INTEGER NOT NULL DEFAULT 1,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id)
+            );
+=== companion_room ===
+CREATE TABLE companion_room (
+              owner_account_id TEXT NOT NULL,
+              room_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              owner_peer_id TEXT NOT NULL DEFAULT '',
+              revision INTEGER NOT NULL DEFAULT 1,
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id, room_id)
+            );
+=== companion_room_member ===
+CREATE TABLE companion_room_member (
+              owner_account_id TEXT NOT NULL,
+              room_id TEXT NOT NULL,
+              member_kind TEXT NOT NULL,
+              member_id TEXT NOT NULL,
+              owner_peer_id TEXT NOT NULL DEFAULT '',
+              state TEXT NOT NULL DEFAULT 'active',
+              profile_json TEXT NOT NULL DEFAULT '{}',
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id, room_id, member_kind, member_id)
+            );
+=== companion_outbox ===
+CREATE TABLE companion_outbox (
+              owner_account_id TEXT NOT NULL,
+              event_id TEXT NOT NULL,
+              conversation_kind TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'queued',
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id, event_id)
+            );
+CREATE INDEX idx_companion_outbox_status
+              ON companion_outbox(owner_account_id, status, created_at);
+=== companion_peer ===
+CREATE TABLE companion_peer (
+              owner_account_id TEXT NOT NULL,
+              peer_id TEXT NOT NULL,
+              profile_json TEXT NOT NULL DEFAULT '{}',
+              relationship TEXT NOT NULL DEFAULT 'nearby',
+              connection_state TEXT NOT NULL DEFAULT 'unavailable',
+              last_seen REAL NOT NULL DEFAULT 0,
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id, peer_id)
+            );
+=== companion_conversation_binding ===
+CREATE TABLE companion_conversation_binding (
+              owner_account_id TEXT NOT NULL,
+              conversation_kind TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              title TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id, conversation_kind, target_id),
+              UNIQUE (owner_account_id, session_id)
+            );
+=== companion_agent_publication ===
+CREATE TABLE companion_agent_publication (
+              owner_account_id TEXT NOT NULL,
+              public_agent_id TEXT NOT NULL,
+              source_kind TEXT NOT NULL,
+              source_id TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              capabilities_json TEXT NOT NULL DEFAULT '[]',
+              enabled INTEGER NOT NULL DEFAULT 1,
+              revision INTEGER NOT NULL DEFAULT 1,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id, public_agent_id),
+              UNIQUE (owner_account_id, source_kind, source_id)
+            );
+=== companion_agent_run ===
+CREATE TABLE companion_agent_run (
+              owner_account_id TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              room_id TEXT NOT NULL,
+              public_agent_id TEXT NOT NULL,
+              source_message_id TEXT NOT NULL,
+              child_session_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              final_text TEXT NOT NULL DEFAULT '',
+              error_text TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL,
+              PRIMARY KEY (owner_account_id, run_id)
+            );
+</code></pre>
+  <p>删除决策：8 表均 0 行、无代码引用、不在任何归属清单；删除后仅这 8 张表消失，其余表（含 ADR-0038 拆库备份表）不受影响。</p>
+
+  <h2>3. 未来方向</h2>
+  <p>companion 的产品范围推迟到未来的 <b>Channel Bundle</b> 决策（<a href="../../product/companion.html">产品 PRD</a> 与 <a href="../../todo/ace-plugin-architecture-evolution-plan.md">插件架构演进计划</a>）。届时按目标形态实现，并作为「不允许中心接线」功能的第一个验证样本（见计划 §8.4）。</p>
+
+  <h2>4. 防回归</h2>
+  <p>为阻止「幽灵表」再次无声出现，<code>crew migrate orphans</code>（<code>crew/state/_migration.py</code> 的 <code>orphan_main_db_tables</code>，只读诊断）可扫描主库中未被任何归属清单覆盖的表；companion 未来若落库，其表必须登记进 <code>OWNER_TABLE_LABELS</code> 或对应 <code>*_DB_TABLES</code> 清单。</p>
+
+  <h2>5. 变更记录</h2>
+  <table>
+    <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td>2026-09-14</td><td>模板改为状态文档：标注无实现、记录 8 张原型表 schema 与删除决策、指向 Channel Bundle 未来方向。</td><td>文档；本地 <code>crew_data/crew.db</code> 删除 8 张空表；新增 <code>crew migrate orphans</code> 诊断。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a></div>
+</div>
+</body>
+</html>

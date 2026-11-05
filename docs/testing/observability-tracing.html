@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ace 可观测追踪测试记录</title>
+  <style>
+    :root{--text:#111;--muted:#555;--line:#e5e5e5;--soft:#fafafa;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+    *{box-sizing:border-box}body{margin:0;color:var(--text);font-family:var(--sans);line-height:1.7}.wrap{max-width:960px;margin:auto;padding:48px 24px 80px}h1{font-size:28px;margin:0 0 8px}h2{font-size:19px;margin:36px 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px}p,li{color:var(--muted)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--line);padding:1px 5px;border-radius:4px}table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}th{background:var(--soft)}.pass{color:#176b35;font-weight:700}.nav{margin-top:40px;font-size:13px;color:#777}.nav a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--line)}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <p> Ace / 测试记录 / Observability Tracing</p>
+  <h1>可观测追踪与数据面板</h1>
+  <p>实施验收记录（2026-09-24）。测试使用仓库锁定环境的 <code>uv run pytest</code> 与 desktop 工作区的 npm/Vitest，避免调用外部 Conda pytest。</p>
+
+  <h2>行为覆盖</h2>
+  <table>
+    <thead><tr><th>区域</th><th>覆盖内容</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>Core/State</td><td>嵌套 span、异常终态、线程传播、sink 生命周期、脱敏（sk-/xoxb-/GitHub/AWS/signed URL）、metadata 不落正文、Mapping key 不执行自定义 <code>__str__</code>、owner/system 隔离、磁盘检查节流与有界回收。</td><td class="pass">目标集通过</td></tr>
+      <tr><td>Gateway/TraceStore</td><td>developer/admin 门控、owner 归属、客户端批量先验证、总容量限流、日志分页元数据、同时间 span keyset、同 owner links、导出重启/过期/路径安全与 partial 状态。</td><td class="pass">目标集通过</td></tr>
+      <tr><td>Providers/Tools</td><td>OpenAI/Anthropic 协议、MCP 生命周期、Wiki 无父 trace 的显式 owner、Compact owner/session、工具错误与 provider 分类。</td><td class="pass">目标集通过</td></tr>
+      <tr><td>Desktop</td><td>托管 <code>--dev</code> 独立 observability 环境、普通/外部 Gateway 不开启、默认最近 1h、1s 轮询与退避、实际 DOM 分页/日志详情/跳 trace、导出选择、离页只 abort、显式取消。</td><td class="pass">目标集通过</td></tr>
+    </tbody>
+  </table>
+
+  <h2>已执行命令</h2>
+  <pre>uv run pytest -q tests/test_observability.py tests/gateway/test_tracing.py tests/test_mcp_client_lifecycle.py tests/wiki/test_feature.py tests/wiki/test_service_contract.py tests/test_anthropic_provider.py tests/test_openai_provider_streaming.py tests/test_openai_provider_vision.py tests/test_compact.py tests/test_provider_error_classification.py tests/test_config_crud.py
+uv run lint-imports
+uv run ruff check <changed Python files>
+cd desktop && npm run typecheck && npm run lint && npm run lint:css
+cd desktop && npm test -- --run tests/unit/tracing.test.ts tests/unit/gateway-launch-mode.test.ts
+cd desktop && npm test -- --run --maxWorkers=1</pre>
+  <p>后端观测/追踪、MCP、Wiki、provider、compact、config 定向回归 298 passed；变更 Python 文件 Ruff 通过，<code>lint-imports</code> 为 376 files / 1518 dependencies、9 contracts kept、0 broken。desktop typecheck、lint、CSS lint 通过；Tracing/Gateway 单测 13 passed；单 worker 全量 171 files / 1851 tests 通过且正常退出。</p>
+
+  <h2>导出一致性约束</h2>
+  <ul>
+    <li>任务创建时冻结 owner、筛选条件、事件水位和时间点；TraceStore 分页与 event 查询应用水位，payload 通过受控引用和捕获时间截止。</li>
+    <li>记录先写唯一临时文件；达到数量、时限或字节预算时在写下一条前停止，manifest 明确 <code>partial_reason</code>，产物始终不超预算。</li>
+    <li>取消只设置 worker stop event；worker 在提交前清理临时文件，下载仅接受 completed 或结构闭合的 partial。</li>
+    <li>下载权限重新校验 owner 和 developer access；桌面主进程使用固定 endpoint 与同目录临时文件，Windows 提交失败尝试恢复原目标。</li>
+  </ul>
+
+  <h2>未覆盖与已知风险</h2>
+  <ul>
+    <li>本轮没有重新跑完整 Python 仓库回归，也没有做跨平台打包后的 Windows/macOS/Linux Gateway 真机 smoke；托管环境注入已覆盖三套打包启动路径和单元断言。</li>
+    <li>没有运行 Playwright/electron 视觉回归或大规模（10k/1M traces）性能基准；桌面行为测试使用 happy-dom 的真实 DOM 事件与分页交互。</li>
+    <li>仓库级 <code>uv run ruff check crew</code> 仍会命中既有的 <code>crew/gateway/ws.py</code> 未使用 <code>get_skills</code>（本轮未改无关文件）；本轮所有变更 Python 文件的 Ruff 检查通过。</li>
+  </ul>
+
+  <div class="nav">返回：<a href="../index.html">文档总览</a> · <a href="../backend/modules/core.html">Core</a> · <a href="../backend/modules/gateway.html">Gateway</a> · <a href="../frontend/desktop-frontend.html">Desktop</a></div>
+</main>
+</body>
+</html>

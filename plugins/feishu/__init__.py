@@ -273,8 +273,8 @@ def register(ctx) -> None:
         await authorize_network_tool(
             _api_base(),
             tool_name=tool_name,
-            workspace_store=ctx.services.get("workspace_store"),
-            security_service=ctx.services.get("security_service"),
+            workspace_store=ctx.resolve_service("workspace_store"),
+            security_service=ctx.resolve_service("security_service"),
         )
         return await asyncio.to_thread(handler, args)
 

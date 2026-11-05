@@ -20,6 +20,7 @@ from crew.app import build_app
 from crew.core.types import Message, ToolCall
 from crew.gateway.server import create_app
 from crew.state.config import load_config
+from crew.state.credentials import read_stored_key
 from crew.state.home import owner_path_segment
 
 OWNER_A = "A:uid-a"
@@ -103,6 +104,34 @@ def api(tmp_path: Path):
     for var in ("TEST_ALPHA_API_KEY", "TEST_BETA_API_KEY", "TEST_GAMMA_API_KEY", "TEST_DELTA_API_KEY", "TEST_PERSONAL_API_KEY"):
         os.environ.pop(var, None)
     os.environ.pop("CREW_HOME", None)
+
+
+# ----------------------- GET /api/config/vendors -----------------------
+
+
+@pytest.mark.asyncio
+async def test_config_vendors_returns_public_catalog(api, auth_headers):
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/config/vendors")
+    assert resp.status_code == 200, resp.text
+    vendors = resp.json()["vendors"]
+    assert len(vendors) >= 8
+    by_id = {v["id"]: v for v in vendors}
+    assert {"deepseek", "zai", "moonshotai", "kimi-coding", "minimax"} <= set(by_id)
+    deepseek = by_id["deepseek"]
+    assert deepseek["protocol"] == "openai"
+    assert deepseek["base_url"] == "https://api.deepseek.com"
+    model_ids = {m["id"] for m in deepseek["models"]}
+    assert "deepseek-v4-flash" in model_ids
+    first_model = deepseek["models"][0]
+    assert set(first_model) == {"id", "context_window", "max_tokens", "reasoning", "vision"}
+    # Anthropic 协议厂商
+    assert by_id["kimi-coding"]["protocol"] == "anthropic"
+    # 公开视图不含 compat 内部开关与密钥
+    for vendor in vendors:
+        assert "compat" not in vendor
+        assert "api_key" not in vendor
 
 
 # ----------------------- POST /api/config/models -----------------------
@@ -350,6 +379,80 @@ async def test_create_model_writes_env(api, tmp_path: Path, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_create_model_without_api_key_env_uses_isolated_env(api, tmp_path: Path, auth_headers):
+    """省略 api_key_env 时，新增模型的 key 进凭证库（按 profile id 隔离），不污染 .env。"""
+    env_path = _owner_overlay_path(tmp_path).parent / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "CREW_API_KEY=sk-existing-legacy\n",
+        encoding="utf-8",
+    )
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post("/api/config/models", json={
+            "id": "implicit-model",
+            "base_url": "https://implicit.example.com/v1",
+            "model": "implicit-1",
+            "api_key": "sk-implicit-secret",
+        })
+
+    assert resp.status_code == 201, resp.text
+    profile = resp.json()["profile"]
+    env_name = profile["api_key_env"]
+    assert env_name.startswith("CREW_MODEL_IMPLICIT_MODEL_")
+    assert env_name.endswith("_API_KEY")
+    assert env_name != "CREW_API_KEY"
+    assert profile["has_key"] is True
+    # key 默认写 owner 凭证库（按 profile id），.env 不新增任何条目
+    assert read_stored_key(OWNER_A, "implicit-model") == "sk-implicit-secret"
+    env_text = env_path.read_text(encoding="utf-8")
+    assert env_name not in env_text
+    assert "CREW_API_KEY=sk-existing-legacy" in env_text
+    assert "TEST_ALPHA_API_KEY=sk-alpha-xxx" in env_text
+    assert "TEST_BETA_API_KEY=sk-beta-xxx" in env_text
+
+
+@pytest.mark.asyncio
+async def test_update_semantic_config_auto_manages_embedding_key_env(api, tmp_path: Path, auth_headers):
+    """Embedding 专用 Key 不要求用户填写环境变量名，由后端自动隔离保存。"""
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.put("/api/config/wiki-semantic", json={
+            "enabled": True,
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "api_key": "sk-embedding-secret",
+        })
+
+    assert resp.status_code == 200, resp.text
+    semantic = resp.json()["wiki"]["semantic"]
+    assert semantic["api_key_env"] == "CREW_WIKI_EMBEDDING_API_KEY"
+    env_path = _owner_overlay_path(tmp_path).parent / ".env"
+    assert "CREW_WIKI_EMBEDDING_API_KEY=sk-embedding-secret" in env_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_owner_model_without_key_does_not_fallback_to_shared_key(api, tmp_path: Path, auth_headers):
+    """owner 私有 profile 缺 key 时，不应借用 CREW_API_KEY 的值。"""
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.post("/api/config/models", json={
+            "id": "missing-key",
+            "base_url": "https://missing.example.com/v1",
+            "model": "missing-1",
+        })
+
+    assert resp.status_code == 201, resp.text
+    env_path = _owner_overlay_path(tmp_path).parent / ".env"
+    env_path.write_text(
+        env_path.read_text(encoding="utf-8") + "CREW_API_KEY=sk-shared-legacy\n",
+        encoding="utf-8",
+    )
+    profile = api.state.crew.owner_model_profiles(OWNER_A)["missing-key"]
+    assert profile.api_key == ""
+    assert profile.has_key is False
+
+
+@pytest.mark.asyncio
 async def test_create_model_rejects_non_api_key_env(api, auth_headers, tmp_path, monkeypatch):
     """模型 API Key 写入只允许密钥变量名，避免覆盖 CREW_HOME 等运行变量。"""
     protected_home = str(tmp_path / "keep-this-home")
@@ -417,6 +520,30 @@ async def test_update_model_success(api, auth_headers):
     assert data["profile"]["id"] == "alpha"
     # 拿不到 temperature（public_dict 有），验证一下
     assert data["profile"]["temperature"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_config_marks_default_profile_owner_editable(api, auth_headers):
+    """设置页可识别默认 builtin profile 的 owner copy-on-write 能力。"""
+    default = api.state.crew.config.model_profiles["alpha"].__class__(
+        id="default",
+        name="Default",
+        api_key="",
+        api_key_env="DEFAULT_API_KEY",
+        base_url="https://api.example.com/v1",
+        model="your-model-name",
+        loaded=True,
+        builtin=True,
+    )
+    api.state.crew.config.model_profiles["default"] = default
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        resp = await client.get("/api/config")
+
+    assert resp.status_code == 200
+    item = next(profile for profile in resp.json()["model_profiles"] if profile["id"] == "default")
+    assert item["builtin"] is True
+    assert item["editable"] is True
 
 
 @pytest.mark.asyncio

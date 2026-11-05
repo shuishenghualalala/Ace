@@ -13,6 +13,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   __resetAllStoresForTest,
+  authStore,
   configStore,
   messageStore,
   sessionStore,
@@ -65,6 +66,8 @@ const MODELS = [
 beforeEach(() => {
   __resetAllStoresForTest();
   __resetSessionModelBindingsForTest();
+  // auth-gate 为真实登录判定：local 桌面会话由 initAuthFlow 置为已登录，测试模拟该态。
+  authStore.set({ isLoggedIn: true });
   configStore.set({
     config: {
       model: 'global-model',

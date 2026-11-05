@@ -7,9 +7,11 @@ import QueuePanel from "./QueuePanel";
 import ScenarioHub from "./ScenarioHub";
 import RunningIntro from "./RunningIntro";
 import TodoProgressPanel from "./TodoProgressPanel";
+import SubagentActivityView from "./SubagentActivityView";
 import { shouldShowTodoPanel } from "../lib/todoUtils";
 
 export interface Props {
+  sessionId?: string;
   messages: UiMessage[];
   busy: boolean;
   compactingContext?: boolean;
@@ -65,6 +67,7 @@ const SKILL_ICONS: Record<string, string> = {
 };
 
 export default function ChatPanel({
+  sessionId,
   messages,
   busy,
   compactingContext = false,
@@ -294,6 +297,7 @@ export default function ChatPanel({
             currentAgentLabel={currentAgentLabel}
             onWikiLink={onWikiLink}
           />
+          <SubagentActivityView sessionId={sessionId} messages={messages} busy={busy} />
           <QueuePanel
             queue={pendingQueue}
             queueHint={queueHint}

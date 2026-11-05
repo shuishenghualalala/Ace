@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, current_owner_account_id
 from crew.gateway.logout import LogoutCleanupError, LogoutCoordinator
 
 
@@ -179,12 +179,12 @@ async def test_logout_cleanup_keeps_original_owner_context_and_resets_afterward(
         return await original_stop_owner(owner)
 
     coordinator._dispatcher.stop_owner = observe_stop_owner
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
     await coordinator.logout("A:uid-a")
 
     assert seen == ["A:uid-a"]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
 
 @pytest.mark.asyncio
@@ -219,17 +219,16 @@ async def test_team_cleanup_failure_keeps_active_owner_lease():
 
 
 @pytest.mark.asyncio
-async def test_restart_required_logout_persists_intent_before_retaining_lease():
+async def test_owner_channel_logout_does_not_require_gateway_restart():
     events: list[str] = []
     coordinator, lease = _coordinator(events, requires_restart=True)
 
     result = await coordinator.logout("A:uid-a")
 
-    assert result.requires_gateway_restart is True
-    assert result.released is False
-    assert lease.current().owner_account_id == "A:uid-a"
-    assert events[-1] == "prepare-restart-logout"
-    assert "release" not in events
+    assert result.requires_gateway_restart is False
+    assert result.released is True
+    assert lease.current() is None
+    assert events[-1] == "release"
 
 
 @pytest.mark.asyncio
@@ -254,7 +253,7 @@ async def test_owner_activation_is_nonblocking_and_reopens_local_admission():
         "activate-tasks:A:uid-a",
     ]
     assert seen == ["A:uid-a"]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     await coordinator.shutdown()
 
 

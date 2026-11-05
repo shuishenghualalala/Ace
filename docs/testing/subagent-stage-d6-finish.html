@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Subagent Stage D6 · 测试记录</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}a{color:#245a83}.ok{color:#176b2c}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;vertical-align:top}</style></head>
+<body><main>
+<h1>Subagent Stage D6 · Continuable 收尾测试记录</h1>
+<p>日期：2026-09-18 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 范围：冷恢复身份、Activation 事件、任务账本、HTTP 控制和 Web 操作。</p>
+
+<h2>1. 覆盖面</h2>
+<table><thead><tr><th>测试面</th><th>验证内容</th><th>文件</th></tr></thead><tbody>
+  <tr><td>冷恢复身份</td><td>descriptor 的 parent/session 身份被篡改时恢复拒绝；正常 owner/parent 仍可继续。</td><td><code>tests/test_subagent_continuable_finish.py</code></td></tr>
+  <tr><td>Activation 状态</td><td>首次运行和续聊按顺序发出 running、ready、idle，one-shot 旧事件不变。</td><td><code>tests/test_subagent_continuable_finish.py</code> / <code>web/src/features/feature-events.test.ts</code></td></tr>
+  <tr><td>任务账本</td><td>后台 task progress、结算结果和 collect 结果保留 task_id 与 subagent_id。</td><td><code>tests/test_subagent_task_accounting.py</code></td></tr>
+  <tr><td>HTTP 控制</td><td>消息投递和中断要求 session_id，路由把 owner/session 边界交给 Runtime。</td><td><code>tests/test_subagent_control_api.py</code></td></tr>
+  <tr><td>Web 活动卡</td><td>活动卡可发消息、发送中状态、中断运行中的 continuable 子智能体；错误显示为只读提示。</td><td><code>web/src/components/SubagentActivityView.test.tsx</code> / <code>web/src/api.test.ts</code></td></tr>
+</tbody></table>
+
+<h2>2. 执行命令与结果</h2>
+<pre><code>.venv/bin/python -m pytest -q \
+  tests/test_subagent_continuable_finish.py \
+  tests/test_subagent_task_accounting.py \
+  tests/test_subagent_control_api.py \
+  tests/test_subagent_stage_d.py \
+  tests/test_subagent_stage_c.py \
+  tests/test_subagent_stage_e.py
+# 27 passed
+
+cd web
+npm test -- --run src/features/feature-events.test.ts \
+  src/components/SubagentActivityView.test.tsx \
+  src/lib/subagentActivity.test.ts src/api.test.ts
+# 22 passed
+npm run typecheck
+# PASS</code></pre>
+
+<h2>3. 结论</h2>
+<p class="ok">D6 专项通过。continuable 的冷恢复、状态观测、任务定位和 Web 控制入口已经形成闭环；默认 one-shot 行为保持兼容。</p>
+<p><a href="../backend/adr/0050-subagent-stage-d6-finish.html">ADR-0050</a> · <a href="../backend/modules/subagent.html">Subagent 模块文档</a></p>
+</main></body></html>

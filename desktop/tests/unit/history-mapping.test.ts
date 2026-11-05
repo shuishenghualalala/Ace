@@ -18,6 +18,7 @@ import {
   filterExistingTurnFileChanges,
   inferTurnFileChangesFromToolCalls,
   mapBackendHistoryItem,
+  mapBackendHistoryItems,
   mergeTeamInternalMessage,
   mergeTeamInternalMessages,
 } from '../../src/ui/features/history-mapping';
@@ -110,6 +111,54 @@ describe('mapBackendHistoryItem turnFileChanges', () => {
         removed: 0,
         status: 'modified',
       },
+    ]);
+  });
+
+  it('marks tool-call turns with final content as answer segment (content stays outside the fold)', () => {
+    const withContent: BackendHistoryItem = {
+      role: 'assistant',
+      content: '排查完成，结论如下。',
+      tool_calls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.js' }, status: 'done' }],
+    };
+    expect(mapBackendHistoryItem(withContent).segmentRole).toBe('answer');
+
+    const processOnly: BackendHistoryItem = {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.js' }, status: 'done' }],
+    };
+    expect(mapBackendHistoryItem(processOnly).segmentRole).toBe('process');
+  });
+
+  it('batch mapping demotes non-final content segments of a split turn to process (narration stays in fold)', () => {
+    const items: BackendHistoryItem[] = [
+      { role: 'user', content: '整理成三条结论。' },
+      {
+        role: 'assistant',
+        content: '我先复核一遍引用。',
+        thinking: '先核对。',
+        tool_calls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.js' }, status: 'done' }],
+      },
+      {
+        role: 'assistant',
+        content: '## 三条结论\n1. 甲\n2. 乙\n3. 丙',
+      },
+      { role: 'user', content: '再来一条。' },
+      {
+        role: 'assistant',
+        content: '单段回合的最终回复。',
+        tool_calls: [{ id: 'tc2', name: 'grep', arguments: { query: 'x' }, status: 'done' }],
+      },
+    ];
+    const messages = mapBackendHistoryItems(items, null);
+    // user 消息的 segmentRole 是单条映射的既有行为（渲染只消费 assistant 段），
+    // 这里只断言 assistant 段：拆段回合的旁白降级 process，末段与单段回合保持 answer。
+    expect(messages.map((m) => (m.role === 'assistant' ? m.segmentRole : null))).toEqual([
+      null,
+      'process',
+      'answer',
+      null,
+      'answer',
     ]);
   });
 

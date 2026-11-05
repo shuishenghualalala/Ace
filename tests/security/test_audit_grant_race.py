@@ -151,6 +151,7 @@ def test_persistent_deny_beats_auto_allow_and_full_access(tmp_path: Path) -> Non
     )
     assert not authorized
     assert request is None
+    service.flush_audit()
     assert any(
         event.action_type == "exec_decision"
         and event.decision == "deny"
@@ -188,6 +189,7 @@ def test_authenticated_user_gesture_is_audited_without_a_second_prompt(tmp_path:
     )
 
     assert result.allowed
+    service.flush_audit()
     assert any(
         event.action_type == "exec_decision"
         and event.decision == "allow"
@@ -567,6 +569,7 @@ def test_recent_user_rejection_suppresses_immediate_identical_exec_retry(
 
     assert authorized is False
     assert repeated is None
+    service.flush_audit()
     assert any(
         event.action_type == "exec_decision"
         and event.decision_source == "recent_user_rejection"

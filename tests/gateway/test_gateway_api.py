@@ -510,7 +510,7 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
                 "expected_revision": 3,
             },
         )
-        crew.team._mark_child_active({
+        await crew.team._mark_child_active({
             "child_id": "task-model::member",
             "parent_session_id": "team-model",
             "owner_account_id": OWNER_A,
@@ -566,7 +566,9 @@ async def test_team_session_model_materializes_and_switches_one_member(tmp_path,
     stored = crew.session_store.get_agent_config("team-model", owner_account_id=OWNER_A)
     assert set(stored["team"]["member_model_bindings"]) == {leader["id"], member["id"]}
     assert stored["team"]["member_model_bindings"][member["id"]]["model_id"] == "model-a"
-    with sqlite3.connect(db_path) as conn:
+    # external 域表在拆库后（ADR-0038）位于 catalog 门面的 external 库，不在主库。
+    external_db = crew.current_external_catalog().db_path
+    with sqlite3.connect(external_db) as conn:
         envelope = json.loads(conn.execute(
             "SELECT profile_json FROM external_agent WHERE id = ?",
             (leader["id"],),
@@ -1004,7 +1006,9 @@ async def test_cron_retry_creates_linked_fire_without_replaying_source(tmp_path,
 
     assert resp.status_code == 202
     assert resp.json()["source_fire_id"] == source["id"]
-    for _ in range(50):
+    # 重试会触发完整 agent turn（含 skills mtime 扫描，Windows 上约秒级），
+    # 轮询上限放宽到 10s，完成即提前退出。
+    for _ in range(1000):
         await asyncio.sleep(0.01)
         runs = crew.cron_store.get_job_runs(job["id"])
         if len(runs) == 2 and runs[0]["status"] != "running":
@@ -1097,6 +1101,43 @@ async def test_team_task_api_ignores_legacy_turn_child_tasks_without_workflow(tm
     assert history.status_code == 200
     assert any(item["role"] == "assistant" and "团队工作流完成" in item["content"] for item in history.json())
     assert any("成员完成开发" in item["content"] for item in history.json())
+
+
+@pytest.mark.asyncio
+async def test_builtin_session_history_does_not_project_request_id_as_agent(tmp_path, auth_headers):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False, gateway_dev_mode=False)
+    crew = build_app(config=cfg, enable_team=False)
+    parent = "web_builtin_parent"
+    request_id = "req_builtin_1"
+    child = f"{parent}::turn::{request_id}"
+    crew.session_store.save(
+        parent,
+        [Message.user("你好"), Message(role="assistant", content="普通回答")],
+        owner_account_id=OWNER_A,
+    )
+    crew.session_store.set_agent_config(parent, {"executor": "builtin"}, owner_account_id=OWNER_A)
+    crew.session_store.save(
+        child,
+        [
+            Message.user("你好"),
+            Message(role="assistant", content="普通回答"),
+            Message.user("继续回答"),
+            Message(role="assistant", content="新的普通回答"),
+        ],
+        owner_account_id=OWNER_A,
+    )
+    app = create_app(crew)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        response = await client.get(f"/api/session/{parent}")
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["content"] for item in items] == ["你好", "普通回答"]
+    assert [item["role"] for item in items] == ["user", "assistant"]
+    assert all("agent_name" not in item for item in items)
+    assert all(request_id not in item for item in items)
 
 
 @pytest.mark.asyncio

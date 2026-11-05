@@ -11,7 +11,7 @@
 import { BackendChatSocket, backendApi } from '../backend-client';
 import type { PlanReviewStatus } from '../chat-render';
 import { renderWorkspaceHistory } from './workspaces';
-import { refreshKanbanBoard } from './kanban-board';
+import { refreshKanbanBoard } from './board-hooks';
 import { refreshCronJobs } from './cron-page';
 import { findChannelSession, loadChannelSessions } from './channel-sessions';
 import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';
@@ -22,8 +22,10 @@ import { loadSessionModel, syncSessionModelUi } from './session-model';
 import { loadInspectorContext, refreshInspector } from './inspector';
 import { syncCraftLabel } from './composer-toolbar';
 import {
+  clearHistoryLoadError,
   ensureSessionMessages,
   isBusySession,
+  markHistoryLoadError,
   newMessageId,
   notify,
   replaceSessionMessages,
@@ -33,6 +35,7 @@ import {
   setActiveSessionId,
   setCurrentWorkspaceId,
   setEditFrom,
+  setHistoryPaging,
   state,
   type TabKey,
   type TodoItem,
@@ -50,8 +53,9 @@ import {
   finalizeStreamingTurn,
   updateGatewayDot,
 } from './chat-controller';
-import { mapBackendHistoryItem, mergeTeamInternalMessages } from './history-mapping';
-import { mergeBackendHistory } from './history-merge';
+import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
+import { mergeBackendHistory, prependHistoryWindow } from './history-merge';
+import { resolveChatRenderTargetId, isStudioView } from './studio-chrome-state';
 import { hydrateMissingTurnFileCounts } from './turn-file-counts';
 import { getLastGatewaySequences } from './gateway-sequence';
 import { resetSessionExcept } from '../stream-reassembly';
@@ -61,6 +65,7 @@ import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { logStream } from '../stream-debug';
 import { sessionStore } from '../stores/stores';
 import { hydrateTurnFoldFromStorage } from './fold-state';
+import { setBackendTransportState } from './backend-status-guard';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
 let setTabFn: (tab: TabKey) => void = () => {};
@@ -83,9 +88,19 @@ export async function openSession(
   const row = state.sessions.find((s) => s.id === sessionId) ?? findChannelSession(sessionId);
   if (row) setCurrentWorkspaceId(row.workspaceId);
   window.dispatchEvent(new CustomEvent('workspace:context-changed'));
+  // P1-6：订阅后立即渲染首屏（空消息 + historyLoading → 骨架占位），不等历史返回——
+  // 首屏可交互时间与历史总量解耦；下方原序列在骨架之上继续执行。
+  if (getMessages(sessionId).length === 0) setHistoryLoading(sessionId, true);
+  renderChat();
+  jumpChatToBottom();
   // 历史消息优先读取逐消息 model；旧消息缺失时回退当前 Session 模型，
   // 因此需先恢复绑定再做历史映射，避免外部 Session 回退成 Crew 默认模型。
-  await loadSessionModel(sessionId);
+  try {
+    await loadSessionModel(sessionId);
+  } catch (err) {
+    setHistoryLoading(sessionId, false);
+    throw err;
+  }
   if (getMessages(sessionId).length === 0) {
     await loadBackendHistory(sessionId);
   } else {
@@ -167,19 +182,34 @@ export function sessionsAffectedByDisconnect(): string[] {
  * history 回填，用 latest-request-wins 防止旧快照覆盖新快照。 */
 const historyLoadSeq = new Map<string, number>();
 
+/** 首屏尾部窗口大小（P1-6）：与历史总量解耦的常数；更早历史触顶翻页补。 */
+const HISTORY_WINDOW_SIZE = 100;
+
 export async function loadBackendHistory(sessionId: string): Promise<void> {
   if (!isRendererLoggedIn()) return;
   const loadSeq = (historyLoadSeq.get(sessionId) ?? 0) + 1;
   historyLoadSeq.set(sessionId, loadSeq);
   const isLatestLoad = () => historyLoadSeq.get(sessionId) === loadSeq;
   setHistoryLoading(sessionId, true);
+  // 首开（store 为空）走窗口端点：首屏延迟与历史总量解耦，游标存入 historyPaging。
+  // 非空重载（重连/watchdog 恢复）仍走全量端点：保留用户已向上翻页加载的更早历史。
+  const firstWindow = (state.messages[sessionId] ?? []).length === 0;
   try {
-    const [items, st, planState, todoState] = await Promise.all([
-      backendApi.history(sessionId),
+    const [windowOrFull, st, planState, todoState] = await Promise.all([
+      firstWindow
+        ? backendApi.historyWindow(sessionId, { limit: HISTORY_WINDOW_SIZE })
+        : backendApi.history(sessionId).then((items) => ({ items, has_more: false, next_before: null })),
       backendApi.sessionStatus(sessionId).catch(() => null),
       backendApi.sessionPlan(sessionId).catch(() => null),
       backendApi.sessionTodos(sessionId).catch(() => ({ todos: [] })),
     ]);
+    if (firstWindow) {
+      setHistoryPaging(sessionId, {
+        hasMore: windowOrFull.has_more,
+        nextBefore: windowOrFull.next_before,
+      });
+    }
+    const items = windowOrFull.items;
     // 已有更新的回填请求在跑：丢弃旧快照，写回/flush 都由最新请求收尾。
     if (!isLatestLoad()) return;
     const localMsgs = state.messages[sessionId] ?? [];
@@ -194,7 +224,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
       renderWorkspaceHistory(openSession);
       return;
     }
-    const history = mergeTeamInternalMessages(items.map((item) => mapBackendHistoryItem(item, sessionId)));
+    const history = mergeTeamInternalMessages(mapBackendHistoryItems(items, sessionId));
     if (st?.last_status === 'failed' && st.last_error) {
       history.push({
         id: newMessageId('error'),
@@ -271,6 +301,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     }
     if (todos.length > 0) setBookTodos(sessionId, todos);
     replaceSessionMessages(sessionId, merged);
+    clearHistoryLoadError(sessionId);
     // 修法3：历史替换后清掉已被替换掉的旧回合 delta 重组缓冲；保留仍在 live 流式的尾巴
     // （其 assistantId 在 merged 里）。避免旧回合缓冲残留导致泄漏 / 串轮。
     resetSessionExcept(sessionId, new Set(merged.map((m) => m.id)));
@@ -325,7 +356,15 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
     });
     renderWorkspaceHistory(openSession);
   } catch {
-    if (isLatestLoad()) replaceSessionMessages(sessionId, []);
+    // 历史加载失败不再静默清空：保留内存中已有消息；无消息可显示时置错误标记，
+    // 聊天区渲染「加载失败 + 重试」卡（__history_error 单元），失败对用户可见。
+    if (isLatestLoad()) {
+      const hadMessages = (state.messages[sessionId] ?? []).length > 0;
+      if (!hadMessages) markHistoryLoadError(sessionId);
+      logStream('history', 'load-failed', { sessionId });
+      notify('会话历史加载失败，可点击对话区「重试」');
+      if (state.activeSessionId === sessionId) renderChat();
+    }
   } finally {
     // history 写回完成：flush 期间排队的迟到分片（P2-2），再清 loading 标记。
     // 仅最新请求收尾：旧请求不得清 loading（新请求仍在排队窗口内）也不得 flush。
@@ -337,6 +376,81 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
       }
     }
   }
+}
+
+// ---------- P1-6：触顶翻页（更早历史按游标前缀补页） ----------
+
+const olderPageInFlight = new Set<string>();
+
+/**
+ * 加载更早一页历史并前缀拼接。滚动距顶 < 2 视口时由滚动预取触发；
+ * 互斥游标保证不重叠，prependHistoryWindow 只做重写场景的兜底去重。
+ * prepend 锚定：渲染前记录 scrollHeight/scrollTop，渲染后补偿增量，视口不跳。
+ */
+export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> {
+  const paging = state.historyPaging[sessionId];
+  if (!paging?.hasMore || !paging.nextBefore) return false;
+  if (olderPageInFlight.has(sessionId)) return false;
+  olderPageInFlight.add(sessionId);
+  logStream('history', 'load-older-start', { sessionId, before: paging.nextBefore });
+  try {
+    const res = await backendApi.historyWindow(sessionId, {
+      limit: HISTORY_WINDOW_SIZE,
+      before: paging.nextBefore,
+    });
+    const current = state.messages[sessionId] ?? [];
+    if (current.length === 0) {
+      // 会话已被清空（删除/重开首窗）：迟到的旧页直接丢弃
+      return false;
+    }
+    const older = mergeTeamInternalMessages(mapBackendHistoryItems(res.items, sessionId));
+    setHistoryPaging(sessionId, { hasMore: res.has_more, nextBefore: res.next_before });
+    replaceSessionMessages(sessionId, prependHistoryWindow(current, older));
+    window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId } }));
+    if (state.activeSessionId === sessionId) {
+      const container = document.getElementById(resolveChatRenderTargetId(isStudioView()));
+      const prevHeight = container?.scrollHeight ?? 0;
+      const prevTop = container?.scrollTop ?? 0;
+      renderChat();
+      if (container) {
+        // 前缀插入使内容增高：补偿 scrollTop 保持视口停在原消息上
+        container.scrollTop = prevTop + (container.scrollHeight - prevHeight);
+      }
+    }
+    logStream('history', 'load-older-applied', {
+      sessionId,
+      olderCount: older.length,
+      hasMore: res.has_more,
+    });
+    return true;
+  } catch (err) {
+    logStream('history', 'load-older-failed', { sessionId, error: String(err) });
+    return false;
+  } finally {
+    olderPageInFlight.delete(sessionId);
+  }
+}
+
+/** 滚动预取：距顶 < 2 视口即取上一页（对齐 ZCode 提前量，不等滚到顶）。 */
+let historyScrollInstalled = false;
+
+export function installHistoryPagingScroll(): void {
+  if (typeof window === 'undefined' || historyScrollInstalled) return;
+  historyScrollInstalled = true;
+  // scroll 事件不冒泡但可捕获：capture 在 window 上代理，容器元素替换也无需重绑
+  window.addEventListener(
+    'scroll',
+    (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const sid = state.activeSessionId;
+      if (!sid || !state.historyPaging[sid]?.hasMore) return;
+      if (target.id !== resolveChatRenderTargetId(isStudioView())) return;
+      if (target.scrollTop > target.clientHeight * 2) return;
+      void loadOlderHistoryPage(sid);
+    },
+    { capture: true, passive: true },
+  );
 }
 
 async function syncSubscribedLiveStates(exceptSessionId?: string): Promise<void> {
@@ -380,7 +494,9 @@ export function bootstrapBackend(): void {
         activeSessionId: state.activeSessionId,
         transient: meta?.transient ?? false,
       });
-      state.backendConnected = meta?.transient && !open ? state.backendConnected : open;
+      setBackendTransportState(
+        open ? 'connected' : meta?.transient ? 'reconnecting' : 'disconnected',
+      );
       updateGatewayDot();
       if (!open) {
         // 主进程换 socket（close reason=reconnect）时紧接 open，不应结算 streaming / 封回合。
@@ -421,6 +537,7 @@ export function bootstrapBackend(): void {
   state.socket.bindLastGatewaySequences(getLastGatewaySequences);
   state.socket.connect();
   startStreamWatchdog();
+  installHistoryPagingScroll();
 }
 
 export async function hydrateBackendState(): Promise<void> {

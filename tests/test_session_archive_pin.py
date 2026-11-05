@@ -123,10 +123,14 @@ async def test_gateway_archive_and_pin_endpoints(tmp_path, auth_headers, monkeyp
         # 主列表不再返回 s-a
         listed = await client.get("/api/sessions")
         assert listed.json() == []
-        # A 仍是 Active Owner，B 在 A 显式 Logout 前不能建立任何操作连接。
+        # Owner 归一化后 gateway 支持多 owner 会话隔离（ad93ad5 移除单 owner
+        # 423 门禁）：B 看不到 A 的会话，跨 owner 归档按"不存在"拒绝（404），
+        # 且不得改变 A 的归档状态。
         monkeypatch.setattr("crew.gateway.auth.LOCAL_OWNER_ACCOUNT_ID", "B:uid-b")
         cross = await client.put("/api/session/s-a/archive", json={"archived": False})
-        assert cross.status_code == 423
+        assert cross.status_code == 404
+        listed = await client.get("/api/sessions")
+        assert listed.json() == []
 
         # 取消归档
         monkeypatch.setattr("crew.gateway.auth.LOCAL_OWNER_ACCOUNT_ID", OWNER_A)
@@ -141,10 +145,13 @@ async def test_gateway_archive_and_pin_endpoints(tmp_path, auth_headers, monkeyp
         listed = await client.get("/api/sessions")
         assert listed.json()[0]["pinned"] is True
 
-        # 同理，B 的置顶操作被 Active Owner 租约先行拒绝。
+        # 同理，B 对 A 的会话置顶同样按"不存在"拒绝，且 A 的置顶状态不变。
         monkeypatch.setattr("crew.gateway.auth.LOCAL_OWNER_ACCOUNT_ID", "B:uid-b")
         cross_pin = await client.put("/api/session/s-a/pin", json={"pinned": False})
-        assert cross_pin.status_code == 423
+        assert cross_pin.status_code == 404
+        monkeypatch.setattr("crew.gateway.auth.LOCAL_OWNER_ACCOUNT_ID", OWNER_A)
+        listed = await client.get("/api/sessions")
+        assert listed.json()[0]["pinned"] is True
 
 
 @pytest.mark.asyncio

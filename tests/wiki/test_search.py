@@ -94,3 +94,27 @@ def test_sync_pages_updates_all_pages(index: SQLiteFTS5SearchIndex):
     ])
 
     assert set(index.search("统一内容", top_k=5)) == {"p1", "p2"}
+
+
+def test_natural_language_query_does_not_require_every_token(index):
+    index.sync_page(_page("p1", "Neural research", "Neural therapy treats brain tumors."))
+    index.sync_page(_page("p2", "Ocean", "Coral reefs support biodiversity."))
+    assert index.search("neural treatment outcomes", top_k=5) == ["p1"]
+
+
+def test_operator_words_are_literal_and_punctuation_is_safe(index):
+    index.sync_page(_page("p1", "Neural research", "Neural therapy treats brain tumors."))
+    assert index.search('OR neural (NOT "AND")', top_k=5) == ["p1"]
+    assert index.search("?!", top_k=5) == []
+    assert index.search("neural", top_k=0) == []
+
+
+def test_chinese_short_keyword_matches_whole_phrase(index):
+    index.sync_page(_page("p1", "知识编排", "负责跨来源关联。"))
+    index.sync_page(_page("p2", "知识来源", "一般来源介绍。"))
+    assert index.search("跨来源", top_k=5) == ["p1"]
+
+
+def test_chinese_question_recalls_partial_query_terms(index):
+    index.sync_page(_page("p1", "作者", "张三提出了知识编排理论。"))
+    assert index.search("知识编排理论是谁提出的？", top_k=5) == ["p1"]
