@@ -216,6 +216,10 @@ class ExecutionStore:
     def control(self, owner: str, task_id: str, action: str, *, unit_id: str = '', confirm_unknown: bool = False) -> None:
         def op(task: dict) -> None:
             if action in {'pause', 'cancel'}:
+                if task['state'] in {'completed', 'cancelled'}:
+                    raise ValueError('已完成或取消的任务不能再次暂停/取消')
+                if action == 'pause' and task['state'] != 'running':
+                    raise ValueError('只能暂停运行中的任务')
                 task['state'] = 'paused' if action == 'pause' else 'cancelled'
                 if action == 'cancel':
                     for u in task['units']:
@@ -226,7 +230,7 @@ class ExecutionStore:
                     raise ValueError('只能恢复已暂停任务')
                 task['state'] = 'running'
             elif action == 'retry':
-                if task['state'] in {'running', 'cancelled', 'paused'}:
+                if task['state'] in {'cancelled', 'paused'} or any(v['state'] == 'running' for v in task['units']):
                     raise ValueError('请先等待本轮结束；取消任务不能重试')
                 u = next((u for u in task['units'] if u['id'] == unit_id), None)
                 if not u or u['state'] not in {'failed', 'unknown'}:

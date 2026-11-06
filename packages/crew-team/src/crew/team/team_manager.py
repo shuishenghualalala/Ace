@@ -203,6 +203,7 @@ class InProcessTeamManager(TeamManager):
         provider_for_owner: Callable[[str], LLMProvider] | None = None,
         provider_for_member_model: Callable[[str, str], LLMProvider] | None = None,
         provider_factory: Callable[[Any], LLMProvider] | None = None,
+        knowledge_store_provider: Callable[[], Any] | None = None,
     ) -> None:
         # 跨请求复用的 owner 级 Provider 缓存。未显式注入解析器时由 Manager 自身维护，
         # 但 production 通常由 App 注入 owner_team_provider / owner_team_member_model_provider，
@@ -245,6 +246,7 @@ class InProcessTeamManager(TeamManager):
         self._planning_failures: dict[TeamKey, str] = {}
         self._collaboration_planning_store: PlanningStore | None = None
         self._collaboration_execution_store: ExecutionStore | None = None
+        self._knowledge_store_provider = knowledge_store_provider
         self._planning_scope_conflicts: dict[TeamKey, dict[str, Any]] = {}
         self._runtime_profile_cache: dict[tuple[str, ...], AgentProfile] = {}
         self._active_lock = threading.Lock()
@@ -5420,10 +5422,22 @@ class InProcessTeamManager(TeamManager):
 
                     if planning_progress:
                         planning_progress({"phase": "started", "status": "running", "label": "正在规划团队任务"})
+                    from crew.collaboration.inputs import wiki_source_snapshot
+                    resolved_inputs = []
+                    existing_request = service.store.get_by_request(owner_account_id, session_id)
+                    if existing_request:
+                        resolved_inputs = existing_request["task"].get("inputs", [])
+                    else:
+                        for ref in task_inputs or []:
+                            if ref.get("kind") == "knowledge_base":
+                                store = self._knowledge_store_provider() if self._knowledge_store_provider else None
+                                resolved_inputs.append(wiki_source_snapshot(store, owner_account_id, ref["id"]))
+                            else:
+                                resolved_inputs.append(ref)
                     workflow = await plan_conversation(
                         service, owner=owner_account_id, request_id=session_id, session_id=session_id,
                         goal=goal, team=stored_team, provider=self._provider_for_owner(owner_account_id),
-                        inputs=list(task_inputs or []), ask=ask_decision,
+                        inputs=resolved_inputs, ask=ask_decision,
                         current_team=current_team,
                     )
                     task_id = str((workflow.get("task") or {}).get("task_id") or "")

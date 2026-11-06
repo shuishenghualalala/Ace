@@ -65,7 +65,9 @@ class TeamWorkflowRuntime:
                 for item in (envelope.attachments or [])
                 if isinstance(item, dict) and str(item.get("name") or item.get("path") or item.get("id") or "").strip()
             ] + ([{"kind": "knowledge_base", "id": str(envelope.params["external_wiki_read_kb_id"])}]
-                 if envelope.params.get("external_wiki_read_kb_id") else []),
+                 if envelope.params.get("external_wiki_read_kb_id") else []) +
+                ([{"kind": "output_contract", "id": "project_review_v1"}]
+                 if envelope.params.get("collaboration_contract") == "project_review_v1" else []),
         ))
         queue_task: asyncio.Task[ResponseChunk] | None = None
         try:

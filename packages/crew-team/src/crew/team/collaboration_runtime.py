@@ -51,6 +51,18 @@ class TeamExecutionAdapter:
         node = self.plan.nodes[package['unit_id']]
         env = self.envelope
         instruction = package_instruction(package)
+        review_contract = any(isinstance(r, dict) and r.get('kind') == 'output_contract'
+                              and r.get('id') == 'project_review_v1' for r in package.get('inputs', []))
+        is_final = not any(e.parent_id == node.node_id for e in self.plan.edges)
+        validate_evidence = review_contract and is_final
+        if validate_evidence:
+            from crew.collaboration.review import review_output_instruction
+            instruction += '\n' + review_output_instruction()
+        agent = self.team.leader if node.assignee == 'leader' else self.team.teammates.get(node.assignee)
+        available = set(getattr(agent, 'tool_filter', None) or [])
+        missing = set(package.get('required_tools', [])) - available
+        if missing:
+            raise ValueError('执行器未确认可用的必需工具：' + '、'.join(sorted(missing)))
         self.emit(self.host._recorded_team_internal_chunk(env,
             agent_id='leader', role='leader', is_leader=True,
             source_session_id=f'{env.session_id}::leader', text=f'派发给 {node.assignee}：{node.title}',
@@ -106,12 +118,25 @@ class TeamExecutionAdapter:
             executor, call_id = result.get('member') or node.assignee, result.get('task_id')
         if not text.strip():
             raise ValueError('执行器没有返回成果；不使用兜底完成文本')
+        evidence_report = None
+        if validate_evidence:
+            from crew.collaboration.review import render_review, validate_review
+            from crew.core.text_parsing import extract_json_object
+            evidence_report = extract_json_object(text)
+            source_texts = {source['title']: source['content'] for ref in package['inputs']
+                            if isinstance(ref, dict) and ref.get('access') == 'read_snapshot'
+                            for source in ref.get('sources', [])}
+            errors = validate_review(evidence_report or {}, source_texts)
+            if errors:
+                raise ValueError('证据校验未通过（模型原始输出不计为成功）：' + '; '.join(errors))
+            text = render_review(evidence_report)
         self.emit(self.host._recorded_team_internal_chunk(env, agent_id=node.assignee,
             role=node.title, source_session_id=f'{env.session_id}::{node.assignee}', text=text,
             node_id=node.node_id, event_type='team_submit', mention_from=node.assignee,
             mention_to=['leader'], mention_intent='submit'))
         return {'text': text, 'executor': executor, 'call_id': call_id,
-                'validation': 'structural_only', 'acceptance': 'pending'}
+                'validation': 'source_quotes_and_schema' if validate_evidence else 'structural_only',
+                'structured_report': evidence_report, 'acceptance': 'pending'}
 
 
 async def run_collaboration(host: Any, envelope: Envelope, *, team: Any, plan: Any,
@@ -128,7 +153,7 @@ async def run_collaboration(host: Any, envelope: Envelope, *, team: Any, plan: A
     if jobs is None:
         jobs = host._collaboration_jobs = {}
     key = (envelope.user_id, task_id)
-    if key in jobs and not jobs[key].done():
+    if key in jobs and not jobs[key].done() and jobs[key] is not asyncio.current_task():
         raise ValueError('该任务正在运行，不能重复启动')
     job = asyncio.create_task(scheduler.run(envelope.user_id, task_id))
     jobs[key] = job
@@ -199,11 +224,15 @@ def control_execution(host: Any, owner: str, task_id: str, action: str, *, unit_
         if current.get('updated_at') != snapshot.get('team_updated_at'):
             raise ValueError('团队配置已改变；请创建新的任务，不静默替换原成员')
     team = host._get_or_create(task['session_id'], external_team_id=external_id, owner_account_id=owner)
+    if not external_id:
+        from crew.collaboration.planning.service import runtime_team_record
+        if runtime_team_record(team)['updated_at'] != snapshot.get('team_updated_at'):
+            raise ValueError('团队配置已改变；请创建新的任务，不静默替换原成员')
     store.control(owner, task_id, action, unit_id=unit_id, confirm_unknown=confirm_unknown)
     if live and not live.done():
         return store.get(owner, task_id)
     plan = host._plans.get(host._key(task['session_id'], owner))
-    if plan is None:
+    if plan is None or not any(n.metadata.get('collaboration_task_id') == task_id for n in plan.nodes.values()):
         host.create_plan(task['session_id'], goal=task['goal'], external_team_id=external_id,
                          owner_account_id=owner, workflow_plan=task['workflow'])
         plan = host._plans[host._key(task['session_id'], owner)]
@@ -215,8 +244,16 @@ def control_execution(host: Any, owner: str, task_id: str, action: str, *, unit_
                            mode='team', params=params,
                            attachments=[r for r in task['inputs'] if isinstance(r, dict) and r.get('kind') == 'attachment'])
     async def continue_run():
-        async for _ in run_collaboration(host, envelope, team=team, plan=plan, external_team_id=external_id):
-            pass  # persisted board/artifacts are available through both clients
+        try:
+            async for _ in run_collaboration(host, envelope, team=team, plan=plan, external_team_id=external_id):
+                pass  # persisted board/artifacts are available through both clients
+        finally:
+            if jobs.get((owner, task_id)) is asyncio.current_task():
+                jobs.pop((owner, task_id), None)
     runner = asyncio.create_task(continue_run())
+    # Reserve synchronously: a second control request must not reconcile/replay
+    # between this call returning and the async generator starting.
+    host._collaboration_jobs = jobs
+    jobs[(owner, task_id)] = runner
     host._track_delegate_task(task['session_id'], owner, runner)
     return store.get(owner, task_id)

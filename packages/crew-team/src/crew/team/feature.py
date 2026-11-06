@@ -95,6 +95,7 @@ def build_team_feature(
     provider_for_owner: Callable[[str], LLMProvider] | None = None,
     provider_for_member_model: Callable[[str, str], LLMProvider] | None = None,
     provider_factory: Callable[[Any], LLMProvider] | None = None,
+    knowledge_store_provider: Callable[[], Any] | None = None,
     enabled: bool = True,
     desired_config_revision: int = 1,
     runtime: FeatureRuntime | None = None,
@@ -123,6 +124,7 @@ def build_team_feature(
             kanban_consumer_provider=kanban_consumer_provider,
             context_contributors=context_contributors,
             provider_factory=provider_factory,
+            knowledge_store_provider=knowledge_store_provider,
             provider_for_owner=provider_for_owner,
             provider_for_member_model=provider_for_member_model,
         )

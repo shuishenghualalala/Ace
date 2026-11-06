@@ -4421,6 +4421,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         provider=provider,
         provider_for_owner=app.owner_team_provider,
         provider_for_member_model=app.owner_team_member_model_provider,
+        knowledge_store_provider=lambda: app._wiki_store,
         enabled=enable_team,
         runtime=plugins.feature_runtime,
         activate=enable_team,

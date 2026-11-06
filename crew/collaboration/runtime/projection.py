@@ -12,9 +12,9 @@ def project_tasks(executions: list[dict], legacy: list[dict]) -> list[dict]:
             attempts = [a for a in task['attempts'] if a['unit_id'] == u['id']]
             progress = {'source': 'team_plan', 'plan_node_id': u['id'], 'turn_session_id': task['session_id'],
                         'turn_title': task['goal'], 'assignee': u['assignee'], 'full_title': u['title'],
-                        'parent_ids': u['depends_on'], 'depends_on': u['depends_on'],
+                        'parent_node_ids': u['depends_on'], 'depends_on': u['depends_on'],
                         'collaboration_task_id': task['task_id'], 'collaboration_plan_id': task['plan_id'],
-                        'execution_state': u['state'], 'acceptance': task['acceptance'],
+                        'execution_state': u['state'], 'execution_task_state': task['state'], 'acceptance': task['acceptance'],
                         'assignment_source': u.get('assignment_source', ''), 'assignment_reason': u.get('assignment_reason', ''),
                         'execution_attempts': [{k: a.get(k) for k in ('attempt_id', 'planned_member', 'actual_executor', 'state', 'started_at', 'ended_at', 'error')} for a in attempts]}
             result.append({'id': u['id'], 'task_id': u['id'], 'session_id': task['session_id'], 'kind': 'team',

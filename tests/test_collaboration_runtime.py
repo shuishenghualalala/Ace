@@ -204,6 +204,55 @@ async def test_adapter_runs_actual_leader_not_control_fallback():
     node = SimpleNamespace(assignee='leader', title='汇总', node_id='c')
     adapter = TeamExecutionAdapter(host, Envelope.of('review', session_id='s', user_id='owner'),
         SimpleNamespace(leader=Leader(), leader_spec=SimpleNamespace(member_id='lead')),
-        SimpleNamespace(nodes={'c': node}), '', lambda _: None)
+        SimpleNamespace(nodes={'c': node}, edges=[]), '', lambda _: None)
     with pytest.raises(ValueError, match='没有返回成果'):
         await adapter.execute({'unit_id': 'c', 'attempt_id': 'att', 'upstream': []})
+
+
+def test_unknown_retry_requires_confirmation_and_history_preserved(store):
+    a = store.claim('owner', 'task')
+    b = store.claim('owner', 'task')
+    store.finish('owner', 'task', b['attempt_id'], state='completed', result={'text': 'ok', 'executor': 'hermes'})
+    store.recover('owner', 'task')
+    with pytest.raises(ValueError, match='核实'):
+        store.control('owner', 'task', 'retry', unit_id='a')
+    store.control('owner', 'task', 'retry', unit_id='a', confirm_unknown=True)
+    new = store.claim('owner', 'task')
+    assert new['attempt_id'] != a['attempt_id']
+    assert store.get('owner', 'task')['attempts'][0]['state'] == 'unknown'
+
+
+def test_evidence_contract_rejects_fabricated_quote_and_official_ranking():
+    from crew.collaboration.review import DIMENSIONS, validate_review
+    sources = {'A1.md': '## 摘要\n这是八个字以上的实际来源原文。'}
+    report = {'fictional': True, 'human_decision_required': True, 'ranking': ['A'],
+        'projects': [{'id': k, 'dimensions': [{'dimension': d, 'claim': 'c', 'analysis': 'a',
+          'uncertainty': 'u', 'strength': '弱', 'sources': [{'file': 'A1.md', 'section': '摘要',
+          'quote': '这是模型编造的八个字以上摘录。'}]} for d in DIMENSIONS]} for k in 'ABC'],
+        'questions': ['a', 'b', 'c']}
+    errors = validate_review(report, sources)
+    assert any('排名' in e for e in errors)
+    assert any('并非' in e for e in errors)
+    assert any('其他项目' in e for e in errors)
+
+
+def test_cancelled_and_completed_are_not_reopened_by_pause(store):
+    store.control('owner', 'task', 'cancel')
+    with pytest.raises(ValueError, match='不能再次'):
+        store.control('owner', 'task', 'pause')
+    assert store.get('owner', 'task')['state'] == 'cancelled'
+
+
+def test_unknown_with_independent_pending_can_be_explicitly_retried(store):
+    store.claim('owner', 'task', concurrency=1)
+    store.recover('owner', 'task')
+    store.control('owner', 'task', 'retry', unit_id='a', confirm_unknown=True)
+    assert store.claim('owner', 'task')['unit_id'] == 'a'
+
+
+@pytest.mark.parametrize('report', [None, [], {'projects': [None, None, None]},
+    {'projects': [{'id': []}, {'id': 'B'}, {'id': 'C'}]},
+    {'projects': [{'id': c, 'dimensions': [None] * 4} for c in 'ABC']}])
+def test_review_contract_reports_malformed_data_without_crashing(report):
+    from crew.collaboration.review import validate_review
+    assert validate_review(report, {})
