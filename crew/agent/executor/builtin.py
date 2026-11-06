@@ -640,6 +640,7 @@ class BuiltinExecutor(AgentExecutor):
         )
         empty_retries = 0
         continuation_count = 0
+        continuation_prefix = ""  # Completed length-limited segments, for final delivery only.
         tool_args_recovery_count = 0
         max_output_tokens_override: int | None = None
         max_output_tokens_escalated = False
@@ -958,7 +959,7 @@ class BuiltinExecutor(AgentExecutor):
                 ctx.messages.append(assistant_msg)
                 view_messages.append(assistant_msg)
                 if stream_continuation_count >= self.stream_continuation_max:
-                    final_text = streamed_text + "\n\n（模型响应多次中断，已保留已生成内容）"
+                    final_text = continuation_prefix + streamed_text + "\n\n（模型响应多次中断，已保留已生成内容）"
                     async for _fc in self._emit_final(
                         rid, next_seq, ctx.session_id, owner_account_id, final_text,
                     ):
@@ -1111,7 +1112,7 @@ class BuiltinExecutor(AgentExecutor):
                 async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
                     yield _nc
                 async for _fc in self._emit_final(
-                    rid, next_seq, ctx.session_id, owner_account_id, text,
+                    rid, next_seq, ctx.session_id, owner_account_id, continuation_prefix + text,
                     replace_content=content_replaced, usage=result.get("usage"),
                     reason="deadline" if deadline_now else None,
                 ):
@@ -1151,19 +1152,25 @@ class BuiltinExecutor(AgentExecutor):
             if not tool_calls:
                 if should_continue(finish_reason, tool_calls) and continuation_count < self.continuation_max:
                     continuation_count += 1
+                    # Each segment is already in history. Keep the prefix only
+                    # for the final artifact; do not duplicate it in model context.
+                    continuation_prefix += text
                     budget.refund()
                     ctx.messages.append(Message.user(CONTINUATION_PROMPT))
                     view_messages.append(Message.user(CONTINUATION_PROMPT))
                     log.info("回复被截断，第 %d 次续写 session=%s", continuation_count, ctx.session_id)
                     continue
                 async for _fc in self._emit_final(
-                    rid, next_seq, ctx.session_id, owner_account_id, text,
+                    rid, next_seq, ctx.session_id, owner_account_id, continuation_prefix + text,
                     replace_content=content_replaced, usage=result.get("usage"),
                 ):
                     yield _fc
                 return
 
             # ---- 执行工具（含 guardrails 防循环）----
+            # A tool turn starts a new answer; preceding narration is not part
+            # of the answer produced after the tool result.
+            continuation_prefix = ""
             #   ToolRunner 把 tool 结果 append 到 ctx.messages；同步到 view_messages（共享对象）。
             _pre_batch_len = len(ctx.messages)
             async for ev in runner.run_batch(

@@ -57,6 +57,8 @@ async def test_failed_branch_does_not_block_independent_work_and_retry_keeps_his
     assert [u['state'] for u in t['units']] == ['failed', 'completed', 'blocked']
     store.control('owner', 'task', 'retry', unit_id='a')
     async def success(p):
+        if p['unit_id'] == 'a':
+            assert p['previous_attempt']['error'] == 'executor offline'
         return {'text': 'done', 'executor': p['member_id']}
     t = await Scheduler(store, success).run('owner', 'task')
     assert t['state'] == 'completed'

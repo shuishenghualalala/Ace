@@ -67,6 +67,33 @@ async def test_agent_plain_answer_no_tools():
     assert "你好" in final
 
 
+@pytest.mark.parametrize("segments", [
+    ['{"projects":', '[{"id":"A"}]', '}'],
+    ["首段", "末段"],
+])
+async def test_length_continuation_preserves_complete_final_without_duplicating_history(segments):
+    provider = FakeProvider(script=[
+        ChatResponse(text=text, finish_reason="length" if i < len(segments) - 1 else "stop")
+        for i, text in enumerate(segments)
+    ])
+    executor = BuiltinExecutor(provider, Registry(), PluginManager())
+    ctx = _retry_ctx()
+    chunks = [chunk async for chunk in executor.execute(ctx)]
+    assert chunks[-1].kind == "final"
+    assert chunks[-1].body["text"] == "".join(segments)
+    assert [m.content for m in ctx.messages if m.role == "assistant"] == segments
+
+
+async def test_length_continuation_keeps_prefix_at_retry_limit():
+    provider = FakeProvider(script=[
+        ChatResponse(text=str(i), finish_reason="length") for i in range(6)
+    ])
+    executor = BuiltinExecutor(provider, Registry(), PluginManager())
+    chunks = [chunk async for chunk in executor.execute(_retry_ctx())]
+    assert chunks[-1].kind == "final"
+    assert chunks[-1].body["text"] == "".join(str(i) for i in range(executor.continuation_max + 1))
+
+
 async def test_agent_repairs_orphan_tool_calls_on_cold_load():
     """冷读历史里的孤儿 tool_call（崩溃残留）先合成 error 结果再进入本轮，
     且随本轮落库持久化——再次冷读扫描为空，不重复合成。"""

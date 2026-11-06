@@ -161,6 +161,7 @@ class ExecutionStore:
                 if any(resources.intersection(v.get('resource_keys') or []) for v in active):
                     continue
                 attempt_id = uuid.uuid4().hex
+                prior = next((a for a in reversed(task['attempts']) if a['unit_id'] == u['id']), None)
                 package = {'task_id': task_id, 'plan_id': task['plan_id'], 'unit_id': u['id'],
                            'attempt_id': attempt_id, 'member_id': u['assignee'], 'goal': task['goal'],
                            'objective': u['detail'] or u['title'], 'inputs': copy.deepcopy(task['inputs']),
@@ -168,6 +169,7 @@ class ExecutionStore:
                            'completion_criteria': u.get('acceptance_criteria', []),
                            'required_tools': u.get('required_tools', []),
                            'assignment_reason': u.get('assignment_reason', ''),
+                           'previous_attempt': ({k: prior[k] for k in ('attempt_id', 'state', 'error')} if prior else None),
                            'upstream': [{'unit_id': v['id'], 'result': v['result']} for v in units if v['id'] in u['depends_on']]}
                 attempt = {'attempt_id': attempt_id, 'unit_id': u['id'], 'planned_member': u['assignee'],
                            'actual_executor': None, 'state': 'dispatching', 'started_at': time.time(),
