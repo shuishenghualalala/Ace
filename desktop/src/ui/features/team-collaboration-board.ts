@@ -28,6 +28,7 @@ import {
   type FeatureReducerResult,
 } from './event-reducer-registry';
 import { registerTeamBoardCallbacks } from './board-hooks';
+import { renderMarkdownHtml } from '../markdown';
 
 const CREW_BUILTIN_AGENT_ID = 'crew::builtin';
 const TEAM_PLAN_SOURCES = new Set(['team_plan', 'team_kanban', 'team_flow_fallback']);
@@ -413,7 +414,6 @@ function summaryItems(task: Task): string[] {
       }),
       ...(progressText(task, 'assignment_reason') ? [`分配依据：${progressText(task, 'assignment_reason')}`] : []),
       ...(task.error ? [String(task.error)] : []),
-      ...(task.result ? [String(task.result)] : []),
     ];
   }
 
@@ -990,6 +990,7 @@ function renderNode(
     <button class="flow-node__summary-btn" type="button" data-team-node="${htmlAttr(node.id)}" aria-expanded="true"><div class="flow-node__top"><span class="agent-chip">主责：${escapeHtml(displayAgent)}</span><span class="flow-status is-${node.status}">${statusLabel[node.status]}</span></div><strong class="flow-node__title" title="${htmlAttr(node.fullTitle || node.title)}">${escapeHtml(node.title)}</strong>${dependency ? `<span class="flow-node__dependency">依赖：${escapeHtml(dependency)}</span>` : ''}<span class="flow-node__hint">收起详情</span></button>
     <div class="flow-node__detail">
       <section class="flow-node__brief" aria-label="节点摘要"><div class="flow-node__meta-line"><span>负责人 ${escapeHtml(displayAgent)}</span>${assignmentDetail}<span>${statusLabel[node.status]}</span>${duration ? `<span>${duration}</span>` : ''}</div>${node.fullTitle && node.fullTitle !== node.title ? `<p class="flow-node__full-title">节点任务：${escapeHtml(node.fullTitle)}</p>` : ''}<ul class="flow-node__brief-list">${summaryItems.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></section>
+      ${collab && node.raw.result ? `<section class="flow-node__result" aria-label="完整协作成果"><h3>${node.status === 'completed' ? '完整成果（待人工复核）' : '未通过验收的原始输出'}</h3><div class="md-body chat-markdown">${renderMarkdownHtml(String(node.raw.result))}</div></section>` : ''}
       ${paths.length ? `<section class="flow-node__artifacts"><span>产物</span>${paths.map((path) => `<button type="button" data-team-open-path="${htmlAttr(path)}" title="${htmlAttr(path)}"><i class="flow-node__file-icon" aria-hidden="true"></i><strong>${escapeHtml(fileNameOf(path))}</strong></button>`).join('')}</section>` : ''}
       ${messageId ? `<div class="flow-node__actions flow-node__locate-actions"><button class="mini-cancel flow-node__locate" type="button" data-team-locate-message="${htmlAttr(messageId)}">定位</button></div>` : ''}
       ${recoveryActions}${!collab && ['pending', 'running'].includes(node.raw.status) ? `<div class="flow-node__actions"><button class="mini-cancel" type="button" data-team-cancel-task="${htmlAttr(node.raw.task_id || node.raw.id)}">取消节点</button></div>` : ''}

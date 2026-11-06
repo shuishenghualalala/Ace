@@ -5646,6 +5646,12 @@ button { font-family: inherit; cursor: pointer; }
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+.flow-node__result {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
 .flow-node__brief-list li::marker {
   color: #7a946c;
   font-size: .78em;

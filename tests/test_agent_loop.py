@@ -508,7 +508,9 @@ async def test_loop_continuation_on_length_truncation():
     ])
     ex = _executor(provider)
     chunks = await _collect(ex, _ctx())
-    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "后半段"
+    # Downstream consumers receive final, not the earlier streamed deltas.
+    # Losing the prefix breaks structured deliverables such as review JSON.
+    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "前半段后半段"
 
 
 @pytest.mark.parametrize("finish_reason", ["length", "max_tokens", "model_context_window_exceeded"])
@@ -535,7 +537,7 @@ async def test_loop_max_tokens_message_rejects_tool_execution(finish_reason):
     chunks = await _collect(_executor(provider, reg), ctx)
 
     assert calls == []  # 截断消息的工具未执行
-    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "后半段"
+    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "先写一点后半段"
     truncated = next(m for m in ctx.messages if m.role == "assistant")
     assert truncated.content == "先写一点"
     assert truncated.tool_calls == []  # 写入历史的截断消息不含工具调用

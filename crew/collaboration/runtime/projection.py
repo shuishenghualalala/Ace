@@ -10,6 +10,7 @@ def project_tasks(executions: list[dict], legacy: list[dict]) -> list[dict]:
     for task in executions:
         for u in task['units']:
             attempts = [a for a in task['attempts'] if a['unit_id'] == u['id']]
+            latest = attempts[-1] if attempts else {}
             progress = {'source': 'team_plan', 'plan_node_id': u['id'], 'turn_session_id': task['session_id'],
                         'turn_title': task['goal'], 'assignee': u['assignee'], 'full_title': u['title'],
                         'parent_node_ids': u['depends_on'], 'depends_on': u['depends_on'],
@@ -20,5 +21,6 @@ def project_tasks(executions: list[dict], legacy: list[dict]) -> list[dict]:
             result.append({'id': u['id'], 'task_id': u['id'], 'session_id': task['session_id'], 'kind': 'team',
                            'title': u['title'], 'assignee': u['assignee'], 'status': statuses[u['state']],
                            'result': (u['result'] or {}).get('text', ''), 'error': u['error'], 'progress': progress,
+                           'started_at': latest.get('started_at', 0), 'finished_at': latest.get('ended_at') or 0,
                            'created_at': task['created_at'], 'updated_at': task['updated_at']})
     return result

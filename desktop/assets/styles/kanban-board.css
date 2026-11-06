@@ -1721,6 +1721,12 @@ body.inspector-open .task-board-toggle {
   overflow-wrap: anywhere;
 }
 
+.team-collaboration-board .flow-node__result {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .team-collaboration-board .flow-node__brief-list li::marker {
   color: var(--mw-status-success);
   font-size: 0.78em;

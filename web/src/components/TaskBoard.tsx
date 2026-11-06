@@ -5,6 +5,7 @@ import { openLocalPath } from "../lib/localPath";
 import { compactTaskSummary, compactTaskSummaryItems, compactTaskText, plainTaskText } from "../lib/taskSummary";
 import type { Mode, RuntimeConcurrency, Session, Task, TeamMemberView, UiMessage } from "../types";
 import AgentAvatarLogo from "./AgentAvatarLogo";
+import CollaborationResult from "./CollaborationResult";
 
 const CREW_BUILTIN_AGENT_ID = "crew::builtin";
 
@@ -620,7 +621,6 @@ function readableSummaryItems(task: Task): string[] {
       }),
       ...(progressText(task, 'assignment_reason') ? [`分配依据：${progressText(task, 'assignment_reason')}`] : []),
       ...(task.error ? [String(task.error)] : []),
-      ...(task.result ? [String(task.result)] : []),
     ];
   }
 
@@ -1176,6 +1176,10 @@ export default function TaskBoard({
                                         ))}
                                       </ul>
                                     </section>
+
+                                    {progressText(node.raw, "collaboration_task_id") && node.raw.result && (
+                                      <CollaborationResult text={String(node.raw.result)} completed={node.status === "completed"} />
+                                    )}
 
                                     {paths.length > 0 && (
                                       <section className="flow-node__artifacts" aria-label="节点产物">

@@ -190,6 +190,10 @@ def test_projection_uses_journal_not_stale_kanban(store):
     assert len(result) == 3
     assert result[0]['status'] == 'failed'
     assert result[0]['progress']['execution_attempts'][0]['error'] == 'model unavailable'
+    attempt = store.get('owner', 'task')['attempts'][0]
+    assert result[0]['started_at'] == attempt['started_at']
+    assert result[0]['finished_at'] == attempt['ended_at']
+    assert result[1]['started_at'] == 0  # no fabricated duration for unstarted work
 
 
 @pytest.mark.asyncio

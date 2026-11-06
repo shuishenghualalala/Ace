@@ -643,3 +643,22 @@ it('内置小队从后端快照显示真实成员，不伪装外援', async () =
   expect(html).toContain('来源核对');
   expect(html).not.toContain('Hermes');
 });
+
+it('持久化成果完整渲染表格与文末内容，不执行模型 HTML', async () => {
+  const result = '# 完整报告\n\n|项目|结论|\n|---|---|\n|A|待核实|\n\n'
+    + '长文内容。'.repeat(500) + '\n\n末尾的第三个追问\n\n<script>alert(1)</script>';
+  vi.mocked(backendApi.tasks).mockResolvedValue([{
+    ...tasks[1], status: 'completed', result, progress: {
+      ...tasks[1].progress, collaboration_task_id: 'durable-task', execution_state: 'completed',
+    },
+  }]);
+  await refreshTeamCollaborationBoard(SESSION_ID);
+  document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+  activateTeamCollaborationBoard(SESSION_ID);
+  document.querySelector<HTMLButtonElement>('[data-team-node="build"]')?.click();
+  document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+  const full = document.querySelector('[aria-label="完整协作成果"]')!;
+  expect(full.querySelector('table')).not.toBeNull();
+  expect(full.textContent).toContain('末尾的第三个追问');
+  expect(full.querySelector('script')).toBeNull();
+});
