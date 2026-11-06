@@ -365,7 +365,7 @@ describe('协作看板 HTML', () => {
 
     expect(html).toContain('还没有流程节点');
     expect(html).toContain('pixel-empty');
-    expect(html).toContain('暂无运行或排队会话');
+    expect(html).toContain('请求队列为空；恢复任务请以上方执行日志为准');
   });
 });
 
@@ -608,4 +608,38 @@ describe('team-collaboration-board 安装事务回滚（单 Feature 事务）', 
       restoreWarn2();
     }
   });
+});
+
+it('持久化节点展示真实尝试和原成员重试，不提供旧改派入口', async () => {
+  vi.mocked(backendApi.tasks).mockResolvedValue([{
+    ...tasks[1], status: 'failed', progress: {
+      ...tasks[1].progress, collaboration_task_id: 'durable-task', execution_state: 'failed',
+      execution_task_state: 'failed', assignment_reason: '用户指定',
+      execution_attempts: [{ attempt_id: 'attempt-1', state: 'failed', actual_executor: 'agent-frontend' }],
+    },
+  }]);
+  await refreshTeamCollaborationBoard(SESSION_ID);
+  document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+  activateTeamCollaborationBoard(SESSION_ID);
+  document.querySelector<HTMLButtonElement>('[data-team-node="build"]')?.click();
+  const html = buildTeamCollaborationBoardHtml(SESSION_ID);
+  expect(html).toContain('原成员重试');
+  expect(html).toContain('data-collab-task="durable-task"');
+  expect(html).toContain('attempt-1');
+  expect(html).not.toContain('data-team-recover-action');
+});
+
+it('内置小队从后端快照显示真实成员，不伪装外援', async () => {
+  vi.mocked(backendApi.getSessionAgentConfig).mockResolvedValue({ executor: 'team', team: {} });
+  vi.spyOn(backendApi, 'collaborationExecutions').mockResolvedValue({ executions: [{ team_snapshot: {
+    name: '真实内置小队', leader_id: 'leader', members: [
+      { member_id: 'leader', name: 'Leader', responsibility: '来源核对' },
+      { member_id: 'tech', name: '技术审阅员', responsibility: '技术证据' },
+    ],
+  } }] });
+  await refreshTeamCollaborationBoard(SESSION_ID);
+  const html = buildTeamCollaborationBoardHtml(SESSION_ID);
+  expect(html).toContain('技术审阅员');
+  expect(html).toContain('来源核对');
+  expect(html).not.toContain('Hermes');
 });

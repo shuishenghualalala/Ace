@@ -55,7 +55,8 @@ def validate_review(report: dict, sources: dict[str, str]) -> list[str]:
             continue
         for row in rows:
             for field in ('claim', 'analysis', 'uncertainty'):
-                if not isinstance(row.get(field), str) or not row[field].strip():
+                if (not isinstance(row.get(field), str) or len(row[field].strip()) < 8 or
+                        row[field].strip() in {'材料记载', '分析判断', '具体待确认问题', '具体待确认'}):
                     errors.append(f"{card['id']} 缺少 {field}")
             if row.get('strength') not in ('强', '中', '弱', '未提供'):
                 errors.append('证据强弱无效')
@@ -112,4 +113,5 @@ def review_output_instruction() -> str:
                   'analysis': '分析判断', 'uncertainty': '具体待确认', 'strength': '弱'} for d in DIMENSIONS]}],
               'questions': ['关键追问1', '关键追问2', '关键追问3']}
     return ('最终交付只输出 JSON，projects 必须恰好包含 A、B、C 三个项目，每个恰好四维；'
-            '引用实际提供的来源文件名、小节与连续逐字原文。不要输出模板占位词。\n' + json.dumps(schema, ensure_ascii=False))
+            '引用实际提供的来源文件名、小节与连续逐字原文。claim/analysis/uncertainty 必须各有具体内容至少8字，'
+            'claim 要概括材料的具体主张，不能只写“材料记载”。不要输出模板占位词。\n' + json.dumps(schema, ensure_ascii=False))

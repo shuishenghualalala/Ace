@@ -1276,11 +1276,20 @@ export const sessionApi = {
     }),
 
   tasks: (sessionId: string) => getJSON<Task[]>(`/api/tasks?session_id=${encodeURIComponent(sessionId)}`),
+  collaborationExecutions: (sessionId: string) =>
+    getJSON<{ executions: { team_snapshot: { name: string; leader_id: string; members: {
+      member_id: string; name: string; responsibility: string;
+    }[] } }[] }>(`/api/collaboration/sessions/${encodeURIComponent(sessionId)}/executions`),
   cancelTask: (taskId: string, reason = '用户取消') =>
     getJSON<Task>(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
       method: 'POST',
       body: JSON.stringify({ reason }),
       headers: { 'Content-Type': 'application/json' },
+    }),
+  controlCollaboration: (taskId: string, action: string, unitId = '', confirmUnknown = false) =>
+    getJSON<{ ok: boolean; error?: string }>(`/api/collaboration/executions/${encodeURIComponent(taskId)}/control`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, unit_id: unitId, confirm_unknown: confirmUnknown }),
     }),
   recoverTeamNode: (
     sessionId: string,

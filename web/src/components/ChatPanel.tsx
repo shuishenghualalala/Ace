@@ -30,6 +30,8 @@ export interface Props {
   currentAgentLabel?: Session["agent_label"];
   isTeamSession?: boolean;
   teamExecutionTier?: TeamExecutionTier;
+  externalWikiReadKbId?: string;
+  onExternalWikiReadKbChange?: (kbId: string) => void;
   onTeamExecutionTierChange?: (tier: TeamExecutionTier) => void;
   teamMembers?: TeamMemberView[];
   compactTools?: boolean;
@@ -86,6 +88,8 @@ export default function ChatPanel({
   currentAgentLabel,
   isTeamSession,
   teamExecutionTier,
+  externalWikiReadKbId,
+  onExternalWikiReadKbChange,
   onTeamExecutionTierChange,
   teamMembers,
   compactTools,
@@ -112,6 +116,17 @@ export default function ChatPanel({
   onWikiLink,
 }: Props) {
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [reviewKbs, setReviewKbs] = useState<{ id: string; name: string }[]>([]);
+  const [kbError, setKbError] = useState("");
+  useEffect(() => {
+    let active = true;
+    if (isTeamSession) {
+      api.wikiKBs().then((result) => {
+        if (active) { setReviewKbs(result.kbs); setKbError(""); }
+      }).catch(() => { if (active) setKbError("知识库列表读取失败；请检查服务后重新打开会话"); });
+    }
+    return () => { active = false; };
+  }, [isTeamSession, sessionId]);
   const isEmpty = messages.length === 0 && !busy && !followupQuestion && !isTeamSession;
   // 场景化推荐：预填文本 + nonce（触发注入）+ 当前激活的场景 chip
   const [prefillText, setPrefillText] = useState("");
@@ -126,6 +141,17 @@ export default function ChatPanel({
 
   return (
     <div className="chat-panel">
+      {isTeamSession && onExternalWikiReadKbChange && (
+        <label title="选择即授权本轮团队只读所选知识库来源快照">
+          团队只读资料：
+          <select aria-label="团队只读知识库" disabled={busy} value={externalWikiReadKbId || ""}
+            onChange={(event) => onExternalWikiReadKbChange(event.target.value)}>
+            <option value="">不读取知识库</option>
+            {reviewKbs.map((kb) => <option key={kb.id} value={kb.id}>{kb.name}</option>)}
+          </select>
+          {kbError && <span role="alert">{kbError}</span>}
+        </label>
+      )}
       {isEmpty ? (
         <div className="welcome">
           {/* Mascot */}

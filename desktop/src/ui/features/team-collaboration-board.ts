@@ -407,6 +407,10 @@ function summaryItems(task: Task): string[] {
     return [
       `执行状态：${progressText(task, 'execution_state') || 'pending'} · ${attempts.length} 次尝试`,
       `实际执行者：${String(last?.actual_executor || '尚未回传')}；完成输出仍需人工复核`,
+      ...attempts.map((item) => {
+        const attempt = item as Record<string, unknown>;
+        return `尝试 ${String(attempt.attempt_id)}：${String(attempt.state)} · 计划 ${String(attempt.planned_member || task.assignee)} · 实际 ${String(attempt.actual_executor || '未回传')}${attempt.error ? ` · ${String(attempt.error)}` : ''}`;
+      }),
       ...(progressText(task, 'assignment_reason') ? [`分配依据：${progressText(task, 'assignment_reason')}`] : []),
       ...(task.error ? [String(task.error)] : []),
       ...(task.result ? [String(task.result)] : []),
@@ -773,7 +777,16 @@ function inferredMembers(nodes: TeamFlowNode[]): TeamBoardMember[] {
 async function loadConfiguredTeam(sessionId: string): Promise<{ name: string; members: TeamBoardMember[] }> {
   const config = await backendApi.getSessionAgentConfig(sessionId).catch(() => null);
   const teamId = String(config?.team?.external_team_id || state.activeExternalTeamIdBySession[sessionId] || '').trim();
-  if (!teamId) return { name: '', members: [] };
+  if (!teamId) {
+    if (config?.executor !== 'team') return { name: '', members: [] };
+    const journal = await backendApi.collaborationExecutions(sessionId).catch(() => null);
+    const snapshot = journal?.executions.at(-1)?.team_snapshot;
+    return { name: snapshot?.name || '内置协作小队',
+      members: (snapshot?.members || []).map((member, index) => ({
+        agentId: member.member_id, name: member.name, role: member.responsibility,
+        isLeader: member.member_id === snapshot?.leader_id, tone: index % 6,
+      })) };
+  }
   const [teams, agents, modelBinding] = await Promise.all([
     backendApi.externalTeams().catch(() => []),
     backendApi.externalAgents().catch(() => []),
@@ -919,6 +932,19 @@ function renderFiles(sessionId: string, files: SessionFileItem[]): string {
   </section>`;
 }
 
+function collaborationControls(node: TeamFlowNode): string {
+  const task = progressText(node.raw, 'collaboration_task_id');
+  const unit = planNodeId(node);
+  const status = progressText(node.raw, 'execution_state');
+  const taskStatus = progressText(node.raw, 'execution_task_state');
+  const button = (action: string, label: string) => `<button class="mini-cancel" type="button" data-collab-task="${htmlAttr(task)}" data-collab-unit="${htmlAttr(unit)}" data-collab-action="${action}">${label}</button>`;
+  const controls = taskStatus === 'paused' ? button('resume', '恢复任务')
+    : taskStatus === 'running' ? button('pause', '暂停后续工作') + button('cancel', '取消任务') + (status === 'running' ? button('reconcile', '核对中断状态') : '')
+    : status === 'failed' ? button('retry', '原成员重试')
+    : status === 'unknown' ? button('retry_unknown', '核实后重试') : '';
+  return `<div class="flow-node__actions"><span>${status === 'unknown' ? '外部结果待核实，禁止自动重派' : '成果待人工复核'}</span>${controls}</div>`;
+}
+
 function renderNode(
   sessionId: string,
   node: TeamFlowNode,
@@ -957,7 +983,7 @@ function renderNode(
   const recoveryNodeId = planNodeId(node);
   const leaderReview = node.owner.toLowerCase() === 'leader' && (recoveryNodeId === 'leader_review' || recoveryNodeId.startsWith('leader_review_'));
   const collab = progressText(node.raw, 'collaboration_task_id');
-  const recoveryActions = collab ? `<div class="flow-node__actions"><span>执行记录已持久化；${progressText(node.raw, 'execution_state') === 'unknown' ? '外部结果待核实，禁止自动重派' : '成果待人工复核'}</span></div>` : node.status === 'blocked'
+  const recoveryActions = collab ? collaborationControls(node) : node.status === 'blocked'
     ? `<div class="flow-node__actions flow-node__recovery-actions" data-team-recover-workflow="${htmlAttr(progressText(node.raw, 'workflow_id'))}"><span>阻塞节点处理</span>${node.raw.progress?.can_confirm_original === true ? `<button class="mini-cancel" type="button" data-team-recover-action="confirm_attempt" data-team-recover-node="${htmlAttr(recoveryNodeId)}">确认原成员尝试</button>` : ''}${leaderReview ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(recoveryNodeId)}" data-team-recover-assignee="leader">重试审阅</button>` : previousAssignee ? `<button class="mini-cancel" type="button" data-team-recover-action="retry" data-team-recover-node="${htmlAttr(recoveryNodeId)}" data-team-recover-assignee="${htmlAttr(previousAssignee)}">重试原成员</button>` : ''}${!leaderReview && recoveryMembers.length ? `<select class="mini-recovery-select" data-team-recovery-assignee="${htmlAttr(recoveryNodeId)}" aria-label="选择恢复成员">${recoveryMembers.map((member) => `<option value="${htmlAttr(member.name)}">${escapeHtml(member.name)}</option>`).join('')}</select><button class="mini-cancel" type="button" data-team-recover-action="reassign" data-team-recover-node="${htmlAttr(recoveryNodeId)}">重新分配</button>` : ''}${!leaderReview ? `<button class="mini-cancel" type="button" data-team-recover-action="abandon" data-team-recover-node="${htmlAttr(recoveryNodeId)}">放弃节点</button>` : ''}</div>`
     : '';
   return `<article class="flow-node is-${node.status}"><div class="flow-node__card">
@@ -981,7 +1007,7 @@ function renderRuntime(sessionId: string, runtime: RuntimeSnapshot | null, dagIn
     : children && typeof children === 'object'
       ? Object.values(children).reduce((count, items) => count + (Array.isArray(items) ? items.length : 0), 0)
       : 0;
-  return `<section class="runtime-box"><div class="runtime-box__head"><span>运行态</span><span>${runtime ? `${runtime.global_active}/${runtime.max_active_runs || '∞'}` : '—'}</span></div><div class="runtime-box__current"><span title="${htmlAttr(sessionId)}">${escapeHtml(sessionId)}</span><em title="${htmlAttr(dagInfo?.detail || '等待 DAG')}">${dagInfo ? `${escapeHtml(dagInfo.label)} · ${escapeHtml(dagInfo.detail)}` : '等待 DAG'}</em></div><div class="runtime-box__grid"><div><span>全局排队</span><b>${runtime?.global_queued ?? 0}</b></div><div><span>活跃子任务</span><b>${activeChildCount}</b></div></div>${sessions.length ? `<div class="runtime-box__sessions">${sessions.slice(0, 4).map((item) => `<div class="runtime-session"><span title="${htmlAttr(item.session_id)}">${escapeHtml(item.session_id || '')}</span><em>${escapeHtml(item.live || 'idle')}${item.queue_depth ? ` · q${item.queue_depth}` : ''}</em></div>`).join('')}</div>` : '<div class="runtime-box__empty">暂无运行或排队会话</div>'}</section>`;
+  return `<section class="runtime-box"><div class="runtime-box__head"><span>运行态</span><span>${runtime ? `${runtime.global_active}/${runtime.max_active_runs || '∞'}` : '—'}</span></div><div class="runtime-box__current"><span title="${htmlAttr(sessionId)}">${escapeHtml(sessionId)}</span><em title="${htmlAttr(dagInfo?.detail || '等待 DAG')}">${dagInfo ? `${escapeHtml(dagInfo.label)} · ${escapeHtml(dagInfo.detail)}` : '等待 DAG'}</em></div><div class="runtime-box__grid"><div><span>全局排队</span><b>${runtime?.global_queued ?? 0}</b></div><div><span>活跃子任务</span><b>${activeChildCount}</b></div></div>${sessions.length ? `<div class="runtime-box__sessions">${sessions.slice(0, 4).map((item) => `<div class="runtime-session"><span title="${htmlAttr(item.session_id)}">${escapeHtml(item.session_id || '')}</span><em>${escapeHtml(item.live || 'idle')}${item.queue_depth ? ` · q${item.queue_depth}` : ''}</em></div>`).join('')}</div>` : '<div class="runtime-box__empty">请求队列为空；恢复任务请以上方执行日志为准</div>'}</section>`;
 }
 
 export function buildTeamCollaborationBoardHtml(sessionId: string | null | undefined = state.activeSessionId): string {
@@ -1011,9 +1037,10 @@ export function buildTeamCollaborationBoardHtml(sessionId: string | null | undef
 
   const completed = currentNodes.filter((node) => node.status === 'completed').length;
   const runningNode = currentNodes.find((node) => node.status === 'running');
-  const rawProgress = currentNodes.length ? Math.min(100, Math.round(((completed + (runningNode ? 0.35 : 0)) / currentNodes.length) * 100)) : 0;
+  const authoritative = currentNodes.some((node) => Boolean(progressText(node.raw, 'collaboration_task_id')));
+  const rawProgress = currentNodes.length ? Math.min(100, Math.round(((completed + (!authoritative && runningNode ? 0.35 : 0)) / currentNodes.length) * 100)) : 0;
   const previousProgress = stableProgress.get(sessionId);
-  const progress = previousProgress?.turnId === currentTurnId
+  const progress = !authoritative && previousProgress?.turnId === currentTurnId
     ? {
         turnId: currentTurnId,
         completed: Math.max(previousProgress.completed, completed),
@@ -1144,6 +1171,18 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
         button.disabled = false;
         notify(`取消节点失败：${error instanceof Error ? error.message : String(error)}`);
       });
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-collab-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const action = button.dataset.collabAction || '';
+      const unknown = action === 'retry_unknown';
+      if (unknown && !window.confirm('外部调用结果未知。你是否已检查实际执行记录及副作用，并确认允许再次执行？')) return;
+      button.disabled = true;
+      void backendApi.controlCollaboration(button.dataset.collabTask || '', unknown ? 'retry' : action,
+        button.dataset.collabUnit || '', unknown)
+        .then(() => refreshTeamCollaborationBoard(sessionId))
+        .catch((error) => { button.disabled = false; notify(`操作失败：${String(error)}`); });
     });
   });
   document.querySelectorAll<HTMLButtonElement>('[data-team-recover-action]').forEach((button) => {

@@ -41,6 +41,7 @@ export interface ComposerModelOption {
 }
 
 const bindingsBySession = new Map<string, SessionModelBinding>();
+const configuredTeamSessions = new Set<string>();
 
 /** 从全局 config 解析模型展示名。 */
 export function modelLabelForId(modelId: string | null | undefined): string {
@@ -212,7 +213,12 @@ export function mergeSessionModelsFromBackend(
 
 export async function loadSessionModel(sessionId: string): Promise<SessionModelBinding | null> {
   try {
-    const binding = await backendApi.getSessionModel(sessionId);
+    const [binding, agentConfig] = await Promise.all([
+      backendApi.getSessionModel(sessionId),
+      backendApi.getSessionAgentConfig(sessionId).catch(() => null),
+    ]);
+    if (agentConfig?.executor === 'team') configuredTeamSessions.add(sessionId);
+    else configuredTeamSessions.delete(sessionId);
     if (binding.source === 'external' && isDraftSession(sessionId) && binding.model_profile_id) {
       setDraftSessionModelId(binding.model_profile_id);
     }
@@ -294,6 +300,7 @@ export function isExternalTeamSession(sessionId: string | null | undefined = sta
   const display = getSessionAgentDisplay(sessionId);
   const binding = bindingsBySession.get(sessionId);
   return isBoundExternalTeamSession(display?.agentBinding)
+    || configuredTeamSessions.has(sessionId)
     || binding?.source === 'team'
     || Boolean(state.activeExternalTeamIdBySession[sessionId]);
 }
@@ -432,4 +439,5 @@ export function reconcileSessionModelsAfterDelete(
 /** 测试钩子：清空会话模型绑定缓存（bindingsBySession 为模块私有，store 重置不动它）。 */
 export function __resetSessionModelBindingsForTest(): void {
   bindingsBySession.clear();
+  configuredTeamSessions.clear();
 }

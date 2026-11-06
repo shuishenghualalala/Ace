@@ -53,13 +53,24 @@ class TeamExecutionAdapter:
         instruction = package_instruction(package)
         review_contract = any(isinstance(r, dict) and r.get('kind') == 'output_contract'
                               and r.get('id') == 'project_review_v1' for r in package.get('inputs', []))
+        if review_contract:
+            instruction += (
+                '\n本轮是只读证据审阅：直接在回复正文交付完整来源索引或审阅意见；'
+                '不能仅返回完成声明、文件路径或产物登记号，不写文件、不调用工具、不发送 team_mention。'
+                '来源 sha256 是应用对整个 content 字段 UTF-8 字节计算的快照标识，不是对内嵌原始内容摘录计算；'
+                '不手工重录内容计算哈希，不虚构哈希比对异常。非最终综合的正文不超过1200字。')
         is_final = not any(e.parent_id == node.node_id for e in self.plan.edges)
         validate_evidence = review_contract and is_final
         if validate_evidence:
             from crew.collaboration.review import review_output_instruction
             instruction += '\n' + review_output_instruction()
         agent = self.team.leader if node.assignee == 'leader' else self.team.teammates.get(node.assignee)
-        available = set(getattr(agent, 'tool_filter', None) or [])
+        tool_filter = getattr(agent, 'tool_filter', None)
+        registry = getattr(agent, 'registry', None)
+        available = set(tool_filter if tool_filter is not None else
+                        registry.names() if registry is not None else [])
+        if review_contract:
+            available = set()  # this opt-in review executes against supplied snapshots only
         missing = set(package.get('required_tools', [])) - available
         if missing:
             raise ValueError('执行器未确认可用的必需工具：' + '、'.join(sorted(missing)))
@@ -78,6 +89,8 @@ class TeamExecutionAdapter:
                 params={**{k: v for k, v in env.params.items() if k != 'query'}, 'task_session_id': env.session_id, 'team_session_id': env.session_id,
                         'team_plan_node_id': node.node_id, 'agent_id': 'leader',
                         'collaboration_attempt_id': package['attempt_id'], 'team_node_detail': instruction})
+            if review_contract:
+                leader_env.params['collaboration_readonly'] = True
             text = ''
             async for chunk in self.team.leader.run(leader_env):
                 if chunk.kind == 'error':
@@ -99,6 +112,8 @@ class TeamExecutionAdapter:
                     'collaboration_attempt_id': package['attempt_id'],
                     'team_upstream_summary': json.dumps(package['upstream'], ensure_ascii=False),
                     'external_wiki_read_kb_id': env.params.get('external_wiki_read_kb_id', '')}
+            if review_contract:
+                meta['collaboration_readonly'] = True
             if cwd:
                 meta['cwd'] = cwd
             def relay(member: str, chunk: ResponseChunk) -> None:

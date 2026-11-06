@@ -29,6 +29,10 @@ def workflow_from_preview(preview: dict[str, Any], *, team_id: str, session_id: 
     unit_ids = {item.get("unit_id") for item in units}
     if len(by_unit) != len(assignments) or len(unit_ids) != len(units) or set(by_unit) != unit_ids:
         raise PlanningError("工作单元与负责人不一致")
+    if any(isinstance(ref, dict) and ref.get("kind") == "output_contract"
+           and ref.get("id") == "project_review_v1" for ref in task.get("inputs", [])):
+        from crew.collaboration.review import validate_review_plan
+        validate_review_plan(units, assignments=assignments, leader_id=team.get("leader_id", ""))
     nodes = []
     edges = []
     for unit in units:

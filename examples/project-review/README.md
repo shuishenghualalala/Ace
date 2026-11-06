@@ -14,3 +14,30 @@
 
 自动检查只核对结构、来源名称/小节/逐字引文、维度覆盖及虚构声明。
 不能证明所有推理正确；必须人工审阅。不存在来源就拒绝输出成功，不生成示范答案填空。
+
+## 桌面全链路（推荐作为功能验收）
+
+1. `uv sync --extra dev` 安装后端。以 `config/config.yaml.example` 为基础配置真实模型；
+   凭据使用环境变量。把本目录 `team-config.yaml` 的小队设置合并到本机配置。
+2. 在 `desktop` 目录执行 `pnpm install`，安装 Electron 后执行 `pnpm dev`。
+   启动器会移除 IDE 可能继承的 `ELECTRON_RUN_AS_NODE`，不会把 Electron 当 Node CLI 启动。
+3. 在仓库根执行：
+   ```
+   uv run python scripts/run_project_review_gateway.py --output /absolute/path/to/acceptance
+   ```
+   默认连接本机开发网关 `http://127.0.0.1:28180`；其他端口使用 `--base-url`。
+   需要鉴权时从 `REVIEW_GATEWAY_TOKEN` 环境变量读取，不把 token 写入文件。
+4. 脚本通过正式 HTTP API 创建独立知识库、导入 13 份材料、绑定内置小队，然后通过 WebSocket
+   启用评审契约发送任务。它不是伪造 UI，也不直写产品数据库。运行会消耗真实模型额度。
+5. 桌面刷新会话列表，打开“三项目预审｜真实 Kimi 协作”，打开看板 → 协作。
+   核对四节点、并行审阅、每个真实 attempt、最终意见和待人工复核提示。
+
+脚本保存 sources.json、events.jsonl、executions.json、run.json 和 final.md。
+只有全部节点 completed 才返回成功；模型失败、等待用户或校验失败都保留原始证据并非零退出。
+即使成功，也需要人工核对引文含义、证据强度与遗漏项。
+
+首次运行的知识库首页摘要编译可能慢于 Source 入库。Source 已解析不等于首页摘要编译成功；
+本轮依据已解析的原始 Source 快照进行评审，不以摘要编译代替原始材料。
+
+普通聊天不自动启用这个固定三项目契约；继续提出澄清问题时可走普通团队消息。
+恢复 API 和边界见 `docs/collaboration-runtime.md`。

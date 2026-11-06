@@ -121,7 +121,7 @@ function resolveMemberMentions(text: string, teamMembers: TeamMemberView[] = [])
   for (const member of teamMembers) {
     const id = String(member.agentId || "").trim();
     const name = String(member.name || "").trim();
-    if (id && name && id !== name) resolved = resolved.replaceAll(`@${id}`, () => `@${name}`);
+    if (id && name && id !== name) resolved = resolved.split(`@${id}`).join(`@${name}`);
   }
   return resolved;
 }

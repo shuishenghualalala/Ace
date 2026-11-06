@@ -455,8 +455,7 @@ export default function App() {
       teamExecutionTier,
       externalWikiReadKbId: effectiveMode === "team"
         && wikiGrant?.teamId === sessionExternalTeams[currentSessionId]
-        && wikiGrant.kbId === wikiKbId
-        ? wikiKbId
+        ? wikiGrant.kbId
         : undefined,
       userMentions: effectiveMode === "team" ? userMentions : undefined,
     });
@@ -761,11 +760,10 @@ export default function App() {
               currentAgentLabel={currentAgentLabel}
               isTeamSession={isCurrentTeamSession}
               teamExecutionTier={sessionTeamTiers[currentSessionId] ?? "auto"}
-              wikiKbId={wikiKbId}
               externalWikiReadKbId={(() => {
                 const grant = sessionTeamWikiReadGrants[currentSessionId];
-                return grant?.teamId === sessionExternalTeams[currentSessionId] && grant.kbId === wikiKbId
-                  ? wikiKbId
+                return grant?.teamId === sessionExternalTeams[currentSessionId]
+                  ? grant.kbId
                   : undefined;
               })()}
               onExternalWikiReadKbChange={(kbId) => {

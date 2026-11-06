@@ -684,7 +684,7 @@ class SingleAgent(Agent):
             if user_reminder:
                 view_messages = [Message.system_reminder(user_reminder), *view_messages]
 
-            effective_tool_filter = self._effective_tool_filter(
+            effective_tool_filter = [] if envelope.params.get("collaboration_readonly") is True else self._effective_tool_filter(
                 session_id, owner_account_id=owner
             )
             tool_schemas = self.registry.list_schemas(effective_tool_filter)
@@ -913,7 +913,8 @@ class SingleAgent(Agent):
         # 3. 上下文压缩：仅作用于「发给 LLM 的视图」llm_messages，
         #    不破坏 history（旧的详细历史仍完整持久化）。
         #    工具 schema 提前解析：摘要调用的 KV 前缀复用需要复放 tools 块。
-        effective_tool_filter = self._effective_tool_filter(task_sid, owner_account_id=owner)
+        effective_tool_filter = ([] if envelope.params.get("collaboration_readonly") is True
+                                 else self._effective_tool_filter(task_sid, owner_account_id=owner))
         tool_schemas = self.registry.list_schemas(effective_tool_filter)
         llm_messages = list(history)  # 拷贝，避免 executor 追加时污染 canonical
         if self.compactor is not None:

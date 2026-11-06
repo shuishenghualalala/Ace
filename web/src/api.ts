@@ -302,6 +302,11 @@ export const api = {
       method: "POST",
       ...jsonBody({ reason }),
     }),
+  controlCollaboration: (taskId: string, action: string, unitId = '', confirmUnknown = false) =>
+    getJSON<{ ok: boolean; error?: string }>(`/api/collaboration/executions/${encodeURIComponent(taskId)}/control`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, unit_id: unitId, confirm_unknown: confirmUnknown }),
+    }),
   recoverTeamNode: (
     sessionId: string,
     nodeId: string,

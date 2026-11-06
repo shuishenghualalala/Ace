@@ -614,6 +614,10 @@ function readableSummaryItems(task: Task): string[] {
     return [
       `执行状态：${progressText(task, 'execution_state') || 'pending'} · ${attempts.length} 次尝试`,
       `实际执行者：${String(last?.actual_executor || '尚未回传')}；完成输出仍需人工复核`,
+      ...attempts.map((item) => {
+        const attempt = item as Record<string, unknown>;
+        return `尝试 ${String(attempt.attempt_id)}：${String(attempt.state)} · 计划 ${String(attempt.planned_member || task.assignee)} · 实际 ${String(attempt.actual_executor || '未回传')}${attempt.error ? ` · ${String(attempt.error)}` : ''}`;
+      }),
       ...(progressText(task, 'assignment_reason') ? [`分配依据：${progressText(task, 'assignment_reason')}`] : []),
       ...(task.error ? [String(task.error)] : []),
       ...(task.result ? [String(task.result)] : []),
@@ -732,6 +736,18 @@ export default function TaskBoard({
   onCancel,
   onRecover,
 }: Props) {
+  const [controlError, setControlError] = useState('');
+  const [controlBusy, setControlBusy] = useState(false);
+  async function controlNode(node: FlowNode, action: string) {
+    const unknown = action === 'retry_unknown';
+    if (unknown && !window.confirm('请确认已核实外部调用及副作用，允许再次执行。')) return;
+    setControlBusy(true); setControlError('');
+    try {
+      await api.controlCollaboration(progressText(node.raw, 'collaboration_task_id'),
+        unknown ? 'retry' : action, String(node.raw.progress?.plan_node_id || node.id), unknown);
+    } catch (error) { setControlError(String(error)); }
+    finally { setControlBusy(false); }
+  }
   const [runtime, setRuntime] = useState<RuntimeConcurrency | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(new Set());
@@ -873,7 +889,8 @@ export default function TaskBoard({
   const completedCount = currentTurnNodes.filter((node) => node.status === "completed").length;
   const runningNode = currentTurnNodes.find((node) => node.status === "running");
   const errorNodes = currentTurnNodes.filter((node) => String(node.raw.error || "").trim());
-  const progressUnits = completedCount + (runningNode ? 0.35 : 0);
+  const authoritative = currentTurnNodes.some((node) => Boolean(progressText(node.raw, 'collaboration_task_id')));
+  const progressUnits = completedCount + (!authoritative && runningNode ? 0.35 : 0);
   const rawProgress = currentTurnNodes.length ? Math.min(100, Math.round((progressUnits / currentTurnNodes.length) * 100)) : 0;
   const toggleTurn = (turnId: string) => {
     setExpandedTurns((prev) => {
@@ -890,7 +907,7 @@ export default function TaskBoard({
     }
     const turnId = currentTurn?.id || "";
     setStableProgress((prev) => {
-      if (prev.sessionId !== sessionId || prev.turnId !== turnId) {
+      if (authoritative || prev.sessionId !== sessionId || prev.turnId !== turnId) {
         return { sessionId, turnId, completed: completedCount, total: currentTurnNodes.length, percent: rawProgress };
       }
       if (currentTurnNodes.length === 0) return prev;
@@ -902,8 +919,8 @@ export default function TaskBoard({
         percent: Math.max(prev.percent, rawProgress),
       };
     });
-  }, [completedCount, currentTurn?.id, currentTurnNodes.length, isTeamMode, rawProgress, sessionId]);
-  const stableProgressMatches = stableProgress.sessionId === sessionId
+  }, [authoritative, completedCount, currentTurn?.id, currentTurnNodes.length, isTeamMode, rawProgress, sessionId]);
+  const stableProgressMatches = !authoritative && stableProgress.sessionId === sessionId
     && stableProgress.turnId === (currentTurn?.id || "");
   const displayCompletedCount = stableProgressMatches ? stableProgress.completed : completedCount;
   const displayTotalCount = stableProgressMatches ? stableProgress.total : currentTurnNodes.length;
@@ -1186,7 +1203,21 @@ export default function TaskBoard({
                                   </>
                                 );
                               })()}
-                              {node.status === "blocked" && (
+                              {progressText(node.raw, "collaboration_task_id") && (
+                                <div className="flow-node__actions">
+                                  <span>成果待人工复核</span>
+                                  {progressText(node.raw, 'execution_task_state') === 'running' && <>
+                                    <button disabled={controlBusy} onClick={() => void controlNode(node, 'pause')}>暂停后续工作</button>
+                                    <button disabled={controlBusy} onClick={() => void controlNode(node, 'cancel')}>取消任务</button>
+                                    {progressText(node.raw, 'execution_state') === 'running' && <button disabled={controlBusy} onClick={() => void controlNode(node, 'reconcile')}>核对中断状态</button>}
+                                  </>}
+                                  {progressText(node.raw, 'execution_task_state') === 'paused' && <button disabled={controlBusy} onClick={() => void controlNode(node, 'resume')}>恢复任务</button>}
+                                  {progressText(node.raw, 'execution_state') === 'failed' && <button disabled={controlBusy} onClick={() => void controlNode(node, 'retry')}>原成员重试</button>}
+                                  {progressText(node.raw, 'execution_state') === 'unknown' && <button disabled={controlBusy} onClick={() => void controlNode(node, 'retry_unknown')}>核实后重试</button>}
+                                  {controlError && <span role="alert">{controlError}</span>}
+                                </div>
+                              )}
+                              {!progressText(node.raw, "collaboration_task_id") && node.status === "blocked" && (
                                 <div className="flow-node__actions flow-node__recovery-actions">
                                   <span>阻塞节点处理</span>
                                   {node.raw.progress?.can_confirm_original === true && (
@@ -1247,7 +1278,7 @@ export default function TaskBoard({
                                   </button>}
                                 </div>
                               )}
-                              {["pending", "running"].includes(node.raw.status) && (
+                              {!progressText(node.raw, "collaboration_task_id") && ["pending", "running"].includes(node.raw.status) && (
                                 <div className="flow-node__actions">
                                   <button className="mini-cancel" onClick={() => void onCancel(node.raw.task_id || node.raw.id)}>
                                     取消节点

@@ -48,6 +48,7 @@ import {
 
 // Inspector 渲染会触发 loadInspectorContext → backendApi.sessionContext；mock 掉避免网络。
 const backendMocks = vi.hoisted(() => ({
+  getSessionAgentConfig: vi.fn(async () => ({ executor: 'builtin' })),
   getSessionModel: vi.fn(),
   setSessionModel: vi.fn(),
   sessionContext: vi.fn(async () => ({ used_tokens: 0, max_tokens: 0, ratio: 0 })),
@@ -83,6 +84,7 @@ beforeEach(() => {
     workspaces: [{ id: 'default', name: '对话', description: '', instructions: '' }],
   });
   backendMocks.getSessionModel.mockReset();
+  backendMocks.getSessionAgentConfig.mockReset().mockResolvedValue({ executor: 'builtin' });
   backendMocks.setSessionModel.mockReset();
   setActiveSessionId('sess-a');
   sessionStore.set({
@@ -93,6 +95,13 @@ beforeEach(() => {
 });
 
 describe('session-model 会话级解析（根因：不再读全局 active_model_id）', () => {
+  it('内置小队无外援ID也可打开协作看板', async () => {
+    backendMocks.getSessionModel.mockResolvedValue({ source: 'crew', model_profile_id: 'session-model-x' });
+    backendMocks.getSessionAgentConfig.mockResolvedValue({ executor: 'team' });
+    await loadSessionModel('sess-a');
+    expect(isExternalTeamSession('sess-a')).toBe(true);
+    expect(isExternalTeamSession('another-session')).toBe(false);
+  });
   it('未绑定会话模型时回退全局 active_model_id', () => {
     expect(resolveSessionModelId()).toBe('global-default');
     expect(resolveSessionModelWindow()).toBe(128000);

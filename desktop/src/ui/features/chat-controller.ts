@@ -1610,7 +1610,7 @@ export async function dispatchWs(
   await ensurePlanModeForSession(sessionId, planActiveForSend);
   // 外源 Team 路由已写入 session_agent_config；WS payload 再带上 id，便于网关直连场景。
   const externalTeamId = state.activeExternalTeamIdBySession[sessionId] || '';
-  const mode = externalTeamId ? 'team' : 'agent';
+  const mode = externalTeamId || isExternalTeamSession(sessionId) ? 'team' : 'agent';
   state.mode = mode;
   if (externalTeamId) {
     await primeTeamCollaborationIdentity(sessionId);
@@ -1651,7 +1651,7 @@ export async function dispatchWs(
     ...(externalTeamId ? { external_team_id: externalTeamId } : {}),
     ...(subScenario ? { sub_scenario: subScenario } : {}),
     ...(wikiExtras ? { wiki_kb_id: wikiExtras.wikiKbId } : {}),
-    ...(externalTeamId && dispatchOptions.externalWikiReadKbId
+    ...(mode === 'team' && dispatchOptions.externalWikiReadKbId
       ? { external_wiki_read_kb_id: dispatchOptions.externalWikiReadKbId }
       : {}),
     ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),

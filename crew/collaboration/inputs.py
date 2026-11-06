@@ -10,12 +10,15 @@ def wiki_source_snapshot(store: Any, owner: str, kb_id: str, *, max_chars: int =
         raise ValueError('知识库读取服务不可用；尚未读取资料')
     if kb_id not in {kb.id for kb in store.list_kbs(owner)}:
         raise ValueError('所选知识库不存在或当前账户无权读取；尚未读取资料')
-    sources, total = [], 0
+    sources, total, titles = [], 0, set()
     for raw in store.list_raws(owner, kb_id):
         if raw.is_duplicate or getattr(raw, 'superseded_by', None):
             continue
         if raw.parse_status != 'parsed':
             raise ValueError(f'知识库来源尚未解析：{raw.title}')
+        if raw.title in titles:
+            raise ValueError(f'知识库来源标题重复，无法无歧义引用：{raw.title}')
+        titles.add(raw.title)
         page = store.get_source_page(raw.id, owner, kb_id)
         if page is None or not page.content.strip():
             raise ValueError(f'知识库来源页面缺失：{raw.title}')

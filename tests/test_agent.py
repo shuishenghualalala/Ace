@@ -354,6 +354,18 @@ async def test_agent_passes_authorization_and_request_params_to_executor():
     assert executor.context.params["query"] == "运行命令"
 
 
+async def test_collaboration_readonly_disables_schema_and_execution_authorization():
+    executor = _CapturingExecutor()
+    agent = _agent(FakeProvider(), executor=executor, tool_filter=["terminal"])
+    envelope = Envelope.of("只读评审", session_id="review-readonly",
+                           params={"collaboration_readonly": True})
+    _ = [chunk async for chunk in agent.run(envelope)]
+    assert executor.context.tool_schemas == []
+    assert executor.context.authorized_tool_names == frozenset()
+    # Per-turn policy must not mutate the reusable agent.
+    assert agent.tool_filter == ["terminal"]
+
+
 async def test_agent_passes_normalized_attachment_context_to_executor(tmp_path):
     executor = _CapturingExecutor()
     agent = _agent(FakeProvider(), executor=executor)
