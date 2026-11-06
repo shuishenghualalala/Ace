@@ -1,7 +1,34 @@
 """Evidence contract for project-review deliverables; no model-generated scores."""
 from __future__ import annotations
 
+import re
+
 DIMENSIONS = ('需求与差异化', 'AI实际帮助', '商业假设与验证', '材料完整与可复核')
+
+
+def validate_review_plan(units: list[dict], *, assignments: list[dict] | None = None,
+                         leader_id: str = '') -> None:
+    """Opt-in scenario contract, not a silent topology repair or generic heuristic."""
+    from crew.collaboration.planning.plan import PlanningError
+    message = ('project_review_v1 要求恰好4个单元：一个来源核对根节点→两个独立并行审阅'
+               '（各自 depends_on 只含来源节点）→一个综合节点（depends_on 必须包含两个审阅节点）。'
+               '不能只在 objective 文字里声称等待而遗漏 depends_on。')
+    id_field = 'unit_id' if assignments is not None else 'key'
+    deps = {u[id_field]: set(u['depends_on']) for u in units}
+    roots = [k for k, v in deps.items() if not v]
+    if len(units) != 4 or len(roots) != 1:
+        raise PlanningError(message)
+    root = roots[0]
+    reviewers = [k for k, v in deps.items() if v == {root}]
+    sinks = [k for k, v in deps.items() if v == set(reviewers) and k not in reviewers]
+    if len(reviewers) != 2 or len(sinks) != 1:
+        raise PlanningError(message)
+    if assignments is not None:
+        members = {a['unit_id']: a['member_id'] for a in assignments}
+        if (members[root] != leader_id or members[sinks[0]] != leader_id or
+                len({members[k] for k in reviewers}) != 2 or
+                any(members[k] == leader_id for k in reviewers)):
+            raise PlanningError('评审契约要求 Leader 做来源核对和综合；两个不同成员独立审阅，不能由 Leader 冒充所有成员')
 
 
 def validate_review(report: dict, sources: dict[str, str]) -> list[str]:
@@ -30,7 +57,7 @@ def validate_review(report: dict, sources: dict[str, str]) -> list[str]:
             for field in ('claim', 'analysis', 'uncertainty'):
                 if not isinstance(row.get(field), str) or not row[field].strip():
                     errors.append(f"{card['id']} 缺少 {field}")
-            if row.get('strength') not in {'强', '中', '弱', '未提供'}:
+            if row.get('strength') not in ('强', '中', '弱', '未提供'):
                 errors.append('证据强弱无效')
             citations = row.get('sources')
             if not isinstance(citations, list) or not citations:
@@ -45,10 +72,11 @@ def validate_review(report: dict, sources: dict[str, str]) -> list[str]:
                     errors.append('来源文件名与小节必须为字符串')
                     continue
                 body = sources.get(source, '')
-                if not body or not section or f'## {section}' not in body or not isinstance(quote, str) or len(quote.strip()) < 8:
+                heading = re.search(r'^##[ \t]+' + re.escape(section) + r'[ \t]*$', body, re.MULTILINE) if section else None
+                if not body or not heading or not isinstance(quote, str) or len(quote.strip()) < 8:
                     errors.append(f'来源/小节/摘录无效：{source}')
                     continue
-                section_body = body.split(f'## {section}', 1)[1].split('\n## ', 1)[0]
+                section_body = re.split(r'^##[ \t]+', body[heading.end():], maxsplit=1, flags=re.MULTILINE)[0]
                 if quote not in section_body:
                     errors.append(f'引文并非来源小节原文：{source} / {section}')
                 if source[0] not in {card['id'], '0'}:

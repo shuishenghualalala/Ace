@@ -20,6 +20,19 @@ def _raw_conn(db_path):
     return sqlite3.connect(str(db_path))
 
 
+def test_empty_attempt_prefix_is_valid_but_positive_missing_event_fails(tmp_path):
+    from crew.state.session_store import SessionEventLogError
+    store = SQLiteSessionStore(str(tmp_path / "crew.db"))
+    try:
+        assert store._resolve_chain("reviewer", "new-attempt", 0) == []
+        with pytest.raises(SessionEventLogError, match="事件链断裂"):
+            store._resolve_chain("reviewer", "new-attempt", 1)
+        with pytest.raises(SessionEventLogError):
+            store._ordered_chain({1: (1, "turn_start", "{}")}, 1)
+    finally:
+        store.close()
+
+
 def _primary_key_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     info = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return [row[1] for row in sorted((r for r in info if int(r[5] or 0) > 0), key=lambda r: int(r[5]))]

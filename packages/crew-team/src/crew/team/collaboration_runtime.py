@@ -10,7 +10,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from crew.collaboration.runtime.scheduler import Scheduler
+from crew.collaboration.runtime.scheduler import RejectedResult, Scheduler
 from crew.core.envelope import Envelope, ResponseChunk
 
 
@@ -128,7 +128,9 @@ class TeamExecutionAdapter:
                             for source in ref.get('sources', [])}
             errors = validate_review(evidence_report or {}, source_texts)
             if errors:
-                raise ValueError('证据校验未通过（模型原始输出不计为成功）：' + '; '.join(errors))
+                raise RejectedResult('证据校验未通过（模型原始输出不计为成功）：' + '; '.join(errors),
+                    {'text': text, 'executor': executor, 'call_id': call_id,
+                     'validation': 'rejected', 'acceptance': 'not_requested'})
             text = render_review(evidence_report)
         self.emit(self.host._recorded_team_internal_chunk(env, agent_id=node.assignee,
             role=node.title, source_session_id=f'{env.session_id}::{node.assignee}', text=text,

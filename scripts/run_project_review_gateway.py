@@ -16,7 +16,6 @@ from pathlib import Path
 
 import httpx
 import websockets
-
 from run_project_review import GOAL
 
 
@@ -44,7 +43,8 @@ async def run(base: str, output: Path) -> None:
             manifest.append({"file": file.name, "capture": result})
         (output / "sources.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
         await call("POST", f"/api/session/{sid}/ensure", {"title": "三项目预审｜真实 Kimi 协作", "workspace_id": "default"})
-        await call("PUT", f"/api/session/{sid}/agent-config", {"executor": "team", "team": {}})
+        await call("PUT", f"/api/session/{sid}/agent-config", {"executor": "team", "team": {},
+            "title": "三项目预审｜真实 Kimi 协作"})
         (output / "run.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2))
         print(f"session={sid} kb={kb}", flush=True)
         try:

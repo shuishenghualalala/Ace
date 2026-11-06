@@ -30,7 +30,9 @@ GOAL = '''对 A 个体门店备货助手、B 独立设计师内容助手、C 社
 Leader 先核对来源索引；技术审阅员独立审查三个项目的需求、差异化、AI 与代码证据；
 商业审阅员与技术审阅员并行独立审查三个项目的付费、获客、运营成本和反证。
 Leader 在两份审阅完成后逐字核对原始来源，交付三个项目四维证据卡、横向比较和三个追问。
-只有这四个工作单元：来源核对、技术审阅、商业审阅、综合复核。源资料已提供，无需追问。
+只有这四个工作单元：来源核对、技术审阅、商业审阅、综合复核。两个审阅的 depends_on 各只包含来源核对；
+综合复核的 depends_on 必须恰好包含技术审阅和商业审阅。源资料已提供，无需追问。
+四维精确名称为：需求与差异化、AI实际帮助、商业假设与验证、材料完整与可复核。
 全部为虚构演示，不编造验证数据，不打总分，不排名，保留人工决定。'''
 
 
@@ -82,7 +84,8 @@ async def run(output: Path):
     try:
         preview = await PlanningService(planning, model_timeout=240).create(owner=owner, request_id=run_id, session_id='review-' + run_id,
             goal=GOAL, team=team, provider=provider, inputs=[{'kind': 'knowledge_base', 'id': kb,
-                'source_index': [{'file': s['file'], 'source_id': s['source_id']} for s in source_manifest]}])
+                'source_index': [{'file': s['file'], 'source_id': s['source_id']} for s in source_manifest]},
+                {'kind': 'output_contract', 'id': 'project_review_v1'}])
         (output / 'planning.json').write_text(json.dumps(preview, ensure_ascii=False, indent=2))
         if preview['state'] != 'planned':
             raise RuntimeError('真实模型规划未通过：' + str(preview.get('error') or preview['state']))

@@ -68,7 +68,10 @@ def runtime_team_record(team: Any) -> dict[str, Any]:
         member_id = str(spec.member_id or "").strip()
         metadata = spec.metadata if isinstance(spec.metadata, dict) else {}
         responsibility = metadata.get("formation_responsibility")
-        members.append({"agent_id": member_id, "agent_name": str(spec.name or member_id),
+        display_name = str(spec.name or member_id)
+        if member_id == str(team.leader_spec.member_id) and display_name == "leader":
+            display_name = "Leader"
+        members.append({"agent_id": member_id, "agent_name": display_name,
                         "role_label": str(metadata.get("role_label") or spec.role or ""),
                         "assigned_capabilities": list(spec.capabilities or [])})
         formation_members.append({"agent_id": member_id, "role_label": str(metadata.get("role_label") or ""),
@@ -208,6 +211,8 @@ class PlanningService:
         ]
         payload["clarifications"] = task.get("clarifications", [])
         snapshot = task["team"]
+        review_contract = any(isinstance(i, dict) and i.get("kind") == "output_contract"
+                              and i.get("id") == "project_review_v1" for i in task["inputs"])
         error = ""
         plan = None
         for attempt in range(2):
@@ -234,6 +239,9 @@ class PlanningService:
                             "coverage_note": ""}
                     break
                 units = validate_work_units(raw.get("work_units"))
+                if review_contract:
+                    from crew.collaboration.review import validate_review_plan
+                    validate_review_plan(units)
                 assignment_input = {"goal": payload["goal"], "clarifications": payload["clarifications"],
                                     "members": snapshot["members"], "work_units": units}
                 assignment_response = await asyncio.wait_for(_structured_chat(provider, [
@@ -244,14 +252,19 @@ class PlanningService:
                                                    clarifications=payload["clarifications"]), snapshot["members"], goal=payload["goal"],
                                  clarifications=payload["clarifications"])
                 plan["version"] = len(payload["clarifications"]) + 1
+                if review_contract and plan["status"] == "planned":
+                    validate_review_plan(plan["work_units"], assignments=plan["assignments"],
+                                         leader_id=snapshot["leader_id"])
                 break
             except (PlanningError, ValueError, TypeError, AttributeError, asyncio.TimeoutError) as exc:
+                plan = None
                 error = str(exc) or "规划模型响应超时"
                 log.warning("规划尝试失败 task=%s attempt=%s type=%s", task["task_id"], attempt + 1, type(exc).__name__)
             except asyncio.CancelledError:
                 self.store.finish(owner, task["task_id"], error="规划已中断，请使用新的请求重试")
                 raise
             except Exception as exc:
+                plan = None
                 error = "规划服务不可用，请稍后重试"
                 log.warning("规划模型请求失败 task=%s attempt=%s type=%s", task["task_id"], attempt + 1, type(exc).__name__)
         # Storage errors must propagate; never report a plan that was not committed.

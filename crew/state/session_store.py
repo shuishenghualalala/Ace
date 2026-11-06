@@ -786,6 +786,11 @@ class SQLiteSessionStore(SessionStore):
         事件表只增不改，链上缺口只可能是数据损坏，fail-closed。
         """
         chain: list[tuple[int, str, str]] = []
+        # A new attempt has no committed messages yet. Zero is the empty
+        # prefix cursor, not an event ID; positive missing/cyclic links still
+        # fail closed below.
+        if leaf_seq == 0:
+            return chain
         seen: set[int] = set()
         cur: int | None = leaf_seq
         while cur is not None:

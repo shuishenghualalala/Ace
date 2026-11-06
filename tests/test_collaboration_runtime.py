@@ -256,3 +256,34 @@ def test_unknown_with_independent_pending_can_be_explicitly_retried(store):
 def test_review_contract_reports_malformed_data_without_crashing(report):
     from crew.collaboration.review import validate_review
     assert validate_review(report, {})
+
+
+def test_review_plan_requires_real_join_not_prose_only():
+    from crew.collaboration.review import validate_review_plan
+    from crew.collaboration.planning.plan import PlanningError
+    units = [{'key': k, 'depends_on': deps} for k, deps in [
+        ('sources', []), ('tech', ['sources']), ('biz', ['sources']), ('final', ['tech', 'biz'])]]
+    validate_review_plan(units)
+    units[-1]['depends_on'] = []
+    with pytest.raises(PlanningError, match='depends_on'):
+        validate_review_plan(units)
+    units[-1]['depends_on'] = ['tech', 'biz']
+    for u in units:
+        u['unit_id'] = u['key']
+    assignments = [{'unit_id': u['key'], 'member_id': 'lead'} for u in units]
+    with pytest.raises(PlanningError, match='两个不同成员'):
+        validate_review_plan(units, assignments=assignments, leader_id='lead')
+
+
+@pytest.mark.asyncio
+async def test_rejected_evidence_is_auditable_but_blocks_dependents(store):
+    from crew.collaboration.runtime.scheduler import RejectedResult
+    async def execute(package):
+        if package['unit_id'] == 'a':
+            raise RejectedResult('引用不符', {'text': '模型实际无效输出', 'executor': 'kimi', 'validation': 'rejected'})
+        return {'text': '有效输出', 'executor': package['member_id']}
+    task = await Scheduler(store, execute).run('owner', 'task')
+    assert task['state'] == 'partially_completed'
+    assert task['attempts'][0]['result']['text'] == '模型实际无效输出'
+    assert task['attempts'][0]['state'] == 'failed'
+    assert task['units'][-1]['state'] == 'blocked'

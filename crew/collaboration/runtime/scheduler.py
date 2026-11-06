@@ -7,6 +7,13 @@ from collections.abc import Awaitable, Callable
 from crew.collaboration.runtime.store import ExecutionStore
 
 
+class RejectedResult(ValueError):
+    """Keep real but invalid output for audit; it must never count as delivery."""
+    def __init__(self, message: str, result: dict) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 class Scheduler:
     def __init__(self, store: ExecutionStore, executor: Callable[[dict], Awaitable[dict]], *, concurrency: int = 2,
                  on_change: Callable[[dict], None] | None = None) -> None:
@@ -28,6 +35,9 @@ class Scheduler:
             except asyncio.CancelledError:
                 self.store.finish(owner, task_id, package['attempt_id'], state='unknown', error='调用已中断；外部结果待核实')
                 raise
+            except RejectedResult as exc:
+                self.store.finish(owner, task_id, package['attempt_id'], state='failed',
+                                  result=exc.result, error=str(exc))
             except Exception as exc:  # noqa: BLE001 - executor boundary; preserve failure in journal
                 self.store.finish(owner, task_id, package['attempt_id'], state='failed', error=str(exc) or type(exc).__name__)
             else:
