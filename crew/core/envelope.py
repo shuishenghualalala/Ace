@@ -145,6 +145,7 @@ class ResponseChunk:
         *,
         replace_content: bool = False,
         reason: str | None = None,
+        status: Status = "succeeded",
         usage: dict[str, int] | None = None,
         structured: Any | None = None,
     ) -> "ResponseChunk":
@@ -163,7 +164,7 @@ class ResponseChunk:
             body=body,
             sequence=sequence,
             is_final=True,
-            status="succeeded",
+            status=status,
         )
 
     @staticmethod

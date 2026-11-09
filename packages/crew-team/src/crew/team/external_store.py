@@ -173,6 +173,21 @@ class TeamExternalAgentStore:
         conn = sqlite3.connect(legacy_path)
         conn.row_factory = sqlite3.Row
         try:
+            # Older combined databases predate the write-time member snapshots.
+            # Add those columns before the backfill SQL reads them; the separate
+            # team database already has them through _init_team_schema().
+            TeamExternalAgentStore._ensure_column(
+                conn,
+                "external_team_member",
+                "agent_name",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            TeamExternalAgentStore._ensure_column(
+                conn,
+                "external_team_member",
+                "agent_provider",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             self._backfill_member_agent_snapshots(conn)
             conn.commit()
         finally:

@@ -250,7 +250,7 @@ class PlanningService:
                 proposals = extract_json_object(assignment_response.text or "")
                 plan = make_plan(merge_assignments(raw, proposals, members=snapshot["members"], goal=payload["goal"],
                                                    clarifications=payload["clarifications"]), snapshot["members"], goal=payload["goal"],
-                                 clarifications=payload["clarifications"])
+                                 clarifications=payload["clarifications"], leader_id=snapshot["leader_id"])
                 plan["version"] = len(payload["clarifications"]) + 1
                 if review_contract and plan["status"] == "planned":
                     validate_review_plan(plan["work_units"], assignments=plan["assignments"],

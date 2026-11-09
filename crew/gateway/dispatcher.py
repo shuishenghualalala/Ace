@@ -870,8 +870,14 @@ class SessionDispatcher:
                             is_terminal = chunk.is_final or chunk.kind in {"final", "error"}
                             if chunk.kind == "error" or chunk.status == "failed":
                                 failed = True
-                                err = chunk.body.get("message", "") or err
-                            elif chunk.kind == "final":
+                                reason = str(chunk.body.get("reason") or "").strip()
+                                err = str(
+                                    chunk.body.get("message")
+                                    or chunk.body.get("error")
+                                    or reason
+                                    or "本轮执行未完成"
+                                )
+                            if chunk.kind == "final":
                                 final_text = chunk.body.get("text", "")
                             if is_terminal:
                                 deferred_terminal = chunk
@@ -990,12 +996,22 @@ class SessionDispatcher:
                                 elif runtime_terminal_status == "failed":
                                     failed = True
                                     err = str(current.get("error") or err)
-                                    if deferred_terminal is None or deferred_terminal.kind == "final":
+                                    if deferred_terminal is None or (
+                                        deferred_terminal.kind == "final"
+                                        and deferred_terminal.status != "failed"
+                                    ):
                                         deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
                                 elif runtime_terminal_status == "completed":
-                                    failed = False
-                                    err = ""
-                                    if deferred_terminal is None or deferred_terminal.kind == "error":
+                                    # A completed dispatcher task can still carry a
+                                    # domain-level failed final (for example, a
+                                    # workflow that stopped with blocked nodes).
+                                    # Preserve that outcome instead of rewriting it
+                                    # as success just because the stream ended.
+                                    if not failed:
+                                        err = ""
+                                    if not failed and (
+                                        deferred_terminal is None or deferred_terminal.kind == "error"
+                                    ):
                                         deferred_terminal = ResponseChunk.final(
                                             rid,
                                             str(current.get("result") or final_text),

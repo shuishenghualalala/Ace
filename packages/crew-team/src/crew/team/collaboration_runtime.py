@@ -12,7 +12,11 @@ from typing import Any
 
 from crew.collaboration.runtime.scheduler import RejectedResult, Scheduler
 from crew.core.envelope import Envelope, ResponseChunk
+from crew.security.launch import use_process_launch
+from crew.state.logging import get_logger
+from crew.team import result_presenter as team_presenter
 
+log = get_logger('team.collaboration_runtime')
 
 def package_instruction(package: dict) -> str:
     return '\n'.join([
@@ -49,8 +53,37 @@ class TeamExecutionAdapter:
             f"协作任务：{task['state']} · 已交付 {sum(u['state'] == 'completed' for u in task['units'])}/{len(task['units'])} · 待人工验收"))
 
     async def execute(self, package: dict) -> dict:
+        activity: list[dict[str, Any]] = []
+        try:
+            return await self._execute(package, activity)
+        finally:
+            store = getattr(self.host, '_collaboration_execution_store', None)
+            if activity and store is not None:
+                try:
+                    store.record_attempt_activity(self.envelope.user_id, package['task_id'], package['attempt_id'], activity)
+                except Exception as exc:  # noqa: BLE001 - execution outcome remains authoritative
+                    log.warning('保存协作执行过程失败 task=%s attempt=%s error=%s', package.get('task_id'), package.get('attempt_id'), exc)
+
+    async def _execute(self, package: dict, activity: list[dict[str, Any]]) -> dict:
         node = self.plan.nodes[package['unit_id']]
         env = self.envelope
+        activity_size = 0
+
+        def capture(chunk: ResponseChunk) -> None:
+            nonlocal activity_size
+            if chunk.kind not in {'delta', 'thinking', 'tool'}:
+                return
+            if activity and activity[-1].get('kind') == 'truncated':
+                return
+            keys = ('text',) if chunk.kind in {'delta', 'thinking'} else ('name', 'phase', 'detail', 'tool_call_id', 'args', 'ui_label')
+            body = {key: str(chunk.body[key] or '') for key in keys if key in chunk.body}
+            size = len(json.dumps(body, ensure_ascii=False))
+            if len(activity) >= 1000 or activity_size + size > 262144:
+                if not activity or activity[-1].get('kind') != 'truncated':
+                    activity.append({'kind': 'truncated'})
+                return
+            activity.append({'kind': chunk.kind, 'body': body, 'timestamp': chunk.ts})
+            activity_size += size
         instruction = package_instruction(package)
         review_contract = any(isinstance(r, dict) and r.get('kind') == 'output_contract'
                               and r.get('id') == 'project_review_v1' for r in package.get('inputs', []))
@@ -75,9 +108,13 @@ class TeamExecutionAdapter:
         missing = set(package.get('required_tools', [])) - available
         if missing:
             raise ValueError('执行器未确认可用的必需工具：' + '、'.join(sorted(missing)))
+        assignee_label = self.host._team_member_display_name(
+            env.session_id, node.assignee, env.user_id,
+        )
         self.emit(self.host._recorded_team_internal_chunk(env,
             agent_id='leader', role='leader', is_leader=True,
-            source_session_id=f'{env.session_id}::leader', text=f'派发给 {node.assignee}：{node.title}',
+            source_session_id=f'{env.session_id}::leader',
+            text=team_presenter.assignment_text(node, assignee_label=assignee_label),
             node_id=node.node_id, event_type='team_assign', mention_from='leader',
             mention_to=[node.assignee], mention_intent='assign'))
         # Required tools are explicit hard requirements. Never infer availability
@@ -94,6 +131,7 @@ class TeamExecutionAdapter:
                 leader_env.params['collaboration_readonly'] = True
             text = ''
             async for chunk in self.team.leader.run(leader_env):
+                capture(chunk)
                 if chunk.kind == 'error':
                     raise RuntimeError(chunk.body.get('message') or 'Leader 执行失败')
                 if chunk.kind == 'final':
@@ -118,16 +156,39 @@ class TeamExecutionAdapter:
             if cwd:
                 meta['cwd'] = cwd
             def relay(member: str, chunk: ResponseChunk) -> None:
+                capture(chunk)
                 if chunk.kind == 'delta':
                     self.emit(self.host._team_internal_chunk(env.request_id, agent_id=member,
+                        agent_name=self.host._team_member_display_name(
+                            env.session_id, member, env.user_id,
+                        ),
                         text=str(chunk.body.get('text') or ''), node_id=node.node_id,
                         role=node.title, source_session_id=f'{env.session_id}::{member}',
                         event_type='team_stream', display_mode='stream', append=True))
-            result = await self.host.request_delegate(env.session_id, member=node.assignee,
-                instruction=instruction, requester_member_id='leader', external_team_id=self.external_team_id,
-                plan_node_id=node.node_id, wait_for_result=True, owner_account_id=env.user_id,
-                task_payload_meta=meta, on_child_chunk=relay, finalize_plan_node=False,
-                attachments=env.attachments, preclaimed_node=True)
+            launch = env.params.get('_security_process_launch')
+            delegate_kwargs = {
+                'member': node.assignee,
+                'instruction': instruction,
+                'requester_member_id': 'leader',
+                'external_team_id': self.external_team_id,
+                'plan_node_id': node.node_id,
+                'wait_for_result': True,
+                'owner_account_id': env.user_id,
+                'task_payload_meta': meta,
+                'on_child_chunk': relay,
+                'finalize_plan_node': False,
+                'attachments': env.attachments,
+                'preclaimed_node': True,
+            }
+            if launch is None:
+                result = await self.host.request_delegate(env.session_id, **delegate_kwargs)
+            else:
+                # Scheduler jobs are background tasks; explicitly restore the
+                # request's host-compiled launch decision before creating the
+                # member task so ACP/CLI receives the same managed credentials
+                # projection and security boundary as a standalone run.
+                with use_process_launch(launch):
+                    result = await self.host.request_delegate(env.session_id, **delegate_kwargs)
             if not result.get('ok') or result.get('status') != 'completed':
                 raise RuntimeError(str(result.get('error') or '成员未完成工作'))
             text = str(result.get('output') or '')
@@ -197,7 +258,13 @@ async def run_collaboration(host: Any, envelope: Envelope, *, team: Any, plan: A
                 f"- {u['title']}：{u['state']} {u['error']}" for u in task['units'] if u['state'] != 'completed') + '\n\n' + text
         else:
             text += '\n\n——所有工作单元已交付，结论仍待人工复核；不代表正式评审决定。'
-        yield ResponseChunk.final(envelope.request_id, text, reason='collaboration_' + task['state'])
+        completed = task['state'] == 'completed'
+        yield ResponseChunk.final(
+            envelope.request_id,
+            text,
+            reason='collaboration_' + task['state'],
+            status='succeeded' if completed else 'failed',
+        )
     finally:
         if waiter is not None:
             waiter.cancel()
@@ -238,7 +305,11 @@ def control_execution(host: Any, owner: str, task_id: str, action: str, *, unit_
     if external_id == 'in_process_team':
         external_id = ''
     if external_id:
-        current = host.external_store.get_team(external_id, owner_account_id=owner)
+        resolver = getattr(host, '_current_external_store', None)
+        external_store = resolver() if callable(resolver) else getattr(host, 'external_store', None)
+        if external_store is None:
+            raise ValueError('团队目录不可用，无法验证原团队配置并恢复任务')
+        current = external_store.get_team(external_id, owner_account_id=owner)
         if current.get('updated_at') != snapshot.get('team_updated_at'):
             raise ValueError('团队配置已改变；请创建新的任务，不静默替换原成员')
     team = host._get_or_create(task['session_id'], external_team_id=external_id, owner_account_id=owner)

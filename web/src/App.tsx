@@ -20,6 +20,7 @@ import {
 import { FeatureEventRegistry } from "./lib/feature-event-dispatcher";
 import { UiPageRegistry } from "./lib/ui-feature-registry";
 import TaskBoard from "./components/TaskBoard";
+import { externalAgentTone } from "./components/ExternalAgentAvatar";
 import WorkspaceModal from "./components/WorkspaceModal";
 import { teamMemberMentionId } from "./components/Composer";
 import { useSessions } from "./hooks/useSessions";
@@ -159,14 +160,14 @@ function teamMembersForBoard(team?: ExternalTeam) {
   };
   const members = sortedMembers
     .filter((member) => member.agent_id !== team.leader_agent_id)
-    .map((member, index) => ({
+    .map((member) => ({
       agentId: member.agent_id,
       mentionId: member.agent_name?.trim() || member.agent_id,
       name: member.agent_name || member.agent_id,
       displayBadge: member.display_badge || "?",
       role: `负责${summarizeBusinessDuty(member.role || "", "协作执行", { max: 80 })}`,
       isLeader: false,
-      tone: (index + 1) % 6,
+      tone: externalAgentTone(member.agent_provider?.trim() || member.agent_name?.trim() || member.agent_id),
     }));
   return [leader, ...members];
 }

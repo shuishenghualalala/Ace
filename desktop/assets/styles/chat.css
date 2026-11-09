@@ -302,7 +302,7 @@ body.history-workspace-active .history-new-chat-slot .btn-new-chat .btn-new-chat
     flex-direction: column;
     gap: var(--mw-space-3);
     scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--mw-status-info) 50%, transparent) transparent;
+    scrollbar-color: var(--mw-border-strong) transparent;
   padding: 0;
   background: var(--mw-bg-surface);
 }
@@ -321,12 +321,12 @@ body.history-workspace-active .history-new-chat-slot .btn-new-chat .btn-new-chat
     min-height: 48px;
     border: 2px solid transparent;
     border-radius: var(--mw-radius-full);
-    background: color-mix(in srgb, var(--mw-status-info) 42%, transparent);
+    background: var(--mw-border-strong);
     background-clip: padding-box;
 }
 
 .chat-messages::-webkit-scrollbar-thumb:hover {
-    background: var(--mw-status-info-bg);
+    background: var(--mw-text-muted);
     background-clip: padding-box;
 }
 

@@ -543,7 +543,7 @@ def intelligent_role_markdown(
 
 def leader_prompt(members: list[dict], *, mode: str = "leader_mesh") -> str:
     roster = "\n".join(
-        f"  - {m.get('member_id') or m.get('name')}: {m.get('role') or m.get('description') or ''}"
+        f"  - {m.get('name') or m.get('member_id')}（内部路由 ID：{m.get('member_id') or m.get('name')}）：{m.get('role') or m.get('description') or ''}"
         for m in members
     )
     return (
@@ -555,6 +555,8 @@ def leader_prompt(members: list[dict], *, mode: str = "leader_mesh") -> str:
         "5. 收齐所有队友的执行结果后，汇总成给用户的最终答案。\n\n"
         f"你的队友：\n{roster}\n\n"
         f"当前协作模式：{mode}。\n"
+        "成员名称是对用户展示的正式称呼；括号里的内部路由 ID 只供工具调用。"
+        "向用户展示派工、进度、回执或结果时，只使用成员名称和 @名称，绝不输出内部路由 ID。\n"
         "leader_relay 表示成员主要与 Leader 沟通；leader_mesh 表示成员可通过 Team Bus 互相沟通，"
         "但用户沟通与最终交付仍由 Leader 负责；swarm 表示允许更多内部提议/投票/接力，但仍要遵守治理边界。\n"
         "注意：能委派就委派，不要自己空想结果。最终答案要整合队友的实际产出。\n"

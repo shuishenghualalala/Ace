@@ -55,7 +55,11 @@ def test_pending_decision_is_persisted_and_idempotent(tmp_path):
     store = PlanningStore(str(tmp_path / "test.db"))
     task = {"task_id": "task", "session_id": "session", "request_id": "request"}
     store.create("owner", task, "hash")
-    plan = make_plan({"work_units": [unit("work")]}, [{"member_id": "a", "name": "A"}])
+    members = [{"member_id": "a", "name": "A"}, {"member_id": "b", "name": "B"}]
+    plan = make_plan({"work_units": [{**unit("work"), "matches": [
+        {"member_id": "a", "kind": "task_instruction", "reference": "A", "reason": "指定 A"},
+        {"member_id": "b", "kind": "task_instruction", "reference": "B", "reason": "指定 B"},
+    ]}]}, members, goal="A 和 B 执行")
     store.finish("owner", "task", plan=plan)
     decision = plan["decisions"][0]["decision_id"]
     result = store.answer("owner", "task", decision, "a")
@@ -64,6 +68,25 @@ def test_pending_decision_is_persisted_and_idempotent(tmp_path):
     assert store.get("other", "task") is None
     with pytest.raises(ValueError):
         store.answer("owner", "task", decision, "b")
+
+
+def test_ordinary_assignment_ties_are_balanced_without_prompt():
+    members = [{"member_id": "a", "name": "A", "responsibility": "审阅", "responsibility_source": "user"},
+               {"member_id": "b", "name": "B", "responsibility": "审阅", "responsibility_source": "user"}]
+    matches = [{"member_id": member["member_id"], "kind": "responsibility", "reference": "审阅", "reason": "负责审阅"} for member in members]
+    plan = make_plan({"work_units": [{**unit("one"), "matches": matches, "ambiguity": "由谁执行？"},
+                                    {**unit("two"), "matches": matches}]}, members)
+    assert plan["status"] == "planned"
+    assert [assignment["member_id"] for assignment in plan["assignments"]] == ["a", "b"]
+    assert plan["decisions"] == []
+
+
+def test_unmatched_units_use_available_members_without_selecting_excluded_or_leader():
+    members = [{"member_id": "lead", "name": "Leader"}, {"member_id": "a", "name": "A"},
+               {"member_id": "b", "name": "B", "excluded": True}]
+    plan = make_plan({"work_units": [unit("one"), unit("two")]}, members, leader_id="lead")
+    assert plan["status"] == "planned"
+    assert [assignment["member_id"] for assignment in plan["assignments"]] == ["a", "a"]
 
 
 @pytest.mark.asyncio

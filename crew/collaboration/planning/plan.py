@@ -80,7 +80,7 @@ def validate_work_units(raw: Any) -> list[dict[str, Any]]:
 
 
 def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goal: str = "",
-                 clarifications: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                 clarifications: list[dict[str, str]] | None = None, leader_id: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Accept evidence-backed suggestions; unresolved choices remain decisions.
 
     A model suggestion is not evidence of a member's tool availability. The
@@ -90,6 +90,7 @@ def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goa
     if not member_map or len(member_map) != len(members):
         raise PlanningError("团队成员为空或成员标识重复")
     assignments, decisions = [], []
+    assigned_counts = {member_id: 0 for member_id in member_map}
     for unit in units:
         ranked: dict[int, dict[str, dict[str, Any]]] = {}
         for match in unit["matches"]:
@@ -128,14 +129,25 @@ def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goa
                 "responsibility_ref": ref, "capability_status": "unverified",
             }
         candidates = ranked[max(ranked)] if ranked else {}
-        if candidates and (not unit["ambiguity"] or (max(ranked) == 3 and len(candidates) == 1)) and (len(candidates) == 1 or max(ranked) == 0):
+        # Ordinary assignment ties are resolved by the team; conflicting
+        # explicit user instructions still need clarification.
+        if candidates and not (max(ranked) == 3 and len(candidates) > 1):
+            chosen = min(candidates, key=lambda member_id: assigned_counts[member_id])
             assignments.append({"assignment_id": uuid.uuid4().hex, "unit_key": unit["key"],
-                                **next(iter(candidates.values()))})
+                                **candidates[chosen]})
+            assigned_counts[chosen] += 1
             continue
         options = list(candidates) if candidates else [key for key, value in member_map.items()
                                                         if not value.get("excluded") and key not in unit["excluded_members"]]
         if not options:
             raise PlanningError(f"{unit['key']} 没有可选的团队成员")
+        if not candidates:
+            chosen = min(options, key=lambda member_id: (member_id == leader_id, assigned_counts[member_id]))
+            assignments.append({"assignment_id": uuid.uuid4().hex, "unit_key": unit["key"],
+                                "member_id": chosen, "source": "model_suggestion", "reason": "根据可用团队成员及任务分配数量自动选择。",
+                                "responsibility_ref": "", "capability_status": "unverified"})
+            assigned_counts[chosen] += 1
+            continue
         decisions.append({"decision_id": uuid.uuid4().hex, "unit_key": unit["key"],
                           "kind": "assignment", "question": unit["ambiguity"] or "请选择此工作单元的负责人",
                           "options": [{"member_id": key, "name": member_map[key].get("name", key)} for key in options],
@@ -144,11 +156,11 @@ def assign_units(units: list[dict[str, Any]], members: list[dict[str, Any]], goa
 
 
 def make_plan(raw: dict[str, Any], members: list[dict[str, Any]], goal: str = "",
-              clarifications: list[dict[str, str]] | None = None) -> dict[str, Any]:
+              clarifications: list[dict[str, str]] | None = None, leader_id: str = "") -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise PlanningError("规划结果不是对象")
     units = validate_work_units(raw.get("work_units"))
-    assignments, decisions = assign_units(units, members, goal, clarifications)
+    assignments, decisions = assign_units(units, members, goal, clarifications, leader_id)
     ids = {u["key"]: uuid.uuid4().hex for u in units}
     for unit in units:
         unit["unit_id"] = ids[unit["key"]]

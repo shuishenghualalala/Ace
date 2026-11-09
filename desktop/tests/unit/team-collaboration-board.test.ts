@@ -14,6 +14,7 @@ import {
   activateTeamCollaborationBoard,
   buildTeamCollaborationBoardHtml,
   disposeTeamCollaborationBoard,
+  durationLabel,
   initTeamCollaborationBoard,
   makeTeamFlowNodes,
   makeTeamFlowTurns,
@@ -238,6 +239,95 @@ describe('Team Flow 数据投影', () => {
 });
 
 describe('协作看板 HTML', () => {
+  it('旧对话缺少派活消息时，从已完成的执行记录恢复派发节点', async () => {
+    vi.mocked(backendApi.tasks).mockResolvedValue([
+      { ...tasks[1], status: 'completed', progress: { ...tasks[1].progress, parent_node_ids: [],
+        collaboration_task_id: 'recorded', execution_attempts: [{ state: 'completed', planned_member: 'agent-frontend', actual_executor: 'agent-frontend' }] } },
+      { ...tasks[1], id: 'waiting', task_id: 'waiting', status: 'pending', progress: { ...tasks[1].progress, plan_node_id: 'waiting', parent_node_ids: [],
+        collaboration_task_id: 'recorded', execution_attempts: [{ state: 'dispatching', planned_member: 'agent-frontend' }] } },
+    ]);
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+    expect(document.querySelector('.flow-dispatch')?.textContent).toContain('Crew · 派发任务');
+    expect(document.querySelector('.flow-dispatch')?.textContent).toContain('1 项');
+    expect(document.querySelector('.flow-dispatch__tasks')?.textContent).toContain('开发桌面协作看板');
+    expect(document.querySelector('.flow-dispatch')?.textContent).not.toContain('接收');
+  });
+
+  it('仅根据本回合真实派活记录显示 Crew 派发节点与交接方向', async () => {
+    const turn = `${SESSION_ID}::turn::new`;
+    vi.mocked(backendApi.tasks).mockResolvedValue([
+      { ...tasks[1], progress: { ...tasks[1].progress, turn_session_id: turn } },
+    ]);
+    messageStore.set({ messages: { [SESSION_ID]: [
+      { id: 'old', role: 'team_internal', content: '', timestamp: 1, eventType: 'team_assign', nodeId: 'build', mentionFrom: 'leader', mentionTo: ['old-member'], sourceSessionId: `${SESSION_ID}::turn::old::leader` },
+      { id: 'new', role: 'team_internal', content: '', timestamp: 2, eventType: 'team_assign', nodeId: 'build', mentionFrom: 'leader', mentionTo: ['agent-frontend'], sourceSessionId: `${turn}::leader` },
+    ] } });
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+    expect(document.querySelector('.flow-dispatch')?.textContent).toContain('Crew · 派发任务');
+    expect(document.querySelector('.flow-dispatch__tasks')?.textContent).toContain('开发桌面协作看板');
+    expect(document.querySelector('.flow-dispatch')?.textContent).not.toContain('接收');
+    expect(document.querySelector('.flow-dispatch')?.textContent).not.toContain('old-member');
+    messageStore.set({ messages: { [SESSION_ID]: [] } });
+    document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+    expect(document.querySelector('.flow-dispatch')).toBeNull();
+    expect(document.querySelector('.flow-node__route')).toBeNull();
+  });
+
+  it('Crew 的真实执行节点直接显示耗时及执行记录', async () => {
+    vi.mocked(backendApi.tasks).mockResolvedValue([{ ...tasks[0], progress: {
+      ...tasks[0].progress, collaboration_task_id: 'recorded', execution_state: 'completed',
+      execution_attempts: [{ state: 'completed', actual_executor: 'leader', started_at: 100, ended_at: 112 }],
+    } }]);
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+    expect(document.querySelector('.flow-node__duration')?.textContent).toBe('耗时 12s');
+    activateTeamCollaborationBoard(SESSION_ID);
+    document.querySelector<HTMLButtonElement>('[data-team-node="leader_plan"]')?.click();
+    const html = buildTeamCollaborationBoardHtml(SESSION_ID);
+    expect(html).toContain('执行记录 · 1 次');
+    expect(html).toContain('实际 Crew');
+    expect(html).not.toContain('外援执行');
+  });
+
+  it('节点计时取实际尝试时间，不把等待时间算作执行时间', () => {
+    const task = { ...tasks[0], created_at: 1, progress: { execution_attempts: [{ started_at: 100, ended_at: 115 }] } };
+    expect(durationLabel(task, 120)).toBe('耗时 15s');
+    expect(durationLabel({ ...task, status: 'running', progress: { execution_attempts: [{ started_at: 100 }] } }, 125)).toBe('已运行 25s');
+    expect(durationLabel({ ...task, progress: { execution_attempts: [] }, started_at: undefined }, 125)).toBe('');
+  });
+
+  it('按外援 provider 选择稳定颜色，而不依赖团队成员顺序', async () => {
+    vi.mocked(backendApi.externalTeams).mockResolvedValue([{
+      id: 'team-product', name: '团队', leader_agent_id: 'crew::builtin', members: [
+        { agent_id: 'crew::builtin', sort_order: 0 },
+        { agent_id: 'agent-hermes', agent_name: 'Hermes', agent_provider: 'hermes', sort_order: 1 },
+        { agent_id: 'agent-kimi', agent_name: 'kimi', agent_provider: 'kimi', sort_order: 2 },
+      ],
+    }]);
+    await primeTeamCollaborationIdentity(SESSION_ID);
+    expect(resolveTeamCollaborationMember(SESSION_ID, { id: 'k', role: 'team_internal', content: '', timestamp: 1, agentId: 'agent-kimi' })?.tone).toBe(0);
+    expect(resolveTeamCollaborationMember(SESSION_ID, { id: 'h', role: 'team_internal', content: '', timestamp: 1, agentId: 'agent-hermes' })?.tone).toBe(2);
+  });
+
+  it('将同层的不同成员并排分组，并保留真实上游依赖', async () => {
+    vi.mocked(backendApi.tasks).mockResolvedValue([
+      tasks[0], tasks[1],
+      { ...tasks[1], id: 'review', task_id: 'review', title: '商业审阅', assignee: 'hermes',
+        progress: { ...tasks[1].progress, plan_node_id: 'review' } },
+      { ...tasks[2], progress: { ...tasks[2].progress, parent_node_ids: ['build', 'review'] } },
+    ]);
+    await refreshTeamCollaborationBoard(SESSION_ID);
+    document.body.innerHTML = buildTeamCollaborationBoardHtml(SESSION_ID);
+    const lanes = document.querySelectorAll('.flow-lane');
+    expect(lanes).toHaveLength(3);
+    expect(lanes[1].textContent).toContain('可并行 · 2 位成员');
+    expect(lanes[1].querySelectorAll('.flow-member-lane')).toHaveLength(2);
+    expect(lanes[2].textContent).toContain('开发桌面协作看板');
+    expect(lanes[2].textContent).toContain('商业审阅');
+  });
+
   it('首发前可只预热团队名称和真实 Leader 身份', async () => {
     await primeTeamCollaborationIdentity(SESSION_ID);
 
@@ -266,8 +356,8 @@ describe('协作看板 HTML', () => {
     const html = buildTeamCollaborationBoardHtml(SESSION_ID);
 
     expect(html).toContain('协作看板');
-    expect(html).toContain('Team Flow');
-    expect(html).toContain('团队工作流');
+    expect(html).toContain('任务流转');
+    expect(html).toContain('团队流程图');
     expect(html).toContain('Crew');
     expect(html).toContain('href="#avatar-headphones"');
     expect(html).toContain('class="pixel-flag"');
@@ -281,8 +371,8 @@ describe('协作看板 HTML', () => {
     expect(html).not.toContain('先确认目标');
     expect(html).toContain('分析需求并拆分任务');
     expect(html).toContain('开发桌面协作看板');
-    expect(html).toContain('依赖：分析需求并拆分任务');
-    expect(html).toContain('运行态');
+    expect(html).toContain('依赖 ← 分析需求并拆分任务');
+    expect(html).toContain('运行状态');
     expect(html).toContain('全局排队');
     expect(html).toContain('活跃子任务');
     expect(html).not.toContain('React');
@@ -625,7 +715,8 @@ it('持久化节点展示真实尝试和原成员重试，不提供旧改派入�
   const html = buildTeamCollaborationBoardHtml(SESSION_ID);
   expect(html).toContain('原成员重试');
   expect(html).toContain('data-collab-task="durable-task"');
-  expect(html).toContain('attempt-1');
+  expect(html).toContain('执行记录 · 1 次');
+  expect(html).toContain('实际 前端工程师');
   expect(html).not.toContain('data-team-recover-action');
 });
 

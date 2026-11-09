@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -66,6 +67,14 @@ def _inherited_workspace_root() -> str:
     if not roots:
         return ""
     return str(max(roots, key=lambda root: len(root.parts)))
+
+
+async def _invoke_callback(callback: Callable[..., Any] | None, *args: Any) -> None:
+    if callback is None:
+        return
+    result = callback(*args)
+    if inspect.isawaitable(result):
+        await result
 
 
 def require_team_result_status(intent: str, value: Any) -> str:
@@ -247,11 +256,11 @@ def make_delegate_handler(
     bus: TeamBus | None = None,
     before_delegate: Callable[[dict[str, Any]], None] | None = None,
     execute_delegate: Callable[[dict[str, Any]], Any] | None = None,
-    on_child_start: Callable[[dict[str, Any]], None] | None = None,
-    on_child_done: Callable[[str, str, str], None] | None = None,
-    on_child_chunk: Callable[[str, ResponseChunk], None] | None = None,
-    on_task_created: Callable[[dict[str, Any]], None] | None = None,
-    on_task_finished: Callable[[dict[str, Any]], None] | None = None,
+    on_child_start: Callable[[dict[str, Any]], Any] | None = None,
+    on_child_done: Callable[[str, str, str], Any] | None = None,
+    on_child_chunk: Callable[[str, ResponseChunk], Any] | None = None,
+    on_task_created: Callable[[dict[str, Any]], Any] | None = None,
+    on_task_finished: Callable[[dict[str, Any]], Any] | None = None,
 ):
     async def handle_delegate(args: dict[str, Any]) -> str:
         member = str(args.get("member", ""))
@@ -380,11 +389,11 @@ async def run_delegate_to_teammate(
     requester_member_id: str = "leader",
     plan_node_id: str = "",
     bus: TeamBus | None = None,
-    on_child_start: Callable[[dict[str, Any]], None] | None = None,
-    on_child_done: Callable[[str, str, str], None] | None = None,
-    on_child_chunk: Callable[[str, ResponseChunk], None] | None = None,
-    on_task_created: Callable[[dict[str, Any]], None] | None = None,
-    on_task_finished: Callable[[dict[str, Any]], None] | None = None,
+    on_child_start: Callable[[dict[str, Any]], Any] | None = None,
+    on_child_done: Callable[[str, str, str], Any] | None = None,
+    on_child_chunk: Callable[[str, ResponseChunk], Any] | None = None,
+    on_task_created: Callable[[dict[str, Any]], Any] | None = None,
+    on_task_finished: Callable[[dict[str, Any]], Any] | None = None,
     owner_account_id: str,
     task_payload_meta: dict[str, Any] | None = None,
     attachments: list[dict[str, Any]] | None = None,
@@ -414,8 +423,7 @@ async def run_delegate_to_teammate(
     touch_activity_async = getattr(tasks, "touch_activity_async", None)
     if callable(touch_activity_async):
         task = await touch_activity_async(task["id"], progress)
-    if on_task_created is not None:
-        on_task_created({**task, "plan_node_id": plan_node_id})
+    await _invoke_callback(on_task_created, {**task, "plan_node_id": plan_node_id})
     log.info("[Team] Leader 派发任务 #%s 给 %s: %s", task["id"], member, instruction[:60])
 
     teammate = teammates[member]
@@ -468,8 +476,8 @@ async def run_delegate_to_teammate(
         ],
     )
     final_text = ""
-    if on_child_start is not None:
-        on_child_start({
+    try:
+        await _invoke_callback(on_child_start, {
             "child_id": child_id,
             "parent_session_id": session_id,
             "session_id": child_session_id,
@@ -482,56 +490,49 @@ async def run_delegate_to_teammate(
             "owner_account_id": owner,
             "execution_snapshot": dict(child_payload_meta.get("execution_snapshot") or {}),
         })
-    try:
         async for chunk in teammate.run(sub_env):
-            if on_child_chunk is not None:
-                on_child_chunk(member, chunk)
+            await _invoke_callback(on_child_chunk, member, chunk)
             if chunk.kind == "final":
                 final_text = chunk.body.get("text", "")
             elif chunk.kind == "error":
                 await tasks.update_status_async(task["id"], "failed", chunk.body.get("message", ""))
-                if on_task_finished is not None:
-                    on_task_finished({
-                        **task,
-                        "plan_node_id": plan_node_id,
-                        "status": "failed",
-                        "result": chunk.body.get("message", ""),
-                    })
+                await _invoke_callback(on_task_finished, {
+                    **task,
+                    "plan_node_id": plan_node_id,
+                    "status": "failed",
+                    "result": chunk.body.get("message", ""),
+                })
                 raise ToolError(chunk.body.get("message", "队友执行出错"))
     except asyncio.CancelledError:
         await tasks.update_status_async(task["id"], "cancelled", "cancelled")
-        if on_task_finished is not None:
-            on_task_finished({
-                **task,
-                "plan_node_id": plan_node_id,
-                "status": "cancelled",
-                "result": "cancelled",
-            })
+        await _invoke_callback(on_task_finished, {
+            **task,
+            "plan_node_id": plan_node_id,
+            "status": "cancelled",
+            "result": "cancelled",
+        })
         raise
     except ToolError:
         raise
     except Exception as exc:  # noqa: BLE001
         await tasks.update_status_async(task["id"], "failed", str(exc))
-        if on_task_finished is not None:
-            on_task_finished({
-                **task,
-                "plan_node_id": plan_node_id,
-                "status": "failed",
-                "result": str(exc),
-            })
-        raise ToolError(f"队友 {member} 执行异常: {exc}") from exc
-    finally:
-        if on_child_done is not None:
-            on_child_done(session_id, child_id, owner)
-
-    await tasks.update_status_async(task["id"], "done", final_text)
-    if on_task_finished is not None:
-        on_task_finished({
+        await _invoke_callback(on_task_finished, {
             **task,
             "plan_node_id": plan_node_id,
-            "status": "completed",
-            "result": final_text,
+            "status": "failed",
+            "result": str(exc),
         })
+        raise ToolError(f"队友 {member} 执行异常: {exc}") from exc
+    finally:
+        await _invoke_callback(on_child_done, session_id, child_id, owner)
+
+    await tasks.update_status_async(task["id"], "done", final_text)
+    await _invoke_callback(on_task_finished, {
+        **task,
+        "plan_node_id": plan_node_id,
+        "status": "completed",
+        "result": final_text,
+    })
     if bus is not None:
         bus.send(
             team_session_id=session_id,
@@ -554,12 +555,23 @@ def register_delegate_tool(
     bus: TeamBus | None = None,
     before_delegate: Callable[[dict[str, Any]], None] | None = None,
     execute_delegate: Callable[[dict[str, Any]], Any] | None = None,
-    on_child_start: Callable[[dict[str, Any]], None] | None = None,
-    on_child_done: Callable[[str, str, str], None] | None = None,
-    on_child_chunk: Callable[[str, ResponseChunk], None] | None = None,
-    on_task_created: Callable[[dict[str, Any]], None] | None = None,
-    on_task_finished: Callable[[dict[str, Any]], None] | None = None,
+    on_child_start: Callable[[dict[str, Any]], Any] | None = None,
+    on_child_done: Callable[[str, str, str], Any] | None = None,
+    on_child_chunk: Callable[[str, ResponseChunk], Any] | None = None,
+    on_task_created: Callable[[dict[str, Any]], Any] | None = None,
+    on_task_finished: Callable[[dict[str, Any]], Any] | None = None,
+    member_display_names: dict[str, str] | None = None,
 ) -> None:
+    display_names = {
+        str(member_id).strip(): str(display_name).strip()
+        for member_id, display_name in (member_display_names or {}).items()
+        if str(member_id).strip() and str(display_name).strip()
+    }
+
+    def _resolve_ui_label_args(args: dict[str, Any], raw_args: dict[str, Any]) -> dict[str, Any]:
+        member_id = str(raw_args.get("member") or args.get("member") or "").strip()
+        return {**args, "member": display_names.get(member_id) or member_id}
+
     registry.register(
         name="delegate_to_teammate",
         toolset="delegation",
@@ -580,6 +592,7 @@ def register_delegate_tool(
         is_async=True,
         display_name="委派队友",
         ui_label_template="委派给 {member}",
+        ui_label_args_resolver=_resolve_ui_label_args,
         result_retention="important",
     )
 

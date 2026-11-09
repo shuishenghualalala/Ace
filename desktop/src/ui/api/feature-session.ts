@@ -244,6 +244,7 @@ export interface ExternalTeamMember {
   team_id?: string;
   agent_id: string;
   agent_name?: string;
+  agent_provider?: string;
   display_badge?: string;
   role?: string;
   role_key?: string;

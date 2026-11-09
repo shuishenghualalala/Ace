@@ -2344,7 +2344,7 @@ class CrewApp:
                 # DK store 的查询要求 owner scope；不传 owner 会在 _require_owner 抛
                 # ValueError，把每一次「停止」都变成一条 ERROR 堆栈。
                 interrupted = (
-                    bool(dk_fn(session_id, message, owner_account_id=owner_account_id))
+                    bool(dk_fn(session_id, owner_account_id=owner_account_id, message=message))
                     or interrupted
                 )
             except Exception:  # noqa: BLE001

@@ -2195,6 +2195,7 @@ def test_team_live_execution_event_is_persisted_to_node_projection(tmp_path):
     )
 
     task = tm.task_projection_for_session("live-events", owner_account_id="owner-live")[0]
+    assert task["started_at"] is None  # A creation timestamp is not an execution start.
     event = task["progress"]["execution_events"][0]
     assert event["event_id"] == "build:tool:tool-1:start"
     assert event["request_id"] == "live-request"

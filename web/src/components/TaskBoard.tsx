@@ -46,6 +46,7 @@ export interface FlowNode {
 interface FlowStage {
   id: string;
   depth: number;
+  hierarchical: boolean;
   nodes: FlowNode[];
 }
 
@@ -178,18 +179,19 @@ function inferDagTier(strategy: string, tier: string): string {
   return "";
 }
 
-export function teamDagInfo(nodes: FlowNode[], turnGroups: FlowTurn[]): DagInfo | null {
+export function teamDagInfo(nodes: FlowNode[], _turnGroups: FlowTurn[]): DagInfo | null {
   if (nodes.length === 0) return null;
   const strategies = nodes
     .map((node) => progressText(node.raw, "plan_strategy"))
     .filter(Boolean);
   const strategy = strategies[0] || "";
   const tier = inferDagTier(strategy, nodes.map((node) => progressText(node.raw, "execution_tier")).find(Boolean) || "");
-  const label = dagStrategyLabel[strategy] || (tier ? `${tier[0].toUpperCase()}${tier.slice(1)} DAG` : "Team DAG");
-  const stageCount = turnGroups.reduce((count, turn) => count + turn.stages.length, 0);
+  const tierLabel: Record<string, string> = { fast: "快速协作", standard: "标准协作", ai: "深度协作" };
+  const label = dagStrategyLabel[strategy] || tierLabel[tier] || "团队流程图";
+  const dependencyCount = nodes.reduce((count, node) => count + parentNodeIds(node).length, 0);
   const detailParts = [
-    stageCount ? `${stageCount}层` : "",
-    `${nodes.length}节点`,
+    `${nodes.length} 个节点`,
+    dependencyCount ? `${dependencyCount} 条依赖连接` : "并行流程",
   ].filter(Boolean);
   return { label, detail: detailParts.join(" · ") };
 }
@@ -422,24 +424,23 @@ export function collectSessionFileItems(tasks: Task[], messages: UiMessage[]): S
   return items;
 }
 
-function durationLabel(task: Task): string {
-  const start = typeof task.started_at === "number" && Number.isFinite(task.started_at)
-    ? task.started_at
-    : typeof task.created_at === "number" && Number.isFinite(task.created_at)
-      ? task.created_at
-      : 0;
-  const end = typeof task.finished_at === "number" && Number.isFinite(task.finished_at)
-    ? task.finished_at
-    : typeof task.updated_at === "number" && Number.isFinite(task.updated_at)
-      ? task.updated_at
-      : 0;
-  if (!start || !end || end < start) return "";
-  const seconds = Math.max(0, Math.round(end - start));
-  if (seconds < 1) return "<1s";
-  if (seconds < 60) return `${seconds}s`;
+export function durationLabel(task: Task, now = Date.now() / 1000): string {
+  const attempts = Array.isArray(task.progress?.execution_attempts) ? task.progress.execution_attempts as Array<Record<string, unknown>> : [];
+  const latest = attempts[attempts.length - 1];
+  const start = latest ? latest.started_at : task.started_at;
+  const running = normalizeStatus(task) === "running";
+  const end = latest ? latest.ended_at : task.finished_at;
+  if (typeof start !== "number" || !Number.isFinite(start) || start <= 0) return "";
+  const hasEnd = typeof end === "number" && Number.isFinite(end) && end > 0;
+  const finish = hasEnd ? end : running ? now : 0;
+  if (!finish || finish < start) return "";
+  const seconds = Math.max(0, Math.round(finish - start));
+  const prefix = running && !hasEnd ? "已运行 " : "耗时 ";
+  if (seconds < 1) return `${prefix}<1s`;
+  if (seconds < 60) return `${prefix}${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
-  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+  return prefix + (rest ? `${minutes}m ${rest}s` : `${minutes}m`);
 }
 
 function planNodeId(node: FlowNode): string {
@@ -450,6 +451,56 @@ function parentNodeIds(node: FlowNode): string[] {
   return stringList(node.raw.progress?.parent_node_ids);
 }
 
+function assignmentMessageForNode(node: FlowNode, messages: UiMessage[]): UiMessage | undefined {
+  const ids = new Set([planNodeId(node), node.raw.task_id, node.raw.id].map((value) => String(value || "").trim()).filter(Boolean));
+  const turn = turnIdOf(node);
+  return [...messages].reverse().find((message) => {
+    const source = String(message.sourceSessionId || "");
+    if (message.eventType !== "team_assign" || !message.nodeId || !ids.has(message.nodeId)) return false;
+    if (source.includes("::turn::")) return turn.includes("::turn::") && (source === turn || source.startsWith(`${turn}::`));
+    if (source && (source === turn || source.startsWith(`${turn}::`))) return true;
+    return Boolean(turn.includes("::turn::") && message.requestId && turn.endsWith(`::turn::${message.requestId}`));
+  });
+}
+
+function nodeDispatch(node: FlowNode, messages: UiMessage[]) {
+  const message = assignmentMessageForNode(node, messages);
+  if (message?.mentionFrom && message.mentionTo?.length) {
+    return { sender: message.mentionFrom, recipients: message.mentionTo, fromExecution: false };
+  }
+  if (!progressText(node.raw, "collaboration_task_id")) return undefined;
+  // The collaboration adapter delegates from the leader; a completed attempt
+  // with an actual executor also survives when chat assignment events do not.
+  const attempts = Array.isArray(node.raw.progress?.execution_attempts)
+    ? node.raw.progress.execution_attempts as Array<Record<string, unknown>> : [];
+  const completed = [...attempts].reverse().find((attempt) => attempt.state === "completed" && String(attempt.actual_executor || "").trim());
+  return completed ? { sender: "leader", recipients: [String(completed.actual_executor).trim()], fromExecution: true } : undefined;
+}
+
+export function stageDispatches(nodes: FlowNode[], messages: UiMessage[], displayName: (id: string) => string) {
+  const groups = new Map<string, { sender: string; nodes: FlowNode[] }>();
+  for (const node of nodes) {
+    const dispatch = nodeDispatch(node, messages);
+    if (!dispatch) continue;
+    const sender = displayName(dispatch.sender);
+    const recipients = dispatch.recipients.map(displayName).filter((name) => name && name !== sender);
+    if (!recipients.length) continue;
+    const group = groups.get(sender) || { sender, nodes: [] };
+    group.nodes.push(node);
+    groups.set(sender, group);
+  }
+  return [...groups.values()];
+}
+
+function executionWorkerIds(node: FlowNode): string[] {
+  const attempts = Array.isArray(node.raw.progress?.execution_attempts)
+    ? node.raw.progress.execution_attempts as Array<Record<string, unknown>>
+    : [];
+  const actual = attempts.map((attempt) => String(attempt.actual_executor || "").trim()).filter(Boolean);
+  if (actual.length) return [...new Set(actual)];
+  return node.owner && node.owner !== "待分配" ? [node.owner] : [];
+}
+
 function hasTeamPlanNodes(nodes: FlowNode[]): boolean {
   return nodes.some((node) => {
     const source = progressText(node.raw, "source");
@@ -457,12 +508,23 @@ function hasTeamPlanNodes(nodes: FlowNode[]): boolean {
   });
 }
 
+function flowMemberGroups(nodes: FlowNode[]): Array<[string, FlowNode[]]> {
+  const groups = new Map<string, FlowNode[]>();
+  for (const node of nodes) groups.set(node.owner, [...(groups.get(node.owner) || []), node]);
+  return [...groups.entries()];
+}
+
+function hasUnresolvedParents(nodes: FlowNode[], allNodes: FlowNode[]): boolean {
+  const ids = new Set(allNodes.flatMap((node) => [planNodeId(node), node.raw.task_id, node.raw.id]).filter(Boolean));
+  return nodes.some((node) => parentNodeIds(node).some((id) => !ids.has(id)));
+}
+
 function makeDagStages(nodes: FlowNode[]): FlowStage[] {
   const ordered = sortTasksForFlow(nodes.map((node) => node.raw))
     .map((task) => nodes.find((node) => node.raw === task))
     .filter((node): node is FlowNode => Boolean(node));
   if (!hasTeamPlanNodes(ordered)) {
-    return ordered.map((node, index) => ({ id: `stage_${index}`, depth: index, nodes: [node] }));
+    return ordered.length ? [{ id: "flow_nodes", depth: 0, hierarchical: false, nodes: ordered }] : [];
   }
 
   const byPlanNodeId = new Map<string, FlowNode>();
@@ -505,6 +567,7 @@ function makeDagStages(nodes: FlowNode[]): FlowStage[] {
     .map(([depth, stageNodes]) => ({
       id: `stage_${depth}`,
       depth,
+      hierarchical: true,
       nodes: stageNodes.sort((a, b) => displayRank(a.raw) - displayRank(b.raw) || a.title.localeCompare(b.title)),
     }));
 }
@@ -534,6 +597,7 @@ export function makeTurnGroups(nodes: FlowNode[]): FlowTurn[] {
     const syntheticStage: FlowStage = {
       id: `${id}:prompt`,
       depth: -1,
+      hierarchical: false,
       nodes: groupNodes,
     };
     return {
@@ -611,15 +675,9 @@ function readableSummary(task: Task): string {
 function readableSummaryItems(task: Task): string[] {
   if (progressText(task, 'collaboration_task_id')) {
     const attempts = Array.isArray(task.progress?.execution_attempts) ? task.progress.execution_attempts : [];
-    const last = attempts.at(-1) as Record<string, unknown> | undefined;
     return [
-      `执行状态：${progressText(task, 'execution_state') || 'pending'} · ${attempts.length} 次尝试`,
-      `实际执行者：${String(last?.actual_executor || '尚未回传')}；完成输出仍需人工复核`,
-      ...attempts.map((item) => {
-        const attempt = item as Record<string, unknown>;
-        return `尝试 ${String(attempt.attempt_id)}：${String(attempt.state)} · 计划 ${String(attempt.planned_member || task.assignee)} · 实际 ${String(attempt.actual_executor || '未回传')}${attempt.error ? ` · ${String(attempt.error)}` : ''}`;
-      }),
-      ...(progressText(task, 'assignment_reason') ? [`分配依据：${progressText(task, 'assignment_reason')}`] : []),
+      `执行状态：${progressText(task, 'execution_state') || 'pending'}`,
+      `执行尝试 ${attempts.length} 次`,
       ...(task.error ? [String(task.error)] : []),
     ];
   }
@@ -670,7 +728,9 @@ function dependencyLabel(node: FlowNode, nodes: FlowNode[]): string {
       if (value) byId.set(value, item.title);
     }
   }
-  return parents.map((parentId) => compactText(byId.get(parentId) || parentId, 18)).join("、");
+  return [...new Set(parents.map((parentId) => byId.has(parentId)
+    ? compactText(byId.get(parentId) || "", 18)
+    : "上游节点"))].join("、");
 }
 
 function compactText(text: string, max = 90): string {
@@ -857,9 +917,8 @@ export default function TaskBoard({
     setKnownTurnIds((known) => {
       setExpandedTurns((prev) => {
         const next = new Set(prev);
-        for (const id of currentIds) {
-          if (!known.has(id)) next.add(id);
-        }
+        const latestTurnId = turnGroups.at(-1)?.id;
+        if (latestTurnId && !known.has(latestTurnId)) next.add(latestTurnId);
         for (const id of next) {
           if (!currentIds.has(id)) next.delete(id);
         }
@@ -880,7 +939,7 @@ export default function TaskBoard({
   const displayAgentName = (agent: string) => {
     const text = String(agent || "").trim();
     if (text.toLowerCase() === "leader") return leaderDisplayName;
-    return teamMembers.find((member) => member.agentId === text || member.name === text)?.name || text;
+    return teamMembers.find((member) => member.agentId === text || member.mentionId === text || member.name === text)?.name || text;
   };
   const memberTones = useMemo(
     () => Object.fromEntries(teamMembers.map((member, index) => [member.name, member.tone ?? index % 6])),
@@ -942,7 +1001,7 @@ export default function TaskBoard({
   };
 
   return (
-    <aside className="board">
+    <aside className={`board${isTeamMode ? " board--team" : ""}`}>
       <button
         className="board-resizer"
         type="button"
@@ -968,7 +1027,7 @@ export default function TaskBoard({
               </button>
             )}
           </span>
-          <em>{isTeamMode ? "Team Flow" : "Execution Flow"}</em>
+          <em>{isTeamMode ? "任务流转" : "执行流程"}</em>
         </div>
         <div className="board__actions">
           <button className="icon-btn" style={{ width: 24, height: 24 }} onClick={onClose} title="收起">
@@ -1057,11 +1116,11 @@ export default function TaskBoard({
               <i />
             </span>
             <div>
-              <strong>{displayNodes.length ? "团队工作流" : "等待团队工作流"}</strong>
+              <strong>{displayNodes.length ? "团队流程图" : "等待团队流程"}</strong>
               <p>
                 {nextNode
                   ? allTeamNodesCompleted ? `已完成：${nextNode.title}` : `当前节点：${nextNode.title}`
-                  : "开始任务后这里会展示 DAG 阶段、负责人和节点小结。"}
+                  : "流程图会展示节点依赖、派出方、接收方与执行人数。"}
               </p>
             </div>
           </div>
@@ -1072,6 +1131,7 @@ export default function TaskBoard({
             <span>{displayCompletedCount}/{displayTotalCount || 0} 已完成</span>
             <span>{displayRunningNode ? `${displayAgentName(displayRunningNode.owner)} 处理中` : "暂无运行节点"}</span>
           </div>
+          <div className="team-roster__head"><strong>团队成员</strong><span>{teamMembers.length} 位</span></div>
           <div className="team-members" aria-label="团队成员">
             {teamMembers.map((member) => (
               <div className={`team-member${member.isLeader ? " is-leader" : ""}`} key={member.name}>
@@ -1089,7 +1149,7 @@ export default function TaskBoard({
                     {member.name}
                     {member.isLeader && <span className="pixel-flag" aria-label="Leader" title="Leader" />}
                   </strong>
-                  <p>{member.role}</p>
+                  <p title={member.role}>{member.role}</p>
                 </div>
               </div>
             ))}
@@ -1104,7 +1164,7 @@ export default function TaskBoard({
             <p>点击团队派活或开始 Team 会话后，这里会按节点展示负责人、进度和小结。</p>
           </div>
         ) : isTeamMode && (
-          <section className="flow-map" aria-label={isTeamMode ? "团队运行流程" : "任务执行流程"}>
+          <section className="flow-map" aria-label={isTeamMode ? "团队流程图" : "任务执行流程"}>
             {turnGroups.map((turn, turnIndex) => (
               <section className={`flow-turn is-${turn.status}`} key={turn.id}>
                 <button
@@ -1112,23 +1172,46 @@ export default function TaskBoard({
                   onClick={() => toggleTurn(turn.id)}
                   aria-expanded={expandedTurns.has(turn.id)}
                 >
-                  <span>{turnIndex + 1}</span>
+                  <span>第 {turnIndex + 1} 轮</span>
                   <div>
                     <strong>{turn.title}</strong>
                     <em>{statusLabel[turn.status]}</em>
                   </div>
                 </button>
                 {expandedTurns.has(turn.id) && turn.stages.map((stage) => (
-                  <div className={`flow-stage is-${stageStatus(stage)}`} key={stage.id}>
-                    <div className="flow-stage__rail">
-                      <span>{stage.depth + 1}</span>
-                      <i />
-                    </div>
-                    <div className="flow-stage__nodes">
-                      {stage.nodes.map((node) => {
-                    const dependency = dependencyLabel(node, displayNodes);
+                  <section className={`flow-lane is-${stageStatus(stage)}`} key={stage.id}>
+                    <header className="flow-lane__head">
+                      <strong>{!stage.hierarchical ? "任务节点" : `流程 ${stage.depth + 1}`}</strong>
+                      <span>{hasUnresolvedParents(stage.nodes, turn.stages.flatMap((item) => item.nodes)) ? "上游节点待确认" : stage.hierarchical && flowMemberGroups(stage.nodes).length > 1 ? `可并行 · ${flowMemberGroups(stage.nodes).length} 位成员` : `${stage.nodes.length} 个节点`}</span>
+                    </header>
+                    {stageDispatches(stage.nodes, messages, displayAgentName).map((dispatch) => (
+                      <div className="flow-dispatch" key={dispatch.sender}>
+                        <div className="flow-dispatch__head"><strong>{dispatch.sender} · 派发任务</strong><span>{dispatch.nodes.length} 项</span></div>
+                        <ul className="flow-dispatch__tasks">{dispatch.nodes.map((node) => <li key={node.id} title={node.fullTitle || node.title}>{node.title}</li>)}</ul>
+                      </div>
+                    ))}
+                    <div className="flow-lane__nodes">
+                      {flowMemberGroups(stage.nodes).map(([owner, memberNodes]) => (
+                        <div className="flow-member-lane" key={owner}>
+                          <div className="flow-member-lane__head">{displayAgentName(owner)} · {memberNodes.length} 项</div>
+                          {memberNodes.map((node) => {
+                    const dependency = dependencyLabel(node, turn.stages.flatMap((item) => item.nodes));
+                    const workers = executionWorkerIds(node).map(displayAgentName);
+                    const duration = durationLabel(node.raw);
                     const recoveryNodeId = planNodeId(node);
                     const leaderReview = node.owner.toLowerCase() === "leader" && (recoveryNodeId === "leader_review" || recoveryNodeId.startsWith("leader_review_"));
+                    const executionAttempts = Array.isArray(node.raw.progress?.execution_attempts)
+                      ? node.raw.progress.execution_attempts as Array<Record<string, unknown>>
+                      : [];
+                    const planningContext = [
+                      progressText(node.raw, "planning_explanation") && `规划依据：${progressText(node.raw, "planning_explanation")}`,
+                      progressText(node.raw, "assignment_reason") && `分配依据：${progressText(node.raw, "assignment_reason")}`,
+                      progressText(node.raw, "responsibility_quote") && `用户职责：${progressText(node.raw, "responsibility_quote")}`,
+                      progressText(node.raw, "capability_status") && progressText(node.raw, "capability_status") !== "covered"
+                        && `能力状态：${progressText(node.raw, "capability_status")}；所需能力：${progressStringList(node.raw, "required_capabilities").join("、") || "待确认"}`,
+                      progressText(node.raw, "planning_fallback_from")
+                        && `规划使用备用路径${progressText(node.raw, "planning_failure_type") ? `（${progressText(node.raw, "planning_failure_type")}）` : ""}`,
+                    ].filter((item): item is string => Boolean(item));
                     return (
                       <article className={`flow-node is-${node.status}`} key={node.id}>
                         <div className="flow-node__card">
@@ -1142,14 +1225,17 @@ export default function TaskBoard({
                               <span className={`flow-status is-${node.status}`}>{statusLabel[node.status]}</span>
                             </div>
                             <strong className="flow-node__title" title={node.fullTitle || node.title}>{node.title}</strong>
-                            {dependency && <span className="flow-node__dependency">依赖：{dependency}</span>}
+                            <div className="flow-node__handoff">
+                              <span className="flow-node__worker-count">执行成员 {workers.length} 位 · {workers.join("、") || "待分配"}</span>
+                              {duration && <span className="flow-node__duration">{duration}</span>}
+                            </div>
+                            {dependency && <span className="flow-node__dependency">依赖 ← {dependency}</span>}
                             <span className="flow-node__hint">{expandedNodes.has(node.id) ? "收起详情" : "点击展开详情"}</span>
                           </button>
                           {expandedNodes.has(node.id) && (
                             <div className="flow-node__detail">
                               {(() => {
                                 const paths = artifactPaths(node.raw);
-                                const duration = durationLabel(node.raw);
                                 const messageId = nodeMessageId(node, messages);
                                 return (
                                   <>
@@ -1166,19 +1252,38 @@ export default function TaskBoard({
                                         <p className="flow-node__full-title">节点任务：{node.fullTitle}</p>
                                       )}
                                       <ul className="flow-node__brief-list">
-                                        {progressText(node.raw, "planning_explanation") && <li>规划依据：{progressText(node.raw, "planning_explanation")}</li>}
-                                        {progressText(node.raw, "assignment_reason") && <li>分配依据：{progressText(node.raw, "assignment_reason")}</li>}
-                                        {progressText(node.raw, "responsibility_quote") && <li>用户职责：{progressText(node.raw, "responsibility_quote")}</li>}
-                                        {progressText(node.raw, "capability_status") && progressText(node.raw, "capability_status") !== "covered" && <li>能力状态：{progressText(node.raw, "capability_status")}；所需能力：{progressStringList(node.raw, "required_capabilities").join("、") || "待确认"}</li>}
-                                        {progressText(node.raw, "planning_fallback_from") && <li>规划使用备用路径{progressText(node.raw, "planning_failure_type") ? `（${progressText(node.raw, "planning_failure_type")}）` : ""}</li>}
                                         {(node.summaryItems.length > 0 ? node.summaryItems : [node.summary]).map((item, index) => (
                                           <li key={`${node.id}_summary_${index}`}>{item}</li>
                                         ))}
                                       </ul>
                                     </section>
+                                    {executionAttempts.length > 0 && (
+                                      <details className="flow-node__attempts">
+                                        <summary>执行记录 · {executionAttempts.length} 次</summary>
+                                        <ol>
+                                          {executionAttempts.map((attempt, index) => (
+                                            <li key={String(attempt.attempt_id || index)}>
+                                              第 {index + 1} 次 · {String(attempt.state || "unknown")}
+                                              {attempt.planned_member ? ` · 计划 ${displayAgentName(String(attempt.planned_member))}` : ""}
+                                              {attempt.actual_executor ? ` · 实际 ${displayAgentName(String(attempt.actual_executor))}` : " · 未回传执行者"}
+                                              {attempt.error ? ` · ${String(attempt.error)}` : ""}
+                                            </li>
+                                          ))}
+                                        </ol>
+                                      </details>
+                                    )}
+                                    {planningContext.length > 0 && (
+                                      <details className="flow-node__context">
+                                        <summary>规划与分配依据</summary>
+                                        <ul>{planningContext.map((item) => <li key={item}>{item}</li>)}</ul>
+                                      </details>
+                                    )}
 
                                     {progressText(node.raw, "collaboration_task_id") && node.raw.result && (
-                                      <CollaborationResult text={String(node.raw.result)} completed={node.status === "completed"} />
+                                      <details className="flow-node__record">
+                                        <summary>完整工作记录</summary>
+                                        <CollaborationResult text={String(node.raw.result)} completed={node.status === "completed"} />
+                                      </details>
                                     )}
 
                                     {paths.length > 0 && (
@@ -1294,9 +1399,11 @@ export default function TaskBoard({
                         </div>
                       </article>
                     );
-                      })}
+                          })}
+                        </div>
+                      ))}
                     </div>
-                  </div>
+                  </section>
                 ))}
               </section>
             ))}
@@ -1310,6 +1417,8 @@ export default function TaskBoard({
           </section>
         )}
 
+        <details className="runtime-details" open={!isTeamMode}>
+          <summary>运行详情 · {runtime ? `${runtime.global_active}/${runtime.max_active_runs || "∞"}` : "—"}</summary>
         <section className="runtime-box">
           <div className="runtime-box__head">
             <span>运行态</span>
@@ -1318,7 +1427,7 @@ export default function TaskBoard({
           {isTeamMode && (
             <div className="runtime-box__current">
               <span title={sessionId}>{sessionId}</span>
-              <em title={dagInfo?.detail || "等待 DAG"}>{dagInfo ? `${dagInfo.label} · ${dagInfo.detail}` : "等待 DAG"}</em>
+              <em title={dagInfo?.detail || "等待团队任务"}>{dagInfo ? `${dagInfo.label} · ${dagInfo.detail}` : "等待团队任务"}</em>
             </div>
           )}
           <div className="runtime-box__grid">
@@ -1344,6 +1453,7 @@ export default function TaskBoard({
             <div className="runtime-box__empty">暂无运行或排队会话</div>
           )}
         </section>
+        </details>
       </div>
     </aside>
   );

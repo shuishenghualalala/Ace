@@ -205,14 +205,78 @@ async def test_adapter_runs_actual_leader_not_control_fallback():
         async def run(self, env):
             assert 'upstream' in env.query
             yield ResponseChunk.final(env.request_id, '')
-    host = SimpleNamespace(_recorded_team_internal_chunk=lambda *a, **kw: kw,
+    host = SimpleNamespace(_team_member_display_name=lambda *a: 'Crew',
+                           _recorded_team_internal_chunk=lambda *a, **kw: kw,
                            _leader_runtime_stream_chunk=lambda *a: None)
-    node = SimpleNamespace(assignee='leader', title='汇总', node_id='c')
+    node = SimpleNamespace(assignee='leader', title='汇总', node_id='c', metadata={})
     adapter = TeamExecutionAdapter(host, Envelope.of('review', session_id='s', user_id='owner'),
         SimpleNamespace(leader=Leader(), leader_spec=SimpleNamespace(member_id='lead')),
         SimpleNamespace(nodes={'c': node}, edges=[]), '', lambda _: None)
     with pytest.raises(ValueError, match='没有返回成果'):
         await adapter.execute({'unit_id': 'c', 'attempt_id': 'att', 'upstream': []})
+
+
+@pytest.mark.asyncio
+async def test_adapter_persists_actual_stream_and_tools_for_history(store):
+    from types import SimpleNamespace
+    from crew.core.envelope import Envelope, ResponseChunk
+    from crew.team.collaboration_runtime import TeamExecutionAdapter
+    from crew.team.history_projection import project_collaboration_history
+
+    package = store.claim('owner', 'task')
+    async def delegate(_session, **kwargs):
+        relay = kwargs['on_child_chunk']
+        relay('kimi', ResponseChunk.thinking_event('r', '先检查材料'))
+        relay('kimi', ResponseChunk.tool_event('r', 'read', 'start', tool_call_id='read-1', args='{"path":"source.md"}'))
+        relay('kimi', ResponseChunk.tool_event('r', 'read', 'result', detail='读取完成', tool_call_id='read-1'))
+        relay('kimi', ResponseChunk.delta('r', '正在整理证据'))
+        return {'ok': True, 'status': 'completed', 'output': '最终结果', 'member': 'kimi', 'task_id': 'child'}
+
+    host = SimpleNamespace(_collaboration_execution_store=store, _team_member_display_name=lambda *_: 'kimi',
+                           _recorded_team_internal_chunk=lambda *_a, **kw: kw, _team_internal_chunk=lambda *_a, **kw: kw,
+                           _team_delegate_cwd=lambda *_a, **_kw: '', request_delegate=delegate)
+    node = SimpleNamespace(node_id='a', assignee='kimi', title='审阅材料', metadata={}, delegate_task_id='')
+    adapter = TeamExecutionAdapter(host, Envelope.of('review', session_id='session', user_id='owner'),
+        SimpleNamespace(teammates={'kimi': SimpleNamespace(tool_filter=set())}),
+        SimpleNamespace(nodes={'a': node}, edges=[], goal='review'), '', lambda _: None)
+    result = await adapter.execute(package)
+    store.finish('owner', 'task', package['attempt_id'], state='completed', result=result)
+    history = project_collaboration_history([store.get('owner', 'task')], [], {})
+    reply = next(item for item in history if item['event_type'] == 'team_submit')
+    assert reply['content'] == '最终结果'
+    assert reply['thinking'] == '先检查材料'
+    assert reply['process_text'] == '正在整理证据'
+    assert reply['tool_calls'][0]['id'] == 'read-1'
+    assert reply['tool_calls'][0]['result'] == '读取完成'
+
+
+@pytest.mark.asyncio
+async def test_adapter_keeps_recorded_process_when_execution_fails(store):
+    from types import SimpleNamespace
+    from crew.core.envelope import Envelope, ResponseChunk
+    from crew.team.collaboration_runtime import TeamExecutionAdapter
+    from crew.team.history_projection import project_collaboration_history
+
+    package = store.claim('owner', 'task')
+
+    async def delegate(_session, **kwargs):
+        kwargs['on_child_chunk']('kimi', ResponseChunk.thinking_event('r', '检查材料'))
+        raise RuntimeError('执行中断')
+
+    host = SimpleNamespace(_collaboration_execution_store=store, _team_member_display_name=lambda *_: 'kimi',
+                           _recorded_team_internal_chunk=lambda *_a, **kw: kw, _team_internal_chunk=lambda *_a, **kw: kw,
+                           _team_delegate_cwd=lambda *_a, **_kw: '', request_delegate=delegate)
+    node = SimpleNamespace(node_id='a', assignee='kimi', title='审阅材料', metadata={}, delegate_task_id='')
+    adapter = TeamExecutionAdapter(host, Envelope.of('review', session_id='session', user_id='owner'),
+        SimpleNamespace(teammates={'kimi': SimpleNamespace(tool_filter=set())}),
+        SimpleNamespace(nodes={'a': node}, edges=[], goal='review'), '', lambda _: None)
+    with pytest.raises(RuntimeError, match='执行中断'):
+        await adapter.execute(package)
+    store.finish('owner', 'task', package['attempt_id'], state='failed', error='执行中断')
+    history = project_collaboration_history([store.get('owner', 'task')], [], {})
+    reply = next(item for item in history if item['event_type'] == 'team_submit')
+    assert reply['thinking'] == '检查材料'
+    assert '执行中断' in reply['content']
 
 
 def test_unknown_retry_requires_confirmation_and_history_preserved(store):

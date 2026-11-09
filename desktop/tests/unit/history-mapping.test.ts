@@ -286,6 +286,23 @@ describe('mapBackendHistoryItem turnFileChanges', () => {
 });
 
 describe('Team Session history mapping', () => {
+  it('replays each assignment and the corresponding member process separately', () => {
+    const source = 'parent::turn::request';
+    const common = { role: 'team_internal', display_mode: 'chat' } as const;
+    const messages = mapBackendHistoryItems([
+      { ...common, content: '@kimi 整理材料', agent_id: 'leader', event_type: 'team_assign', node_id: 'a', source_session_id: `${source}::leader` },
+      { ...common, content: '整理成果', agent_id: 'kimi', event_type: 'team_submit', node_id: 'a', source_session_id: `${source}::kimi`, thinking: '检查来源', process_text: '正在整理', tool_calls: [{ id: 'read-a', name: 'read', arguments: {}, status: 'done' }] },
+      { ...common, content: '@kimi 检查证据', agent_id: 'leader', event_type: 'team_assign', node_id: 'b', source_session_id: `${source}::leader` },
+      { ...common, content: '检查成果', agent_id: 'kimi', event_type: 'team_submit', node_id: 'b', source_session_id: `${source}::kimi` },
+    ]);
+
+    expect(messages).toHaveLength(4);
+    expect(messages.map((item) => item.eventType)).toEqual(['team_assign', 'team_submit', 'team_assign', 'team_submit']);
+    expect(messages[1]).toMatchObject({ content: '整理成果', thinking: '检查来源', processText: '正在整理' });
+    expect(messages[1].toolCalls?.[0].toolCallId).toBe('read-a');
+    expect(messages[3].content).toBe('检查成果');
+  });
+
   it('preserves team_internal identity and presentation metadata', () => {
     const msg = mapBackendHistoryItem({
       role: 'team_internal',

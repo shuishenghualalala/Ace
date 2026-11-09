@@ -128,7 +128,9 @@ class TeamWorkflowRuntime:
         planning_key = self.host._key(envelope.session_id, envelope.user_id)
         planning_failure = self.host._planning_failures.pop(planning_key, "")
         if plan is None and planning_failure:
-            yield ResponseChunk.final(envelope.request_id, planning_failure, reason="planning_failed")
+            yield ResponseChunk.final(
+                envelope.request_id, planning_failure, reason="planning_failed", status="failed",
+            )
             return
         scope_conflict = self.host._planning_scope_conflicts.pop(planning_key, {})
         if plan is None and scope_conflict:
@@ -273,12 +275,16 @@ class TeamWorkflowRuntime:
             missing_info = self.host._planning_missing_info.pop(planning_key, [])
             planning_failure = self.host._planning_failures.pop(planning_key, "")
             if plan is None and planning_failure:
-                yield ResponseChunk.final(envelope.request_id, planning_failure, reason="planning_failed")
+                yield ResponseChunk.final(
+                    envelope.request_id, planning_failure, reason="planning_failed", status="failed",
+                )
                 return
         if plan is None:
             planning_failure = self.host._planning_failures.pop(planning_key, "")
             if planning_failure:
-                yield ResponseChunk.final(envelope.request_id, planning_failure, reason="planning_failed")
+                yield ResponseChunk.final(
+                    envelope.request_id, planning_failure, reason="planning_failed", status="failed",
+                )
                 return
             if missing_info or self.host._planning_missing_info.pop(planning_key, []):
                 yield ResponseChunk.final(
@@ -897,13 +903,21 @@ class TeamWorkflowRuntime:
             if dispatch_nodes:
                 progressed = True
                 if len(dispatch_nodes) > 1:
-                    names = "、".join(f"{node.title}→{node.assignee}" for node in dispatch_nodes)
-                    yield ResponseChunk.status_event(envelope.request_id, f"并发派发节点：{names}")
+                    names = "、".join(
+                        f"{node.title}→@{self.host._team_member_display_name(envelope.session_id, node.assignee, envelope.user_id)}"
+                        for node in dispatch_nodes
+                    )
+                    yield ResponseChunk.status_event(envelope.request_id, f"并行任务：{names}")
                 else:
                     node = dispatch_nodes[0]
+                    assignee_name = self.host._team_member_display_name(
+                        envelope.session_id,
+                        node.assignee,
+                        envelope.user_id,
+                    )
                     yield ResponseChunk.status_event(
                         envelope.request_id,
-                        f"派发节点「{node.title}」给 {node.assignee}（第 {node.attempt_count + 1} 次）…",
+                        f"@{assignee_name} 开始执行「{node.title}」（第 {node.attempt_count + 1} 次）…",
                     )
                 for node in dispatch_nodes:
                     if not team_presenter.should_show_assignment(plan, node):
@@ -1144,14 +1158,19 @@ class TeamWorkflowRuntime:
                         mention_to=["leader"],
                         mention_intent="submit" if is_review_submission else "handoff",
                     ))
+                    assignee_name = self.host._team_member_display_name(
+                        envelope.session_id,
+                        node.assignee,
+                        envelope.user_id,
+                    )
                     if assessment.execution_status != "completed":
-                        ack_text = f"@{node.assignee} 「{node.title}」未通过执行验收，已标记为{assessment.execution_status}。"
+                        ack_text = f"@{assignee_name} 「{node.title}」未通过执行验收，已标记为{assessment.execution_status}。"
                     elif is_review_submission:
-                        ack_text = f"@{node.assignee} 已收到「{node.title}」方案，将进入 Leader 审阅。"
+                        ack_text = f"@{assignee_name} 已收到「{node.title}」方案，将进入 Leader 审阅。"
                     elif self.host._result_requires_user_input(result_summary, result_contract):
-                        ack_text = f"@{node.assignee} 已收到，我会结合团队状态判断是否需要向用户补充信息。"
+                        ack_text = f"@{assignee_name} 已收到，我会结合团队状态判断是否需要向用户补充信息。"
                     else:
-                        ack_text = f"@{node.assignee} 已收到「{node.title}」提交，我会结合计划状态推进下一步。"
+                        ack_text = f"@{assignee_name} 已收到「{node.title}」提交，我会结合计划状态推进下一步。"
                     chunks.append(self.host._recorded_team_internal_chunk(
                         envelope,
                         agent_id="leader",
@@ -1355,4 +1374,12 @@ class TeamWorkflowRuntime:
                         )
                 break
 
-        yield ResponseChunk.final(envelope.request_id, self.host._format_workflow_result(plan))
+        workflow_complete = bool(plan.nodes) and all(
+            node.status == "completed" for node in plan.nodes.values()
+        )
+        yield ResponseChunk.final(
+            envelope.request_id,
+            self.host._format_workflow_result(plan, owner_account_id=envelope.user_id),
+            reason=None if workflow_complete else "workflow_incomplete",
+            status="succeeded" if workflow_complete else "failed",
+        )

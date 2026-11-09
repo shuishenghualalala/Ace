@@ -201,6 +201,18 @@ class ExecutionStore:
             self._event(task, 'attempt_' + state, unit_id=u['id'], attempt_id=attempt_id, error=error)
         self._mutate(owner, task_id, op)
 
+    def record_attempt_activity(self, owner: str, task_id: str, attempt_id: str, activity: list[dict]) -> None:
+        """Persist UI-safe stream activity on the same owner-scoped attempt."""
+        if not activity:
+            return
+        def op(task: dict) -> None:
+            attempt = next((item for item in task['attempts'] if item['attempt_id'] == attempt_id), None)
+            if attempt is None:
+                raise ValueError('执行尝试不存在')
+            attempt['activity'] = copy.deepcopy(activity)
+            task['updated_at'] = time.time()
+        self._mutate(owner, task_id, op)
+
     def settle(self, owner: str, task_id: str) -> None:
         def op(task: dict) -> None:
             bad = {u['id'] for u in task['units'] if u['state'] in {'failed', 'blocked', 'unknown', 'cancelled'}}

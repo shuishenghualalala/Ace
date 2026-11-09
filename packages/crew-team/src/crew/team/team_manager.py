@@ -1035,6 +1035,9 @@ class InProcessTeamManager(TeamManager):
 
         candidate = str(member_id or "").strip()
         team = self._teams.get(self._key(session_id, owner_account_id))
+        if team is None and "::turn::" in session_id:
+            visible_session_id = session_id.split("::turn::", 1)[0]
+            team = self._teams.get(self._key(visible_session_id, owner_account_id))
         if team is None:
             return candidate
         spec = (
@@ -1334,7 +1337,8 @@ class InProcessTeamManager(TeamManager):
                     "output_ref": "\n".join(list(task.get("artifact_paths") or [])),
                     "created_at": float(task.get("created_at") or getattr(workflow, "created_at", 0) or 0),
                     "updated_at": float(task.get("updated_at") or getattr(workflow, "updated_at", 0) or 0),
-                    "started_at": float(task.get("claimed_at") or task.get("created_at") or 0),
+                    # Creation can precede actual work by an arbitrary queue wait.
+                    "started_at": task.get("claimed_at") or (node_metadata.get(node_id) or {}).get("execution_started_at"),
                     "finished_at": task.get("done_at") if status == "completed" else None,
                     "progress": {
                         "source": "team_kanban",
@@ -4970,6 +4974,7 @@ class InProcessTeamManager(TeamManager):
         return "\n".join([
             "# 当前团队成员",
             "这是 Crew 控制面已配置的真实团队成员列表。用户询问团队成员、Leader 或职责时，必须基于此列表回答，不要说未提供成员信息。",
+            "成员名称是对用户展示的正式称呼；括号中的内部路由 ID 只供工具调用。向用户展示派工、进度、回执或结果时，只使用成员名称和 @名称，不要输出内部路由 ID。",
             *rows,
         ])
 
@@ -5382,10 +5387,14 @@ class InProcessTeamManager(TeamManager):
                         )
                     service = PlanningService(self._collaboration_planning_store)
                     if external_team_id:
-                        if self.external_store is None:
-                            raise PlanningError("团队目录不可用")
                         def current_team() -> dict[str, Any]:
-                            return self.external_store.get_team(external_team_id, owner_account_id=owner_account_id)
+                            external_store = self._current_external_store()
+                            if external_store is None:
+                                raise PlanningError("团队目录不可用")
+                            return external_store.get_team(
+                                external_team_id,
+                                owner_account_id=owner_account_id,
+                            )
                     else:
                         def current_team() -> dict[str, Any]:
                             return runtime_team_record(team)
@@ -5529,9 +5538,25 @@ class InProcessTeamManager(TeamManager):
                     return True
         return False
 
-    def _format_workflow_result(self, plan: TeamPlan | None) -> str:
+    def _format_workflow_result(
+        self,
+        plan: TeamPlan | None,
+        *,
+        owner_account_id: str = "",
+    ) -> str:
         if plan is None:
             return "团队工作流未能创建可执行计划。"
+
+        def _assignee_label(member_id: str) -> str:
+            value = str(member_id or "待分配").strip()
+            if not owner_account_id or value == "待分配":
+                return value
+            return self._team_member_display_name(
+                plan.team_session_id,
+                value,
+                owner_account_id,
+            )
+
         blocked_nodes = [
             node for node in plan.nodes.values()
             if node.status == "blocked"
@@ -5563,7 +5588,7 @@ class InProcessTeamManager(TeamManager):
                 suffix = "等" if len(runnable_nodes) > 3 else ""
                 lines.append(f"- 仍可继续：{titles}{suffix}")
             for node in blocked_nodes:
-                owner = node.assignee or "待分配"
+                owner = _assignee_label(node.assignee)
                 reason = node.result_summary or node.last_error or "当前节点没有可执行成员"
                 lines.append(f"- [blocked] {node.title}（主责：{owner}）：{reason}")
             return "\n".join(lines)
@@ -5586,7 +5611,7 @@ class InProcessTeamManager(TeamManager):
         for node in plan.nodes.values():
             status = node.status
             summary = node.result_summary or node.last_error or "无结果摘要"
-            lines.append(f"- [{status}] {node.title}（{node.assignee}）：{summary}")
+            lines.append(f"- [{status}] {node.title}（{_assignee_label(node.assignee)}）：{summary}")
         return "\n".join(lines)
 
     def _team_delegate_cwd(
@@ -6029,6 +6054,7 @@ class InProcessTeamManager(TeamManager):
         request_id: str,
         *,
         agent_id: str,
+        agent_name: str = "",
         text: str,
         source_session_id: str = "",
         role: str = "",
@@ -6058,7 +6084,7 @@ class InProcessTeamManager(TeamManager):
         body: dict[str, Any] = {
             "text": text,
             "agent_id": CREW_BUILTIN_AGENT_ID if is_crew_builtin_display_id(agent_id) else agent_id,
-            "agent_name": "Crew" if is_crew_builtin_display_id(agent_id) else agent_id,
+            "agent_name": agent_name or ("Crew" if is_crew_builtin_display_id(agent_id) else agent_id),
             "agent_role": role,
             "source_session_id": source_session_id,
             "is_leader": is_leader,
@@ -6173,6 +6199,15 @@ class InProcessTeamManager(TeamManager):
             communication_request_text=communication_request_text,
         )
         inner = chunk.body["payload"]
+        inner["agent_name"] = (
+            "Crew"
+            if is_leader or is_crew_builtin_display_id(agent_id)
+            else self._team_member_display_name(
+                envelope.session_id,
+                agent_id,
+                envelope.user_id,
+            )
+        )
         if node_id:
             inner["node_id"] = node_id
         payload = dict(inner)
@@ -7102,6 +7137,7 @@ class InProcessTeamManager(TeamManager):
             on_child_done=self._mark_child_done,
             on_task_created=_mark_plan_from_delegate_task,
             on_task_finished=_finish_plan_from_delegate_task,
+            member_display_names={member.member_id: member.name for member in members},
         )
         leader_visible_tools = [
             name for name in leader_registry.names()

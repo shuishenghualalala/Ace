@@ -80,9 +80,19 @@ class RuntimeStaffingPolicy:
             agent_id = str(member.external_agent_id).strip()
             profile = self.resolve_member_profile(member, owner_account_id)
             profiles = {agent_id: profile} if profile is not None else {}
+            # The Team member's configured role is the assignment contract.
+            # The live external profile is used to gate runtime/model readiness,
+            # not to erase capabilities that were already configured on the
+            # roster when the agent's observed profile is sparse.
+            capabilities = normalize_capabilities(member.capabilities)
+            if not capabilities:
+                capabilities = normalize_capabilities(
+                    flow_builder.member_node_metadata(member).get("required_capabilities") or []
+                )
             return evaluate_capability_coverage(
                 required_capabilities,
                 profiles,
+                capability_sets={agent_id: capabilities} if capabilities else None,
                 assigned_agent_ids=[agent_id],
                 require_profile_availability=True,
             )
@@ -167,6 +177,10 @@ class RuntimeStaffingPolicy:
             required,
             owner_account_id=owner_account_id,
         )
+        current_member = team.members.get(node.assignee)
+        current_member_name = str(
+            getattr(current_member, "name", "") or node.assignee
+        ).strip()
         can_confirm_original = self.can_confirm_original(team, node, owner_account_id=owner_account_id)
         # A user's explicit assignment is not invalidated by missing historical
         # capability evidence. The executor still enforces actual availability
@@ -195,14 +209,17 @@ class RuntimeStaffingPolicy:
                         "trigger_type": "existing_member_reassignment",
                         "required_capabilities": list(required),
                         "replacement_assignee": member_id,
-                        "reason": f"当前负责人 {node.assignee} 不具备所需能力，已有成员 {member_id} 可以承担。",
+                        "reason": (
+                            f"当前负责人 {current_member_name} 不具备所需能力，"
+                            f"已有成员 {getattr(_member, 'name', '') or member_id} 可以承担。"
+                        ),
                     }
         if coverage.status in {"unavailable", "unknown"}:
             return {
                 "trigger_type": "capability_unverified" if can_confirm_original else "agent_unavailable",
                 "required_capabilities": list(required),
-                "reason": (f"当前成员 {node.assignee} 的运行环境可用，但所需能力尚未得到验证。"
-                           if can_confirm_original else f"当前成员 {node.assignee} 的运行环境不可用或无法确认。"),
+                "reason": (f"当前成员 {current_member_name} 的运行环境可用，但所需能力尚未得到验证。"
+                           if can_confirm_original else f"当前成员 {current_member_name} 的运行环境不可用或无法确认。"),
                 "can_confirm_original": can_confirm_original,
             }
         if coverage.status != "covered":
@@ -212,7 +229,7 @@ class RuntimeStaffingPolicy:
             return {
                 "trigger_type": "capability_gap",
                 "required_capabilities": missing,
-                "reason": f"当前节点负责人 {node.assignee} 未覆盖硬能力：{'、'.join(missing)}。",
+                "reason": f"当前节点负责人 {current_member_name} 未覆盖硬能力：{'、'.join(missing)}。",
                 "can_confirm_original": can_confirm_original,
             }
         return None

@@ -3,10 +3,12 @@ import type { Task, UiMessage } from "../types";
 import {
   collectSessionFileItems,
   currentTurnNodesForBoard,
+  durationLabel,
   makeNodes,
   makeTurnGroups,
   nodeMessageId,
   nodeTitle,
+  stageDispatches,
   teamDagInfo,
 } from "./TaskBoard";
 
@@ -17,6 +19,48 @@ const task = (overrides: Partial<Task>): Task => ({
   status: "completed",
   result: "",
   ...overrides,
+});
+
+describe("stageDispatches", () => {
+  it("recovers historical dispatches from completed collaboration attempts", () => {
+    const nodes = makeNodes([
+      task({ id: "one", assignee: "kimi", progress: { collaboration_task_id: "t1", execution_attempts: [{ state: "completed", planned_member: "kimi", actual_executor: "kimi" }] } }),
+      task({ id: "two", assignee: "hermes", progress: { collaboration_task_id: "t1", execution_attempts: [{ state: "completed", planned_member: "hermes", actual_executor: "hermes" }] } }),
+      task({ id: "pending", assignee: "kimi", progress: { collaboration_task_id: "t1", execution_attempts: [{ state: "dispatching", planned_member: "kimi", actual_executor: null }] } }),
+    ]);
+    const result = stageDispatches(nodes, [], (id) => id === "leader" ? "Crew" : id);
+    expect(result).toHaveLength(1);
+    expect(result[0].nodes.map((node) => node.id)).toEqual(["one", "two"]);
+  });
+
+  it("uses real assignment events from this turn and groups their recipients", () => {
+    const turn = "session::turn::new";
+    const nodes = makeNodes([
+      task({ id: "one", assignee: "kimi", progress: { turn_session_id: turn, plan_node_id: "one" } }),
+      task({ id: "two", assignee: "hermes", progress: { turn_session_id: turn, plan_node_id: "two" } }),
+    ]);
+    const event = (id: string, target: string, source: string): UiMessage => ({
+      id: `${id}-${source}`, role: "team_internal", text: "", eventType: "team_assign",
+      nodeId: id, mentionFrom: "leader", mentionTo: [target], sourceSessionId: source,
+    });
+    const display = (id: string) => id === "leader" ? "Crew" : id;
+    const events = [event("one", "kimi", `${turn}::leader`), event("two", "hermes", `${turn}::leader`),
+      event("one", "wrong", "session::turn::old::leader")];
+    const result = stageDispatches(nodes, events, display);
+    expect(result).toHaveLength(1);
+    expect(result[0].sender).toBe("Crew");
+    expect(result[0].nodes.map((node) => node.id)).toEqual(["one", "two"]);
+    expect(stageDispatches(nodes, [], display)).toEqual([]);
+  });
+});
+
+describe("node duration", () => {
+  it("uses the latest actual attempt and keeps running time distinct from waiting time", () => {
+    const leader = task({ assignee: "leader", created_at: 1, progress: { execution_attempts: [{ started_at: 100, ended_at: 115 }] } });
+    expect(durationLabel(leader, 120)).toBe("耗时 15s");
+    expect(durationLabel({ ...leader, status: "running", progress: { execution_attempts: [{ started_at: 100 }] } }, 125)).toBe("已运行 25s");
+    expect(durationLabel({ ...leader, started_at: undefined, progress: { execution_attempts: [] } }, 125)).toBe("");
+  });
 });
 
 describe("nodeTitle", () => {
@@ -127,7 +171,7 @@ describe("currentTurnNodesForBoard", () => {
     const currentNodes = currentTurnNodesForBoard(nodes, turnGroups);
 
     expect(currentNodes.map((node) => node.id)).toEqual(["new_1"]);
-    expect(teamDagInfo(currentNodes, [turnGroups[turnGroups.length - 1]])?.label).toBe("Standard Semantic DAG");
+    expect(teamDagInfo(currentNodes, [turnGroups[turnGroups.length - 1]])?.label).toBe("团队协作");
   });
 });
 

@@ -68,6 +68,23 @@ describe("preserveLocalProcessDetails", () => {
 });
 
 describe("mapHistoryItems", () => {
+  it("replays each assignment and the corresponding member's recorded process", () => {
+    const source = "web_demo::turn::req_1";
+    const items: BackendHistoryItem[] = [
+      teamItem({ content: "@kimi 整理材料", agent_id: "leader", event_type: "team_assign", node_id: "a", source_session_id: `${source}::leader` }),
+      teamItem({ content: "整理成果", agent_name: "kimi", event_type: "team_submit", node_id: "a", source_session_id: `${source}::kk`, thinking: "检查来源", process_text: "正在整理", tool_calls: [{ id: "read-a", name: "read", arguments: {}, status: "done" }] }),
+      teamItem({ content: "@kimi 检查证据", agent_id: "leader", event_type: "team_assign", node_id: "b", source_session_id: `${source}::leader` }),
+      teamItem({ content: "检查成果", agent_name: "kimi", event_type: "team_submit", node_id: "b", source_session_id: `${source}::kk` }),
+    ];
+
+    const messages = mapHistoryItems(items);
+    expect(messages).toHaveLength(4);
+    expect(messages.map((item) => item.eventType)).toEqual(["team_assign", "team_submit", "team_assign", "team_submit"]);
+    expect(messages[1]).toMatchObject({ text: "整理成果", thinking: "检查来源", processText: "正在整理" });
+    expect(messages[1].toolCalls?.[0].toolCallId).toBe("read-a");
+    expect(messages[3].text).toBe("检查成果");
+  });
+
   it("normalizes unknown backend roles to a safe status message", () => {
     const [message] = mapHistoryItems([{
       role: "unexpected_role",
