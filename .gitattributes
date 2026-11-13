@@ -5,3 +5,4 @@ security-runtime/tests/**/*.rs text eol=lf
 security-runtime/Cargo.toml text eol=lf
 security-runtime/Cargo.lock text eol=lf
 *.sh text eol=lf
+deb-package/version.txt text eol=lf

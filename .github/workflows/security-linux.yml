@@ -41,11 +41,11 @@ jobs:
       - run: cargo test --manifest-path security-runtime/Cargo.toml --release --locked
         env:
           ACE_REQUIRE_NATIVE_TESTS: '1'
-      - run: uv run pytest tests/security -q
+      - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/release/ace-security-runtime --bwrap /usr/bin/bwrap --bwrap-license /usr/share/doc/bubblewrap/copyright --bwrap-version "$(dpkg-query -W -f='${Version}' bubblewrap)" --output desktop/security-runtime-bin
+      - run: uv run pytest tests/security -q --basetemp "$RUNNER_TEMP/ace-security-tests"
       - run: python tests/security/security_matrix.py --platform linux --runtime security-runtime/target/release/ace-security-runtime
         env:
           ACE_REQUIRE_NATIVE_SECURITY: '1'
-      - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/release/ace-security-runtime --bwrap /usr/bin/bwrap --bwrap-license /usr/share/doc/bubblewrap/copyright --bwrap-version "$(dpkg-query -W -f='${Version}' bubblewrap)" --output desktop/security-runtime-bin
       - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
       - name: Bind Linux evidence to the tested release artifact
         env:

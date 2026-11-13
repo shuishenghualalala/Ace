@@ -318,7 +318,7 @@ def test_wait_after_kill_returns_settled_status():
     reg.kill_process(s.id, owner_account_id="local")
     result = reg.wait(s.id, timeout=5, owner_account_id="local")
     assert result["status"] == "exited"
-    assert result["exit_code"] == -15
+    assert result["exit_code"] == (1 if os.name == "nt" else -15)
 
 
 def test_stdin_pipe_batch_write_and_close():

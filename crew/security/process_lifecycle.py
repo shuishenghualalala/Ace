@@ -91,7 +91,7 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        # os.kill(pid, 0) sends a Windows console control event; it is not a probe.
+        # os.kill(pid, 0) is not a non-signalling liveness probe on Windows.
         import psutil
 
         try:

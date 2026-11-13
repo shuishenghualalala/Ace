@@ -535,7 +535,7 @@ async def test_file_read_pagination(registry, tmp_path):
 async def test_file_read_preserves_bom(registry, tmp_path):
     p = tmp_path / "bom.txt"
     original = "﻿hello world\r\nsecond line\r\n"
-    p.write_text(original, encoding="utf-8")
+    p.write_bytes(original.encode("utf-8"))
 
     r = await registry.execute(ToolCall("c1", "file_read", {"path": str(p)}))
     assert not r.is_error

@@ -39,6 +39,10 @@ jobs:
           python-version: '3.11'
       # wiki extra 与 README「验证安装」一节保持一致；e2e 标记默认跳过
       - run: uv sync --extra dev --extra wiki
+      - name: Use Git Bash for shell-script contract tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"$env:ProgramFiles\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
       # 静态检查与 OS 无关，只在 Linux 一份上跑，避免矩阵三倍重复
       - run: uv run ruff check .
         if: runner.os == 'Linux'

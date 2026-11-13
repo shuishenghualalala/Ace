@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import sys
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -1048,7 +1050,7 @@ def test_formation_catalog_excludes_runtime_managed_agents(tmp_path, monkeypatch
         "id": "rt-managed",
         "type": "acp",
         "provider": "generic",
-        "executable_path": "/bin/sh",
+        "executable_path": sys.executable,
         "metadata": {
             "availability_status": "ready",
             "models": [{"id": "model-managed", "label": "Managed Model", "default": True}],
@@ -1081,7 +1083,7 @@ async def test_confirmed_temporary_member_is_owner_private_hidden_and_cleaned_up
         "id": "rt-ready",
         "type": "acp",
         "provider": "generic",
-        "executable_path": "/bin/sh",
+        "executable_path": sys.executable,
         "metadata": {
             "availability_status": "ready",
             "models": [{"id": "model-ready", "label": "Ready Model", "default": True}],
@@ -1275,7 +1277,7 @@ async def test_formation_does_not_claim_unverified_capability_is_a_confirmed_gap
         "id": "rt-ready",
         "type": "acp",
         "provider": "generic",
-        "executable_path": "/bin/sh",
+        "executable_path": sys.executable,
         "metadata": {
             "availability_status": "ready",
             "models": [{
@@ -1291,7 +1293,7 @@ async def test_formation_does_not_claim_unverified_capability_is_a_confirmed_gap
         "id": "rt-generic",
         "type": "acp",
         "provider": "generic",
-        "executable_path": "/bin/sh",
+        "executable_path": sys.executable,
         "metadata": {
             "availability_status": "ready",
             "models": [{"id": "model-generic", "label": "Generic Model", "default": True}],

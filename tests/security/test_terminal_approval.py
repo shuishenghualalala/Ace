@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -68,7 +69,10 @@ class _FullAccessService:
     "command",
     [
         "echo safe-looking",
-        "Remove-Item -Recurse -Force '__TARGET__'",
+        pytest.param(
+            "Remove-Item -Recurse -Force '__TARGET__'",
+            marks=pytest.mark.skipif(os.name != "nt", reason="PowerShell uses native Windows target paths"),
+        ),
         "a=rm; $a -rf /tmp/example",
     ],
 )
@@ -78,7 +82,7 @@ async def test_every_managed_terminal_command_crosses_host_authorization(
     command: str,
 ) -> None:
     """Unknown/PowerShell/indirect commands must not bypass approval by missing a regex."""
-    command = command.replace("__TARGET__", str(tmp_path / "delete-target").replace("'", "''"))
+    command = command.replace("__TARGET__", str(Path(tmp_path.anchor) / "ace-approval-test-target").replace("'", "''"))
     context = SecurityContext(
         os_user="os-a",
         owner_account_id="owner-a",

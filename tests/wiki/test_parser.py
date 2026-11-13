@@ -28,7 +28,7 @@ def test_parse_txt():
 def test_parse_md():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "test.md"
-        path.write_text("# Title\n\nbody", encoding="utf-8")
+        path.write_bytes(b"# Title\n\nbody")
         assert parse_document_to_markdown(path) == "# Title\n\nbody"
 
 

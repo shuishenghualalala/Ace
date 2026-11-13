@@ -743,6 +743,10 @@ describe('wiki-page 入口挂点', () => {
     await refreshWikiData();
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-new]')).not.toBeNull());
 
+    // The panel mounts before its initial session request has finished.
+    await vi.waitFor(() => {
+      expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
+    });
     const newSessionId = `wiki-new-${wikiSidSeq}`;
     api.wikiAgentSession.mockResolvedValueOnce({ ok: true, session_id: newSessionId, kb_id: 'default' });
     document.querySelector<HTMLElement>('[data-wiki-agent-new]')!.click();

@@ -87,7 +87,7 @@ async function check(name: string, run: () => Promise<string>): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     results.push({ name, ok: false, detail: message.split('\n')[0].slice(0, 160) });
-    console.log(`FAIL  ${name}: ${message.split('\n')[0].slice(0, 160)}`);
+    console.log(`FAIL  ${name}: ${message}`);
   }
 }
 

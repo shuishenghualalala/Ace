@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import asyncio
 
 import pytest
@@ -336,7 +338,7 @@ async def test_plugin_skill_root_resolves_against_plugin_dir(tmp_path):
     _, plugins = _load(tmp_path)
     roots = plugins.plugin_skill_roots()
     assert len(roots) == 1
-    assert roots[0].endswith("lifecycle_plugin/skills")
+    assert Path(roots[0]).parts[-2:] == ("lifecycle_plugin", "skills")
 
 
 async def test_plugin_execution_driver_is_owned_and_removed_on_unload(tmp_path):

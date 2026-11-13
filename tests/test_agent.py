@@ -1463,7 +1463,7 @@ async def test_read_attachment_truncation_is_self_describing(tmp_path):
 
     long_file = tmp_path / "long.md"
     body = "\n".join(f"line-{i}" for i in range(1500))
-    long_file.write_text(body, encoding="utf-8")
+    long_file.write_bytes(body.encode("utf-8"))
 
     result = await rt._read_attachment(str(long_file))
 

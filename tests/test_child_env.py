@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 import pytest
@@ -143,12 +144,16 @@ def test_spawn_local_child_env_excludes_host_secrets(
     from crew.tools.process_registry import ProcessRegistry
 
     ambient = _host_env()
+    if os.name == "nt":
+        ambient.update({name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT") if name in os.environ})
     monkeypatch.setattr(child_env.os, "environ", ambient)
     registry = ProcessRegistry()
-    command = (
-        f"{sys.executable} -c "
-        "\"import os,json;print(json.dumps(sorted(os.environ)))\""
-    )
+    code = "import os,json;print(json.dumps(sorted(os.environ)))"
+    if os.name == "nt":
+        command = "& '" + sys.executable.replace("'", "''") + "' -c '" + code + "'"
+    else:
+        import shlex
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
     session = registry.spawn_local(
         command,
         session_key="env-check",
