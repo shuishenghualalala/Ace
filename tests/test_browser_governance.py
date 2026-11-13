@@ -39,7 +39,7 @@ PLAIN_REF = "p1:e18"
 async def browser(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "crew.browser.manager.get_owner_runtime_home",
-        lambda owner: tmp_path / "accounts" / str(owner),
+        lambda owner: tmp_path / "accounts" / str(owner).replace(":", "_"),
     )
     driver = FakeBrowserDriver()
     manager = BrowserManager(BrowserConfig(), driver)

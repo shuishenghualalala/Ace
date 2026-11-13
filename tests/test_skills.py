@@ -2086,3 +2086,31 @@ def test_build_optional_skills_index_prompt(optional_env):
     install_skill("opt-skill")
     assert "/opt-skill" not in build_optional_skills_index_prompt()
 
+
+
+def test_watcher_dispatch_does_not_acquire_the_index_lock(tmp_path):
+    """A watcher event must not invert the reader/index and Observer locks."""
+    import threading
+    from types import SimpleNamespace
+
+    from crew.agent.skills.watcher import SkillWatcher
+
+    index_lock = threading.Lock()
+    callbacks = []
+
+    def invalidate():
+        with index_lock:
+            callbacks.append(threading.get_ident())
+
+    watcher = SkillWatcher(lambda: [tmp_path], invalidate)
+    event = SimpleNamespace(src_path=str(tmp_path / "SKILL.md"), is_directory=False)
+    worker = threading.Thread(target=watcher._handle_event, args=(event,))
+    with index_lock:
+        worker.start()
+        worker.join(timeout=1)
+        blocked = worker.is_alive()
+    worker.join(timeout=1)
+    assert not blocked
+    assert callbacks == []
+    watcher.sync()
+    assert callbacks == [threading.get_ident()]

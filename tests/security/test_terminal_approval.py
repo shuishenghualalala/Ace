@@ -68,7 +68,7 @@ class _FullAccessService:
     "command",
     [
         "echo safe-looking",
-        "Remove-Item -Recurse -Force C:\\\\Users",
+        "Remove-Item -Recurse -Force '__TARGET__'",
         "a=rm; $a -rf /tmp/example",
     ],
 )
@@ -78,6 +78,7 @@ async def test_every_managed_terminal_command_crosses_host_authorization(
     command: str,
 ) -> None:
     """Unknown/PowerShell/indirect commands must not bypass approval by missing a regex."""
+    command = command.replace("__TARGET__", str(tmp_path / "delete-target").replace("'", "''"))
     context = SecurityContext(
         os_user="os-a",
         owner_account_id="owner-a",

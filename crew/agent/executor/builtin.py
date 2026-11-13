@@ -46,6 +46,8 @@ from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
 from crew.core.envelope import ResponseChunk
 from crew.core.errors import CrewError, CrewErrorKind, ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
+from contextvars import copy_context
+
 from crew.core.observability import attach_context, capture_context, event, span
 from crew.core.types import IMAGE_INPUT_UNAVAILABLE_NOTICE, Message, ToolResult
 from crew.plugins.manager import PluginManager
@@ -70,7 +72,22 @@ VISION_CAPABILITY_RECOVERY_PROMPT = (
 )
 
 
-async def _observed_provider_stream(
+async def _observed_provider_stream(stream: Any, **kwargs: Any) -> AsyncIterator[Any]:
+    """Keep observation tokens in one context even when consumers switch tasks."""
+    context = copy_context()
+    observed = _observed_provider_stream_in_context(stream, **kwargs)
+    try:
+        while True:
+            try:
+                chunk = await asyncio.create_task(anext(observed), context=context)
+            except StopAsyncIteration:
+                break
+            yield chunk
+    finally:
+        await asyncio.create_task(observed.aclose(), context=context)
+
+
+async def _observed_provider_stream_in_context(
     stream: Any,
     *,
     request_payload: dict[str, Any],

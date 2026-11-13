@@ -105,7 +105,7 @@ async def plugin_tool(tmp_path, monkeypatch):
     """真实 BrowserManager + FakeDriver + 真偏好库上的 BrowserUseTool。"""
     monkeypatch.setattr(
         "crew.browser.manager.get_owner_runtime_home",
-        lambda owner: tmp_path / "accounts" / str(owner),
+        lambda owner: tmp_path / "accounts" / str(owner).replace(":", "_"),
     )
     driver = FakeBrowserDriver()
     manager = BrowserManager(BrowserConfig(), driver)
@@ -2099,7 +2099,7 @@ def test_explicit_browser_manager_injection_is_authoritative(tmp_path):
 async def test_browser_manager_aclose_releases_all_owner_resources_and_tasks(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "crew.browser.manager.get_owner_runtime_home",
-        lambda owner: tmp_path / "accounts" / str(owner),
+        lambda owner: tmp_path / "accounts" / str(owner).replace(":", "_"),
     )
     driver = FakeBrowserDriver()
     manager = BrowserManager(BrowserConfig(), driver)

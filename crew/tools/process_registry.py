@@ -354,7 +354,7 @@ class ProcessRegistry:
         else:
             # Linux 可用时包进 user systemd scope（整树由 systemd 收容），
             # 失败回退 setsid 进程组；命令统一为 argv 形式由 wrap 决定。
-            popen_args, scope_unit = wrap_argv_for_containment(["/bin/sh", "-c", command])
+            popen_args, scope_unit = wrap_argv_for_containment(["/bin/sh", "-c", command], env=env)
             shell = False
         proc = subprocess.Popen(
             popen_args,
@@ -522,14 +522,15 @@ class ProcessRegistry:
         flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
         scope_unit = ""
         bridge_argv = [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER]
+        bridge_env = build_spawn_env({"PYTHONUNBUFFERED": "1"})
         if not _IS_WINDOWS:
-            bridge_argv, scope_unit = wrap_argv_for_containment(bridge_argv)
+            bridge_argv, scope_unit = wrap_argv_for_containment(bridge_argv, env=bridge_env)
         try:
             proc = subprocess.Popen(
                 bridge_argv,
                 shell=False, text=True, encoding="utf-8", errors="replace", cwd=session.cwd,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env=build_spawn_env({"PYTHONUNBUFFERED": "1"}),
+                env=bridge_env,
                 preexec_fn=None if _IS_WINDOWS else os.setsid, creationflags=flags,
             )
         except Exception:

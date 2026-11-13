@@ -428,7 +428,7 @@ def test_managed_background_command_is_protocol_data_not_host_argv(tmp_path, mon
 
     assert result == "session"
     assert captured["payload"]["command"][-1].endswith("echo secret")
-    assert captured["payload"]["command"][-2] == "-c"
+    assert captured["payload"]["command"][-2] == ("-Command" if os.name == "nt" else "-c")
     assert captured["payload"]["helper_argv"] == [str(tmp_path / "ace-security-runtime")]
     assert captured["payload"]["full_disk_read"] is False
     # The trusted root is already visible through the broader writable root, so the

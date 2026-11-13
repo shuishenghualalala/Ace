@@ -39,6 +39,9 @@ jobs:
           ACE_WINDOWS_NATIVE_STATE_DIR: '${{ runner.temp }}\ace-security-state'
           ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
       - run: uv run pytest tests/security -q
+        env:
+          ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
+          ACE_WINDOWS_NATIVE_STATE_DIR: '${{ runner.temp }}\ace-security-state'
       - run: python tests/security/security_matrix.py --platform windows --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe
         env:
           ACE_REQUIRE_NATIVE_SECURITY: '1'

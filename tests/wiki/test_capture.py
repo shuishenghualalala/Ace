@@ -19,7 +19,10 @@ def store():
     with tempfile.TemporaryDirectory() as tmp:
         s = FileSystemWikiStore(base_dir=tmp)
         s.init_kb("A:uid-a")
-        yield s
+        try:
+            yield s
+        finally:
+            s.close()
 
 
 async def test_capture_document_parsed_into_default_kb(store):

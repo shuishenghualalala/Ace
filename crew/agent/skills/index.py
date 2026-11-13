@@ -758,14 +758,14 @@ async def abuild_optional_skills_index_prompt(
 
 def get_skill_packages() -> dict[str, dict]:
     """返回所有已扫描的 skill packages 映射：package slug -> package info。"""
-    get_skills()  # 确保已扫描
-    return dict(_current_packages())
+    with _SCAN_LOCK:
+        get_skills()  # Capture a consistent snapshot before a watcher invalidates it.
+        return dict(_current_packages())
 
 
 async def aget_skill_packages() -> dict[str, dict]:
     """get_skill_packages 的 async 变体。"""
-    await aget_skills()
-    return dict(_current_packages())
+    return await asyncio.to_thread(get_skill_packages)
 
 
 def get_package_info(package_slug: str) -> dict | None:

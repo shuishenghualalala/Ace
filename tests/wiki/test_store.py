@@ -11,7 +11,11 @@ from crew.wiki.store import FileSystemWikiStore
 @pytest.fixture
 def store():
     with tempfile.TemporaryDirectory() as tmp:
-        yield FileSystemWikiStore(base_dir=tmp)
+        s = FileSystemWikiStore(base_dir=tmp)
+        try:
+            yield s
+        finally:
+            s.close()
 
 
 def test_init_kb_creates_directories_and_defaults(store: FileSystemWikiStore):

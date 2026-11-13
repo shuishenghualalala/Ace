@@ -10,6 +10,8 @@ health 线程读取该时间戳算出滞后，desktop 据此区分「进程活�
 from __future__ import annotations
 
 import json
+import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -115,6 +117,16 @@ class _HealthRequestHandler(BaseHTTPRequestHandler):
         return
 
 
+class _HealthHTTPServer(ThreadingHTTPServer):
+    # Windows SO_REUSEADDR permits a second live listener on the same port.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class GatewayHealthServer:
     """独立线程 health 服务；端口绑定失败时降级为「仅主端口」，不阻止启动。"""
 
@@ -130,7 +142,7 @@ class GatewayHealthServer:
         # 哨兵 task 首戳之前先给出一个基线，保证 health 端口从启动起就带 loop_lag_ms。
         note_loop_tick(time.monotonic())
         try:
-            httpd = ThreadingHTTPServer((self.host, self.port), _HealthRequestHandler)
+            httpd = _HealthHTTPServer((self.host, self.port), _HealthRequestHandler)
         except OSError:
             log.warning(
                 "Gateway health 线程服务绑定 %s:%s 失败，降级为仅主端口 /api/health",

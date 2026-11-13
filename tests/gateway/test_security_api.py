@@ -125,8 +125,12 @@ async def test_gateway_security_headers_cover_authentication_failures(api):
 
 @pytest.mark.asyncio
 async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
-    api,
+    api, monkeypatch,
 ):
+    async def available_runtime():
+        return object(), True, False, "test"
+
+    monkeypatch.setattr("crew.gateway.routers.security._live_filesystem_runtime", available_runtime)
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await _put_json(

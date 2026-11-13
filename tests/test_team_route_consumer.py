@@ -123,7 +123,7 @@ async def test_interaction_bridge_team_tool_disabled_when_team_missing() -> None
 async def test_dynamic_tool_specs_loads_team_status_constants() -> None:
     """TEAM_RESULT_STATUSES 惰性加载，dynamic_tool_specs 在 team 禁用时仍能渲染 schema。"""
 
-    binding = SimpleNamespace(context_type="team", team_role="leader")
+    binding = SimpleNamespace(context_type="team", team_role="leader", wiki_kb_id="")
     specs = InteractionBridge.dynamic_tool_specs(binding)
     team_mention = next(spec for spec in specs if spec["name"] == "team_mention")
     assert "result_status" in team_mention["inputSchema"]["properties"]

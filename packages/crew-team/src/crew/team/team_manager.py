@@ -2080,7 +2080,7 @@ class InProcessTeamManager(TeamManager):
                     raise ValueError("多个历史任务包含同名节点，请刷新任务面板后重试。")
                 if matches:
                     workflow_id, node_id = matches[0]
-        plan = self._plans.get(self._existing_plan_key(session_id, owner_account_id))
+        plan = self._plans.get(self._key(session_id, owner_account_id))
         if workflow_id:
             plan = next((item for key, item in self._plans.items()
                          if key[0] == owner_account_id

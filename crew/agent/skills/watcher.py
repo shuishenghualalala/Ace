@@ -50,6 +50,7 @@ class SkillWatcher:
         self._handler = None
         self._watched: set[str] = set()
         self._lock = threading.Lock()
+        self._dirty = threading.Event()
 
     @property
     def running(self) -> bool:
@@ -95,6 +96,12 @@ class SkillWatcher:
 
     def sync(self) -> None:
         """补齐新出现的 roots（监听目标变化时增量 schedule）。"""
+        # Never call the index invalidator from watchdog's dispatch thread: that
+        # thread holds Observer._lock while get() may hold the index lock and
+        # schedule a new watch. Consume the notification on the reader instead.
+        if self._dirty.is_set():
+            self._dirty.clear()
+            self._on_change()
         with self._lock:
             if self._observer is None or self._handler is None:
                 return
@@ -145,7 +152,7 @@ class SkillWatcher:
     def _handle_event(self, event) -> None:  # noqa: ANN001
         try:
             if self._is_relevant(event):
-                self._on_change()
+                self._dirty.set()
         except Exception:
             logger.debug("skill watcher 事件处理失败", exc_info=True)
 

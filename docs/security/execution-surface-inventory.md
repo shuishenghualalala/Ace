@@ -60,6 +60,7 @@
 | `desktop/src/main/open-with-service.ts` | host-fixed | 仅响应 Desktop 用户“使用其他应用打开”；应用来自当前 OS 已登记清单，命令固定、argv 分离，并限制探测输出与超时；超时或输出超限会终止完整探测进程树。 |
 | `desktop/src/main/uninstall.ts` | host-fixed | 卸载清理；仅签名安装包的用户发起卸载流程可达。 |
 | `desktop/scripts/check-security.mjs` | dev-only | 构建期 Electron 安全配置检查。 |
+| `desktop/scripts/dev.mjs` | dev-only | 源码开发入口：仅以固定 argv 启动 esbuild 与依赖目录中的 Electron，不接收产品用户/模型命令，也不进入安装包。 |
 | `desktop/scripts/resolve-playwright-candidates.mjs` | dev-only | 定时/手动兼容性 CI 解析候选 npm 版本；不进入用户安装包，也不接收产品用户输入。 |
 | `desktop/src/main/security-setup.ts` | installer-only | 仅 Windows 安装包：固定 runtime 绝对路径经编码 PowerShell `RunAs` 请求一次 UAC，用户动作不能提供 executable/argv。 |
 

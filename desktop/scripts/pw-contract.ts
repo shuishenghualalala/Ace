@@ -51,6 +51,23 @@ import type { Dialog, Page } from '../src/main/browser/playwright-compat';
 // Electron with no ordinary BrowserWindow.
 app.on('window-all-closed', () => undefined);
 
+// Xvfb runners have no GPU device; use Chromium's software compositor.
+if (process.platform === 'linux' && process.env.CI) app.disableHardwareAcceleration();
+
+async function cleanupContractRoot(root: string): Promise<void> {
+  try {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    // Electron retains persistent Session databases until the process exits.
+    // Windows cannot unlink those open files; the ephemeral runner owns them.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform !== 'win32' || !['EBUSY', 'EPERM'].includes(code ?? '')) {
+      throw error;
+    }
+    console.log(`Deferred locked Electron profile cleanup until process exit: ${root}`);
+  }
+}
+
 const hash = (value: string): string =>
   createHash('sha256').update(value).digest('hex').slice(0, 32);
 
@@ -909,7 +926,7 @@ app.whenReady().then(async () => {
         pdfContents.close({ waitForBeforeUnload: false });
       }
       pdfHost.dispose();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -2200,7 +2217,7 @@ app.whenReady().then(async () => {
     } finally {
       await consoleHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -2536,7 +2553,7 @@ app.whenReady().then(async () => {
     } finally {
       await downloadHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -2754,7 +2771,7 @@ app.whenReady().then(async () => {
     } finally {
       await outputHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -3042,7 +3059,7 @@ app.whenReady().then(async () => {
     } finally {
       await runHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -3189,7 +3206,7 @@ app.whenReady().then(async () => {
     } finally {
       await lifecycleHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -3349,7 +3366,7 @@ app.whenReady().then(async () => {
     } finally {
       await findHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -3495,7 +3512,7 @@ app.whenReady().then(async () => {
     } finally {
       await popupHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await rm(tempRoot, { recursive: true, force: true });
+      await cleanupContractRoot(tempRoot);
     }
   });
 
@@ -4134,7 +4151,7 @@ app.whenReady().then(async () => {
         );
       } finally {
         if (!panelWindow.isDestroyed()) panelWindow.destroy();
-        await rm(tempRoot, { recursive: true, force: true });
+        await cleanupContractRoot(tempRoot);
       }
     }
   };

@@ -157,6 +157,7 @@ async def test_managed_external_interactive_compiles_scoped_projection(
         return "managed-session"
 
     monkeypatch.setenv("HOME", str(owner_home))
+    monkeypatch.setenv("USERPROFILE", str(owner_home))
     monkeypatch.setattr(SecurityExecutionBroker, "open_interactive", open_interactive)
     token = current_process_launch.set(_managed_launch(workspace))
     try:

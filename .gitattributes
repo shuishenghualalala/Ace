@@ -1,2 +1,7 @@
 *.bundle filter=lfs diff=lfs merge=lfs -text
 desktop/src/ui/features/rich-reply/validate.generated.js text eol=lf
+security-runtime/src/** text eol=lf
+security-runtime/tests/**/*.rs text eol=lf
+security-runtime/Cargo.toml text eol=lf
+security-runtime/Cargo.lock text eol=lf
+*.sh text eol=lf

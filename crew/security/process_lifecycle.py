@@ -90,6 +90,19 @@ def read_process_start_time(pid: int) -> str | None:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        # os.kill(pid, 0) sends a Windows console control event; it is not a probe.
+        import psutil
+
+        try:
+            psutil.Process(pid).wait(timeout=0)
+            return False
+        except psutil.TimeoutExpired:
+            return True
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            return True
     try:
         os.kill(pid, 0)
         return True
@@ -108,7 +121,7 @@ _CONTAINMENT_LOCK = threading.Lock()
 _fallback_warning_issued = False
 
 
-def _probe_systemd_scope() -> bool:
+def _probe_systemd_scope(*, env: dict[str, str] | None = None) -> bool:
     if shutil.which("systemd-run") is None:
         return False
     try:
@@ -117,6 +130,7 @@ def _probe_systemd_scope() -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,
+            env=env,
         )
         return result.returncode == 0
     except Exception:  # noqa: BLE001
@@ -169,7 +183,9 @@ def isolated_process_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
-def wrap_argv_for_containment(argv: Sequence[str]) -> tuple[list[str], str | None]:
+def wrap_argv_for_containment(
+    argv: Sequence[str], *, env: dict[str, str] | None = None,
+) -> tuple[list[str], str | None]:
     """linux-scope 模式下把 argv 包进 user systemd scope。
 
     返回 (argv, scope_unit)：其余模式原样返回 argv，scope_unit 为 None
@@ -177,6 +193,11 @@ def wrap_argv_for_containment(argv: Sequence[str]) -> tuple[list[str], str | Non
     helper 走 isolated_process_kwargs 的进程组即可。
     """
     if select_containment_mode() != "linux-scope":
+        return list(argv), None
+    # Probe with the same sanitized environment used by the child. A host-shell
+    # user bus may exist even though the managed child cannot reach it.
+    if env is not None and not _probe_systemd_scope(env=env):
+        _warn_weaker_containment("child environment cannot reach the user systemd bus")
         return list(argv), None
     unit = f"ace-proc-{uuid.uuid4().hex[:12]}.scope"
     return [

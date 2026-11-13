@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,6 +90,20 @@ def test_wrap_argv_scope_mode_prefixes_unit(monkeypatch):
     assert unit2 != unit  # 每次 spawn 独立单元，互不误杀
 
 
+def test_scope_probe_uses_the_child_environment(monkeypatch):
+    child_env = {"PATH": "/usr/bin"}
+    monkeypatch.setattr(pl, "select_containment_mode", lambda: "linux-scope")
+    seen = []
+    def probe(*, env):
+        seen.append(env)
+        return False
+    monkeypatch.setattr(pl, "_probe_systemd_scope", probe)
+    argv, unit = pl.wrap_argv_for_containment(["/bin/sh", "-c", "echo hi"], env=child_env)
+    assert argv == ["/bin/sh", "-c", "echo hi"]
+    assert unit is None
+    assert seen == [child_env]
+
+
 def test_wrap_argv_non_scope_passthrough(monkeypatch):
     monkeypatch.setattr(pl, "select_containment_mode", lambda: "posix-group")
     argv, unit = pl.wrap_argv_for_containment(["/bin/sh", "-c", "x"])
@@ -128,7 +143,10 @@ def test_signal_skipped_when_identity_reused(monkeypatch):
         def wait(self, timeout=None):
             return 0
 
-    monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: kills.append((pgid, sig)))
+    if os.name == "nt":
+        monkeypatch.setattr(pl, "_taskkill_tree", lambda pid: kills.append((pid, signal.SIGTERM)))
+    else:
+        monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: kills.append((pgid, sig)))
     values = iter(["t-1", "t-2"])
     monkeypatch.setattr(pl, "read_process_start_time", lambda pid: next(values))
     owner = pl.ProcessOwner.capture(_FakeProc())
@@ -138,7 +156,10 @@ def test_signal_skipped_when_identity_reused(monkeypatch):
 
 def test_signal_delivered_when_identity_matches(monkeypatch):
     kills: list = []
-    monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: kills.append((pgid, sig)))
+    if os.name == "nt":
+        monkeypatch.setattr(pl, "_taskkill_tree", lambda pid: (kills.append((pid, signal.SIGTERM)), True)[1])
+    else:
+        monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: kills.append((pgid, sig)))
     monkeypatch.setattr(pl, "read_process_start_time", lambda pid: "same")
     monkeypatch.setattr(pl, "_pid_alive", lambda pid: True)
     owner = pl.ProcessOwner(1234, identity=pl.ProcessIdentity(1234, "same"))
@@ -150,17 +171,17 @@ def test_signal_delivered_when_identity_matches(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_terminate_process_tree_kills_whole_group():
+    import psutil
+
     proc = _spawn_sleeper_tree()
     child_pid = None
     try:
         # 等孙进程起来
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            out = subprocess.run(
-                ["pgrep", "-P", str(proc.pid)], capture_output=True, text=True
-            )
-            if out.stdout.strip():
-                child_pid = int(out.stdout.split()[0])
+            children = psutil.Process(proc.pid).children()
+            if children:
+                child_pid = children[0].pid
                 break
             time.sleep(0.05)
         assert child_pid is not None, "孙进程未启动"
@@ -229,6 +250,24 @@ def test_owner_for_pid_exited_detection():
     assert owner.exited() is True
 
 
+@pytest.mark.parametrize("running", [True, False])
+def test_windows_liveness_probe_waits_without_sending_a_signal(monkeypatch, running):
+    import psutil
+
+    calls = []
+
+    def wait(*, timeout):
+        calls.append(timeout)
+        if running:
+            raise psutil.TimeoutExpired(timeout, pid=1234)
+        return 0
+
+    monkeypatch.setattr(pl, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(wait=wait))
+    assert pl._pid_alive(1234) is running
+    assert calls == [0]
+
+
 # ---- F4：统一宽限 + 终末超时 ----
 
 def test_resolve_grace_ms_defaults_and_clamps():
@@ -249,7 +288,10 @@ class _UnkillableProcess:
 
 @pytest.mark.asyncio
 async def test_terminate_returns_error_within_bounds_for_unkillable(monkeypatch):
-    monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: True)
+    if os.name == "nt":
+        monkeypatch.setattr(pl, "_taskkill_tree", lambda pid: True)
+    else:
+        monkeypatch.setattr(pl.os, "killpg", lambda pgid, sig: True)
     monkeypatch.setattr(pl, "_pid_alive", lambda pid: True)
     owner = pl.ProcessOwner(987654, process=_UnkillableProcess())
     started = time.monotonic()
@@ -261,6 +303,7 @@ async def test_terminate_returns_error_within_bounds_for_unkillable(monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="Windows terminates process trees without POSIX SIGTERM/SIGKILL escalation")
 async def test_terminate_escalates_term_to_kill(tmp_path):
     """忽略 SIGTERM 的进程在宽限后收到 SIGKILL 并在终末等待内结算。"""
     import signal as _signal

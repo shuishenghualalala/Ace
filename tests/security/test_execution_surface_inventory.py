@@ -54,6 +54,7 @@ INDIRECT_SURFACES = {
     "crew/agent/external/process_lifecycle.py",
 }
 DESKTOP_PROCESS_FILES = {
+    "desktop/scripts/dev.mjs",
     "desktop/scripts/check-security.mjs",
     "desktop/scripts/resolve-playwright-candidates.mjs",
     "desktop/src/main/index.ts",
