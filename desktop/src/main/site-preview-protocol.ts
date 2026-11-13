@@ -19,6 +19,30 @@ export const SITE_PREVIEW_CSP = [
   "form-action 'none'",
 ].join('; ');
 
+/** External anchors must use the main-process popup handler before frame CSP blocks navigation. */
+export function injectSitePreviewLinkBridge(html: string): string {
+  const bridge = `<script data-ace-site-link-bridge>
+(() => {
+  const prepareLink = (event) => {
+    if (event.defaultPrevented || !(event.target instanceof Element)) return;
+    const link = event.target.closest('a[href]');
+    if (!link || link.hasAttribute('download')) return;
+    try {
+      const url = new URL(link.href, location.href);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return;
+      link.target = '_blank';
+      link.relList.add('noopener', 'noreferrer');
+    } catch {}
+  };
+  document.addEventListener('click', prepareLink, true);
+  document.addEventListener('auxclick', prepareLink, true);
+})();
+</script>`;
+  return /<\/head\s*>/i.test(html)
+    ? html.replace(/<\/head\s*>/i, `${bridge}</head>`)
+    : `${html}${bridge}`;
+}
+
 type GatewayResolver = () => Promise<{
   baseUrl: string;
   headers: (pathname: string) => Record<string, string>;
@@ -128,7 +152,10 @@ export function registerSitePreviewProtocol(resolveGateway: GatewayResolver): vo
         });
       }
       console.log(`[ace-site] ${resolved.assetId}/${resolved.assetPath || 'index.html'} -> 200 ${contentType}`);
-      const body = request.method === 'HEAD' ? null : await upstream.arrayBuffer();
+      const body = request.method === 'HEAD' ? null
+        : contentType.toLowerCase().includes('text/html')
+          ? injectSitePreviewLinkBridge(await upstream.text())
+          : await upstream.arrayBuffer();
       return new Response(body, {
         status: upstream.status,
         headers: {

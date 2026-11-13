@@ -24,6 +24,7 @@ import {
   openWikiAgent,
   forgetWikiAgentKb,
   initWikiAgent,
+  normalizeWikiCardPages,
 } from '../../src/ui/features/wiki-agent';
 import {
   applyChunk,
@@ -34,13 +35,13 @@ import { openInspectorToTab } from '../../src/ui/features/inspector';
 import { bindFileDrop, bindFilePaste } from '../../src/ui/features/attachments';
 import {
   __resetWikiViewForTest,
+  createWikiPageContribution,
   refreshWikiData,
   renderWikiPage,
   setWikiAgentEntryHandler,
 } from '../../src/ui/features/wiki-page';
 import {
   normalizeChunk,
-  normalizeWikiCardPages,
   reduceChunk,
   type AnyChatChunk,
   type ReducerSnapshot,
@@ -48,12 +49,10 @@ import {
 import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 import { patchBook, setBookTodos, setBusy, type Bookkeeping } from '../../src/ui/state';
 
-const { mockOpenSession, mockLoadBackendHistory, mockShowConfirmDialog, mockOpenModelSelectPopover } = vi.hoisted(() => ({
+const { mockOpenSession, mockLoadBackendHistory, mockShowConfirmDialog } = vi.hoisted(() => ({
   mockOpenSession: vi.fn(),
   mockLoadBackendHistory: vi.fn(async () => undefined),
   mockShowConfirmDialog: vi.fn(async () => true),
-  // 模型浮层只验证调用与回调，真实浮层行为在 model-picker-sync.test.ts 覆盖。
-  mockOpenModelSelectPopover: vi.fn(() => vi.fn()),
 }));
 
 vi.mock('../../src/ui/backend-client', async (importOriginal) => {
@@ -64,13 +63,14 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       wikiAgentSession: vi.fn(),
       wikiAgentSessions: vi.fn(),
       wikiPage: vi.fn(),
+      wikiSearch: vi.fn(),
       wikiKBs: vi.fn(),
       wikiInit: vi.fn(),
       wikiPages: vi.fn(),
-      wikiSummary: vi.fn(),
       wikiUpload: vi.fn(),
       wikiIngest: vi.fn(),
       sessionTodos: vi.fn(),
+      tasks: vi.fn(async () => []),
       getSessionModel: vi.fn(),
       setSessionModel: vi.fn(),
       deleteSession: vi.fn(async () => ({ ok: true })),
@@ -90,7 +90,10 @@ vi.mock('../../src/ui/ui-feedback', () => ({
 }));
 
 // ── chat-controller 的重依赖（与 chat-controller-send.test.ts 一致） ──
-vi.mock('../../src/ui/features/running-intro', () => ({ syncRunningIntroSlot: vi.fn() }));
+vi.mock('../../src/ui/features/running-intro', () => ({
+  syncRunningIntroSlot: vi.fn(),
+  registerRunningIntroTarget: vi.fn(() => () => {}),
+}));
 vi.mock('../../src/ui/features/usage-tracker', () => ({ recordTurn: vi.fn() }));
 vi.mock('../../src/ui/features/cron-page', () => ({ onAfterFinal: vi.fn() }));
 vi.mock('../../src/ui/features/kanban-board', () => ({
@@ -106,10 +109,6 @@ vi.mock('../../src/ui/features/inspector', () => ({
 vi.mock('../../src/ui/features/composer-toolbar', () => ({
   syncComposerModelLabel: vi.fn(),
   syncComposerWorkspaceLabel: vi.fn(),
-}));
-vi.mock('../../src/ui/features/model-picker', () => ({
-  syncModelUi: vi.fn(),
-  openModelSelectPopover: mockOpenModelSelectPopover,
 }));
 vi.mock('../../src/ui/features/system-page', () => ({ renderSystemOverview: vi.fn() }));
 vi.mock('../../src/ui/features/attachments', () => ({
@@ -129,11 +128,12 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
 const api = backendApi as unknown as {
   wikiAgentSession: ReturnType<typeof vi.fn>;
   wikiAgentSessions: ReturnType<typeof vi.fn>;
+  tasks: ReturnType<typeof vi.fn>;
   wikiPage: ReturnType<typeof vi.fn>;
+  wikiSearch: ReturnType<typeof vi.fn>;
   wikiKBs: ReturnType<typeof vi.fn>;
   wikiInit: ReturnType<typeof vi.fn>;
   wikiPages: ReturnType<typeof vi.fn>;
-  wikiSummary: ReturnType<typeof vi.fn>;
   wikiUpload: ReturnType<typeof vi.fn>;
   wikiIngest: ReturnType<typeof vi.fn>;
   sessionTodos: ReturnType<typeof vi.fn>;
@@ -165,6 +165,10 @@ function makePage(partial: Partial<WikiPage>): WikiPage {
     aliases: [],
     ...partial,
   };
+}
+
+function pagesResult(pages: WikiPage[]) {
+  return { ok: true, pages, source_titles: {}, source_files: {} };
 }
 
 type MockSocket = {
@@ -273,7 +277,6 @@ beforeEach(() => {
   });
   api.wikiInit.mockResolvedValue({ ok: true });
   api.wikiPages.mockResolvedValue({ ok: true, pages: [], source_titles: {}, source_files: {} });
-  api.wikiSummary.mockResolvedValue({ ok: true, summary: '', kb_id: 'default', status: 'empty' });
   api.sessionTodos.mockResolvedValue({ ok: true, todos: [] });
   api.getSessionModel.mockResolvedValue({ ok: true, model_profile_id: 'glm-fast', model_label: 'GLM 快速' });
   api.setSessionModel.mockImplementation(async (_sid: string, id: string) => ({
@@ -286,8 +289,8 @@ beforeEach(() => {
 
 // ── Wiki Agent 结果卡片渲染 ──
 
-describe('wiki_cards 渲染', () => {
-  it('wiki_cards 挂到本回合 assistant 消息并渲染卡片网格（含查看按钮）', async () => {
+describe('wiki.cards 卡片渲染', () => {
+  it('wiki.cards 挂到本回合 assistant 消息并渲染卡片网格（含查看按钮）', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
 
@@ -300,8 +303,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法', tags: ['前端'] })] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法', tags: ['前端'] })] } },
       session_id: WIKI_SID,
       request_id: rid,
       sequence: 3,
@@ -335,8 +338,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({ id: 'p1', title: 'React 笔记', summary: 'Hooks 用法' })] } },
       session_id: WIKI_SID,
       request_id: rid,
       sequence: 3,
@@ -366,7 +369,32 @@ describe('wiki_cards 渲染', () => {
     expect(scrollValue).toBe(456);
   });
 
-  it('旧 request_id 的迟到 wiki_cards 被 turn gate 丢弃', async () => {
+  it('消息正文里的 [[WikiLink]] 点击后按标题解析并打开页面', async () => {
+    api.wikiSearch.mockResolvedValueOnce(
+      pagesResult([makePage({ id: 'target-1', title: '目标页', content: '目标正文' })]),
+    );
+
+    await enterWiki();
+    const rid = await sendAndGetRequestId('查一下');
+    applyChunk({
+      kind: 'final',
+      body: { text: '参见 [[目标页]]' },
+      session_id: WIKI_SID,
+      request_id: rid,
+      sequence: 2,
+      is_final: true,
+    } as ChatChunk);
+
+    await vi.waitFor(() => expect(document.querySelector('[data-rel-title="目标页"]')).not.toBeNull());
+    (document.querySelector('[data-rel-title="目标页"]') as HTMLElement).click();
+
+    await vi.waitFor(() => {
+      expect(api.wikiSearch).toHaveBeenCalledWith('目标页', 'default', 8);
+      expect(document.querySelector<HTMLInputElement>('[data-wiki-title]')?.value).toBe('目标页');
+    });
+  });
+
+  it('旧 request_id 的迟到 wiki.cards 被 turn gate 丢弃', async () => {
     await enterWiki();
     const rid = await sendAndGetRequestId('查一下');
     applyChunk({
@@ -378,8 +406,8 @@ describe('wiki_cards 渲染', () => {
       is_final: true,
     } as ChatChunk);
     applyChunk({
-      kind: 'wiki_cards',
-      body: { pages: [makePage({})] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [makePage({})] } },
       session_id: WIKI_SID,
       request_id: 'req-stale',
       sequence: 3,
@@ -470,6 +498,31 @@ describe('wiki-page 入口挂点', () => {
     expect(payload.query).toBe('总结当前知识库');
     expect(payload.wiki_kb_id).toBe('default');
     expect(uiStore.get().activeTab).toBe('wiki');
+  });
+
+  it('重新进入 Wiki 时从持久化任务恢复整理卡片', async () => {
+    api.tasks.mockResolvedValueOnce([{
+      id: 'wiki-task-restored',
+      kind: 'wiki_ingest',
+      session_id: WIKI_SID,
+      title: '深度整理《产品资料》',
+      status: 'running',
+      progress: {
+        source_title: '产品资料',
+        stage: 'analyzing_chunks',
+        label: '已分析第 2/5 个分块',
+      },
+      created_at: NOW,
+      updated_at: NOW,
+    }]);
+
+    await enterWiki();
+
+    expect(api.tasks).toHaveBeenCalledWith(WIKI_SID);
+    const restored = (messageStore.get().messages[WIKI_SID] ?? [])
+      .find((message) => message.id === 'wiki-ingest-wiki-task-restored');
+    expect(restored?.streaming).toBe(true);
+    expect(restored?.toolCalls?.[0]?.progressText).toBe('已分析第 2/5 个分块');
   });
 
   it('面板内消息复制按钮可用（不依赖 #chat-messages 的全局委托）', async () => {
@@ -661,7 +714,7 @@ describe('wiki-page 入口挂点', () => {
       .toBe('已选择：全部内容');
   });
 
-  it('右栏「已编辑文件」卡「查看」：跳主聊天区同一会话并展开 Files 看板定位文件', async () => {
+  it('右栏「已编辑文件」卡「查看」：留在 Wiki 页面并打开文件改动详情', async () => {
     const mockSetTab = vi.fn();
     setChatCallbacks({ openSession: mockOpenSession, setTab: mockSetTab });
     uiStore.set({ activeTab: 'wiki' });
@@ -677,11 +730,11 @@ describe('wiki-page 入口挂点', () => {
     });
     document.querySelector<HTMLButtonElement>('.msg__file-changes__review')!.click();
 
-    await vi.waitFor(() => {
-      expect(mockOpenSession).toHaveBeenCalledWith(WIKI_SID);
-      expect(mockSetTab).toHaveBeenCalledWith('chat');
-      expect(vi.mocked(openInspectorToTab)).toHaveBeenCalledWith('files', { expandFilePath: '/tmp/wiki-out.md' });
-    });
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-file-changes-dialog]')).not.toBeNull());
+    expect(document.querySelector('[data-wiki-file-changes-dialog]')?.textContent).toContain('wiki-out.md');
+    expect(mockOpenSession).not.toHaveBeenCalled();
+    expect(mockSetTab).not.toHaveBeenCalled();
+    expect(vi.mocked(openInspectorToTab)).not.toHaveBeenCalled();
   });
 
   it('新建对话创建独立 Wiki session，保留旧会话并切到空白输入', async () => {
@@ -740,28 +793,42 @@ describe('wiki-page 入口挂点', () => {
   });
 
   it('模型 chip：加载会话模型绑定，选择后走会话级接口切换（不影响主对话）', async () => {
+    // active_model_id 故意与绑定不同：chip 初始文案来自 config 兜底，
+    // 显示「GLM 快速」即可证明绑定已落缓存（排除与切换后文案竞争的迟到加载）。
+    configStore.set({
+      config: {
+        model: 'minimax-m3',
+        has_key: true,
+        base_url: '',
+        active_model_id: 'minimax-m3',
+        models: [
+          { id: 'glm-fast', name: 'GLM 快速', model: 'glm-4-flash', has_key: true, loaded: true },
+          { id: 'minimax-m3', name: 'MiniMax M3', model: 'MiniMax-M3', has_key: true, loaded: true },
+        ],
+      },
+    });
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
 
-    // 绑定加载后 chip 显示后端返回的模型名
+    // 绑定加载后 chip 显示后端返回的模型名（与主对话同一个 mw-context-chip）
+    const chip = () => document.querySelector<HTMLElement>('[data-wiki-agent-panel] .mw-context-chip');
     await vi.waitFor(() => {
-      expect(document.querySelector('[data-wiki-agent-model-label]')?.textContent).toBe('GLM 快速');
+      expect(chip()?.querySelector('.mw-context-chip__label')?.textContent).toBe('GLM 快速');
     });
     expect(api.getSessionModel).toHaveBeenCalledWith(WIKI_SID);
+    // 挂载链路里并发的重复加载全部落定，避免迟到的旧绑定覆盖切换结果
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // 点击 chip 打开模型浮层（复用 model-picker 的通用浮层），高亮当前绑定
-    document.querySelector<HTMLElement>('[data-wiki-agent-model]')!.click();
-    expect(mockOpenModelSelectPopover).toHaveBeenCalledTimes(1);
-    const opts = mockOpenModelSelectPopover.mock.calls[0]?.[0] as {
-      activeId: string;
-      onPick: (id: string) => void;
-    };
-    expect(opts.activeId).toBe('glm-fast');
+    // 点击 chip 打开模型浮层（与主对话同一个 openModelSelectPopover 实现），高亮当前绑定
+    chip()!.click();
+    const popover = document.querySelector('.composer-select-popover');
+    expect(popover).not.toBeNull();
+    expect(popover?.querySelector('.composer-select-item.is-selected')?.getAttribute('data-model-id')).toBe('glm-fast');
 
     // 选择新模型 → PUT 会话级接口（workspace=wiki）→ chip 更新
-    opts.onPick('minimax-m3');
+    popover?.querySelector<HTMLElement>('[data-model-id="minimax-m3"]')!.click();
     await vi.waitFor(() => {
-      expect(document.querySelector('[data-wiki-agent-model-label]')?.textContent).toBe('模型-minimax-m3');
+      expect(chip()?.querySelector('.mw-context-chip__label')?.textContent).toBe('模型-minimax-m3');
     });
     expect(api.setSessionModel).toHaveBeenCalledWith(WIKI_SID, 'minimax-m3', { workspace_id: 'wiki' });
     expect(mockOpenSession).not.toHaveBeenCalled();
@@ -809,6 +876,27 @@ describe('wiki-page 入口挂点', () => {
     const rebuilt = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
     expect(rebuilt).toBe(input);
     expect(rebuilt.value).toBe('写到一半的草稿');
+  });
+
+  it('切出再切回 Wiki 会重新挂载对话面板并保留草稿', async () => {
+    const contribution = createWikiPageContribution();
+    uiStore.set({ activeTab: 'wiki' });
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull());
+
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
+    input.value = '切页前的草稿';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await contribution.deactivate();
+    expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).toBeNull();
+
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-wiki-agent-panel] [data-composer-input]')).not.toBeNull();
+      expect(document.querySelector('[data-wiki-agent-panel] .wiki-agent-pane__void')).not.toBeNull();
+    });
+    expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value)
+      .toBe('切页前的草稿');
   });
 
   it('IME 合成中按 Enter 不发送，普通 Enter 发送', async () => {
@@ -874,7 +962,7 @@ describe('wiki reducer（纯函数）', () => {
     expect(normalizeWikiCardPages({})).toEqual([]);
   });
 
-  it('wiki_cards patch 到最后一条 assistant；无 assistant 时新建空载体消息', () => {
+  it('wiki.cards patch 到最后一条 assistant；无 assistant 时新建空载体消息', () => {
     const existing = {
       id: 'm-1',
       role: 'assistant' as const,
@@ -882,8 +970,8 @@ describe('wiki reducer（纯函数）', () => {
       timestamp: 1,
     };
     const chunk = normalizeChunk({
-      kind: 'wiki_cards',
-      body: { pages: [{ id: 'p1', title: 'A' }] },
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [{ id: 'p1', title: 'A' }] } },
       sequence: 9,
     }) as AnyChatChunk;
     const patched = reduceChunk(chunk, snap({ messages: [existing] }));
@@ -900,8 +988,12 @@ describe('wiki reducer（纯函数）', () => {
     expect(appended.finalize).toBe(false);
   });
 
-  it('wiki_cards 空数组 no-op', () => {
-    const chunk = normalizeChunk({ kind: 'wiki_cards', body: { pages: [] }, sequence: 9 }) as AnyChatChunk;
+  it('wiki.cards 空数组 no-op', () => {
+    const chunk = normalizeChunk({
+      kind: 'feature_event',
+      body: { feature: 'wiki', event: 'cards', version: 1, payload: { pages: [] } },
+      sequence: 9,
+    }) as AnyChatChunk;
     const result = reduceChunk(chunk, snap());
     expect(result.messageUpserts).toEqual([]);
   });

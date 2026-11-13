@@ -1,12 +1,58 @@
-import { describe, expect, it, vi } from 'vitest';
+/**
+ * @vitest-environment happy-dom
+ *
+ * sites-page 单测：协议解析、annotation prompt、DOM 生命周期。
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ protocol: { handle: vi.fn() } }));
 
 import type { LocalSite, SiteAnnotation } from '../../src/ui/backend-client';
-import { parseSitePreviewUrl } from '../../src/main/site-preview-protocol';
+import { injectSitePreviewLinkBridge, parseSitePreviewUrl } from '../../src/main/site-preview-protocol';
 import { buildSiteAnnotationPrompt } from '../../src/ui/features/sites-page';
 
 describe('sites page annotation handoff', () => {
+  it('routes external anchors through the popup handler without bypassing app click cancellation', () => {
+    const html = injectSitePreviewLinkBridge('<!doctype html><html><head></head><body></body></html>');
+    const script = new DOMParser().parseFromString(html, 'text/html').querySelector('script')!;
+    document.body.innerHTML = `<a id="external" href="https://example.com/article"><span>原文</span></a>
+      <a id="local" href="ace-site://site_0123456789ab/about">Local</a>
+      <a id="download" href="https://example.com/file" download>Download</a>
+      <a id="cancelled" href="https://example.com/cancelled">Cancelled</a>`;
+    const listeners: Array<[string, EventListener]> = [];
+    const addListener = vi.spyOn(document, 'addEventListener').mockImplementation((type, listener) => {
+      listeners.push([type, listener as EventListener]);
+    });
+    window.eval(script.textContent!);
+    addListener.mockRestore();
+    try {
+      const prepareClick = listeners.find(([type]) => type === 'click')![1];
+      const click = (selector: string, cancelled = false): MouseEvent => {
+        const event = new MouseEvent('click', { cancelable: true });
+        Object.defineProperty(event, 'target', { value: document.querySelector(selector) });
+        if (cancelled) event.preventDefault();
+        prepareClick(event);
+        return event;
+      };
+      const event = click('#external span');
+      const external = document.querySelector<HTMLAnchorElement>('#external')!;
+      expect(external.target).toBe('_blank');
+      expect(external.relList.contains('noopener')).toBe(true);
+      expect(external.relList.contains('noreferrer')).toBe(true);
+      expect(event.defaultPrevented).toBe(false);
+      event.preventDefault(); // Annotation/app handlers can still cancel the default navigation.
+      expect(event.defaultPrevented).toBe(true);
+      click('#local');
+      click('#download');
+      click('#cancelled', true);
+      expect(document.querySelector<HTMLAnchorElement>('#local')!.target).toBe('');
+      expect(document.querySelector<HTMLAnchorElement>('#download')!.target).toBe('');
+      expect(document.querySelector<HTMLAnchorElement>('#cancelled')!.target).toBe('');
+    } finally {
+      document.body.replaceChildren();
+    }
+  });
+
   it('parses only controlled inspiration protocol ids and keeps paths encoded', () => {
     expect(parseSitePreviewUrl('ace-site://site_0123456789ab/assets/app.js')).toMatchObject({
       kind: 'site', siteId: 'site_0123456789ab', assetPath: 'assets/app.js',
@@ -144,7 +190,7 @@ describe('sites page annotation handoff', () => {
   it('allows user-triggered downloads in every site preview surface', async () => {
     const fs = await import('node:fs/promises');
     const sitesPage = await fs.readFile('src/ui/features/sites-page.ts', 'utf8');
-    expect(sitesPage.match(/sandbox=\"allow-scripts allow-forms allow-modals allow-same-origin allow-downloads\"/g)).toHaveLength(2);
+    expect(sitesPage.match(/sandbox=\"allow-scripts allow-forms allow-modals allow-same-origin allow-downloads allow-popups\"/g)).toHaveLength(2);
   });
 
   it('does not reset the main window reveal gate for site frame navigation', async () => {
@@ -200,7 +246,7 @@ describe('sites page annotation handoff', () => {
     expect(main).toContain("mainWindow.webContents.send('inspiration:window-state-changed'");
     expect(main).toContain('if (!win.isDestroyed()) win.destroy()');
     expect(main).toContain('sandbox: true');
-    expect(main).toContain("setWindowOpenHandler(() => ({ action: 'deny' }))");
+    expect(main).toContain('installSitePreviewNavigation(win.webContents)');
     expect(main).toContain('for (const win of inspirationWindows.values())');
     expect(main).toContain('inspirationWindows.clear()');
     expect(main).toContain("segments[1] === 'exports'");
@@ -231,8 +277,9 @@ describe('sites page annotation handoff', () => {
     expect(surface).toContain("mode: 'widget' | 'canvas'");
     expect(surface).toContain('ace-blueprint-annotation-mode');
     expect(surface).toContain('ace-blueprint-element-selected');
-    expect(surface).toContain('指出要修改的位置');
-    expect(surface).not.toContain('data-blueprint-target-note');
+    expect(surface).toContain('批注整体');
+    expect(surface).toContain('批注元素');
+    expect(surface).toContain('data-blueprint-target-note');
     expect(surface).not.toContain('data-site-surface-mode="use"');
     expect(surface).toContain("targetKind: 'canvas'");
     expect(surface).toContain("targetKind: 'widget'");
@@ -243,5 +290,77 @@ describe('sites page annotation handoff', () => {
     expect(controller).toContain('composeBlueprintAnnotationMessage');
     expect(composerContext).toContain("blueprintAnnotationPreview.id = 'chat-blueprint-annotation-preview'");
     expect(inspector).toContain("'blueprint-surface-open'");
+  });
+});
+
+vi.mock('../../src/ui/backend-client', () => ({
+  backendApi: {
+    inspirations: vi.fn(async () => ({ inspirations: [] })),
+    sites: vi.fn(async () => ({ sites: [] })),
+  },
+}));
+
+import { backendApi } from '../../src/ui/backend-client';
+import { createSitesPageContribution } from '../../src/ui/features/sites-page';
+
+const api = backendApi as unknown as {
+  inspirations: ReturnType<typeof vi.fn>;
+};
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe('Sites 页面生命周期', () => {
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <button class="nav-item" data-tab="sites">Sites</button>
+      <section id="sites-tab" class="tab-pane"><div id="sites-page-root"></div></section>
+    `;
+  });
+
+  it('activate 渲染 sites 页面并触发加载', async () => {
+    const contribution = createSitesPageContribution();
+    contribution.activate({ signal: new AbortController().signal });
+    await flush();
+
+    const root = document.querySelector('#sites-page-root');
+    expect(root).not.toBeNull();
+    expect(api.inspirations).toHaveBeenCalled();
+  });
+
+  it('deactivate 释放计时器并清空根节点', async () => {
+    const contribution = createSitesPageContribution();
+    contribution.activate({ signal: new AbortController().signal });
+    await flush();
+
+    await contribution.deactivate();
+
+    expect(document.querySelector('#sites-page-root')?.children.length).toBe(0);
+  });
+
+  it('离页后旧加载响应不回写页面', async () => {
+    let resolveInspirations!: (value: unknown) => void;
+    api.inspirations.mockReturnValue(new Promise((resolve) => { resolveInspirations = resolve; }));
+
+    const contribution = createSitesPageContribution();
+    const controller = new AbortController();
+    contribution.activate({ signal: controller.signal });
+    await flush();
+
+    controller.abort();
+    await contribution.deactivate();
+    resolveInspirations({
+      inspirations: [
+        {
+          id: 'late',
+          title: 'Late Inspiration',
+          description: '',
+          sourcePath: '/x',
+          updatedAt: 1,
+        },
+      ],
+    });
+    await flush();
+
+    expect(document.querySelector('#sites-page-root')?.textContent).not.toContain('Late Inspiration');
   });
 });

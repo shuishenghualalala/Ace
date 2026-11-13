@@ -1,6 +1,6 @@
 ---
 name: crew-wiki-curator
-description: Crew Wiki Agent 的专业知识工程指引。处理 Wiki 入库规划、页面匹配与拆分、来源冲突、溯源置信度、批量维护、归档、lint 或长期质量治理时使用；入库计划按 wiki.ingest.auto_apply 决定自动应用或等待确认。
+description: Crew 笔记（内部 Wiki）Agent 的专业知识工程指引。处理 Crew 笔记、Wiki 或知识库的入库规划、页面匹配与拆分、来源冲突、溯源置信度、批量维护、归档、lint 或长期质量治理时使用；入库计划按 wiki.ingest.auto_apply 决定自动应用或等待确认。
 category: 知识管理
 metadata:
   zh_name: Wiki 管理规范
@@ -13,7 +13,9 @@ metadata:
 python: ">=3.8"
 ---
 
-# Crew Wiki Curator Skill
+# Crew 笔记 Curator Skill
+
+> 术语约定：Crew 笔记是对外产品名称；Wiki、知识库和 Wiki 知识库是兼容别名。三者指向同一套数据和工具，不要因名称不同创建重复内容。
 
 本 Skill 为 Crew Wiki Agent 提供知识工程判断标准。系统提示词决定必须执行的步骤、确认边界与完成标准；本 Skill 解释每一步如何判断和做好，不替代系统流程。
 
@@ -83,7 +85,8 @@ python: ">=3.8"
 
 - 批量材料逐个 capture/parse，先基于 hash 去重，再合并规划，避免同一事实重复创建候选页。
 - 已解析来源使用 `wiki_batch_ingest`，每次最多五份；按 `next_cursor` 继续，保留部分成功、跳过和失败事实。
-- 长素材的全篇硬上限是 5 个 Entity 和 3 个 Topic；短素材最多 3 个 Entity 且不生成 Topic。分块只提供候选，不能把配额乘以分块数。
+- 不按素材长度设置固定的 Entity 或 Topic 数量上限。分块用于保留语义上下文，跨块结果按规范标题和别名合并；是否入库由质量、独立性、长期复用价值和证据完整性决定。
+- 概览负责整体理解，知识导航提供完整目录。分页、批处理、模型输出 token 和查询上下文预算只是工程保护，不能解释为知识容量或展示配额。
 - `wiki_plan_ingest` 采用轻量知识单元：每个单元只表达一个 subject 的一条可追溯主张，页面聚合、规范匹配和 create/update/skip/contest 由编译器确定性完成。不要要求它一次撰写完整页面或穷举材料中的所有名词。
 - 富文本按语义分块提取；成功分块会持久化缓存，失败重试只处理未完成块。模型响应在最后一个 unit 中途截断时保留此前完整单元，不重跑整块。`analysis_stats` 中的 `total_chunks`、`analyzed_chunks`、`cache_hits`、`truncated_chunks` 和 `elapsed_ms` 是真实处理状态。
 - plan 中明确 create、update、skip、冲突与影响页面。`wiki.ingest.auto_apply=true`（默认）时计划工具内部立即应用并返回实际结果；配置为 false 时才展示计划、停止并等待后续确认回合。

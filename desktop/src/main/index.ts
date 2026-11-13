@@ -12,10 +12,12 @@ if (process.platform === 'win32') {
 import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, nativeTheme, protocol } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as net from 'net';
 import { createHash } from 'crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { Readable, Transform } from 'stream';
+import { pipeline } from 'stream/promises';
+import type { ReadableStream as NodeReadableStream } from 'stream/web';
 import WebSocket from 'ws';
 import { BrowserHost, BrowserHostError } from './browser-host';
 import { loginNewServiceInstance } from './auth-service';
@@ -27,6 +29,7 @@ import {
   type ResolvedOwnedFile,
 } from './crew-file-protocol';
 import { registerSitePreviewProtocol } from './site-preview-protocol';
+import { installSitePreviewNavigation } from './site-preview-navigation';
 import { authorizeOwnedImagePath, writeOwnedImageToClipboard } from './image-clipboard';
 import {
   managedGatewayModeEnv,
@@ -37,14 +40,24 @@ import {
 } from './gateway-launch-mode';
 import {
   resolveCrewHome,
+  resolveTaskWorkspaceRoot,
 } from './crew-session-file';
+import { canonicalOwnedShellRoot, resolveAllowedShellPath } from './shell-allowed-path';
 import {
   classifyCuaSetupAuthorityRequest,
   createDesktopSecurityProof,
   gatewayInstanceAccessToken,
   probeGatewayInstance,
   type GatewayComponentState,
+  type GatewayProbeFailureKind,
 } from './gateway-instance-auth';
+import { probeBackendHealth } from './backend-health-probe';
+import { BackendHealthMonitor } from './backend-health-monitor';
+import type {
+  BackendHealthState,
+  BackendProcessState,
+  BackendTransportState,
+} from './backend-health-monitor';
 import { GatewayRestartController } from './gateway-restart-controller';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
@@ -81,6 +94,7 @@ import {
   DialogSelectFileArgs,
   DialogSelectFolderArgs,
   DialogSaveLocalExportArgs,
+  TracingSaveExportArgs,
   InspirationWindowArgs,
   UpdateStartDownloadArgs,
   SecurityPendingArgs,
@@ -97,7 +111,6 @@ import {
   runElevatedSecuritySetup,
   runElevatedUacEnable,
 } from './security-setup';
-import { isDeniedShellPath } from './shell-allowed-path';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
   IPC_ARG_VALIDATION_FAILED,
@@ -105,7 +118,7 @@ import {
 } from '../shared/constants';
 import { listOpenWithApplications, openFileWithApplication } from './open-with-service';
 import { handleUninstall, setUninstallDeps } from './uninstall';
-import { isTrayStatus, TrayService } from './tray-service';
+import { isTrayNotificationSummary, isTrayStatus, TrayService } from './tray-service';
 import { currentAppVersion, currentAppVersionLabel } from './app-version';
 import {
   configureUpdateController,
@@ -126,9 +139,16 @@ import {
   verifyPackageIntegrity,
   verifyPackageSignature,
 } from './update/update-integrity';
+import {
+  GITHUB_REPO,
+  githubReleasesPageUrl,
+  resolveGithubReleaseDownloadUrl,
+  resolveGithubReleaseTarget,
+} from './update/github-release';
 import { evaluateVersionUpdate } from './version-compare';
 import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
+import { commitDownloadedExport } from './tracing-export-file';
 
 // 必须早于 app.whenReady()/BrowserWindow 创建；该开关随同一安装包跨 Windows、macOS、Linux 生效。
 configurePptxWasmRuntime(app.commandLine);
@@ -138,11 +158,11 @@ const GATEWAY_PORT_MIN = 8000;
 const GATEWAY_PORT_MAX = 8009; // inclusive upper bound, max 10 attempts
 
 // A private standard scheme lets the sandboxed Browser WebContents render one
-// explicitly approved HTML artifact without granting arbitrary file:// access.
+// explicitly approved HTML artifact and its local static assets without file:// access.
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'crew-artifact',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
   },
   {
     // 对话 UI 内联展示任务工作区图片（browser_use screenshot 导出），
@@ -165,6 +185,14 @@ app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_pro
 let mainWindow: BrowserWindow | null = null;
 const inspirationWindows = new Map<string, BrowserWindow>();
 let managedGateway: ChildProcessWithoutNullStreams | null = null;
+// 正在被主动收割的子进程：stopManagedGateway 会立刻清空 managedGateway（防并发重拉），
+// 但退出兜底（process.on('exit')）仍需句柄补 SIGKILL——忽略 SIGTERM 的 gateway 否则
+// 会以孤儿形态活下来继续占端口。子进程退出后清空。
+let stoppingGateway: ChildProcessWithoutNullStreams | null = null;
+/** 收割宽限期：SIGTERM 后等待该时长，仍未退出则升级 SIGKILL。 */
+const GATEWAY_TERMINATE_GRACE_MS = 3_000;
+/** SIGKILL 后留给内核回收句柄的时间。 */
+const GATEWAY_KILL_SETTLE_MS = 400;
 let ensureGatewayPromise: Promise<{ baseUrl: string; managed: boolean }> | null = null;
 const securityApprovalNonces = new Map<string, string>();
 const gatewaySockets = new Map<number, WebSocket>();
@@ -200,11 +228,10 @@ let isQuitting = false;
 let gatewayGeneration = 0;
 // Backend health monitor state
 let backendConnected = false;
-let healthMonitorTimer: ReturnType<typeof setInterval> | null = null;
-// 连续健康检查失败次数。单次 /api/health 超时不代表 gateway 挂了——gateway 繁忙
-// （加载技能 / 构建大 prompt / 执行工具）时单线程 asyncio 可能 2s 内没响应 health。
-// 需连续 N 次失败才判 disconnected，避免误弹「智能体运行环境准备中」遮罩。
-let healthFailCount = 0;
+let backendProcessState: BackendProcessState = 'starting';
+let backendHealthState: BackendHealthState = 'unknown';
+let backendTransportState: BackendTransportState = 'unknown';
+// ensureGateway 缓存重证明的容错次数，与健康监控阈值语义独立。
 const HEALTH_FAIL_THRESHOLD = 3;
 let gatewayComponents: Record<string, GatewayComponentState> | undefined;
 // Track the actually resolved gateway base URL (updated by ensureGateway)
@@ -219,6 +246,8 @@ const gatewayRestartController = new GatewayRestartController(async () => {
   if (isQuitting) return;
   gatewayGeneration += 1;
   ensureGatewayPromise = null;
+  backendHealthMonitor.markRestart();
+  setBackendProcessState('restarting');
   logSupervisorDecision('automatic-restart', { generation: gatewayGeneration });
   try {
     await ensureGateway();
@@ -227,34 +256,26 @@ const gatewayRestartController = new GatewayRestartController(async () => {
     console.error('[gateway] automatic restart failed:', error);
     throw error;
   }
+}, {
+  // 用户重试作废旧 wait（GatewaySupersededError）不计失败，避免虚增退避指数。
+  isIgnorableError: (error) => error instanceof GatewaySupersededError,
+  // 熔断：连续 5 次短命/失败重启 → 停止自动拉起，置 error 终态等用户手动重试。
+  stableUptimeMs: 60_000,
+  maxConsecutiveFailures: 5,
+  onTripped: ({ consecutiveFailures }) => {
+    logSupervisorDecision('circuit-breaker-tripped', { consecutiveFailures });
+    setBackendProcessState('error');
+  },
 });
 
-function readCrewHomeFromConfig(): string | null {
-  try {
-    const configPath = path.join(repoRoot(), 'config', 'config.yaml');
-    const content = fs.readFileSync(configPath, 'utf8');
-    const match = content.match(/^\s*crew_home:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/m);
-    if (match?.[1]?.trim()) return match[1].trim();
-  } catch {
-    // config.yaml not available
-  }
-  return null;
-}
-
 function getTaskWorkspaceRoot(): string {
-  if (process.env.CREW_TASK_WORKSPACE_ROOT) {
-    return path.resolve(process.env.CREW_TASK_WORKSPACE_ROOT);
-  }
-  // 从 config.yaml 读取 crew_home，与后端 load_config() 保持一致
-  const crewHome = readCrewHomeFromConfig();
-  if (crewHome) {
-    const resolved = path.isAbsolute(crewHome)
-      ? crewHome
-      : path.join(os.homedir(), crewHome);
-    return path.join(resolved, 'task_workspaces');
-  }
-  // fallback: 与后端 home.py DEFAULT_HOME_DIRNAME 保持一致
-  return path.join(os.homedir(), '.Crew', 'task_workspaces');
+  const crewHome = activeGatewayCrewHome();
+  const configPath = app.isPackaged
+    ? path.join(crewHome, 'config.yaml')
+    : path.join(repoRoot(), 'config', 'config.yaml');
+  let configContents = '';
+  try { configContents = fs.readFileSync(configPath, 'utf8'); } catch { /* use defaults */ }
+  return resolveTaskWorkspaceRoot(crewHome, configContents);
 }
 
 /**
@@ -263,17 +284,15 @@ function getTaskWorkspaceRoot(): string {
  * @param extraRoots 调用方显式授权的额外根目录（如项目工作空间根），必须是绝对路径。
  */
 function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): string {
-  const resolved = path.resolve(rawPath);
-  if (!path.isAbsolute(resolved)) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path must be absolute`);
-  }
-  // Deny sensitive security/audit resources even when they sit under an allowed root
-  // (M-1): the instance HMAC key (.gateway-instance) and raw cross-owner SQLite must
-  // never reach the renderer.
-  if (isDeniedShellPath(resolved)) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path is a sensitive security/audit resource`);
-  }
+  const crewHome = activeGatewayCrewHome();
+  const ownerSegment = currentCrewFileOwnerSegment();
   const taskWorkspaceRoot = getTaskWorkspaceRoot();
+  // Crew Home also contains every account's .env and the Gateway instance key.
+  // Only artifact roots belonging to the active account may be exposed here.
+  const ownedRoots = ownerSegment ? [
+    canonicalOwnedShellRoot(crewHome, ownerSegment, 'task_workspaces'),
+    canonicalOwnedShellRoot(crewHome, ownerSegment, 'uploads'),
+  ].filter((root): root is string => Boolean(root)) : [];
   const allowedRoots = [
     app.getPath('userData'),
     app.getPath('downloads'),
@@ -281,14 +300,17 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
     app.getPath('pictures'),
     app.getPath('desktop'),
     taskWorkspaceRoot,
-    path.dirname(taskWorkspaceRoot),
+    ...ownedRoots,
     ...extraRoots,
-  ].map((r) => path.resolve(r));
-  const allowed = allowedRoots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
-  if (!allowed) {
-    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: path not under any allowed root`);
+  ];
+  try {
+    return resolveAllowedShellPath(rawPath, allowedRoots, {
+      root: crewHome,
+      allowedRoots: [taskWorkspaceRoot, ...ownedRoots],
+    });
+  } catch (error) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: ${(error as Error).message}`);
   }
-  return resolved;
 }
 
 const MANAGED_GATEWAY_PORT = 28180;
@@ -445,7 +467,7 @@ function sendBrowserHostFrame(
   try {
     const payload = JSON.stringify(value);
     // ws.send queues frames in call order. Rejecting on payload size
-    // silently dropped exact snapshots/recording steps and made
+    // silently dropped exact snapshots and made
     // large Playwright responses fail despite a healthy local connection.
     socket.send(payload);
     return true;
@@ -474,32 +496,6 @@ function ensureBrowserHost(): BrowserHost {
       const socket = browserHostSocket;
       if (!socket) return;
       sendBrowserHostFrame(socket, { type: 'event', event: record });
-    });
-    browserHost.on('recording', (event: unknown) => {
-      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
-      const record = event as Record<string, unknown>;
-      const markIncomplete = (): void => {
-        browserHost?.markRecordingIncomplete(
-          typeof record.targetId === 'string' ? record.targetId : '',
-          typeof record.recordingId === 'string' ? record.recordingId : '',
-        );
-      };
-      const runtimeKey = currentBrowserRuntimeKey();
-      const v11 = record.schemaVersion === 11;
-      if (
-        !runtimeKey
-        || (!v11 && record.runtimeKey !== runtimeKey)
-        || (v11 && typeof record.runtimeKey === 'string' && record.runtimeKey !== runtimeKey)
-      ) {
-        markIncomplete();
-        return;
-      }
-      const socket = browserHostSocket;
-      if (!socket) {
-        markIncomplete();
-        return;
-      }
-      if (!sendBrowserHostFrame(socket, { type: 'event', event: record })) markIncomplete();
     });
     browserHost.on('tab-updated', (event: unknown) => {
       if (!event || typeof event !== 'object' || Array.isArray(event)) return;
@@ -768,6 +764,50 @@ process.on('uncaughtException', (err) => {
   }
 });
 
+// ── 渲染层错误上报落盘（renderer:report-error，preload 单向 send）──────────
+// 渲染层的 window.onerror / unhandledrejection / 渲染隔离兜底统一落
+// userData/logs/renderer-errors.log；单文件 5MB 轮转保留 1 份历史（.1）。
+const RENDERER_ERROR_LOG_MAX_BYTES = 5 * 1024 * 1024;
+
+function rendererErrorLogPath(): string {
+  return path.join(app.getPath('userData'), 'logs', 'renderer-errors.log');
+}
+
+function appendRendererErrorLog(report: unknown): void {
+  try {
+    const r = report as { source?: unknown; message?: unknown; stack?: unknown; context?: unknown };
+    if (typeof r?.message !== 'string') return;
+    const file = rendererErrorLogPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    try {
+      if (fs.statSync(file).size >= RENDERER_ERROR_LOG_MAX_BYTES) {
+        try { fs.rmSync(`${file}.1`, { force: true }); } catch { /* best-effort */ }
+        fs.renameSync(file, `${file}.1`);
+      }
+    } catch {
+      /* 尚无旧文件 */
+    }
+    const source = typeof r.source === 'string' ? r.source : 'unknown';
+    const context = r.context ? ` ${JSON.stringify(r.context)}` : '';
+    const stack = typeof r.stack === 'string' ? `\n${r.stack}` : '';
+    fs.appendFileSync(file, `[${new Date().toISOString()}] [${source}] ${r.message}${stack}${context}\n`, 'utf8');
+  } catch {
+    /* 日志失败不阻断 */
+  }
+}
+
+ipcMain.on('renderer:report-error', (_event, report) => appendRendererErrorLog(report));
+
+// 退出兜底：before-quit 的异步收割未及完成时，进程退出瞬间仍持有子进程句柄——
+// 同步补一刀 SIGKILL（Windows 上 kill() 即 TerminateProcess），杜绝孤儿 gateway。
+process.on('exit', () => {
+  try {
+    (managedGateway ?? stoppingGateway)?.kill('SIGKILL');
+  } catch {
+    /* already dead */
+  }
+});
+
 function loadDesktopPrefs(): DesktopPrefs {
   const parsed = readDesktopPrefsFile();
   const out: DesktopPrefs = {
@@ -919,6 +959,14 @@ function createTray(): void {
       isQuitting = true;
       app.quit();
     },
+    onNotificationSelected: (id: string) => {
+      showMainWindow();
+      mainWindow?.webContents.send('tray:notification-selected', id);
+    },
+    onNotificationsMarkAllRead: () => {
+      showMainWindow();
+      mainWindow?.webContents.send('tray:notifications-mark-all-read');
+    },
   });
   trayService.create();
 }
@@ -1036,7 +1084,7 @@ function openInspirationWindow(inspirationId: string, title = '灵感'): Browser
   inspirationWindows.set(inspirationId, win);
   pushInspirationWindowState(inspirationId, true);
   const target = `ace-site://${encodeURIComponent(inspirationId)}/`;
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  installSitePreviewNavigation(win.webContents);
   win.webContents.on('will-navigate', (event, url) => {
     try {
       const parsed = new URL(url);
@@ -1093,7 +1141,7 @@ function createWindow() {
   if (!browserHostDisposePromise) ensureBrowserHost();
 
   mainWindow.loadFile(path.join(__dirname, '../assets/index.html'));
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  installSitePreviewNavigation(mainWindow.webContents);
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const expected = path.join(__dirname, '../assets/index.html');
     if (!isTrustedRendererFileUrl(url, expected)) event.preventDefault();
@@ -1337,16 +1385,35 @@ function createActiveGatewaySecurityProof(method: string, pathname: string, body
  * 但无法返回 HTTP 响应时 fetch 无限挂起。
  */
 async function hasHealthApi(baseUrl: string): Promise<boolean> {
-  return (await probeHealthApi(baseUrl)).verified;
+  const probe = await probeHealthApi(baseUrl);
+  if (!probe.verified) return false;
+  // 独立健康线程（主端口+1）先于主 API 端口绑定（uvicorn 在 lifespan 返回后
+  // 才 listen）。「就绪」必须以主 API 端口真正接受连接为准，否则 auth 配置拉取等
+  // 主进程内部消费方会在启动窗口内吃到 ECONNREFUSED，拿到错误的兜底状态。
+  const mainApi = await probeGatewayInstance(baseUrl, { crewHome: activeGatewayCrewHome() });
+  return mainApi.verified;
 }
 
+/**
+ * 最近一次经 health 线程端口探测拿到的 loop_lag_ms：断连日志里带上它，
+ * 便于区分「进程死」与「进程活但业务循环忙」（IPC payload 结构不变）。
+ */
+let lastGatewayLoopLagMs: number | undefined;
+
 async function probeHealthApi(baseUrl: string) {
-  return probeGatewayInstance(baseUrl, { crewHome: activeGatewayCrewHome() });
+  const result = await probeBackendHealth(baseUrl, { crewHome: activeGatewayCrewHome() });
+  if (result.verified) {
+    lastGatewayLoopLagMs = typeof result.loopLagMs === 'number' ? result.loopLagMs : undefined;
+  }
+  return result;
 }
 
 // 供开发态 / 回退使用的 Gateway
 function startManagedGateway(): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
+  // spawn 前清理上次异常退出残留的开发态 gateway（28180 被占会让新实例绑定失败）。
+  killZombieGatewayProcesses();
   const root = repoRoot();
   const python = candidatePython();
   const crewHome = activeGatewayCrewHome();
@@ -1380,8 +1447,12 @@ function startManagedGateway(): void {
     if (managedGateway === child) {
       managedGateway = null;
       ensureGatewayPromise = null;
+      setBackendProcessState('offline');
       logSupervisorDecision('instance-exit', { platform: 'managed', code, signal });
-      if (!isQuitting) gatewayRestartController.schedule();
+      if (!isQuitting) {
+        gatewayRestartController.noteGatewayExit();
+        gatewayRestartController.schedule();
+      }
     }
   });
   child.on('error', (error) => {
@@ -1389,8 +1460,12 @@ function startManagedGateway(): void {
     if (managedGateway === child) {
       managedGateway = null;
       ensureGatewayPromise = null;
+      setBackendProcessState('error');
       logSupervisorDecision('instance-error', { platform: 'managed', error: String(error) });
-      if (!isQuitting) gatewayRestartController.schedule();
+      if (!isQuitting) {
+        gatewayRestartController.noteGatewayExit();
+        gatewayRestartController.schedule();
+      }
     }
   });
 }
@@ -1405,34 +1480,66 @@ function recycleGatewayForSecurityChange(): void {
   const child = managedGateway;
   if (!child || child.killed || isQuitting) return;
   logSupervisorDecision('security-change-restart', { generation: gatewayGeneration });
-  child.kill();
+  // 主动回收：与用户重试 / 卡死回收同语义，退出不计入熔断的短命实例计数
+  // （否则短时间内反复切换严格安全开关会误触熔断，停掉自动重启）；
+  // 同时复用统一收割链——SIGTERM 被忽略时仍会升级 SIGKILL 并留下退出兜底句柄。
+  gatewayRestartController.noteIntentionalStop();
+  void terminateGatewayChild(child);
+}
+
+/**
+ * 打包态 gateway 统一布局（三平台一致，源码模式，不再使用 PyInstaller 二进制）：
+ *   <gatewayRoot>/crew/            — gateway 源码树（含 skills/scenarios/mcp_servers）
+ *   <gatewayRoot>/config/          — 可发布配置模板（.env.example / config.yaml.example / prompts/）
+ *   <gatewayRoot>/plugins/         — 内置插件
+ *   <gatewayRoot>/runtimes/python/ — 内嵌 Python（gateway 本体与技能脚本共用同一解释器）
+ *   <gatewayRoot>/runtimes/node/   — 内嵌 Node.js（技能脚本用）
+ * gateway 由安装包内嵌 Python 以 `-m crew.gateway.server` 直接跑源码启动。
+ * CREW_PACKAGED=1 让后端识别打包态（用户配置落 ~/ 而非安装目录）。
+ */
+function packagedGatewayLaunch(gatewayRoot: string): {
+  command: string;
+  args: string[];
+  envExtras: Record<string, string>;
+} {
+  const python = process.platform === 'win32'
+    ? path.join(gatewayRoot, 'runtimes', 'python', 'python.exe')
+    : path.join(gatewayRoot, 'runtimes', 'python', 'bin', 'python3');
+  return {
+    command: python,
+    args: ['-m', 'crew.gateway.server'],
+    envExtras: {
+      CREW_PACKAGED: '1',
+      PYTHONPATH: gatewayRoot,
+      // 安装目录可能只读（Program Files / /opt），禁止向源码树写 .pyc
+      PYTHONDONTWRITEBYTECODE: '1',
+    },
+  };
 }
 
 // ============================================================================
 // 🌟 核心新增：专供 Windows 打包态使用的绝对路径静默启动
 // ============================================================================
 /**
- * Windows 打包版专用：在指定端口启动 crew-gateway.exe。
+ * Windows 打包版专用：在指定端口启动 gateway（内嵌 Python 跑源码）。
  * 通过 GATEWAY_PORT 环境变量告知后端监听端口。
  */
 function startWindowsPackagedGateway(port: number): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
 
   const exeDir = path.dirname(app.getPath('exe'));
-  const gatewayExePath = path.join(exeDir, '../crew-gateway/crew-gateway.exe');
-  const gatewayDir = path.dirname(gatewayExePath);
+  const gatewayRoot = path.resolve(exeDir, '..', 'crew-gateway');
+  const launch = packagedGatewayLaunch(gatewayRoot);
 
-  console.log(`[gateway] Starting packaged Windows gateway on port ${port}:`, gatewayExePath);
+  console.log(`[gateway] Starting packaged Windows gateway on port ${port}:`, launch.command);
 
-  // 清理可能残留的僵尸 gateway 进程（上次 Electron 异常退出未清理）
-  const killStart = Date.now();
-  killZombieGatewayProcesses();
-  console.log(`[gateway] Zombie cleanup took ${Date.now() - killStart}ms`);
-
+  // Port scanning already avoids occupied ports. Never kill another Gateway by
+  // command-line pattern: it may belong to a CLI or another installation.
   try {
     const spawnStart = Date.now();
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
+    managedGateway = spawn(launch.command, launch.args, {
+      cwd: gatewayRoot,
       windowsHide: true,
       detached: false,
       // 不注入 CREW_TASK_WORKSPACE_ROOT，让后端从 config.yaml 自行计算
@@ -1440,8 +1547,10 @@ function startWindowsPackagedGateway(port: number): void {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
+        ...launch.envExtras,
         ...packagedSecurityRuntimeEnv(),
-        // 与开发态一致：打包 exe 内嵌 Python 仍可能走 GBK 控制台
+        // 与开发态一致：内嵌 Python 仍可能走 GBK 控制台
         PYTHONIOENCODING: 'utf-8',
         ...(process.platform === 'win32' ? { PYTHONUTF8: '1' } : {}),
       },
@@ -1451,7 +1560,7 @@ function startWindowsPackagedGateway(port: number): void {
 
     // 记录 stdout/stderr 用于诊断启动问题
     attachGatewayLog(child);
-    writeGatewayLogLine(`[spawn] packaged win gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
+    writeGatewayLogLine(`[spawn] packaged win gateway pid=${child.pid} port=${port} python=${launch.command}`);
     child.stdout.on('data', (chunk) => console.log('[gateway-win]', String(chunk).trim()));
     child.stderr.on('data', (chunk) => console.warn('[gateway-win]', String(chunk).trim()));
 
@@ -1475,8 +1584,12 @@ function startWindowsPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'win32', code, signal });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
     child.on('error', (err) => {
@@ -1484,8 +1597,12 @@ function startWindowsPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'win32', error: String(err) });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
   } catch (err) {
@@ -1494,41 +1611,43 @@ function startWindowsPackagedGateway(port: number): void {
 }
 
 /**
- * macOS 打包版专用：在指定端口启动 crew-gateway 二进制。
- * macOS .app 结构：Ace.app/Contents/Resources/crew-gateway/
+ * macOS 打包版专用：在指定端口启动 gateway（内嵌 Python 跑源码）。
+ * macOS .app 结构：crew-desktop.app/Contents/Resources/crew-gateway/
  */
 function startMacOSPackagedGateway(port: number): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
 
   // macOS .app bundle: exe 位于 Contents/MacOS/crew-desktop，
-  // gateway 放在 Contents/Resources/crew-gateway/crew-gateway
+  // gateway 源码树放在 Contents/Resources/crew-gateway/
   const resourcesPath = path.join(path.dirname(app.getPath('exe')), '..', 'Resources');
-  const gatewayExePath = path.join(resourcesPath, 'crew-gateway', 'crew-gateway');
-  const gatewayDir = path.dirname(gatewayExePath);
+  const gatewayRoot = path.join(resourcesPath, 'crew-gateway');
+  const launch = packagedGatewayLaunch(gatewayRoot);
 
-  console.log(`[gateway] Starting packaged macOS gateway on port ${port}:`, gatewayExePath);
+  console.log(`[gateway] Starting packaged macOS gateway on port ${port}:`, launch.command);
 
-  // 注意：不在此处调用 killZombieGatewayProcesses()。
-  // macOS 上 killZombieGatewayProcesses 使用 `pkill -f crew-gateway`，
-  // 它会匹配命令行中包含 "crew-gateway" 的所有进程——包括本函数刚刚 spawn
-  // 出来的新 gateway，导致新进程被 SIGTERM 误杀（pkill 是异步的，无法按 PID 排除）。
-  // 僵尸进程清理统一在 before-quit / uninstall 时执行即可。
+  // spawn 之前收割上次异常退出残留的僵尸（此时本进程尚无托管实例，不会误杀自己）。
+  // 旧注释担忧 pkill 误杀「刚 spawn 的新实例」——那只在 spawn 之后清理才会发生；
+  // 现在清理先于 spawn 完成，且复用外部 gateway 的路径不会走到这里。
+  killZombieGatewayProcesses();
 
   try {
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
+    managedGateway = spawn(launch.command, launch.args, {
+      cwd: gatewayRoot,
       detached: false,
       env: {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
+        ...launch.envExtras,
         ...packagedSecurityRuntimeEnv(),
       },
     });
     const child = managedGateway;
 
     attachGatewayLog(child);
-    writeGatewayLogLine(`[spawn] packaged mac gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
+    writeGatewayLogLine(`[spawn] packaged mac gateway pid=${child.pid} port=${port} python=${launch.command}`);
     child.stdout.on('data', (chunk) => console.log('[gateway-mac]', String(chunk).trim()));
     child.stderr.on('data', (chunk) => console.warn('[gateway-mac]', String(chunk).trim()));
 
@@ -1537,8 +1656,12 @@ function startMacOSPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'darwin', code, signal });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
     child.on('error', (err) => {
@@ -1546,8 +1669,12 @@ function startMacOSPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'darwin', error: String(err) });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
   } catch (err) {
@@ -1556,8 +1683,8 @@ function startMacOSPackagedGateway(port: number): void {
 }
 
 /**
- * Linux 打包版专用：在指定端口启动 crew-gateway 二进制。
- * deb 装在固定路径 /opt/crew-gateway/crew-gateway。
+ * Linux 打包版专用：在指定端口启动 gateway（内嵌 Python 跑源码）。
+ * deb 装在固定路径 /opt/crew-gateway/（源码树 + runtimes/）。
  *
  * 与 macOS/Windows 一致：desktop 子进程托管 gateway。废弃了原先的 systemd user
  * service 架构——多用户机器上各用户 systemd 服务都 enable-linger + Restart=always
@@ -1566,27 +1693,32 @@ function startMacOSPackagedGateway(port: number): void {
  */
 function startLinuxPackagedGateway(port: number): void {
   if (managedGateway) return;
+  setBackendProcessState('starting');
+  // spawn 前收割残留僵尸（此前仅 Windows 路径做，Linux/macOS 孤儿会持续占 8000+ 端口）。
+  killZombieGatewayProcesses();
 
-  const gatewayExePath = '/opt/crew-gateway/crew-gateway';
-  const gatewayDir = path.dirname(gatewayExePath);
+  const gatewayRoot = '/opt/crew-gateway';
+  const launch = packagedGatewayLaunch(gatewayRoot);
 
-  console.log(`[gateway] Starting packaged Linux gateway on port ${port}:`, gatewayExePath);
+  console.log(`[gateway] Starting packaged Linux gateway on port ${port}:`, launch.command);
 
   try {
-    managedGateway = spawn(gatewayExePath, [], {
-      cwd: gatewayDir,
+    managedGateway = spawn(launch.command, launch.args, {
+      cwd: gatewayRoot,
       detached: false,
       env: {
         ...process.env,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
+        ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
+        ...launch.envExtras,
         ...packagedSecurityRuntimeEnv(),
       },
     });
     const child = managedGateway;
 
     attachGatewayLog(child);
-    writeGatewayLogLine(`[spawn] packaged linux gateway pid=${child.pid} port=${port} exe=${gatewayExePath}`);
+    writeGatewayLogLine(`[spawn] packaged linux gateway pid=${child.pid} port=${port} python=${launch.command}`);
     child.stdout.on('data', (chunk) => console.log('[gateway-linux]', String(chunk).trim()));
     child.stderr.on('data', (chunk) => console.warn('[gateway-linux]', String(chunk).trim()));
 
@@ -1595,8 +1727,12 @@ function startLinuxPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('offline');
         logSupervisorDecision('instance-exit', { platform: 'linux', code, signal });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
     child.on('error', (err) => {
@@ -1604,8 +1740,12 @@ function startLinuxPackagedGateway(port: number): void {
       if (managedGateway === child) {
         managedGateway = null;
         ensureGatewayPromise = null;
+        setBackendProcessState('error');
         logSupervisorDecision('instance-error', { platform: 'linux', error: String(err) });
-        if (!isQuitting) gatewayRestartController.schedule();
+        if (!isQuitting) {
+          gatewayRestartController.noteGatewayExit();
+          gatewayRestartController.schedule();
+        }
       }
     });
   } catch (err) {
@@ -1617,12 +1757,24 @@ function startLinuxPackagedGateway(port: number): void {
  * 清理可能残留的僵尸 gateway 进程。
  * 上次 Electron 异常退出时 managedGateway.kill() 可能未执行，
  * 导致旧 gateway 进程占着 8000 端口，新 gateway 无法启动。
+ *
+ * 只在「即将 spawn 自己的托管实例」前调用（managedGateway 为空）：
+ * - 复用外部 gateway 的路径绝不能跑（会把要复用的实例杀掉）；
+ * - 自家实例存活时也不能跑（pkill 按模式匹配无法排除它）。
+ * 模式同时覆盖打包二进制（crew-gateway）与开发态 Python（crew.gateway.server）；
+ * POSIX 侧带 -u 用户过滤，多用户机器不误杀他人实例。
  */
 function killZombieGatewayProcesses(): void {
   if (process.platform === 'win32') {
     try {
-      // 查找所有 crew-gateway.exe 进程（排除当前 managedGateway）
-      const output = spawn('tasklist', ['/FI', 'IMAGENAME eq crew-gateway.exe', '/FO', 'CSV', '/NH'], {
+      // 打包态 gateway 是「内嵌 python.exe -m crew.gateway.server」，进程名不再
+      // 是 crew-gateway.exe，按命令行特征匹配（排除当前 managedGateway）。
+      const output = spawn('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" " +
+        "| Where-Object { $_.CommandLine -match 'crew\\.gateway\\.server' } " +
+        "| ForEach-Object { $_.ProcessId }",
+      ], {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'ignore'],
       });
@@ -1631,44 +1783,36 @@ function killZombieGatewayProcesses(): void {
       output.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
 
       output.on('close', () => {
-        const lines = stdout.split('\n').filter(line => line.includes('crew-gateway.exe'));
-        for (const line of lines) {
-          const match = line.match(/"crew-gateway\.exe","(\d+)"/);
-          if (match) {
-            const pid = parseInt(match[1], 10);
-            // 跳过当前管理的 gateway（如果存在）
-            if (managedGateway && managedGateway.pid === pid) continue;
+        const pids = stdout.split(/\r?\n/).map((line) => parseInt(line.trim(), 10)).filter(Number.isFinite);
+        for (const pid of pids) {
+          // 跳过当前管理的 gateway（如果存在）
+          if (managedGateway && managedGateway.pid === pid) continue;
 
-            console.warn(`[gateway] Killing zombie crew-gateway process: PID ${pid}`);
-            try {
-              spawn('taskkill', ['/PID', String(pid), '/F'], {
-                windowsHide: true,
-                stdio: 'ignore',
-              });
-            } catch (err) {
-              console.error(`[gateway] Failed to kill PID ${pid}:`, err);
-            }
+          console.warn(`[gateway] Killing zombie crew-gateway process: PID ${pid}`);
+          try {
+            // /T 连进程树一起收（gateway 可能带 grandchild 工具进程）
+            spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+              windowsHide: true,
+              stdio: 'ignore',
+            });
+          } catch (err) {
+            console.error(`[gateway] Failed to kill PID ${pid}:`, err);
           }
         }
       });
     } catch (err) {
       console.warn('[gateway] Failed to enumerate gateway processes:', err);
     }
-  } else if (process.platform === 'linux') {
+  } else if (process.platform === 'linux' || process.platform === 'darwin') {
     try {
-      // Linux 打包态 gateway 由本进程 spawn 托管（不再用 systemd user service）。
-      // 只杀当前用户的残留 crew-gateway，避免误杀别的用户各自的 gateway 实例。
-      spawn('pkill', ['-u', String(process.getuid?.() ?? 0), '-f', '/opt/crew-gateway/crew-gateway'], {
-        stdio: 'ignore',
-      });
+      // 只杀当前用户的残留实例（打包态 python（安装目录含 crew-gateway）或开发态 python -m crew.gateway.server）。
+      spawn(
+        'pkill',
+        ['-u', String(process.getuid?.() ?? 0), '-f', 'crew-gateway|crew\\.gateway\\.server'],
+        { stdio: 'ignore' },
+      );
     } catch (err) {
-      console.warn('[gateway] Failed to kill Linux gateway processes:', err);
-    }
-  } else if (process.platform === 'darwin') {
-    try {
-      spawn('pkill', ['-f', 'crew-gateway'], { stdio: 'ignore' });
-    } catch (err) {
-      console.warn('[gateway] Failed to kill macOS gateway processes:', err);
+      console.warn(`[gateway] Failed to kill ${process.platform} gateway processes:`, err);
     }
   }
 }
@@ -1676,10 +1820,12 @@ function killZombieGatewayProcesses(): void {
 // ── 托管 Gateway 启动日志捕获 ──────────────────────────────────────────────
 // 打包用户看不到主进程控制台；把 gateway stdout/stderr 落盘到
 // userData/logs/gateway-startup.log，供「查看日志」诊断冷启动卡顿（AV 扫 cacert、
-// 崩溃 traceback、端口冲突等）。每次 spawn 截断，只留本次尝试。
+// 崩溃 traceback、端口冲突等）。
+// append + 大小轮转（.1/.2，单份 2MB）：崩溃循环不被下一次 spawn 截断抹掉自己的历史。
 // spawn 与首次输出之间有窗口，先把 spawn 动作本身写进日志，避免开头长时间空白；
 // 显式 utf8，避免 Windows GBK 控制台输出落到文件成乱码。
 let gatewayLogStream: fs.WriteStream | null = null;
+const GATEWAY_LOG_MAX_BYTES = 2 * 1024 * 1024;
 
 function gatewayLogPath(): string {
   return path.join(app.getPath('userData'), 'logs', 'gateway-startup.log');
@@ -1693,12 +1839,25 @@ function writeGatewayLogLine(line: string): void {
   }
 }
 
+function rotateGatewayLogIfNeeded(file: string): void {
+  try {
+    if (fs.statSync(file).size < GATEWAY_LOG_MAX_BYTES) return;
+  } catch {
+    return; // 尚无文件
+  }
+  try { fs.rmSync(`${file}.2`, { force: true }); } catch { /* best-effort */ }
+  try { fs.renameSync(`${file}.1`, `${file}.2`); } catch { /* 尚无 .1 */ }
+  try { fs.renameSync(file, `${file}.1`); } catch { /* best-effort */ }
+}
+
 function attachGatewayLog(child: ChildProcessWithoutNullStreams): void {
   try {
     const file = gatewayLogPath();
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    rotateGatewayLogIfNeeded(file);
     gatewayLogStream?.end();
-    gatewayLogStream = fs.createWriteStream(file, { flags: 'w', encoding: 'utf8' });
+    gatewayLogStream = fs.createWriteStream(file, { flags: 'a', encoding: 'utf8' });
+    gatewayLogStream.write(`\n===== gateway spawn @ ${new Date().toISOString()} =====\n`, 'utf8');
     const write = (prefix: string, chunk: Buffer | string): void => {
       const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
       gatewayLogStream?.write(
@@ -1723,18 +1882,63 @@ function backendLogInfo(): { logPath: string } {
   return { logPath: gatewayLogPath() };
 }
 
-function backendStatusPayload(connected: boolean): {
+type BackendStatusDetail = {
+  failureKind?: GatewayProbeFailureKind;
+  since?: number;
+  healthState?: BackendHealthState;
+  loopLagMs?: number;
+  transportState?: BackendTransportState;
+};
+
+function backendStatusPayload(
+  connected: boolean,
+  detail: BackendStatusDetail = {},
+): {
   connected: boolean;
   baseUrl: string;
   logPath: string;
   components?: Record<string, GatewayComponentState>;
+  failureKind?: GatewayProbeFailureKind;
+  since?: number;
+  processState: BackendProcessState;
+  healthState: BackendHealthState;
+  transportState: BackendTransportState;
+  loopLagMs?: number;
 } {
   return {
     connected,
     baseUrl: resolvedGatewayBaseUrl,
     ...backendLogInfo(),
     ...(gatewayComponents ? { components: gatewayComponents } : {}),
+    ...(detail.failureKind ? { failureKind: detail.failureKind } : {}),
+    ...(detail.since !== undefined ? { since: detail.since } : {}),
+    processState: backendProcessState,
+    healthState: detail.healthState ?? backendHealthState,
+    transportState: detail.transportState ?? backendTransportState,
+    ...(detail.loopLagMs !== undefined
+      ? { loopLagMs: detail.loopLagMs }
+      : lastGatewayLoopLagMs !== undefined ? { loopLagMs: lastGatewayLoopLagMs } : {}),
   };
+}
+
+function setBackendProcessState(next: BackendProcessState): void {
+  if (backendProcessState === next) return;
+  backendProcessState = next;
+  try {
+    mainWindow?.webContents.send('backend:status', backendStatusPayload(backendConnected));
+  } catch {
+    // webContents may be destroyed during shutdown
+  }
+}
+
+function setBackendTransportState(next: BackendTransportState): void {
+  if (backendTransportState === next) return;
+  backendTransportState = next;
+  try {
+    mainWindow?.webContents.send('backend:status', backendStatusPayload(backendConnected));
+  } catch {
+    // webContents may be destroyed during shutdown
+  }
 }
 
 /** supervisor 杀/拉决策持久化到启动日志（复盘报告 B5：重拉/终止动作须可回溯）。 */
@@ -1747,13 +1951,19 @@ function logSupervisorDecision(action: string, detail?: Record<string, unknown>)
 /**
  * 等到 /api/health 实例证明通过。
  *
- * 冷启动没有合理的时间天花板（AV 扫 cacert 可拖到 90s+，下一次可能更久）。
- * 默认一直等到：ready / 子进程退出 / 应用退出 / 所属 ensureGateway 代际被作废（用户重试）。
- * 仅 logout 受控重启等有外部 deadline 的路径传 timeoutMs。
+ * 每个等待都有死线（冷启动可拖到 90s+ 的 AV 扫描已按 180s 上限覆盖）：
+ *   - spawn 后的冷启动等待：180s（GATEWAY_COLD_START_TIMEOUT_MS）
+ *   - 复用存活实例的等待：60s（进程声称活着却迟迟不健康，按卡死处理）
+ * 死线触发时若子进程仍活着则先收割再返回 false——否则下一轮 ensureGateway 会
+ * 在「旧实例占端口」的状态下扫出新端口，端口被无谓顶替。
+ * 也响应：ready / 子进程退出 / 应用退出 / 所属 ensureGateway 代际被作废（用户重试）。
  */
 class GatewaySupersededError extends Error {
   constructor() { super('gateway wait superseded by retry'); }
 }
+
+const GATEWAY_COLD_START_TIMEOUT_MS = 180_000;
+const GATEWAY_REUSE_WAIT_TIMEOUT_MS = 60_000;
 
 async function waitForHealthApi(
   baseUrl: string,
@@ -1782,6 +1992,11 @@ async function waitForHealthApi(
     }
     if (deadline !== null && Date.now() >= deadline) {
       console.warn(`[gateway] Health API timeout after ${Date.now() - started}ms (${attempts} attempts)`);
+      logSupervisorDecision('health-wait-timeout', { waitedMs: Date.now() - started, attempts });
+      const child = options.process;
+      if (child && child.exitCode === null) {
+        await stopManagedGateway('health-wait-timeout');
+      }
       return false;
     }
     const child = options.process;
@@ -1800,85 +2015,127 @@ async function waitForHealthApi(
   }
 }
 
-/** Stop only a Gateway child owned by this Desktop before rebuilding it. */
-async function stopManagedGateway(reason: string): Promise<void> {
-  const child = managedGateway;
-  if (!child) return;
-  managedGateway = null;
-  await new Promise<void>((resolve) => {
+/**
+ * 收割单个 Gateway 子进程：SIGTERM → graceMs → SIGKILL → 短暂等待后放行。
+ * 收割窗口内句柄保留在 stoppingGateway，供 process.on('exit') 在异步链未及完成时补刀；
+ * 子进程真正退出（或兜底放行）后清空。
+ */
+function terminateGatewayChild(
+  child: ChildProcessWithoutNullStreams,
+  graceMs: number = GATEWAY_TERMINATE_GRACE_MS,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
     let settled = false;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
     const finish = () => {
       if (settled) return;
       settled = true;
+      if (graceTimer !== null) clearTimeout(graceTimer);
+      if (stoppingGateway === child) stoppingGateway = null;
       resolve();
     };
     if (child.exitCode !== null) {
       finish();
       return;
     }
+    stoppingGateway = child;
     child.once('exit', finish);
-    setTimeout(() => {
+    graceTimer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already dead */ }
-      setTimeout(finish, 400);
-    }, 3000);
+      setTimeout(finish, GATEWAY_KILL_SETTLE_MS);
+    }, graceMs);
     try { child.kill(); } catch { finish(); }
   });
+}
+
+/** Stop only a Gateway child owned by this Desktop before rebuilding it. */
+async function stopManagedGateway(reason: string): Promise<void> {
+  const child = managedGateway;
+  if (!child) return;
+  managedGateway = null;
+  // 主动回收（用户重试 / 卡死回收 / 健康等待死线）预期的退出不计熔断失败。
+  gatewayRestartController.noteIntentionalStop();
+  await terminateGatewayChild(child);
   logSupervisorDecision('instance-exit-superseded', { pid: child.pid ?? -1, reason });
 }
 
 // ============================================================================
 // Backend health monitor: periodically polls /api/health and pushes status
 // changes to the renderer via IPC ('backend:status').
+// 探针串行化（链式 setTimeout）、失败分类（unreachable/timeout/auth_failed/unknown）
+// 与启动/稳定双阈值详见 backend-health-monitor.ts。
 // ============================================================================
-// 🌟 启动优化：健康探测间隔从 1500ms 降至 1000ms，更快感知 gateway 就绪状态变化
-const HEALTH_CHECK_INTERVAL_MS = 1000;
+const backendHealthMonitor = new BackendHealthMonitor(
+  // 每次探测取当时的 resolvedGatewayBaseUrl（ensureGateway 端口选择后会更新）
+  () => probeHealthApi(resolvedGatewayBaseUrl),
+  (change) => {
+    gatewayComponents = change.connected ? change.components : undefined;
+    if (change.healthState) backendHealthState = change.healthState;
+    if (change.loopLagMs !== undefined) lastGatewayLoopLagMs = change.loopLagMs;
+    pushBackendStatus(change.connected, {
+      ...(change.failureKind ? { failureKind: change.failureKind } : {}),
+      ...(change.since !== undefined ? { since: change.since } : {}),
+      ...(change.healthState ? { healthState: change.healthState } : {}),
+      ...(change.loopLagMs !== undefined ? { loopLagMs: change.loopLagMs } : {}),
+    });
+    updateStalledRecycle(change);
+  },
+);
 
-function pushBackendStatus(connected: boolean, options: { force?: boolean } = {}): void {
-  if (backendConnected === connected && !options.force) return;
+// ── 卡死自动回收：进程活着但业务循环 stalled（loop_lag ≥10s 双样本去抖）────────
+// 持续 30s 仍 stalled → 主动收割（SIGTERM→3s→SIGKILL），exit handler 接力走既有
+// 重启梯子（退避 + 熔断）。此前 stalled 只挂横幅，用户是唯一恢复途径。
+const STALLED_RECYCLE_AFTER_MS = 30_000;
+let stalledRecycleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function updateStalledRecycle(change: { connected: boolean; healthState?: BackendHealthState }): void {
+  const stalled = change.connected && change.healthState === 'stalled';
+  if (!stalled) {
+    if (stalledRecycleTimer !== null && change.healthState !== undefined) {
+      clearTimeout(stalledRecycleTimer);
+      stalledRecycleTimer = null;
+    }
+    return;
+  }
+  if (stalledRecycleTimer !== null || isQuitting) return;
+  stalledRecycleTimer = setTimeout(() => {
+    stalledRecycleTimer = null;
+    if (isQuitting || backendHealthState !== 'stalled' || !managedGateway) return;
+    logSupervisorDecision('stalled-recycle', { loopLagMs: lastGatewayLoopLagMs });
+    setBackendProcessState('restarting');
+    void stopManagedGateway('stalled-recycle');
+  }, STALLED_RECYCLE_AFTER_MS);
+}
+
+function pushBackendStatus(
+  connected: boolean,
+  detail: BackendStatusDetail = {},
+): void {
   backendConnected = connected;
-  console.log(`[main] backend status → ${connected ? 'connected' : 'disconnected'}`);
+  if (detail.healthState) backendHealthState = detail.healthState;
+  if (detail.loopLagMs !== undefined) lastGatewayLoopLagMs = detail.loopLagMs;
+  if (connected && (backendProcessState === 'starting' || backendProcessState === 'restarting')) {
+    backendProcessState = 'ready';
+  }
+  console.log(
+    `[main] backend status → ${connected ? 'connected' : `disconnected (${detail.failureKind ?? 'unknown'})`}`
+    + (!connected && lastGatewayLoopLagMs !== undefined
+      ? `，最近 loop_lag_ms=${Math.round(lastGatewayLoopLagMs)}`
+      : ''),
+  );
   try {
-    mainWindow?.webContents.send('backend:status', backendStatusPayload(connected));
+    mainWindow?.webContents.send('backend:status', backendStatusPayload(connected, detail));
   } catch {
     // webContents may be destroyed
   }
 }
 
-async function pollBackendHealth(): Promise<void> {
-  // Use the resolved gateway base URL (updated by ensureGateway after port selection)
-  const baseUrl = resolvedGatewayBaseUrl;
-  const probe = await probeHealthApi(baseUrl);
-  if (probe.verified) {
-    // 恢复要快：一旦成功立即重置并推送 connected（若先前被判 disconnected，遮罩立刻消失）
-    healthFailCount = 0;
-    const componentsChanged = JSON.stringify(gatewayComponents) !== JSON.stringify(probe.components);
-    gatewayComponents = probe.components;
-    pushBackendStatus(true, { force: componentsChanged });
-    return;
-  }
-  // 失败容错：连续 N 次失败才判 disconnected。gateway 繁忙时单次 health 超时属正常，
-  // 立即弹遮罩会误阻断用户操作（如点技能时 gateway 正在加载）。
-  healthFailCount += 1;
-  if (healthFailCount >= HEALTH_FAIL_THRESHOLD) {
-    gatewayComponents = undefined;
-    pushBackendStatus(false);
-  }
-}
-
 function startBackendHealthMonitor(): void {
-  if (healthMonitorTimer) return;
-  // Immediate first check
-  void pollBackendHealth();
-  healthMonitorTimer = setInterval(() => {
-    void pollBackendHealth();
-  }, HEALTH_CHECK_INTERVAL_MS);
+  backendHealthMonitor.start();
 }
 
 function stopBackendHealthMonitor(): void {
-  if (healthMonitorTimer) {
-    clearInterval(healthMonitorTimer);
-    healthMonitorTimer = null;
-  }
+  backendHealthMonitor.stop();
 }
 
 // ============================================================================
@@ -1891,7 +2148,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     // A prior proof is not a permanent trust grant. Re-prove immediately before
     // every credential-bearing caller reuses the URL, so an unmanaged Gateway
     // restart cannot silently turn a stale cached port into a trusted service.
-    // 与 pollBackendHealth 容错对齐：gateway 单线程 asyncio 繁忙（摘要/工具执行）+
+    // 与 backendHealthMonitor 容错对齐：gateway 单线程 asyncio 繁忙（摘要/工具执行）+
     // Defender 扫描时，单次 3s health 超时属正常；连续失败才判定实例失效。
     // 否则一次抖动就清空缓存 → 全量重拉 → 旧实例占 8000 → 扫描选出 8001 →
     // spawn 被 managedGateway 短路 → 空等无进程端口，遮罩永不消失。
@@ -1903,7 +2160,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     if (ensureGatewayPromise !== cachedPromise) return ensureGateway();
     ensureGatewayPromise = null;
     if (cached.managed) {
-      await stopManagedGateway('identity-mismatch');
+      await stopManagedGateway('health-reproof-failed');
     }
     logSupervisorDecision('instance-reprobe', {
       cachedBaseUrl: cached.baseUrl,
@@ -1924,7 +2181,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       if (managedGateway) {
         console.log('[gateway] Windows packaged: managed instance alive, waiting on existing port...');
         logSupervisorDecision('reuse-alive-instance', { platform: 'win32' });
-        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation })) {
+        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_REUSE_WAIT_TIMEOUT_MS })) {
           return { baseUrl: resolvedGatewayBaseUrl, managed: true };
         }
       }
@@ -1948,7 +2205,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       // 托管实例无冷启动时间天花板：等到 ready / 子进程退出 / 关应用 / 代际作废。
       resolvedGatewayBaseUrl = portUrl;
       startWindowsPackagedGateway(selectedPort);
-      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: 60_000 })) {
+      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
         console.log(`[gateway] Total ensureGateway time: ${Date.now() - ensureStart}ms`);
         return { baseUrl: portUrl, managed: true };
       }
@@ -1977,7 +2234,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       if (managedGateway) {
         console.log('[gateway] Linux packaged: managed instance alive, waiting on existing port...');
         logSupervisorDecision('reuse-alive-instance', { platform: 'linux' });
-        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation })) {
+        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_REUSE_WAIT_TIMEOUT_MS })) {
           return { baseUrl: resolvedGatewayBaseUrl, managed: true };
         }
       }
@@ -1995,10 +2252,10 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
         console.log(`[gateway] Port ${port} is in use, trying ${port + 1}...`);
       }
       const portUrl = `http://127.0.0.1:${selectedPort}`;
-      // spawn 前暴露真实端口，wait 期间监控打对地址；最多等待 60 秒，child 提前退出则立即失败。
+      // spawn 前暴露真实端口，wait 期间监控打对地址；冷启动死线 180s，child 提前退出则立即失败。
       resolvedGatewayBaseUrl = portUrl;
       startLinuxPackagedGateway(selectedPort);
-      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: 60_000 })) {
+      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
         console.log(`[gateway] Total ensureGateway time: ${Date.now() - ensureStart}ms`);
         return { baseUrl: portUrl, managed: true };
       }
@@ -2011,7 +2268,7 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
       if (managedGateway) {
         console.log('[gateway] macOS packaged: managed instance alive, waiting on existing port...');
         logSupervisorDecision('reuse-alive-instance', { platform: 'darwin' });
-        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation })) {
+        if (await waitForHealthApi(resolvedGatewayBaseUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_REUSE_WAIT_TIMEOUT_MS })) {
           return { baseUrl: resolvedGatewayBaseUrl, managed: true };
         }
       }
@@ -2029,10 +2286,10 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
         console.log(`[gateway] Port ${port} is in use, trying ${port + 1}...`);
       }
       const portUrl = `http://127.0.0.1:${selectedPort}`;
-      // 与 Windows 一致：spawn 前暴露真实端口，wait 无冷启动天花板。
+      // 与 Windows 一致：spawn 前暴露真实端口；冷启动死线 180s（覆盖 AV 扫描 90s+）。
       resolvedGatewayBaseUrl = portUrl;
       startMacOSPackagedGateway(selectedPort);
-      if (await waitForHealthApi(portUrl, { process: managedGateway, generation })) {
+      if (await waitForHealthApi(portUrl, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
         return { baseUrl: portUrl, managed: true };
       }
       throw new Error('packaged macOS Crew Gateway exited before readiness');
@@ -2041,18 +2298,63 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     // 4. 开发环境 / 兜底：拉起 28180 端口的 Python 子进程
     resolvedGatewayBaseUrl = MANAGED_GATEWAY_URL;
     startManagedGateway();
-    if (await waitForHealthApi(MANAGED_GATEWAY_URL, { process: managedGateway, generation })) {
+    if (await waitForHealthApi(MANAGED_GATEWAY_URL, { process: managedGateway, generation, timeoutMs: GATEWAY_COLD_START_TIMEOUT_MS })) {
       return { baseUrl: MANAGED_GATEWAY_URL, managed: true };
     }
 
     throw new Error('Crew Gateway failed instance verification on every candidate port');
   })();
-  ensureGatewayPromise = pending;
-  void pending.catch(() => {
-    // 只清自己这个 promise；retry 已接管（设置了新代际 promise）时不清。
-    if (ensureGatewayPromise === pending) ensureGatewayPromise = null;
+  // 托管实例就绪 → 通知重启控制器记录存活起点（熔断的短命实例计数依赖它）。
+  const tracked = pending.then((result) => {
+    if (result.managed) gatewayRestartController.noteGatewayReady();
+    return result;
   });
-  return pending;
+  ensureGatewayPromise = tracked;
+  void tracked.catch(() => {
+    // 只清自己这个 promise；retry 已接管（设置了新代际 promise）时不清。
+    if (ensureGatewayPromise === tracked) ensureGatewayPromise = null;
+  });
+  return tracked;
+}
+
+/**
+ * 冷启动/重启窗口内的有界重试 fetch。
+ * 「健康线程就绪」先于主 API 端口绑定（uvicorn 在 lifespan 返回后才 listen），
+ * 此窗口内打到 gateway 的请求会吃 ECONNREFUSED——这是进程启动与端口绑定的
+ * 时间差，不是故障。仅在网络级拒连且进程处于 starting/restarting 时等待重试；
+ * HTTP 状态错误与其他异常原样抛出，offline/error 态快速失败。
+ */
+const GATEWAY_FETCH_STARTUP_RETRY_MS = 15_000;
+const GATEWAY_FETCH_STARTUP_RETRY_INTERVAL_MS = 250;
+const GATEWAY_FETCH_RETRYABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE']);
+
+function isGatewayStartupRetryable(error: unknown): boolean {
+  let current: unknown = error;
+  while (current && typeof current === 'object') {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && GATEWAY_FETCH_RETRYABLE_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+function gatewayFetchRetryWindowOpen(): boolean {
+  return !isQuitting
+    && (backendProcessState === 'starting' || backendProcessState === 'restarting');
+}
+
+async function fetchGatewayWithStartupRetry(url: string, init?: RequestInit): Promise<Response> {
+  const deadline = Date.now() + GATEWAY_FETCH_STARTUP_RETRY_MS;
+  for (;;) {
+    try {
+      return await fetch(url, init);
+    } catch (error) {
+      if (!isGatewayStartupRetryable(error) || !gatewayFetchRetryWindowOpen() || Date.now() >= deadline) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, GATEWAY_FETCH_STARTUP_RETRY_INTERVAL_MS));
+    }
+  }
 }
 
 async function securityGatewayRequest(
@@ -2076,7 +2378,7 @@ async function securityGatewayRequest(
     ...(body ? { 'content-type': 'application/json' } : {}),
     ...(usesRemoteAuth ? { Authorization: `Bearer ${jwt}`, ...identityHeaders } : {}),
   };
-  const response = await fetch(`${baseUrl}${pathname}`, {
+  const response = await fetchGatewayWithStartupRetry(`${baseUrl}${pathname}`, {
     method,
     headers,
     ...(body ? { body } : {}),
@@ -2342,7 +2644,7 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
           'n=0; while kill -0 "$1" 2>/dev/null && [ $n -lt 120 ]; do sleep 0.5; n=$((n+1)); done', // 等安装流程结束（≤60s）
           'n=0; while kill -0 "$2" 2>/dev/null && [ $n -lt 40 ]; do sleep 0.3; n=$((n+1)); done',  // 等旧 app 退出（≤12s）
           'sleep 1', // dpkg 换完文件后收尾
-          'pkill -u "$(id -u)" -f /opt/crew-gateway/crew-gateway 2>/dev/null', // 清旧 gateway
+          'pkill -u "$(id -u)" -f /opt/crew-gateway 2>/dev/null', // 清旧 gateway
           'sleep 1', // 等端口释放
           'exec crew-desktop',
         ].join('; ');
@@ -2487,6 +2789,10 @@ function registerIpc() {
     version: currentAppVersion(app),
     label: currentAppVersionLabel(app),
   }));
+  trustedHandle('app:get-launch-mode', () => ({
+    isDevLaunch: IS_DEV_LAUNCH,
+    mode: IS_DEV_LAUNCH ? 'dev' : 'account',
+  }));
   ipcMain.on('window:maximized', (e) => {
     assertTrustedRenderer(e);
     e.sender.send('window:maximized-changed', true);
@@ -2547,18 +2853,106 @@ function registerIpc() {
     return { ok: true, canceled: false, path: result.filePath };
   });
 
+  trustedHandle('tracing:save-export', async (_e, raw: unknown) => {
+    const args = parseOrThrow(TracingSaveExportArgs.parse(raw), 'tracing:save-export');
+    const { baseUrl } = await ensureGateway();
+    const exportPath = `/api/tracing/exports/${args.exportId}`;
+    const buildGatewayHeaders = (): Record<string, string> => {
+      const headers: Record<string, string> = { ...gatewayAccessHeaders(exportPath) };
+      const identity = usesGatewayRemoteAuth() ? gatewayIdentityHeaders() : null;
+      if (usesGatewayRemoteAuth() && !identity) throw new Error('追踪导出需要有效登录态');
+      Object.assign(headers, identity || {});
+      return headers;
+    };
+    const statusResponse = await fetchGatewayWithStartupRetry(`${baseUrl}${exportPath}`, {
+      headers: buildGatewayHeaders(),
+    });
+    if (!statusResponse.ok) {
+      const detail = (await statusResponse.text().catch(() => '')).slice(0, 500);
+      throw new Error(`追踪导出状态查询失败 (${statusResponse.status})${detail ? `: ${detail}` : ''}`);
+    }
+    const statusBody = await statusResponse.json() as { status?: string; format?: string };
+    if (statusBody.status !== 'completed' && statusBody.status !== 'partial') {
+      throw new Error('追踪导出尚未完成');
+    }
+    const format = statusBody.format === 'json' || statusBody.format === 'csv' || statusBody.format === 'jsonl'
+      ? statusBody.format
+      : 'jsonl';
+    const extension = format === 'jsonl' ? 'jsonl' : format;
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: '保存追踪导出',
+      defaultPath: path.join(app.getPath('downloads'), `ace-traces-${args.exportId}.${extension}`),
+      filters: [
+        { name: 'JSONL', extensions: ['jsonl', 'ndjson'] },
+        { name: 'JSON', extensions: ['json'] },
+        { name: 'CSV', extensions: ['csv'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+
+    const downloadPath = `${exportPath}/download`;
+    const response = await fetchGatewayWithStartupRetry(`${baseUrl}${downloadPath}`, {
+      headers: buildGatewayHeaders(),
+    });
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 500);
+      throw new Error(`追踪导出下载失败 (${response.status})${detail ? `: ${detail}` : ''}`);
+    }
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    const maxBytes = 64 * 1024 * 1024;
+    if (declaredLength > maxBytes) throw new Error('追踪导出超过大小上限');
+    if (!response.body) throw new Error('追踪导出没有可读取的数据流');
+
+    let totalBytes = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer | string, _encoding, callback) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        totalBytes += buffer.byteLength;
+        if (totalBytes > maxBytes) {
+          callback(new Error('追踪导出超过大小上限'));
+          return;
+        }
+        callback(null, buffer);
+      },
+    });
+    const tempPath = `${result.filePath}.${args.exportId}.${process.hrtime.bigint().toString()}.tmp`;
+    try {
+      await pipeline(
+        Readable.fromWeb(response.body as unknown as NodeReadableStream),
+        limiter,
+        fs.createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }),
+      );
+      await commitDownloadedExport(tempPath, result.filePath);
+    } catch (error) {
+      await fs.promises.unlink(tempPath).catch(() => undefined);
+      throw error;
+    }
+    return { ok: true, canceled: false, path: result.filePath };
+  });
+
   trustedHandle('shell:readTextFile', async (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:readTextFile');
     const resolved = resolveShellAllowedPath(args.path);
-    const stat = await fs.promises.stat(resolved);
+    const stat = fs.lstatSync(resolved);
     const maxBytes = 512 * 1024;
-    if (!stat.isFile()) {
+    if (!stat.isFile() || stat.nlink !== 1 || fs.realpathSync(args.path) !== resolved) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile target is not a file`);
     }
     if (stat.size > maxBytes) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: shell:readTextFile file too large`);
     }
-    return fs.promises.readFile(resolved, 'utf8');
+    const bytes = await readResolvedCrewFile({
+      filePath: resolved,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        nlink: stat.nlink,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      },
+    });
+    return bytes?.toString('utf8') ?? '';
   });
 
   trustedHandle('shell:writeTextFile', async (_e, raw: unknown) => {
@@ -2661,7 +3055,7 @@ function registerIpc() {
     const ensured = await ensureGateway();
     const kbId = args.kbId || 'default';
     const listPath = `/api/wiki/sources?kb_id=${encodeURIComponent(kbId)}`;
-    const res = await fetch(new URL(listPath, ensured.baseUrl).toString(), {
+    const res = await fetchGatewayWithStartupRetry(new URL(listPath, ensured.baseUrl).toString(), {
       headers: { ...gatewayAccessHeaders(listPath) },
     });
     if (!res.ok) {
@@ -2815,6 +3209,15 @@ function registerIpc() {
     setTrayStatus(status);
     return { ok: true };
   });
+  trustedHandle('tray:set-notifications', (_e, summary: unknown) => {
+    if (!isTrayNotificationSummary(summary)) {
+      throw new Error(
+        `${IPC_ARG_VALIDATION_FAILED}: tray:set-notifications expected a valid notification summary`,
+      );
+    }
+    trayService?.setNotifications(summary);
+    return { ok: true };
+  });
   trustedHandle('app:get-system-locale', () => {
     return app.getLocale();
   });
@@ -2857,6 +3260,25 @@ function registerIpc() {
   trustedHandle('update:install-package', async () => installDownloadedUpdate());
 
   trustedHandle('update:get-state', (): UpdateStateSnapshot => readUpdateState());
+
+  // 打开 GitHub Releases 当前系统对应的安装包下载页。查询失败 / 无匹配资产时回退到 releases 列表页。
+  trustedHandle('release:open-latest-download', async () => {
+    const fallback = { ok: false, url: githubReleasesPageUrl() };
+    try {
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Crew-Desktop' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return fallback;
+      const release = (await res.json()) as { assets?: Array<{ name: string; browser_download_url: string }> };
+      const assets = release.assets ?? [];
+      const target = resolveGithubReleaseTarget();
+      const url = resolveGithubReleaseDownloadUrl(assets, target) ?? githubReleasesPageUrl();
+      return { ok: true, url };
+    } catch {
+      return fallback;
+    }
+  });
 
   trustedHandle('feedback:submit', async (_e, raw: unknown) => {
     const args = parseOrThrow(FeedbackSubmitArgs.parse(raw), 'feedback:submit');
@@ -3048,7 +3470,7 @@ function registerIpc() {
         'X-Crew-Security-Proof': createActiveGatewaySecurityProof(proofMethod, proofPath, proofBody),
       };
     }
-    const res = await fetch(targetUrl.toString(), fetchInit);
+    const res = await fetchGatewayWithStartupRetry(targetUrl.toString(), fetchInit);
     const body = await res.text();
     return {
       ok: res.ok,
@@ -3105,7 +3527,7 @@ function registerIpc() {
     gatewayStreamControllers.get(streamKey)?.abort();
     gatewayStreamControllers.set(streamKey, controller);
     try {
-      const response = await fetch(targetUrl.toString(), {
+      const response = await fetchGatewayWithStartupRetry(targetUrl.toString(), {
         method: args.init?.method || 'GET',
         headers,
         ...(args.init?.body !== undefined ? { body: args.init.body } : {}),
@@ -3240,7 +3662,7 @@ function registerIpc() {
       const form = new FormData();
       form.append('file', new Blob([new Uint8Array(content)]), path.basename(filePath));
       try {
-        const res = await fetch(uploadUrl, { method: 'POST', headers: authHeaders, body: form });
+        const res = await fetchGatewayWithStartupRetry(uploadUrl, { method: 'POST', headers: authHeaders, body: form });
         results.push({
           path: filePath,
           ok: res.ok,
@@ -3376,7 +3798,10 @@ function registerIpc() {
   trustedHandle('gateway:retry', async () => {
     gatewayGeneration += 1;
     logSupervisorDecision('user-retry', { generation: gatewayGeneration });
+    // 手动重试 = 熔断后的梯子复位：清零计数，恢复自动重启资格。
+    gatewayRestartController.reset();
     ensureGatewayPromise = null;
+    backendHealthMonitor.markRestart();
     await stopManagedGateway('user-retry');
     void ensureGateway()
       .then(() => scheduleBrowserHostConnection())
@@ -3386,6 +3811,7 @@ function registerIpc() {
 
   trustedHandle('gateway-ws:connect', async (event) => {
     const senderId = event.sender.id;
+    setBackendTransportState('reconnecting');
     const previous = gatewaySockets.get(senderId);
     if (previous?.readyState === WebSocket.OPEN) {
       logMainStream('ws-connect-skip', { senderId, reason: 'already-open' });
@@ -3451,6 +3877,7 @@ function registerIpc() {
     };
     socket.on('open', () => {
       logMainStream('ws-open', { senderId, url: httpUrl.toString() });
+      setBackendTransportState('connected');
       sendEvent({ type: 'open' });
     });
     socket.on('message', (data) => {
@@ -3473,6 +3900,7 @@ function registerIpc() {
     socket.on('close', (code, reason) => {
       event.sender.removeListener('destroyed', handleRendererDestroyed);
       logMainStream('ws-close', { code, reason: reason.toString(), senderId });
+      setBackendTransportState(reason.toString() === 'reconnect' ? 'reconnecting' : 'disconnected');
       sendEvent({
         type: 'close',
         code,
@@ -3481,6 +3909,7 @@ function registerIpc() {
       if (gatewaySockets.get(senderId) === socket) gatewaySockets.delete(senderId);
     });
     socket.on('error', (err) => {
+      setBackendTransportState('disconnected');
       sendEvent({ type: 'error', error: err.message });
     });
     event.sender.once('destroyed', handleRendererDestroyed);
@@ -3515,6 +3944,7 @@ function registerIpc() {
       gatewaySockets.delete(senderId);
       try { socket.close(1000, 'client-close'); } catch { /* best effort */ }
     }
+    setBackendTransportState('disconnected');
     return { ok: true };
   });
 
@@ -3607,6 +4037,20 @@ function registerIpc() {
   trustedHandle('browser-view:hide', () => {
     browserHost?.hidePanel();
     return { ok: true };
+  });
+  trustedHandle('browser-view:zoom', (_event, raw: unknown) => {
+    const request = validateBrowserPanelIdentity(raw);
+    const action = (raw as Record<string, unknown>).action;
+    if (action !== 'in' && action !== 'out' && action !== 'reset') {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid browser zoom action`);
+    }
+    const runtimeKey = currentBrowserRuntimeKey();
+    if (!runtimeKey || !browserHost) return { ok: false, error: '桌面浏览器尚未连接' };
+    try {
+      return { ok: true, zoomFactor: browserHost.zoomPanel({ runtimeKey, ...request, action }) };
+    } catch (error) {
+      return { ok: false, error: (error instanceof Error ? error.message : '无法调整网页缩放').slice(0, 500) };
+    }
   });
   trustedHandle('browser-view:get-navigation', (_event, raw: unknown) => {
     const request = validateBrowserPanelIdentity(raw);
@@ -3729,24 +4173,14 @@ async function bootstrap() {
   // 注入卸载模块依赖（托盘「卸载」功能需要访问主进程内部状态）
   setUninstallDeps({
     getMainWindow: () => mainWindow,
-    stopManagedGateway: (timeoutMs = 3000) => {
-      return new Promise((resolve) => {
-        if (!managedGateway) return resolve();
-        const gw = managedGateway;
-        const done = () => {
-          if (managedGateway === gw) managedGateway = null;
-          resolve();
-        };
-        gw.once('exit', done);
-        const timer = setTimeout(() => {
-          try { gw.kill('SIGKILL'); } catch { /* ignore */ }
-          setTimeout(done, 500);
-        }, timeoutMs);
-        try { gw.kill(); } catch { /* already dead */ }
-        gw.once('exit', () => clearTimeout(timer));
-      });
+    // 与 before-quit 共用同一条收割链（SIGTERM → SIGKILL → exit 兜底），
+    // 卸载流程自己实现一遍会让退出兜底拿不到句柄。
+    stopManagedGateway: (timeoutMs = GATEWAY_TERMINATE_GRACE_MS) => {
+      const gw = managedGateway;
+      if (!gw) return Promise.resolve();
+      managedGateway = null;
+      return terminateGatewayChild(gw, timeoutMs);
     },
-    killZombieGatewayProcesses,
     setQuittingFlag: () => { isQuitting = true; },
     resetQuittingFlag: () => { isQuitting = false; },
     stopBackendHealthMonitor,
@@ -3762,7 +4196,13 @@ async function bootstrap() {
   app.on('activate', () => {
     // Hidden AutomationHost windows are implementation details and must not
     // suppress recreation of the user-facing window on macOS.
-    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      // 重建窗口 = 应用继续存活：复位退出闩锁。此前 darwin 上「登出后关窗」会把
+      // isQuitting 置真且无人复位——自动重启 / browser-host 重连 / 启动重试窗口
+      // 全部被永久禁用，app 悄悄变成「活着的僵尸」。
+      isQuitting = false;
+      createWindow();
+    }
     else showMainWindow();
   });
 }
@@ -3790,25 +4230,44 @@ app.on('before-quit', () => {
   } catch (err) {
     console.warn('[main] disposeUpdateDownload failed:', (err as Error).message);
   }
-  // 🌟 新增：彻底猎杀 Electron 托管的 Python 后台进程，防止驻留
+  // 🌟 彻底收割 Electron 托管的后台进程，防止驻留：统一走 stopManagedGateway 的
+  // SIGTERM → 3s → SIGKILL 升级链（此前只发一次裸 SIGTERM，不等待不升级不杀树，
+  // 忽略 SIGTERM 的 gateway 会以孤儿形态活下来继续占端口）。
+  // 异步收割若未及完成，process.on('exit') 兜底再补一刀 SIGKILL。
   if (managedGateway) {
-    console.log('[main] Killing managed gateway process before quit...');
-    managedGateway.kill();
-    managedGateway = null;
+    console.log('[main] Stopping managed gateway before quit...');
+    void stopManagedGateway('app-quit');
   }
 });
 
-const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) {
-  app.quit();
-} else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      showMainWindow();
+// 打包流水线的最小启动探针：真正加载 Electron 与主进程并等到 ready，
+// 但不创建窗口、启动 Gateway 或碰单实例锁。它能拦住仅靠 codesign --verify
+// 无法发现的 dyld / Framework 加载失败。
+if (process.argv.includes('--crew-packaging-smoke-test')) {
+  app.whenReady().then(() => {
+    if (!app.isPackaged) {
+      console.error('Packaging smoke test requires a packaged app');
+      app.exit(1);
+      return;
     }
+    process.stdout.write('CREW_PACKAGING_SMOKE_OK\n', () => app.exit(0));
+  }).catch((err) => {
+    console.error('Packaging smoke test failed:', err);
+    app.exit(1);
   });
-  bootstrap().catch((err) => {
-    console.error('Bootstrap failed:', err);
+} else {
+  const gotLock = app.requestSingleInstanceLock();
+  if (!gotLock) {
     app.quit();
-  });
+  } else {
+    app.on('second-instance', () => {
+      if (mainWindow) {
+        showMainWindow();
+      }
+    });
+    bootstrap().catch((err) => {
+      console.error('Bootstrap failed:', err);
+      app.quit();
+    });
+  }
 }

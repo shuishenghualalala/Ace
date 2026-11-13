@@ -6,7 +6,24 @@ Crew 的 Electron 桌面客户端。它连接本机 Crew Gateway，提供对话�
 
 ## 快速开始
 
-在仓库根目录执行：
+在仓库根目录执行一行命令即可启动开发模式（会自动激活虚拟环境、补齐配置和依赖）：
+
+```bash
+# macOS / Linux
+bash scripts/dev.sh
+```
+
+```powershell
+# Windows PowerShell
+pwsh ./scripts/dev.ps1
+```
+
+`npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，不显示邮箱登录页。
+普通模式和开发模式都使用托管端口 `28180`；连接成功后，渲染层会记录实际地址。
+
+### 手动步骤
+
+如果需要按步骤执行：
 
 ```bash
 uv venv .venv --python 3.11
@@ -22,15 +39,12 @@ npm start
 `config/config.yaml`；默认 `auth.mode: email`，首次打开会显示邮箱登录页。邮箱不需要验证码，
 仅用于生成相互隔离的本机租户 Owner。
 
-如果只进行日常开发、不测试邮箱登录流程，使用：
+如果只想启动开发模式：
 
 ```bash
 cd desktop
 npm run dev
 ```
-
-`npm run dev` 会传入 `--dev`，使用隔离的 `dev:dev` Owner 和开发数据目录，不显示邮箱登录页。
-普通模式和开发模式都使用托管端口 `28180`；连接成功后，渲染层会记录实际地址。
 
 首次打开后，在“设置 → 模型”中添加模型并将其设为默认。API Key 写入当前用户的本地环境文件，不会返回给渲染层。
 
@@ -75,6 +89,14 @@ npm run dev
 | `scripts/check-security.mjs` | Electron/IPC/XSS 等静态安全门禁 |
 | `electron-builder.yml` | Linux、Windows 和 macOS 的 Electron `dir` 构建配置 |
 
+### 外援中心迁移边界
+
+`features/agent-hub.ts` 负责 Agent Hub 外壳与目录卡片，`features/agents-page.ts` 负责外援目录、创建流程和派活业务。创建 Agent/Team 表单由 `agents-page.ts` 通过类型化 `renderForm` slot 挂载，Hub 不再持有 `legacy-form` 包装节点。会话外援身份严格以 Gateway 返回的 `agent_binding` 为准，外援 Session 只写规范字段 `external.external_agent_id`；Provider 字符串仅用于展示，不参与身份推断。协议中性的 `executor=external` 不接受顶层 `external_agent_id`；ACP 仍保留 `acp.external_agent_id` 和 ACP 时代顶层字段的输入兼容。
+
+2026-08-31 P3-6 阶段收口：移除重复目录类型和 `legacy-form` 节点，外援 Agent 配置改为规范字段单写，Desktop 身份判断统一依赖 `agent_binding`；模块级页面状态暂不重构。验证记录：相关 5 个单元测试文件 49 项通过，`npm run typecheck` 和 `npm run build` 通过。
+
+2026-08-31 会话字段收口：Desktop 继续只写 `external.external_agent_id`；Gateway 对 `executor=external` 不接受顶层 `external_agent_id`，ACP 仍保留顶层与 `acp.external_agent_id` 输入兼容。
+
 渲染层通过 `window.Crew` 的最小预加载桥访问主进程能力。`gateway:fetch` 仅允许本机 Gateway 的 `/api/` 路径；外部链接、文件选择和上传均在主进程执行白名单及大小校验。
 
 ## 开发与验证
@@ -104,3 +126,16 @@ npm run dist:mac
 应在与目标一致的操作系统上执行。产物位于 `desktop/release/`；正式分发前仍需配置代码签名、公证、安装权限与更新来源。
 
 包含 Gateway 和运行时的完整安装器构建方式，见根目录 [README](../README.md#构建桌面发行包可选)。
+
+## GitHub Actions 三平台打包
+
+统一使用 `release-desktop`，同时构建 macOS arm64/x64 DMG、Linux UOS/Kylin deb 和 Windows exe：
+
+- 分支开发包：手动运行时在 **Use workflow from** 选择 `dev`，`tag` 留空。
+  `version` 可填 `1.1.0` 这样的三段数字版本，留空读取所选提交的 `deb-package/version.txt`。
+  从本次运行的 Artifacts 下载 `release-windows` 等产物；不会创建或覆盖 GitHub Release。
+- Tag 发布：推送 `v*` tag 自动构建并发布；也可手动填写已存在的 `tag` 重建，`version` 留空。
+  此时构建 tag 指向的提交，而不是分支选择器指向的提交。
+
+三平台共用预检解析出的提交 SHA 和版本。单个平台构建成功后即可下载其 artifact，
+GitHub Release 则需要所有平台成功后才发布。开发分支普通 push 不会自动触发完整打包。

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Agent 核心缺陷修复批次测试记录（2026-09-17）</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}h3{margin-top:28px}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 10px}th{background:#f8f8f8}.bad{color:#b00020;font-weight:600}</style>
+</head>
+<body>
+<h1>Agent 核心缺陷修复批次测试记录</h1>
+<p>2026-09-17 · 分支 <code>fix/agent-core-defects</code> · 验证 HEAD <code>f8d33e1</code> · worktree <code>/Users/ahuamao/Documents/Codes/Ace/.worktrees/agent-core-defects</code> · 环境 macOS（Apple Silicon） · 依据清单：<code>docs/todo/kimi-2026-09-16-agent-core-defects.md</code>。</p>
+
+<h2>提交清单（11 个 commit）</h2>
+<table>
+<thead><tr><th>提交</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>71513d9</code></td><td>插件 hook/middleware 同步回调线程化，取消路径 2s 有界优雅窗口去 busy-spin</td></tr>
+<tr><td><code>cccc05e</code></td><td>桌面端健康探针串行化 + 失败分类 + 启动/稳定双阈值</td></tr>
+<tr><td><code>a8aa51b</code></td><td>子 agent 收尾顺序 / bg_events TTL 清扫 / delegate_task 异常隔离；sqlite 重试睡眠可注入</td></tr>
+<tr><td><code>2ffe5a6</code></td><td>删除全屏后端遮罩，改为非阻断状态横幅（失败分类文案 + 手动重试）</td></tr>
+<tr><td><code>4ce7c1b</code></td><td>per-tool 超时看门狗 + interrupt 可取消在途工具（aborted/timed-out 合法输出语义）</td></tr>
+<tr><td><code>08f746f</code></td><td>health 端点独立线程隔离 + 循环活性哨兵 loop_lag_ms</td></tr>
+<tr><td><code>679ace7</code></td><td>整回合 deadline（默认关闭）+ interrupt_message 消费 + compact 段中断检查</td></tr>
+<tr><td><code>e99e58e</code></td><td>追问/权限等待有界超时 + interrupt 取消联动（默认拒绝）</td></tr>
+<tr><td><code>94b37b5</code></td><td>热路径同步 I/O 治理：prompt 缓存 / env to_thread / llm_trace 队列落盘 / 媒体读取线程化</td></tr>
+<tr><td><code>9bd8fda</code></td><td>本批次的模块文档与验证记录</td></tr>
+<tr><td><code>f8d33e1</code></td><td>同步 hook/middleware 线程化的 ContextVar 写回——修复 wiki_learning 上下文回传回归</td></tr>
+</tbody>
+</table>
+
+<h2>验证汇总</h2>
+<table>
+<thead><tr><th>范围</th><th>命令</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>后端全量</td><td><code>uv run pytest -q --ignore=tests/security</code></td><td><strong>4119 passed / 3 failed / 43 skipped</strong>（f8d33e1 上复测）。3 个失败均为基线已存在，见下节。</td></tr>
+<tr><td>失败隔离复跑</td><td>失败用例单独复跑</td><td>确定性失败仅基线 3 个；<code>test_cron_run_now_background_task_strong_ref_drains</code> 曾仅全量时失败、单独复跑通过——全量时序 flake。</td></tr>
+<tr><td>基线对照</td><td>在分支基点 <code>61d1c8b</code> 上复跑确定性失败用例</td><td>基线同样失败，非本分支引入。</td></tr>
+<tr><td>静态门禁</td><td><code>uv run ruff check crew/</code></td><td>All checks passed!</td></tr>
+<tr><td>import 契约</td><td><code>uv run lint-imports</code></td><td>9 contracts kept, 0 broken</td></tr>
+<tr><td>桌面端全量单测</td><td><code>cd desktop &amp;&amp; npx vitest run tests/unit/</code></td><td>169 files / <strong>1970 passed</strong> 全绿（106.7s）</td></tr>
+<tr><td>桌面端类型</td><td><code>cd desktop &amp;&amp; npx tsc --noEmit</code></td><td>exit 0，0 error</td></tr>
+</tbody>
+</table>
+
+<h2>基线失败清单（基线已存在，非本分支引入）</h2>
+<p>以下 3 个用例在分支基点 <code>61d1c8b</code> 上以同命令复跑<strong>同样失败</strong>，属基线已存在失败：</p>
+<ul>
+<li><code>tests/test_agent.py::test_overflow_compacts_then_retries_once_then_errors</code></li>
+<li><code>tests/test_tool_result_lifecycle.py::test_full_compaction_recovers_protected_results</code></li>
+<li><code>tests/test_tool_result_lifecycle.py::test_protected_attachments_survive_repeated_compactions</code></li>
+</ul>
+<p>另有 <code>tests/gateway/test_background_tasks.py::test_cron_run_now_background_task_strong_ref_drains</code> 仅在后端全量运行时失败、单独复跑通过，为全量时序 flake，非确定性失败。</p>
+
+<h2>中途引入并已修复的回归（wiki_learning ContextVar 回传）</h2>
+<p><code>71513d9</code> 把同步 hook 回调挪进线程后，曾导致 3 个 <code>tests/test_wiki_learning_plugin.py</code> 用例失败：插件同步 <code>pre_llm_call</code> 钩子内对 ContextVar 的 <code>.set()</code> 发生在线程上下文副本里，无法回传事件循环侧调用方。已由 <code>f8d33e1</code> 修复：<code>_lease_callback</code> 的线程化路径改为 <code>contextvars.copy_context()</code> + 线程内 <code>ctx.run(...)</code> + await 完成后在调用协程里写回有变化的 ContextVar（异常/取消路径不写回）；同步工具 handler 走同一路径，天然覆盖。修复后上述 3 个用例转绿，批次 A 的"不阻塞事件循环 / 取消有界窗口"保护保持不变。</p>
+
+<h2>追加：TaskManager 异步门面 + P2-3.3 错误类型化（2026-09-17 第二阶段）</h2>
+<table>
+<thead><tr><th>提交</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>3c8f140</code></td><td>ADR-0045（错误类型化与重试策略）+ ADR-0046（任务存储异步门面）</td></tr>
+<tr><td><code>7be86ac</code></td><td>TaskRuntime 19 个 async 门面方法；事件循环上的任务存储同步写调用点全量迁移（约 30 处：dispatcher / handle_terminal / team delegate_tool / subagent tools / sessions 路由 / history_projection）；新增 3 个测试（async 等价、并发互斥、ticker 不阻塞回归）</td></tr>
+<tr><td><code>5080c47</code></td><td>CrewErrorKind + RETRYABLE_KINDS 白名单；ProviderError kind/status/retry_delay；provider 分类收敛到 crew/providers/classify.py；Retry-After/body retry_delay 解析；新增 39 个分类矩阵测试</td></tr>
+<tr><td><code>81583a2</code></td><td>builtin 重试段消费 retry_delay（60s 封顶）；error 帧结构化（code=kind + retryable + retry_delay）；outbound/dispatcher 错误分支类型化；新增 10 个测试</td></tr>
+</tbody>
+</table>
+<p>验证：批次1 验收子集 749 passed；批次3 后全量 <code>uv run pytest -q --ignore=tests/security</code> 为 <strong>4171 passed / 3 failed</strong>（3 个均为基线已存在失败，清单见上节，零新增）；<code>ruff check</code> 通过；<code>lint-imports</code> 9 kept / 0 broken。行为变化两处（ADR-0045 裁定）：503 server_overloaded 与欠费 quota_exceeded 不再自动重试；429 usage_limit 经分类器显式 retryable 保留限流退避。</p>
+
+<h2>追加：asyncio_bridge 自循环线程保护（2026-09-18）</h2>
+<p><code>crew/core/asyncio_bridge.py</code> 记录桥接事件循环线程身份；<code>run_sync</code> 在该线程调用时立即关闭调用方创建的协程并抛出 <code>RuntimeError</code>，不再向自身事件循环投递后同步等待。新增 <code>tests/test_asyncio_bridge.py</code> 覆盖同步上下文、普通事件循环防御路径和桥接循环线程拒绝路径；测试使用标准 asyncio/concurrent.futures API，不依赖 Unix 专属机制。</p>
+<p>验证：<code>/Users/ahuamao/Documents/Codes/Ace/.venv/bin/python -m pytest tests/test_asyncio_bridge.py -q</code>：<strong>3 passed</strong>；<code>ruff check crew/core/asyncio_bridge.py tests/test_asyncio_bridge.py</code>：通过；Python 3.12.9 编译检查：通过。</p>
+<h2>环境</h2>
+<ul>
+<li>macOS（Apple Silicon），Python 3.13.2（uv 管理），Node/npm（desktop 依赖 worktree 内 <code>desktop/node_modules</code>）。</li>
+<li>所有命令在 worktree <code>/Users/ahuamao/Documents/Codes/Ace/.worktrees/agent-core-defects</code> 内执行，日期 2026-09-18。</li>
+</ul>
+</body>
+</html>

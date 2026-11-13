@@ -105,25 +105,26 @@ describe('composer-input', () => {
     it('按内容高度撑高（happy-dom scrollHeight=0 → 高度收敛为 0），溢出隐藏', () => {
       const input = document.createElement('textarea');
       autoresizeTextarea(input, 140);
-      expect(input.style.height).toBe('0px');
-      expect(input.style.overflowY).toBe('hidden');
+      expect(input.style.getPropertyValue('--mw-runtime-height')).toBe('0px');
+      expect(input.style.getPropertyValue('--mw-runtime-overflow-y')).toBe('hidden');
+      expect(input.classList.contains('mw-runtime-style')).toBe(true);
     });
 
     it('scrollHeight 超过上限时出滚动条并钳制高度', () => {
       const input = document.createElement('textarea');
       Object.defineProperty(input, 'scrollHeight', { value: 300, configurable: true });
       autoresizeTextarea(input, 140);
-      expect(input.style.height).toBe('140px');
-      expect(input.style.overflowY).toBe('auto');
+      expect(input.style.getPropertyValue('--mw-runtime-height')).toBe('140px');
+      expect(input.style.getPropertyValue('--mw-runtime-overflow-y')).toBe('auto');
     });
 
-    it('resetTextareaHeight 还原内联样式', () => {
+    it('resetTextareaHeight 还原运行时高度变量', () => {
       const input = document.createElement('textarea');
       Object.defineProperty(input, 'scrollHeight', { value: 300, configurable: true });
       autoresizeTextarea(input, 140);
       resetTextareaHeight(input);
-      expect(input.style.height).toBe('');
-      expect(input.style.overflowY).toBe('hidden');
+      expect(input.style.getPropertyValue('--mw-runtime-height')).toBe('');
+      expect(input.style.getPropertyValue('--mw-runtime-overflow-y')).toBe('hidden');
     });
   });
 });

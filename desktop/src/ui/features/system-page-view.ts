@@ -80,7 +80,7 @@ export function createSystemPageView(options: { onRefresh(): void }): SystemPage
   title.className = 'page-header__title';
   title.textContent = '系统总览';
   description.className = 'page-header__desc';
-  description.textContent = '查看运行状态、资源占用、会话负载与平台服务。日志和使用统计在设置中统一管理。';
+  description.textContent = '查看运行状态、主机资源、会话负载与平台服务。日志和使用统计在设置中统一管理。';
   headerActions.className = 'page-header__actions';
   refresh.id = 'sys-resources-refresh';
   refresh.type = 'button';
@@ -111,7 +111,7 @@ export function createSystemPageView(options: { onRefresh(): void }): SystemPage
   resourcesHeading.append(
     Object.assign(document.createElement('h2'), {
       className: 'system-page__card-title',
-      textContent: '资源占用',
+      textContent: '主机资源',
     }),
     Object.assign(document.createElement('span'), {
       id: 'sys-refresh-stamp',
@@ -132,10 +132,10 @@ export function createSystemPageView(options: { onRefresh(): void }): SystemPage
       className: 'system-page__process',
       hidden: true,
     }),
-    resourceRow('CPU', 'sys-bar-cpu', 'sys-bar-cpu-val'),
-    resourceRow('内存', 'sys-bar-mem', 'sys-bar-mem-val'),
-    resourceRow('磁盘', 'sys-bar-disk', 'sys-bar-disk-val'),
-    resourceRow('网络', 'sys-bar-net', 'sys-bar-net-val'),
+    resourceRow('CPU 使用', 'sys-bar-cpu', 'sys-bar-cpu-val'),
+    resourceRow('内存使用', 'sys-bar-mem', 'sys-bar-mem-val'),
+    resourceRow('磁盘使用', 'sys-bar-disk', 'sys-bar-disk-val'),
+    resourceRow('网络累计', 'sys-bar-net', 'sys-bar-net-val'),
   );
   resources.append(resourcesHeader, resourcesBody);
 

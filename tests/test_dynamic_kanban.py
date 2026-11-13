@@ -13,6 +13,7 @@ import pytest
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import ChatResponse, Message, ToolCall
 from crew.dynamickanban.manager import DynamicKanbanManager
 from crew.dynamickanban.models import PlanDelta
@@ -208,9 +209,11 @@ def test_legacy_workflow_migration_only_backfills_provable_owner(tmp_path: Path)
     assert owner_a.get_workflow("wf_ambiguous") is None
     assert owner_b.get_workflow("wf_ambiguous") is None
     assert owner_a.get_workflow("wf_orphan") is None
+    # owner 统一后无主看板归本机 local，不再永久隔离
+    assert root.for_owner(LOCAL_OWNER_ACCOUNT_ID).get_workflow("wf_orphan") is not None
     root.close()
 
-    # Reopening reruns migrations; quarantined rows must remain quarantined.
+    # Reopening reruns migrations; ambiguous rows stay quarantined for manual claim.
     reopened = SQLiteKanbanStore(db_path)
     assert reopened.for_owner("A:uid-a").get_workflow("wf_unique") is not None
     reopened.close()
@@ -223,7 +226,7 @@ def test_legacy_workflow_migration_only_backfills_provable_owner(tmp_path: Path)
     check.close()
     assert rows == {
         "wf_ambiguous": "legacy_ambiguous",
-        "wf_orphan": "legacy_orphaned",
+        "wf_orphan": "owned",
         "wf_unique": "owned",
     }
 
@@ -488,7 +491,7 @@ async def test_manager_interrupt(
         await asyncio.sleep(0.01)
     assert manager._engines, "engine 应已注册"
 
-    assert manager.interrupt(session_id, "测试中断", owner_account_id="local") is True
+    assert manager.interrupt(session_id, owner_account_id="local", message="测试中断") is True
     barrier.set()
     chunks = await task
     assert chunks[-1].kind == "final"
@@ -526,10 +529,11 @@ def test_manager_interrupt_requires_owner(
         plugins=plugins,
         config=cfg,
     )
-    assert manager.interrupt("s_missing_owner", "测试中断") is False
-    assert manager.interrupt("s_missing_owner", "测试中断", owner_account_id="   ") is False
+    assert manager.interrupt("s_missing_owner", owner_account_id="local", message="测试中断") is False
+    with pytest.raises(ValueError):
+        manager.interrupt("s_missing_owner", owner_account_id="   ", message="测试中断")
     # 有 owner 但该 session 没有活跃 workflow：同样是 False，且不抛异常。
-    assert manager.interrupt("s_missing_owner", "测试中断", owner_account_id="local") is False
+    assert manager.interrupt("s_missing_owner", owner_account_id="local", message="测试中断") is False
 
 
 def test_manager_steer_requires_owner(
@@ -551,7 +555,7 @@ def test_manager_steer_requires_owner(
         plugins=plugins,
         config=cfg,
     )
-    assert manager.steer("s_missing_owner", "补充指令") is False
+    assert manager.steer("s_missing_owner", owner_account_id="local", text="补充指令") is False
 
 
 @pytest.mark.asyncio
@@ -581,11 +585,11 @@ async def test_manager_interrupt_is_owner_scoped(
     owner_a_store.create_workflow("s_scoped", "owner_a 需求")
 
     # owner_b 查不到该 workflow，因此中断失败
-    assert manager.interrupt("s_scoped", "测试中断", owner_account_id="owner_b") is False
+    assert manager.interrupt("s_scoped", owner_account_id="owner_b", message="测试中断") is False
 
     # owner_a 可以查到并中断：没有运行中 engine 时走 DB 兜底，
     # 把残留任务和 workflow 标记为失败（paused/active 僵尸均可中止）
-    assert manager.interrupt("s_scoped", "测试中断", owner_account_id="owner_a") is True
+    assert manager.interrupt("s_scoped", owner_account_id="owner_a", message="测试中断") is True
     wf = owner_a_store.get_latest_workflow_by_session("s_scoped")
     assert wf is not None and wf.status == "failed"
 
@@ -595,14 +599,23 @@ def test_app_interrupt_passes_owner_scope_to_dynamic_kanban() -> None:
 
     早先这里断言 inspect.getsource 的字面子串——那是测排版不是测行为：把调用换成
     self.team 之类的真 bug 会照常绿，而 black 折行、局部变量改名却会假红。
+
+    4C-3 后 app.dynamic_kanban 改为 compat property，只把真正的
+    DynamicKanbanManager 实例视为 active manager；测试通过继承该类型并保持
+    行为录制能力来验证透传语义。
     """
     from types import SimpleNamespace
 
     from crew.app import CrewApp
+    from crew.dynamickanban.manager import DynamicKanbanManager
 
     seen: list[tuple[str, str | None, str]] = []
 
-    class _RecordingKanban:
+    class _RecordingKanban(DynamicKanbanManager):
+        def __init__(self) -> None:
+            # 跳过父类完整构造；本测试只验证 App 层透传，不需要真实 store/registry。
+            pass
+
         def interrupt(self, session_id, message=None, owner_account_id=""):
             seen.append((session_id, message, owner_account_id))
             return True
@@ -634,10 +647,15 @@ async def test_app_handle_dynamic_kanban(tmp_path: Path) -> None:
     )
     app = build_app(config, enable_team=False)
     assert app.dynamic_kanban is not None
+    binding = app.execution_drivers.resolve("dynamic_kanban")
+    assert binding.generation.feature_id == "product.dynamic-kanban"
 
-    env = Envelope.of("测试请求", session_id="session_1", mode="dynamic_kanban")
-    chunks = [c async for c in app.handle(env)]
-    assert chunks[-1].kind == "final"
+    try:
+        env = Envelope.of("测试请求", session_id="session_1", mode="dynamic_kanban")
+        chunks = [c async for c in app.handle(env)]
+        assert chunks[-1].kind == "final"
+    finally:
+        await app.shutdown()
 
 
 
@@ -919,13 +937,25 @@ class _DummyTaskRuntime:
         }
         return {"task_id": task_id}
 
+    async def create_runtime_async(self, **kwargs: Any) -> dict[str, Any]:
+        return self.create_runtime(**kwargs)
+
     def update(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {}).update(kwargs)
+
+    async def update_async(self, task_id: str, **kwargs: Any) -> None:
+        self.update(task_id, **kwargs)
 
     def get(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
         return self._tasks.get(task_id, {"backgrounded": False, "output_ref": "", "status": "running"})
 
+    async def get_async(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+        return self.get(task_id, **kwargs)
+
     def mark_running(self, task_id: str) -> None:
+        pass
+
+    async def mark_running_async(self, task_id: str) -> None:
         pass
 
     def touch_activity(self, task_id: str, progress: Any = None, **kwargs: Any) -> None:
@@ -936,6 +966,9 @@ class _DummyTaskRuntime:
 
     def finish(self, task_id: str, **kwargs: Any) -> None:
         self._tasks.setdefault(task_id, {})["status"] = kwargs.get("status", "completed")
+
+    async def finish_async(self, task_id: str, **kwargs: Any) -> None:
+        self.finish(task_id, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -1218,7 +1251,7 @@ async def test_manager_quarantines_conflicting_stored_definition(
     )
 
     with pytest.raises(WorkflowDefinitionMigrationError):
-        await manager._load_or_build_definition(workflow, workflow.title)
+        await manager._load_or_build_definition(workflow, workflow.title, owner_account_id="local")
 
     quarantined = owner_store.get_workflow(workflow.id)
     assert quarantined is not None
@@ -1259,7 +1292,7 @@ async def test_manager_quarantines_invalid_v2_definition(
     )
 
     with pytest.raises(ValueError, match="入口|循环"):
-        await manager._load_or_build_definition(workflow, workflow.title)
+        await manager._load_or_build_definition(workflow, workflow.title, owner_account_id="local")
 
     quarantined = owner_store.get_workflow(workflow.id)
     assert quarantined is not None
@@ -1403,18 +1436,89 @@ async def test_runtime_emits_workflow_progress_chunks(
     )
     env = Envelope.of("progress test", session_id="s_progress")
     chunks = [c async for c in runtime.run(wf, definition, "req_progress", env)]
-    progress_chunks = [c for c in chunks if c.kind == "workflow_progress"]
+    progress_chunks = [
+        c for c in chunks
+        if c.kind == "feature_event"
+        and c.body.get("feature") == "kanban"
+        and c.body.get("event") == "workflow_progress"
+    ]
     assert len(progress_chunks) >= 3, f"应至少产生启动、进入阶段、完成等 progress 帧，实际 {len(progress_chunks)}"
 
     first = progress_chunks[0]
-    assert first.body["workflow_id"] == wf.id
-    assert first.body["status"] == "running"
-    assert first.body["current_phase"]["id"] == "phase_1"
+    payload = first.body["payload"]
+    assert payload["workflow_id"] == wf.id
+    assert payload["status"] == "running"
+    assert payload["current_phase"]["id"] == "phase_1"
 
     # 最终帧应标记为 done
     last_progress = progress_chunks[-1]
-    assert last_progress.body["status"] == "done"
-    assert last_progress.body.get("current_phase") is None or last_progress.body["current_phase"]["status"] == "done"
+    last_payload = last_progress.body["payload"]
+    assert last_payload["status"] == "done"
+    assert last_payload.get("current_phase") is None or last_payload["current_phase"]["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_manager_background_stream_blanks_request_id_for_feature_event(
+    db_path: str,
+) -> None:
+    """后台化后，feature_event kanban workflow_progress 帧也应清空 request_id 推送。"""
+    store = SQLiteKanbanStore(db_path).for_owner("local")
+    cfg = Config(db_path=db_path)
+    pushed: list[ResponseChunk] = []
+
+    def capture_chunk(session_id: str, chunk: ResponseChunk, owner: str) -> None:
+        pushed.append(chunk)
+
+    manager = DynamicKanbanManager(
+        store=store,
+        provider=FakeProvider(),
+        base_registry=Registry(),
+        session_store=InMemorySessionStore(),
+        memory=NullMemory(),
+        plugins=PluginManager([], registry=Registry()),
+        config=cfg,
+        on_runtime_chunk=capture_chunk,
+    )
+
+    async def _gen() -> AsyncIterator[ResponseChunk]:
+        yield ResponseChunk.delta("req_bg", "first", sequence=1)
+        # 让主循环越过后台化阈值；0.2s 足够覆盖前台 wait_for 0.1s 超时
+        await asyncio.sleep(0.2)
+        yield ResponseChunk.feature_event(
+            "req_bg",
+            "kanban",
+            "workflow_progress",
+            payload={"workflow_id": "wf1", "status": "running"},
+            sequence=2,
+        )
+
+    chunks = [
+        c async for c in manager._stream_runtime_with_background(
+            _gen(),
+            request_id="req_bg",
+            envelope=Envelope.of("q", session_id="s_bg"),
+            session_id="s_bg",
+            background_after_seconds=0.001,
+        )
+    ]
+    # 前台只拿到第一帧 delta + 后台化提示 status
+    assert any(c.kind == "delta" for c in chunks)
+    assert any(c.kind == "status" for c in chunks)
+
+    # 等待后台 consumer 把剩余帧推送完成
+    for _ in range(200):
+        if manager._background_tasks:
+            await asyncio.sleep(0.01)
+        else:
+            break
+
+    # 后台推送的 workflow_progress feature_event request_id 应被清空
+    assert len(pushed) == 1
+    pushed_chunk = pushed[0]
+    assert pushed_chunk.kind == "feature_event"
+    assert pushed_chunk.body["feature"] == "kanban"
+    assert pushed_chunk.body["event"] == "workflow_progress"
+    assert pushed_chunk.request_id == ""
 
 
 @pytest.mark.asyncio
@@ -1545,7 +1649,7 @@ async def test_manager_pause_and_resume_stream(
     session_store: InMemorySessionStore,
     plugins: PluginManager,
 ) -> None:
-    """manager.pause() / resume_stream() 能让 workflow 暂停后继续。"""
+    """manager.pause(owner_account_id="local") / resume_stream() 能让 workflow 暂停后继续。"""
     barrier = asyncio.Event()
     provider = FakeProvider()
     store = SQLiteKanbanStore(db_path)
@@ -1615,7 +1719,7 @@ async def test_manager_pause_and_resume_stream(
         await asyncio.sleep(0.01)
     assert manager._engines, "runtime 应已注册"
 
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
     barrier.set()
     chunks = await task
     assert chunks[-1].kind == "final"
@@ -2393,7 +2497,7 @@ async def test_manager_resume_stream_waits_for_previous_engine(
     old_runtime = next(iter(manager._engines.values()))
 
     # pause 立即落盘 paused，但旧 runtime 仍卡在 phase 内（barrier 未放行）
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
 
     env2 = Envelope.of("继续", session_id=session_id, mode="dynamic_kanban", request_id="req_rr2")
     resume_task = asyncio.create_task(_consume(manager.resume_stream(session_id, "req_rr2", env2)))
@@ -2597,7 +2701,7 @@ async def test_manager_resume_stream_disconnect_keeps_workflow_resumable(
             break
         await asyncio.sleep(0.01)
     assert manager._engines, "runtime 应已注册"
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
     gate.set()
     await interact_task
     wf = owner_store.get_latest_active_workflow_by_session(session_id, active_statuses={"paused"})
@@ -2699,7 +2803,7 @@ async def test_manager_interrupt_paused_workflow_marks_failed(
         await asyncio.sleep(0.01)
     assert manager._engines, "runtime 应已注册"
 
-    assert manager.pause(session_id, "测试暂停", owner_account_id="local") is True
+    assert manager.pause(session_id, owner_account_id="local", reason="测试暂停") is True
     barrier.set()
     await interact_task
     wf = owner_store.get_latest_active_workflow_by_session(session_id, active_statuses={"paused"})
@@ -2707,7 +2811,7 @@ async def test_manager_interrupt_paused_workflow_marks_failed(
     assert not manager._engines, "runtime 应已退出"
 
     # paused 状态中止：无 runtime 可置标志，应走 DB 兜底落 failed
-    assert manager.interrupt(session_id, "中止", owner_account_id="local") is True
+    assert manager.interrupt(session_id, owner_account_id="local", message="中止") is True
     wf = owner_store.get_workflow(wf.id)
     assert wf.status == "failed"
     state = owner_store.load_runtime_state(wf.id)

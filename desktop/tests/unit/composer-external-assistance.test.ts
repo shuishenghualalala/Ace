@@ -234,7 +234,8 @@ describe('composer 外援入口', () => {
     expect(document.querySelector('[data-create-agent]')?.textContent).toContain('加入我的外援');
 
     document.querySelector<HTMLElement>('[data-agents-tab="create-team"]')?.click();
-    expect(document.querySelector('.mw-agent-hub__form > .mw-agent-hub__legacy-form > .team-create')).not.toBeNull();
+    expect(document.querySelector('.mw-agent-hub__form > .team-create')).not.toBeNull();
+    expect(document.querySelector('.mw-agent-hub__legacy-form')).toBeNull();
     expect(document.querySelectorAll('.team-create__heading .team-mark i')).toHaveLength(2);
     const leaderTrigger = document.querySelector<HTMLElement>('[data-agents-select-key="team-leader"]');
     expect(leaderTrigger?.textContent).toContain('Crew');
@@ -506,6 +507,16 @@ describe('composer 外援入口', () => {
       expect(document.querySelector('.formation-progress .team-mark')).toBeNull();
     });
 
+    const responsibility = document.querySelector<HTMLTextAreaElement>('[data-member-role="crew::builtin"]');
+    expect(responsibility).not.toBeNull();
+    responsibility!.value = '用户指定：审阅评分标准';
+    responsibility!.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector<HTMLElement>('[data-agents-select-key="member-role:crew::builtin"]')?.click();
+    document.querySelector<HTMLElement>('[data-agents-select-value="project_manager"]')?.click();
+    expect(document.querySelector('.team-create__review')).not.toBeNull();
+    expect(document.querySelector<HTMLTextAreaElement>('[data-member-role="crew::builtin"]')?.value)
+      .toBe('用户指定：审阅评分标准');
+
     resolveAi({
       ...fastSuggestion,
       requested_formation_mode: 'auto',
@@ -516,6 +527,8 @@ describe('composer 外援入口', () => {
       expect(document.querySelector('.formation-progress')?.textContent).toContain('智能检查暂未完成');
       expect(document.querySelector('.formation-progress')?.textContent).toMatch(/智能检查优化\s*·\s*\d+s/);
       expect(document.querySelector('[data-recheck-formation]')).not.toBeNull();
+      expect(document.querySelector<HTMLTextAreaElement>('[data-member-role="crew::builtin"]')?.value)
+        .toBe('用户指定：审阅评分标准');
     });
     document.querySelector<HTMLElement>('[data-agents-tab="mine"]')?.click();
   });
@@ -590,6 +603,7 @@ describe('composer 外援入口', () => {
 
     const card = document.querySelector<HTMLElement>('[data-team-id="team-product"]');
     expect(card?.getAttribute('role')).toBe('button');
+    expect(card?.querySelectorAll('.session__team-logo i')).toHaveLength(2);
     card?.click();
 
     const modal = document.querySelector<HTMLElement>('[data-team-detail-backdrop]');
@@ -600,6 +614,7 @@ describe('composer 外援入口', () => {
     expect(modal?.textContent).toContain('Claude Reviewer');
     expect(modal?.textContent).toContain('负责复核交付质量');
     expect(modal?.querySelector('.team-modal-member.is-leader')).not.toBeNull();
+    expect(modal?.querySelectorAll('.session__team-logo i')).toHaveLength(2);
 
     modal?.querySelector<HTMLElement>('[data-team-detail-close]')?.click();
     expect(document.querySelector('[data-team-detail-backdrop]')).toBeNull();
@@ -617,7 +632,9 @@ describe('composer 外援入口', () => {
         base_url: '',
         active_model_id: 'test',
         models: [],
-        external_agents: { enabled: false },
+        feature_capabilities: {
+          'product.external-agents': { state: 'discovered', available: false, generation: null },
+        },
       },
     });
     const agents = vi.spyOn(backendApi, 'externalAgents');
@@ -807,7 +824,6 @@ describe('composer 外援入口', () => {
     expect(ensureSession).toHaveBeenCalledOnce();
     expect(setAgentConfig).toHaveBeenCalledWith('new-agent-session', {
       executor: 'external',
-      external_agent_id: 'agent-codex',
       external: { external_agent_id: 'agent-codex' },
     });
     expect(assigned).toHaveBeenCalledWith(

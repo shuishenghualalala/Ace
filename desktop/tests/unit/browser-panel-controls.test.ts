@@ -5,10 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { backendApi, type BrowserPageState } from '../../src/ui/backend-client';
 import {
   bindBrowserPanel,
+  hideBrowserPanelView,
   openBrowserArtifact,
   openUserBrowser,
   renderBrowserPanel,
-  sendRecordingControl,
+  setBrowserPanelSession,
   syncBrowserPanelSession,
 } from '../../src/ui/features/browser-panel';
 import { setActiveSessionId } from '../../src/ui/state';
@@ -103,6 +104,25 @@ describe('browser panel control recovery', () => {
     await opening;
 
     expect(control).not.toHaveBeenCalled();
+  });
+
+  it('switches an explicit Wiki session and restores the main session when cleared', async () => {
+    const connect = vi.fn().mockResolvedValue({ ok: true });
+    const close = vi.fn().mockResolvedValue({ ok: true });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: { browserWsConnect: connect, browserWsClose: close },
+    });
+    setActiveSessionId('main-session');
+
+    setBrowserPanelSession('wiki-session-a');
+    await Promise.resolve();
+    setBrowserPanelSession(null);
+    await Promise.resolve();
+
+    expect(connect).toHaveBeenNthCalledWith(1, 'wiki-session-a');
+    expect(connect).toHaveBeenNthCalledWith(2, 'main-session');
+    expect(close).toHaveBeenCalled();
   });
 
   it('opens an explicit chat link in a new user tab', async () => {
@@ -535,6 +555,44 @@ describe('browser panel control recovery', () => {
     await vi.waitFor(() => expect(commands).toContain('open-existing'));
   });
 
+  it('zooms via the native bridge and keeps the percentage synchronized with page shortcuts', async () => {
+    const navigationEvents: Array<(event: { tabLabel: string }) => void> = [];
+    const current = pageState({ tab_id: 'zoom-tab', tab_label: 'zoom-label', url: 'https://example.com/', mode: 'ai' });
+    const zoom = vi.fn(async (request: { action: string }) => ({ ok: true, zoomFactor: request.action === 'in' ? 1.1 : request.action === 'out' ? 0.9 : 1 }));
+    Object.defineProperty(window, 'Crew', { configurable: true, value: {
+      browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+      browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+      browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
+      browserViewZoom: zoom,
+      browserViewGetNavigation: vi.fn(async () => ({ ok: true, navigation: {
+        url: current.url, title: '', can_go_back: false, can_go_forward: false, zoom_factor: 0.75,
+      } })),
+      onBrowserWsEvent: vi.fn(() => () => undefined),
+      onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+      onBrowserViewNavigationChanged: vi.fn((callback) => { navigationEvents.push(callback); return () => undefined; }),
+    } });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: current });
+    const control = vi.spyOn(backendApi, 'browserControl');
+    setActiveSessionId('session-zoom');
+    document.body.innerHTML = renderBrowserPanel();
+    bindBrowserPanel();
+    const button = (action: string) => document.querySelector<HTMLButtonElement>(`[data-browser-zoom="${action}"]`)!;
+    await vi.waitFor(() => expect(button('in').disabled).toBe(false));
+    button('in').click();
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('110%'));
+    expect(zoom).toHaveBeenLastCalledWith({ sessionId: 'session-zoom', tabLabel: 'zoom-label', action: 'in' });
+    button('out').click();
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('90%'));
+    const resetKey = new KeyboardEvent('keydown', { key: '0', ctrlKey: true, bubbles: true, cancelable: true });
+    document.querySelector('[data-browser-url]')!.dispatchEvent(resetKey);
+    expect(resetKey.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('100%'));
+    navigationEvents[0]({ tabLabel: 'zoom-label' });
+    await vi.waitFor(() => expect(button('reset').textContent).toBe('75%'));
+    expect(control).not.toHaveBeenCalled();
+  });
+
   it('enables back and forward only from Chromium history state', async () => {
     const navigationEvents: Array<(event: { tabLabel: string }) => void> = [];
     const current = pageState({
@@ -590,114 +648,6 @@ describe('browser panel control recovery', () => {
       expect(document.querySelector<HTMLInputElement>('[data-browser-url]')?.value).toBe('https://example.com/final');
     });
     expect(document.querySelector<HTMLButtonElement>('[data-browser-action="back"]')?.disabled).toBe(false);
-  });
-
-  it('re-enables the record button once a real page loads', async () => {
-    // 真 bug 复现：面板在空白页时渲染，录制按钮 disabled。导航到真实页后，状态更新
-    // 走 patchChrome 增量刷新——它只刷 [data-browser-action]（后退/前进/刷新），
-    // 漏了 [data-browser-record]，于是录制按钮永远停在"空白页"那一刻的 disabled，
-    // 用户加载了页面也点不动。这条钉住：真实页加载后录制按钮必须一起解禁。
-    const loaded = pageState({
-      tab_id: 'tab-loaded',
-      tab_label: 'session-tab-loaded',
-      url: 'https://www.baidu.com/s?wd=1321',
-      title: '1321年_百度搜索',
-      mode: 'human',
-      running: true,
-      tabs: [{
-        id: 'tab-loaded',
-        label: 'session-tab-loaded',
-        url: 'https://www.baidu.com/s?wd=1321',
-        title: '1321年_百度搜索',
-      }],
-    });
-    Object.defineProperty(window, 'Crew', {
-      configurable: true,
-      value: {
-        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
-        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
-        browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
-        onBrowserWsEvent: vi.fn(() => () => undefined),
-        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
-      },
-    });
-    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
-    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: loaded });
-    setActiveSessionId('session-record-enable');
-
-    document.body.innerHTML = renderBrowserPanel();
-
-    bindBrowserPanel();
-    await vi.waitFor(() => {
-      expect(document.querySelector<HTMLInputElement>('[data-browser-url]')?.value)
-        .toBe('https://www.baidu.com/s?wd=1321');
-    });
-
-    // patchChrome 只刷新 [data-browser-action] 那批按钮，录制控件是
-    // [data-browser-record]，必须被单独重刷——漏刷过一次，后果是录制入口一直
-    // 停在面板首次渲染那一刻的状态，页面加载了也不跟着变。
-    expect(document.querySelector<HTMLButtonElement>('[data-browser-action="reload"]')?.disabled).toBe(false);
-    const start = document.querySelector<HTMLButtonElement>('[data-browser-record="start"]');
-    expect(start).not.toBeNull();
-    expect(start?.disabled).toBe(false);
-  });
-
-  it('starts an armed recording when navigation arrives outside applyPageState', async () => {
-    // 真机复现：空白页按下录制 → 打开网站 → 指示条永久停在「预备录制」。
-    // 根因是页面内导航走 refreshPanelNavigation——它直接改 pageState 再调
-    // patchChrome，**不经过 applyPageState**，而预备录制的落地点当初只挂在后者上。
-    const navigationEvents: Array<(event: { tabLabel: string }) => void> = [];
-    const blank = pageState({
-      tab_id: 'tab-armed',
-      tab_label: 'session-tab-armed',
-      url: 'about:blank',
-      mode: 'human',
-      running: true,
-      tabs: [{ id: 'tab-armed', label: 'session-tab-armed', url: 'about:blank', title: '' }],
-    });
-    Object.defineProperty(window, 'Crew', {
-      configurable: true,
-      value: {
-        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
-        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
-        browserViewHide: vi.fn().mockResolvedValue({ ok: true }),
-        browserViewGetNavigation: vi.fn().mockResolvedValue({
-          ok: true,
-          navigation: {
-            url: 'https://www.baidu.com/s?wd=x',
-            title: 'x_百度搜索',
-            can_go_back: true,
-            can_go_forward: false,
-          },
-        }),
-        onBrowserViewNavigationChanged: vi.fn((callback) => {
-          navigationEvents.push(callback);
-          return () => undefined;
-        }),
-        onBrowserWsEvent: vi.fn(() => () => undefined),
-        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
-      },
-    });
-    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
-    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: blank });
-    const control = vi.spyOn(backendApi, 'browserControl')
-      .mockResolvedValue({ ok: true, state: blank });
-    setActiveSessionId('session-armed-nav');
-    document.body.innerHTML = renderBrowserPanel();
-    bindBrowserPanel();
-    await vi.waitFor(() => expect(navigationEvents).toHaveLength(1));
-
-    // 空白页按下录制 → 预备态，不发 record_start
-    await sendRecordingControl('start');
-    expect(control).not.toHaveBeenCalledWith('session-armed-nav', 'record_start');
-    expect(document.querySelector('.browser-rec.is-armed')).not.toBeNull();
-
-    // 页面内导航提交（只走 refreshPanelNavigation → patchChrome）
-    navigationEvents[0]({ tabLabel: 'session-tab-armed' });
-
-    await vi.waitFor(() => {
-      expect(control).toHaveBeenCalledWith('session-armed-nav', 'record_start');
-    });
   });
 
   it('closes the browser workbench after the last tab is deleted', async () => {
@@ -784,6 +734,51 @@ describe('browser panel control recovery', () => {
     await vi.advanceTimersByTimeAsync(500);
 
     expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('detaches the native page during divider dragging and remounts it after release', async () => {
+    hideBrowserPanelView();
+    const hide = vi.fn().mockResolvedValue({ ok: true });
+    const mount = vi.fn().mockResolvedValue({ ok: true });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewHide: hide,
+        browserViewSetPanel: mount,
+        onBrowserWsEvent: vi.fn(() => () => undefined),
+        onBrowserViewLayoutInvalidated: vi.fn(() => () => undefined),
+      },
+    });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({
+      ok: true,
+      state: pageState({ tab_id: 'resize-tab', tab_label: 'resize-tab', url: 'https://example.com' }),
+    });
+    setActiveSessionId('session-resize');
+    document.body.innerHTML = renderBrowserPanel();
+    const stage = document.querySelector<HTMLElement>('[data-browser-stage]')!;
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue({
+      x: 400, y: 120, left: 400, top: 120, right: 900, bottom: 600, width: 500, height: 480,
+    } as DOMRect);
+    bindBrowserPanel();
+    await vi.waitFor(() => expect(mount).toHaveBeenCalled());
+    hide.mockClear();
+    mount.mockClear();
+
+    document.body.classList.add('inspector-resizing');
+    try {
+      await vi.waitFor(() => expect(hide).toHaveBeenCalled());
+      expect(mount).not.toHaveBeenCalled();
+    } finally {
+      document.body.classList.remove('inspector-resizing');
+    }
+    await vi.waitFor(() => expect(mount).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-resize',
+      bounds: { x: 400, y: 120, width: 500, height: 480 },
+    })));
   });
 
   it('keeps the state channel active while the workbench is closed', async () => {

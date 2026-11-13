@@ -21,21 +21,58 @@
 /** 单回合的 delta 片段缓冲：gateway_sequence → 文本。同一回合内 seq 单调唯一（后端保证）。 */
 type FragmentBuffer = Map<number, string>;
 
-/** session → assistantId → 片段缓冲。模块级状态，跨 applyChunk 调用累积。 */
-const buffers = new Map<string, Map<string, FragmentBuffer>>();
+/** delta 帧区间（回合内 1-based 帧序号，见 crew/gateway/outbound.py / connections.py 合并逻辑）。 */
+export interface DeltaRange {
+  start: number;
+  end: number;
+}
 
-function ensureFrags(sessionId: string, assistantId: string): FragmentBuffer {
+/** 单回合缓冲：文本片段 + 各片段的帧区间（合并帧为 min..max，无区间信息的旧帧缺省）。 */
+interface TurnBuffer {
+  frags: FragmentBuffer;
+  ranges: Map<number, DeltaRange>;
+}
+
+/** session → assistantId → 回合缓冲。模块级状态，跨 applyChunk 调用累积。 */
+const buffers = new Map<string, Map<string, TurnBuffer>>();
+
+function ensureTurn(sessionId: string, assistantId: string): TurnBuffer {
   let byAid = buffers.get(sessionId);
   if (!byAid) {
     byAid = new Map();
     buffers.set(sessionId, byAid);
   }
-  let frags = byAid.get(assistantId);
-  if (!frags) {
-    frags = new Map();
-    byAid.set(assistantId, frags);
+  let turn = byAid.get(assistantId);
+  if (!turn) {
+    turn = { frags: new Map(), ranges: new Map() };
+    byAid.set(assistantId, turn);
   }
-  return frags;
+  return turn;
+}
+
+/**
+ * 从 delta 帧 body 解析帧区间；无效（缺失/非数/<=0）时返回 null，调用方按无区间旧帧处理。
+ * 与 chat-reducer 的 deltaRangeOf 同一有效性规则。
+ */
+export function parseDeltaRange(
+  body: { delta_start?: number | string; delta_end?: number | string },
+  sequenceFallback?: number,
+): DeltaRange | null {
+  const startRaw = body.delta_start ?? sequenceFallback;
+  const endRaw = body.delta_end ?? sequenceFallback;
+  const start = typeof startRaw === 'number' ? startRaw : Number(startRaw);
+  const end = typeof endRaw === 'number' ? endRaw : Number(endRaw);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0) return null;
+  return { start: Math.min(start, end), end: Math.max(start, end) };
+}
+
+/** left 后缀与 right 前缀的最长重叠长度。 */
+function suffixPrefixOverlap(left: string, right: string): number {
+  const max = Math.min(left.length, right.length);
+  for (let k = max; k > 0; k--) {
+    if (left.endsWith(right.slice(0, k))) return k;
+  }
+  return 0;
 }
 
 /**
@@ -43,12 +80,34 @@ function ensureFrags(sessionId: string, assistantId: string): FragmentBuffer {
  *
  * delta 在一个回合内共享会话级单调 seq（中间夹带的 status/tool 帧占用别的 seq，不进本缓冲），
  * 故「按 seq 升序拼接 delta 片段」恒等于正确文本顺序——即便分片乱序到达、或 seq 非连续。
+ *
+ * 重复免疫（ranges 提供帧区间时）：live 投递经限流合并（一帧携带多帧文本 + 合并区间），而
+ * 重连 replay 回放的是未合并单帧；被合并成员的 gateway_sequence 未在客户端登记，精确序号去重
+ * 拦不住，同一文本会以「合并帧 + 单帧」各进一次缓冲。这里按帧区间去重：
+ * - 区间已完全被覆盖 → 整段跳过；
+ * - 区间头部与已发射部分重叠 → 剥离重复前缀（重叠段文本既是 out 后缀也是本片段前缀）再拼接。
+ * 区间不重叠的相邻片段（即便文本巧合相同）照常全量拼接，不误伤合法重复文本。
  */
-export function reconstruct(frags: FragmentBuffer): string {
+export function reconstruct(frags: FragmentBuffer, ranges?: Map<number, DeltaRange>): string {
   if (frags.size === 0) return '';
   const seqs = Array.from(frags.keys()).sort((a, b) => a - b);
   let out = '';
-  for (const s of seqs) out += frags.get(s);
+  let emittedEnd = 0;
+  for (const s of seqs) {
+    const text = frags.get(s) ?? '';
+    const range = ranges?.get(s) ?? null;
+    if (!range) {
+      out += text;
+      continue;
+    }
+    if (range.end <= emittedEnd) continue;
+    if (range.start <= emittedEnd && out) {
+      out += text.slice(suffixPrefixOverlap(out, text));
+    } else {
+      out += text;
+    }
+    emittedEnd = Math.max(emittedEnd, range.end);
+  }
   return out;
 }
 
@@ -57,10 +116,17 @@ export function reconstruct(frags: FragmentBuffer): string {
  * 调用方（applyChunk 的 delta 分支）用它**覆盖** reducer 算出的 `cur + text`（到达顺序拼接）。
  * 幂等：同一 seq 重复写入用相同 text 覆盖（去重层已防重复帧，这里是二次防御）。
  */
-export function noteDelta(sessionId: string, assistantId: string, seq: number, text: string): string {
-  const frags = ensureFrags(sessionId, assistantId);
-  frags.set(seq, text);
-  return reconstruct(frags);
+export function noteDelta(
+  sessionId: string,
+  assistantId: string,
+  seq: number,
+  text: string,
+  range?: DeltaRange | null,
+): string {
+  const turn = ensureTurn(sessionId, assistantId);
+  turn.frags.set(seq, text);
+  if (range) turn.ranges.set(seq, range);
+  return reconstruct(turn.frags, turn.ranges);
 }
 
 /** 清除指定回合（assistantId）的片段缓冲。回合封口（finalizeTurn）时调用。 */
@@ -87,5 +153,5 @@ export function resetSessionExcept(sessionId: string, keepIds: Set<string>): voi
 
 /** 单测 / 诊断：读取某回合当前片段缓冲的拷贝。 */
 export function peekFrags(sessionId: string, assistantId: string): Map<number, string> {
-  return new Map(buffers.get(sessionId)?.get(assistantId) ?? []);
+  return new Map(buffers.get(sessionId)?.get(assistantId)?.frags ?? []);
 }

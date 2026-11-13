@@ -15,6 +15,17 @@ import { isPlanDocumentPath } from '../plan-document-path';
 import { newMessageId, state } from '../state';
 import { sessionDisplayModelLabel, sessionMessageModelLabel } from './session-model';
 
+export function backendDurationToMs(value: unknown): number {
+  const seconds = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return 0;
+  const now = Date.now();
+  if (
+    (seconds >= 1_000_000_000 && seconds <= now / 1000 + 366 * 24 * 60 * 60)
+    || (seconds >= 1_000_000_000_000 && seconds <= now + 366 * 24 * 60 * 60 * 1000)
+  ) return 0;
+  return Math.round(seconds * 1000);
+}
+
 export function makeSessionTitle(text: string): string {
   return text.trim().slice(0, 18) || '新对话';
 }
@@ -236,11 +247,19 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     mentionFrom: item.mention_from,
     mentionTo: item.mention_to,
     mentionIntent: item.mention_intent,
+    communicationKind: item.communication_kind,
+    communicationStatus: item.communication_status,
+    requestId: item.request_id,
+    replyTo: item.reply_to,
+    communicationRequestText: item.communication_request_text,
     displayMode: item.display_mode,
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,
     artifacts: item.artifacts,
-    segmentRole: item.tool_calls?.length ? 'process' : 'answer',
+    // 后端把整回合聚合成一条：tool_calls 与最终正文同在一条 history item 上。
+    // 有正文时单条层面按 answer（折叠区外）处理；多段拆段历史的旁白修正由
+    // mapBackendHistoryItems 批内推断（连续 assistant 段里非末段正文降级为 process）。
+    segmentRole: item.tool_calls?.length && !item.content?.trim() ? 'process' : 'answer',
     toolCalls: item.tool_calls?.map((tc) => ({
       toolCallId: tc.id,
       name: tc.name,
@@ -249,7 +268,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       result: tc.result,
       status: normalizeHistoryToolStatus(tc.status, tc.result, tc.duration),
       startedAt: tc.started_at != null ? tc.started_at * 1000 : 0,
-      duration: tc.duration != null ? Math.round(tc.duration * 1000) : 0,
+      duration: tc.duration != null ? backendDurationToMs(tc.duration) : 0,
     })),
   };
   if (role === 'assistant' || role === 'team_internal') {
@@ -272,6 +291,43 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     base.attachments = parsed.attachments;
   }
   return base;
+}
+
+/**
+ * 批量映射历史，并做多段回合的 segmentRole 推断（对齐实时路径 splitAssistantAfterSettledTools 的拆段形状）。
+ * 单条映射只看得见自身字段：带工具又有正文的段无法判断是「过程旁白」还是「最终回复」。
+ * 批内按「连续 assistant 段 = 同一回合」分组，只有组内最后一条带正文的段是正式答案（answer，折叠区外），
+ * 其余带正文的段都是工具循环中的旁白（process，进折叠区），避免旁白漏到折叠区外与最终回复并排顶格。
+ */
+export function mapBackendHistoryItems(
+  items: readonly BackendHistoryItem[],
+  sessionId: string | null = state.activeSessionId,
+): ChatMessage[] {
+  const messages = items.map((item) => mapBackendHistoryItem(item, sessionId));
+  const out = [...messages];
+  const settleRun = (start: number, end: number) => {
+    if (start < 0) return;
+    let lastContent = -1;
+    for (let i = end - 1; i >= start; i -= 1) {
+      if (out[i]?.content?.trim()) { lastContent = i; break; }
+    }
+    for (let i = start; i < end; i += 1) {
+      if (i !== lastContent && out[i]?.content?.trim()) {
+        out[i] = { ...out[i]!, segmentRole: 'process' as const };
+      }
+    }
+  };
+  let runStart = -1;
+  messages.forEach((m, i) => {
+    if (m.role === 'assistant') {
+      if (runStart < 0) runStart = i;
+      return;
+    }
+    settleRun(runStart, i);
+    runStart = -1;
+  });
+  settleRun(runStart, messages.length);
+  return out;
 }
 
 function mergeStreamingText(existing?: string, incoming?: string, append = false): string | undefined {
@@ -317,6 +373,14 @@ function isDuplicateAssistantOfTeamResult(existing: ChatMessage, incoming: ChatM
   const assistant = existing.role === 'assistant' ? existing : incoming.role === 'assistant' ? incoming : null;
   const team = existing.role === 'team_internal' ? existing : incoming.role === 'team_internal' ? incoming : null;
   if (!assistant || !team || !isTeamNodeResult(team)) return false;
+  if (assistant.requestId || team.requestId) {
+    return Boolean(
+      assistant.requestId
+      && team.requestId
+      && assistant.requestId === team.requestId
+      && team.eventType === 'team_summary',
+    );
+  }
   const assistantText = compactText(assistant.content);
   const teamText = compactText(team.content);
   return Boolean(assistantText && teamText && (assistantText === teamText || assistantText.includes(teamText) || teamText.includes(assistantText)));
@@ -333,6 +397,7 @@ function teamTurnKey(message: ChatMessage): string {
 function matchesTeamNode(existing: ChatMessage, incoming: ChatMessage): boolean {
   if (existing.role !== 'team_internal') return false;
   if (!isTeamStream(existing) && !isTeamNodeResult(existing) && !isTeamPlanningProgress(existing)) return false;
+  if (hasDifferentTeamRequests(existing, incoming)) return false;
   if (incoming.nodeId && existing.nodeId === incoming.nodeId) {
     const existingTurn = teamTurnKey(existing);
     const incomingTurn = teamTurnKey(incoming);
@@ -347,6 +412,25 @@ function matchesTeamNode(existing: ChatMessage, incoming: ChatMessage): boolean 
   );
 }
 
+function sameTeamRequest(existing: ChatMessage, incoming: ChatMessage): boolean {
+  const existingRequestId = String(existing.requestId || '').trim();
+  const incomingRequestId = String(incoming.requestId || '').trim();
+  if (existingRequestId || incomingRequestId) {
+    return Boolean(existingRequestId && incomingRequestId && existingRequestId === incomingRequestId);
+  }
+  return Boolean(
+    existing.sourceSessionId
+    && incoming.sourceSessionId
+    && existing.sourceSessionId === incoming.sourceSessionId,
+  );
+}
+
+function hasDifferentTeamRequests(existing: ChatMessage, incoming: ChatMessage): boolean {
+  const existingRequestId = String(existing.requestId || '').trim();
+  const incomingRequestId = String(incoming.requestId || '').trim();
+  return Boolean(existingRequestId && incomingRequestId && existingRequestId !== incomingRequestId);
+}
+
 function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boolean {
   return existing.role === 'team_internal'
     && incoming.role === 'team_internal'
@@ -355,8 +439,12 @@ function isDuplicateTeamEvent(existing: ChatMessage, incoming: ChatMessage): boo
     && existing.eventType === incoming.eventType
     && existing.nodeId === incoming.nodeId
     && (existing.agentId || existing.mentionFrom) === (incoming.agentId || incoming.mentionFrom)
-    && existing.sourceSessionId === incoming.sourceSessionId
+    && sameTeamRequest(existing, incoming)
     && existing.content.trim() === incoming.content.trim();
+}
+
+function isUserMentionAnswer(message: ChatMessage): boolean {
+  return message.communicationKind === 'user_mention_answer' && Boolean(message.requestId);
 }
 
 function shouldSuppressApproveDecision(existing: ChatMessage, incoming: ChatMessage): boolean {
@@ -388,6 +476,47 @@ export function mergeTeamInternalMessage(
     ? messages.filter((message) => !isDuplicateAssistantOfTeamResult(message, incoming))
     : messages;
   if (next.some((message) => isDuplicateTeamEvent(message, incoming))) return next;
+  if (isUserMentionAnswer(incoming)) {
+    const communicationIndex = next.findIndex((message) =>
+      isUserMentionAnswer(message)
+      && message.requestId === incoming.requestId
+      && message.agentId === incoming.agentId,
+    );
+    if (communicationIndex >= 0) {
+      const matched = next[communicationIndex];
+      if (isTeamStream(incoming) && !isTeamStream(matched)) {
+        return [
+          ...next.slice(0, communicationIndex),
+          { ...matched, ...incoming },
+          ...next.slice(communicationIndex + 1),
+        ];
+      }
+      if (isTeamStream(incoming)) {
+        // 流式 direct mention 继续走下面的 append 合并，不能被 waiting 帧直接覆盖。
+        // 终态则保留已收集的思考与工具过程，统一收口到同一个回答气泡。
+      } else {
+        const processText = isTeamStream(matched)
+          && matched.content.trim()
+          && matched.content.trim() !== incoming.content.trim()
+          ? (matched.processText || matched.content)
+          : incoming.processText;
+        return [
+          ...next.slice(0, communicationIndex),
+          {
+            ...matched,
+            ...incoming,
+            displayMode: incoming.displayMode || matched.displayMode,
+            collapsedTitle: matched.collapsedTitle || incoming.collapsedTitle,
+            processText,
+            thinking: mergeStreamingText(matched.thinking, incoming.thinking),
+            toolCalls: mergeToolCalls(matched.toolCalls, incoming.toolCalls),
+            ...mergedTeamTurnTiming(matched, incoming),
+          },
+          ...next.slice(communicationIndex + 1),
+        ];
+      }
+    }
+  }
   let matchingIndex = -1;
   for (let index = next.length - 1; index >= 0; index -= 1) {
     if (matchesTeamNode(next[index], incoming)) {

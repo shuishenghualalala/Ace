@@ -13,7 +13,10 @@ loop 在「每轮开始」与「每个工具执行前」轮询本对象的状态
 
 from __future__ import annotations
 
+import asyncio
 import threading
+
+_INTERRUPT_POLL_SECONDS = 0.05  # 跨线程/跨 loop 唤醒失败时的轮询兜底间隔
 
 
 class TurnControl:
@@ -24,6 +27,9 @@ class TurnControl:
         self._pending_steer: str | None = None
         self._interrupted: bool = False
         self._interrupt_message: str | None = None
+        # 同 loop 内让「等中断」的执行侧任务即时唤醒；跨线程 set 失败时
+        # _interrupted 标记仍在，执行侧走轮询兜底感知（时延 = 轮询间隔）。
+        self._interrupt_event: asyncio.Event | None = asyncio.Event()
 
     # ---------------- 外部（gateway）调用 ---------------- #
     def steer(self, text: str) -> bool:
@@ -45,13 +51,39 @@ class TurnControl:
         """请求在下一个安全点优雅停止当前轮。message 为触发中断的新消息（可选）。
 
         中断优先级高于 steer：一旦中断，未注入的 steer 作废（那一步不会再发生）。
+        同时 set 中断事件，让正等在工具内部的执行侧任务即时感知（而非等安全点轮询）。
         """
         with self._lock:
             self._interrupted = True
             self._interrupt_message = message
             self._pending_steer = None
+            event = self._interrupt_event
+        if event is not None and not event.is_set():
+            try:
+                event.set()
+            except RuntimeError:
+                # 跨线程/跨 loop 触发时无法安全唤醒等待者；标记已置位，
+                # 执行侧经 wait_interrupted 的轮询兜底感知。
+                pass
 
     # ---------------- loop（executor）消费 ---------------- #
+    async def wait_interrupted(self) -> None:
+        """阻塞至 interrupt() 被调用（执行侧与在途工具竞争用）。
+
+        同 loop 时事件即时唤醒；事件跨线程 set 失败时按
+        ``_INTERRUPT_POLL_SECONDS`` 轮询 ``interrupted`` 兜底，保证必然返回。
+        """
+        event = self._interrupt_event
+        while not self.interrupted:
+            if event is None or event.is_set():
+                # is_set 但标记未可见：锁内状态为准，短 sleep 后复查。
+                await asyncio.sleep(_INTERRUPT_POLL_SECONDS)
+                continue
+            try:
+                await asyncio.wait_for(event.wait(), timeout=_INTERRUPT_POLL_SECONDS)
+            except asyncio.TimeoutError:
+                continue
+
     def drain_steer(self) -> str | None:
         """取出并清空待注入的 steer 文本；无则返回 None。"""
         with self._lock:
@@ -69,9 +101,21 @@ class TurnControl:
         with self._lock:
             return self._interrupt_message
 
+    def drain_interrupt_message(self) -> str | None:
+        """取出并清空中断消息；无则返回 None。
+
+        executor 在回合收尾时调用：消息作为历史标记消费一次即清空，
+        配合 reset() 双保险，不泄漏到下一回合。
+        """
+        with self._lock:
+            message = self._interrupt_message
+            self._interrupt_message = None
+            return message
+
     def reset(self) -> None:
         """新一轮开始时清空状态（SingleAgent 复用同一 control 实例时调用）。"""
         with self._lock:
             self._pending_steer = None
             self._interrupted = False
             self._interrupt_message = None
+            self._interrupt_event = asyncio.Event()

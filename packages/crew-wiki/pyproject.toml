@@ -1,0 +1,40 @@
+[project]
+name = "crew-wiki"
+version = "0.1.0"
+description = "Crew wiki feature package - 本地知识库（import 名保持 crew.wiki，ADR-0037 uv workspace 首个试点）"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+# 依赖根包 crew（workspace 源）：wiki 的宿主装配、core/state 协议设施仍在根包。
+dependencies = [
+    "crew",
+]
+
+[project.optional-dependencies]
+# Wiki 文件上传解析：HTML 需要 markdownify，PDF 需要 pymupdf，DOCX 需要 python-docx，
+# XLSX 需要 openpyxl，PPTX 需要 python-pptx，文本编码探测需要 charset-normalizer，
+# YouTube 字幕需要 youtube-transcript-api。
+# 旧版 DOC/XLS/PPT 在运行期通过系统 LibreOffice 转换，不额外引入 Python 包。
+# 随成员包自带；根包 wiki extra 转发到 `crew-wiki[wiki]` 以保持既有安装入口。
+wiki = [
+    "charset-normalizer>=3.4.0",
+    "markdownify>=0.13.1",
+    "pymupdf>=1.28.0",
+    "python-docx>=1.2.0",
+    "openpyxl>=3.1.0",
+    "python-pptx>=1.0.0",
+    "youtube-transcript-api>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# 打包 src/crew 整层（editable 安装时 hatchling 会把 src/ 加进 sys.path，
+# 使顶层 crew 命名空间同时包含仓库根与成员 src 两部分）；src/crew 下只有 wiki，
+# 故 wheel 内容即 crew/wiki/**（含 seed/、presets/ 非 .py 资产，hatchling 默认全量收录）。
+[tool.hatch.build.targets.wheel]
+packages = ["src/crew"]
+
+[tool.uv.sources]
+# crew 即 workspace 根包（仓库根 pyproject），仅从 workspace 解析。
+crew = { workspace = true }

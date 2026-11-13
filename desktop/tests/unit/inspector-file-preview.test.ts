@@ -156,12 +156,20 @@ describe('Inspector HTML 文件预览', () => {
     expect(document.body.textContent).not.toContain('c.md');
     expect(document.body.textContent).toContain('本条消息改动');
 
+    // expandFilePath 指定的产物卡在列表内联展开，不再打开独立标签页
+    const deckCard = document.querySelector<HTMLElement>('.inspector-file[data-file-path="/tmp/demo/deck.pptx"]');
+    expect(deckCard?.classList.contains('is-active')).toBe(true);
+    expect(deckCard?.querySelector('.inspector-file__diff')).toBeTruthy();
+    expect(document.querySelector('.inspector-file-tab-view')).toBeNull();
+
+    // 点击折叠态文件卡同样在列表内联展开
     Array.from(document.querySelectorAll<HTMLButtonElement>('[data-file-toggle]'))
-      .find((button) => button.textContent?.includes('deck.pptx'))
+      .find((button) => button.textContent?.includes('a.md'))
       ?.click();
-    expect(document.querySelector('.inspector-file-tab-view')).toBeTruthy();
-    expect(document.body.textContent).toContain('deck.pptx');
-    expect(document.body.textContent).not.toContain('这个文件已不在当前会话的改动列表中');
+    const aCard = document.querySelector<HTMLElement>('.inspector-file[data-file-path="/tmp/demo/a.md"]');
+    expect(aCard?.classList.contains('is-active')).toBe(true);
+    expect(aCard?.querySelector('.inspector-file__diff')).toBeTruthy();
+    expect(document.querySelector('.inspector-file-tab-view')).toBeNull();
 
     openInspectorToTab('files');
     expect(document.body.textContent).toContain('a.md');
@@ -170,7 +178,7 @@ describe('Inspector HTML 文件预览', () => {
     expect(document.body.textContent).toContain('本次会话改动');
   });
 
-  it('历史消息只带文件路径时也能打开文件标签页，并主动读取 PPT 预览内容', async () => {
+  it('历史消息只带文件路径时也能内嵌展开文件卡，并主动读取 PPT 预览内容', async () => {
     patchBook('sess-html', {
       fileChanges: [{
         path: '/tmp/demo/other.md',
@@ -189,10 +197,13 @@ describe('Inspector HTML 文件预览', () => {
     expect(document.body.textContent).toContain('本条消息改动');
     expect(document.body.textContent).not.toContain('这条消息关联的文件已不在当前改动列表中');
 
-    document.querySelector<HTMLButtonElement>('[data-file-toggle]')?.click();
-    expect(document.querySelector('.inspector-file-tab-view')).toBeTruthy();
-    expect(document.body.textContent).toContain('history.pptx');
-    expect(document.body.textContent).not.toContain('这个文件已不在当前会话的改动列表中');
+    const historyCard = () => document.querySelector<HTMLElement>('.inspector-file[data-file-path="/tmp/demo/history.pptx"]');
+    if (!historyCard()?.classList.contains('is-active')) {
+      historyCard()?.querySelector<HTMLButtonElement>('[data-file-toggle]')?.click();
+    }
+    expect(historyCard()?.classList.contains('is-active')).toBe(true);
+    expect(historyCard()?.querySelector('.inspector-file__diff')).toBeTruthy();
+    expect(document.querySelector('.inspector-file-tab-view')).toBeNull();
     await vi.waitFor(() => expect(readFileBase64).toHaveBeenCalledWith('/tmp/demo/history.pptx'));
     await vi.waitFor(() => expect(document.querySelector('.inspector-office-preview--pptx')).toBeTruthy());
     expect(document.body.textContent).not.toContain('正在加载PPT 预览');
@@ -219,14 +230,20 @@ describe('Inspector HTML 文件预览', () => {
     expect(readTextFile).toHaveBeenCalledTimes(1);
   });
 
-  it('文件列表页不内嵌展开预览，点击文件后在独立标签页显示详情', async () => {
+  it('文件卡点击后在列表内嵌展开预览，不再打开独立标签页', async () => {
     openInspectorToTab('files');
-    expect(document.querySelector('.inspector-file__preview-frame')).toBeNull();
-    expect(document.querySelector('.inspector-file__diff')).toBeNull();
+    const card = () => document.querySelector<HTMLElement>('.inspector-file[data-file-path="/tmp/demo/index.html"]');
+    // 统一从折叠态开始（首个文件可能被自动展开）
+    if (card()?.classList.contains('is-active')) {
+      card()?.querySelector<HTMLButtonElement>('[data-file-toggle]')?.click();
+    }
+    expect(card()?.querySelector('.inspector-file__diff')).toBeNull();
+    expect(card()?.querySelector('.inspector-file__preview-frame')).toBeNull();
 
-    document.querySelector<HTMLButtonElement>('[data-file-toggle]')?.click();
-    await vi.waitFor(() => expect(document.querySelector('.inspector-file-tab-view')).toBeTruthy());
-    expect(document.querySelector('.inspector-file-tab-view .inspector-file__preview-frame')).toBeTruthy();
+    card()?.querySelector<HTMLButtonElement>('[data-file-toggle]')?.click();
+    expect(document.querySelector('.inspector-file-tab-view')).toBeNull();
+    expect(card()?.classList.contains('is-active')).toBe(true);
+    await vi.waitFor(() => expect(card()?.querySelector('.inspector-file__diff .inspector-file__preview-frame')).toBeTruthy());
   });
 
   it('非 HTML 文件仍直接展示代码且不出现转换按钮', () => {

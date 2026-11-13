@@ -34,6 +34,32 @@ function buildSanitizer(): typeof DOMPurify {
   return DOMPurify;
 }
 
+/** A bad formula must only lose its typesetting, not the surrounding message. */
+function tolerantMathHtml(): ReturnType<typeof mathHtml> {
+  const extension = mathHtml();
+  const exits = extension.exit!;
+  for (const [type, closingTag] of [['mathText', '</span>'], ['mathFlow', '</div>']] as const) {
+    const render = exits[type]!;
+    exits[type] = function (token) {
+      try {
+        return render.call(this, token);
+      } catch (error) {
+        if (!(error instanceof Error) || error.name !== 'ParseError') throw error;
+        // The upstream handler has already resumed its content buffer before
+        // calling KaTeX. Preserve the complete token, including its dollars,
+        // then finish the wrapper and block state the handler would have closed.
+        this.tag(escapeHtml(this.sliceSerialize(token)));
+        this.tag(closingTag);
+        if (type === 'mathFlow') {
+          this.setData('mathFlowOpen');
+          this.setData('slurpOneLineEnding');
+        }
+      }
+    };
+  }
+  return extension;
+}
+
 /**
  * micromark 输出后处理：只补 micromark 不会输出、但 UI/Electron 行为需要的东西。
  *
@@ -162,7 +188,7 @@ export function renderMarkdownHtml(
   // 扩展：GFM（表格/删除线/任务列表/autolink）+ math（$..$ / $$..$$，KaTeX 输出 HTML）。
   const raw = micromark(withPlaceholders, {
     extensions: [gfm(), math()],
-    htmlExtensions: [gfmHtml(), mathHtml()],
+    htmlExtensions: [gfmHtml(), tolerantMathHtml()],
   });
 
   const withClasses = addCustomClasses(raw);

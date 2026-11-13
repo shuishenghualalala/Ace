@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
-import importlib.util
 import json
 import os
+import re
 import shutil
 import time
 from typing import Any
@@ -15,12 +16,15 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from crew.agent.external.detector import discover_local_runtimes
+from crew.agent.external.feature import EXTERNAL_AGENT_CATALOG_SERVICE_KEY
 from crew.agent.external.runtime_profile import normalize_runtime_models
-from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.core.errors import ProviderError
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
+from crew.collaboration.formation.recommendations import apply_recommendations, recommendation_targets, validate_recommendations
+from crew.collaboration.formation.assessment import assess_roster
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
+from crew.providers import stream_aux
 from crew.gateway.helpers import (
     build_team_draft,
     confirmed_formation_plan,
@@ -32,16 +36,25 @@ from crew.gateway.helpers import (
 from crew.security.launch import ProcessLaunch, current_process_launch
 from crew.security.models import PermissionProfile, PermissionProfileKind
 from crew.state.logging import get_logger
+from crew.team.agent_profile import build_agent_profile
 from crew.team.formation import (
     apply_formation_ai_audit,
     formation_ai_context,
     formation_auto_decision,
 )
 from crew.team.roles import (
+    CREW_BUILTIN_AGENT_ID,
     all_role_public_payloads,
     crew_builtin_agent_public,
     intelligent_role_markdown,
     role_preset,
+)
+from crew.team.team_spec import team_spec_for_creation
+from crew.team.payloads import (
+    _external_agent_payloads,
+    _external_team_payloads,
+    _managed_temporary_agent_ids,
+    _runtime_availability,
 )
 
 log = get_logger("gateway.runtimes")
@@ -53,6 +66,14 @@ SUGGEST_PROMPT_CHAR_CAP = 32_000
 TEAM_DRAFT_CACHE_TTL_S = 300.0
 TEAM_DRAFT_CACHE_MAX_ENTRIES = 128
 FORMATION_MODES = frozenset({"fast", "ai", "auto"})
+
+
+def _builtin_leader_unavailable(crew: Any, owner: str, leader_id: str) -> bool:
+    """Use the same provider resolution as chat; the demo provider cannot lead work."""
+    if leader_id != CREW_BUILTIN_AGENT_ID:
+        return False
+    check = getattr(crew, "_session_demo_mode", None)
+    return bool(callable(check) and check(owner, {}))
 
 
 class _TeamDraftCache:
@@ -86,6 +107,11 @@ def _normalized_draft_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def _is_numbered_goal(value: str) -> bool:
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    return bool(lines) and all(re.match(r"^\d+[.、．]\s*\S", line) for line in lines)
+
+
 def _draft_cache_key(
     kind: str,
     payload: dict[str, Any],
@@ -109,131 +135,38 @@ def _draft_stream_line(event: dict[str, Any]) -> str:
     return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
-def _runtime_availability(runtime: dict[str, Any]) -> dict[str, Any]:
-    """Expose the persisted probe state, with a live executable-path guard."""
-    payload = dict(runtime)
-    target = str(runtime.get("executable_path") or "").strip()
-    protocol = str(runtime.get("protocol") or "").strip().lower()
-    available = False
-    if target:
-        if protocol == "client":
-            try:
-                available = importlib.util.find_spec(target) is not None
-            except (ImportError, AttributeError, ValueError):
-                available = False
-        else:
-            resolved = target if os.path.isabs(target) else shutil.which(target)
-            available = bool(resolved and os.path.isfile(resolved) and os.access(resolved, os.X_OK))
-    metadata = dict(runtime.get("metadata")) if isinstance(runtime.get("metadata"), dict) else {}
-    display_badge = resolve_runtime_display_badge(
-        provider=str(runtime.get("provider") or ""),
-        metadata=metadata,
-    )
-    metadata["display_badge"] = display_badge
-    status = str(metadata.get("availability_status") or "").strip()
-    if not available:
-        status = "unavailable"
-    elif status not in {"ready", "degraded", "unavailable"}:
-        status = "degraded"
-    payload["available"] = status == "ready"
-    payload["availability_status"] = status
-    payload["display_badge"] = display_badge
-    payload["metadata"] = metadata
-    return payload
+def _formation_agent_catalog(store: Any, *, owner_account_id: str) -> list[dict[str, Any]]:
+    """Return only durable user-managed Agents for create-time Formation.
 
+    Runtime staffing Agents are intentionally retained in the External Agent store so
+    their profiles can learn across runs, but they are not part of a new Team's
+    Formation catalog. Formation-confirmed temporary members are also excluded while
+    their owning Team is active. Runtime staffing uses its own catalog and may include
+    managed Agents.
+    """
 
-def _external_agent_payloads(
-    store: Any,
-    agents: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Project RuntimeDescriptor presentation fields onto persisted Agents."""
-
+    hidden_ids = _managed_temporary_agent_ids(store, owner_account_id=owner_account_id)
     runtimes = {
-        str(runtime.get("id") or ""): runtime
+        str(runtime.get("id") or ""): _runtime_availability(runtime)
         for runtime in store.list_runtimes()
     }
-    payloads: list[dict[str, Any]] = []
-    for agent in agents:
+    catalog = []
+    for agent in store.list_agents(
+            owner_account_id=owner_account_id,
+            include_managed=False,
+        ):
+        if str(agent.get("id") or "") in hidden_ids:
+            continue
+        # Cached profile evidence does not prove that a local executable is
+        # still present. Keep the evidence, but refresh availability for this
+        # suggestion so an unavailable Agent cannot be silently selected.
         runtime = runtimes.get(str(agent.get("runtime_id") or ""))
-        metadata = (
-            runtime.get("metadata")
-            if isinstance(runtime, dict) and isinstance(runtime.get("metadata"), dict)
-            else {}
-        )
-        payloads.append({
-            **agent,
-            "display_badge": resolve_runtime_display_badge(
-                provider=str(
-                    (runtime or {}).get("provider")
-                    or agent.get("provider")
-                    or ""
-                ),
-                metadata=metadata,
-            ),
-        })
-    return payloads
+        profile = build_agent_profile(agent).to_dict()
+        profile["availability"] = str((runtime or {}).get("availability_status") or "unavailable")
+        catalog.append({**agent, "profile": profile})
+    return catalog
 
 
-def _managed_temporary_agent_ids(store: Any, *, owner_account_id: str) -> set[str]:
-    """Return managed Agents that must stay out of the user's normal catalog."""
-
-    hidden = {
-        str(member.get("agent_id") or "")
-        for team in store.list_teams(owner_account_id=owner_account_id)
-        for member in (
-            team.get("formation_plan", {}).get("members", [])
-            if isinstance(team.get("formation_plan"), dict)
-            else []
-        )
-        if isinstance(member, dict)
-        and member.get("selection_source") == "ai_temporary"
-        and str(member.get("agent_id") or "")
-    }
-    hidden.update(
-        str(agent.get("id") or "")
-        for agent in store.list_agents(owner_account_id=owner_account_id)
-        if str(agent.get("managed_kind") or "")
-        and str(agent.get("id") or "")
-    )
-    return hidden
-
-
-
-def _external_team_payloads(
-    store: Any,
-    teams: list[dict[str, Any]],
-    *,
-    owner_account_id: str,
-) -> list[dict[str, Any]]:
-    """Project member Agent badges while keeping Team persistence unchanged."""
-
-    agents = _external_agent_payloads(
-        store,
-        store.list_agents(owner_account_id=owner_account_id),
-    )
-    badge_by_agent_id = {
-        str(agent.get("id") or ""): str(agent.get("display_badge") or "?")
-        for agent in agents
-    }
-    badge_by_agent_id["crew::builtin"] = "M"
-    return [
-        {
-            **team,
-            "display_badge": "T",
-            "members": [
-                {
-                    **member,
-                    "display_badge": badge_by_agent_id.get(
-                        str(member.get("agent_id") or ""),
-                        "?",
-                    ),
-                }
-                for member in (team.get("members") or [])
-                if isinstance(member, dict)
-            ],
-        }
-        for team in teams
-    ]
 
 
 def _truncate_user_payload(payload: dict) -> dict:
@@ -292,10 +225,18 @@ def _formation_ai_prompt(context: dict[str, Any]) -> tuple[str, str]:
     context_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
     prompt = (
         "你是 Formation AI，基于 Fast 草案做一次最小变更审计，不重新生成完整团队。"
-        "Leader、locked_agent_ids、excluded_agent_ids 是不可修改约束。"
+        "先理解团队目标并为各成员提出具体职责，再从 standard_roles 中选择最能概括该职责的角色；"
+        "不要仅凭团队名称直接给成员套用角色。只有团队名称时可基于名称合理推测职责，"
+        "并在 reason 中说明这是待用户确认的建议；信息不足则保留待确认角色。"
+        "为待确认角色提出明确分工时，必须同时填写 responsibility_focus 和与其一致的 role_key。"
+        "Leader 身份、locked_agent_ids 成员身份和 excluded_agent_ids 是不可修改约束。"
+        "locked 成员不能删除或替换，但可以根据其能力证据建议标准角色、能力标签和结构化职责；"
+        "必须保留 team_input.member_assignments 中用户原写的负责事项作为任务使命，不得扩大或改写其含义。"
+        "逐一核对这些负责事项与 available_agents 的能力证据；证据明确支持时补足角色和交付说明，证据不足则保留待验证状态。"
         "member_changes 只填写确需新增、调整或移除的常驻成员；未提及成员由后端保留。"
-        "只能引用 available_agents 和 standard_roles。不要输出分析过程、完整职责、工作流、"
-        "交付物、Provider 偏好或普通业务追问。新增需求和独立分工约束必须在 evidence_quote "
+        "低置信度或缺失的能力画像表示待验证，不得据此认定成员不胜任或将其移出团队。"
+        "只能引用 available_agents 和 standard_roles。不要输出分析过程、完整职责正文、工作流、"
+        "Provider 偏好或普通业务追问；职责重点限一行，交付物最多三项。新增需求和独立分工约束必须在 evidence_quote "
         "中逐字引用 team_input 的依据；没有依据就不要新增。"
         "若 Fast 已经最小充分，staffing_plan.required=false。"
         "若仍有已知必要能力无法由当前成员可靠覆盖，直接给出合并后的最小临时成员方案；"
@@ -310,7 +251,8 @@ def _formation_ai_prompt(context: dict[str, Any]) -> tuple[str, str]:
         "\"required_capabilities\":[\"...\"],\"evidence_quote\":\"...\"}]},"
         "\"member_changes\":{\"remove_agent_ids\":[\"...\"],"
         "\"upsert_members\":[{\"agent_id\":\"...\",\"role_key\":\"...\","
-        "\"assigned_capabilities\":[\"...\"],\"evidence_quote\":\"...\"}]},"
+        "\"assigned_capabilities\":[\"...\"],\"responsibility_focus\":\"...\","
+        "\"deliverables\":[\"...\"],\"reason\":\"...\",\"evidence_quote\":\"...\"}]},"
         "\"staffing_plan\":{\"required\":true,\"minimality_rationale\":\"...\","
         "\"members\":[{\"role_key\":\"...\","
         "\"required_capabilities\":[\"...\"],\"responsibility_focus\":\"...\","
@@ -323,6 +265,97 @@ def _formation_ai_prompt(context: dict[str, Any]) -> tuple[str, str]:
     if len(prompt) > SUGGEST_PROMPT_CHAR_CAP:
         prompt = prompt[:SUGGEST_PROMPT_CHAR_CAP]
     return prompt, context_json
+
+
+async def _run_responsibility_recommendations(
+    *, provider: LLMProvider, payload: dict[str, Any], agents: list[dict[str, Any]],
+    fallback: dict[str, Any], requested_mode: str, started_at: float, fast_ms: int,
+) -> dict[str, Any]:
+    """Recommend duties for the existing roster without changing membership."""
+    started = time.perf_counter()
+    raw_assignments = payload.get("member_assignments") if isinstance(payload.get("member_assignments"), list) else []
+    targets = recommendation_targets(fallback, raw_assignments)
+    unresolved = [member for member in fallback.get("members", []) if str(member.get("agent_id") or "") in targets]
+    if len(unresolved) > 12:
+        return _formation_response_payload(
+            fallback, requested_mode=requested_mode, selected_mode="fast", started_at=started_at,
+            fast_ms=fast_ms, fallback_reason="too_many_members",
+        )
+    assignments = {
+        str(item.get("agent_id") or ""): str(item.get("responsibility") or "").strip()
+        for item in raw_assignments if isinstance(item, dict)
+    }
+    user_roles = {str(item.get("agent_id") or ""): str(item.get("role_key") or "").strip()
+                  for item in raw_assignments if isinstance(item, dict)}
+    names = {str(agent.get("id") or ""): str(agent.get("name") or agent.get("id") or "")[:120] for agent in [crew_builtin_agent_public(), *agents]}
+    context = {
+        "team_name": str(payload.get("name") or "")[:500],
+        "team_goal": str(payload.get("description") or "")[:4096],
+        "members": [{"agent_id": member.get("agent_id"), "name": names.get(str(member.get("agent_id") or ""), ""),
+                     "user_responsibility": assignments.get(str(member.get("agent_id") or ""), "")[:1000],
+                     "user_role_key": user_roles.get(str(member.get("agent_id") or ""), "")}
+                    for member in unresolved],
+        "available_roles": [{"key": role["key"], "label": role["label"], "description": role["description"]}
+                            for role in all_role_public_payloads() if role.get("key") != "unclassified"],
+    }
+    prompt = (
+        "为团队中每个给定成员建议一条长期职责，再选择最符合职责的角色。"
+        "只依据团队名称、目标与用户指定职责，不新增事实；用户指定职责原样保留，用户指定角色不得改变。"
+        "能力证据不足不妨碍建议职责，能力仍待验证。目标模糊时使用 general_collaborator，"
+        "职责应表明按具体任务协作。不得增删或替换成员。每个成员都必须输出一次。"
+        "只返回 JSON：{\"members\":[{\"agent_id\":\"...\",\"role_key\":\"...\","
+        "\"responsibility\":\"...\",\"reason\":\"...\"}]}。\n"
+        + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    )
+    result = None
+    reason = ""
+    try:
+        response = await provider.chat([Message.system("只输出可解析 JSON。"), Message.user(prompt)])
+        raw = extract_json_object(response.text or "")
+        result, reason = apply_recommendations(
+            fallback, raw, team_goal=str(payload.get("description") or payload.get("name") or ""),
+            agent_names=names, user_duties=assignments, target_ids=targets, user_roles=user_roles,
+        )
+    except (TimeoutError, ProviderError, AttributeError, TypeError, ValueError):
+        reason = "provider_error"
+    elapsed = int((time.perf_counter() - started) * 1000)
+    log.info("Formation responsibility recommendation selected=%s fallback_reason=%s members=%d elapsed_ms=%d",
+             "ai" if result else "fast", reason or "none", len(unresolved), elapsed)
+    return _formation_response_payload(
+        result or fallback, requested_mode=requested_mode, selected_mode="ai" if result else "fast",
+        started_at=started_at, fast_ms=fast_ms, ai_ms=elapsed, fallback_reason=reason,
+    )
+
+
+async def _suggest_changed_role_duties(
+    provider: LLMProvider, *, name: str, goal: str, changes: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], str]:
+    """Suggest duties for fixed role choices; never change a user selection."""
+    roles = {str(item["agent_id"]): str(item["role_key"]) for item in changes}
+    context = {
+        "team_name": name[:500], "team_goal": goal[:4096],
+        "members": [{
+            "agent_id": str(item["agent_id"]), "role_key": str(item["role_key"]),
+            "role_label": str(role_preset(str(item["role_key"]))["label"]),
+            "existing_responsibility": str(item.get("responsibility") or "")[:2000],
+        } for item in changes],
+    }
+    prompt = (
+        "根据团队目标与用户选定的角色，为每个成员建议一条具体、可编辑的团队职责。"
+        "角色已由用户选定，不得更改；已有职责只作参考，不得把推测当成用户要求。"
+        "逐一返回所有成员。只返回 JSON：{\"members\":[{\"agent_id\":\"...\","
+        "\"role_key\":\"...\",\"responsibility\":\"...\"}]}。\n"
+        + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    )
+    try:
+        response = await provider.chat([Message.system("只输出可解析 JSON。"), Message.user(prompt)])
+        proposals, reason = validate_recommendations(
+            extract_json_object(response.text or ""), unresolved_ids=set(roles), user_duties={}, user_roles=roles,
+        )
+        return ([{"agent_id": item.agent_id, "role_key": item.role_key, "responsibility": item.mission}
+                 for item in proposals], reason)
+    except (TimeoutError, ProviderError, AttributeError, TypeError, ValueError):
+        return [], "provider_error"
 
 
 async def _run_formation_ai(
@@ -338,6 +371,8 @@ async def _run_formation_ai(
 ) -> dict[str, Any]:
     """Run one Formation AI audit and compile it into the stable public shape."""
 
+    from crew.team.formation import apply_formation_ai_audit, formation_ai_context
+
     context = formation_ai_context(payload, agents, fallback, runtimes)
     prompt, context_json = _formation_ai_prompt(context)
     ai_started_at = time.perf_counter()
@@ -346,10 +381,15 @@ async def _run_formation_ai(
     response_chars = 0
     reasoning_chars = 0
     try:
-        resp = await provider.chat([
-            Message.system("只输出可解析 JSON；不要输出分析过程。"),
-            Message.user(prompt),
-        ])
+        resp = await stream_aux(
+            provider,
+            [
+                Message.system("只输出可解析 JSON；不要输出分析过程。"),
+                Message.user(prompt),
+            ],
+            purpose="formation-audit",
+            timeout=120.0,
+        )
         usage = dict(resp.usage or {})
         response_chars = len(resp.text or "")
         reasoning_chars = len(resp.reasoning_content or "")
@@ -412,6 +452,8 @@ async def _run_formation_ai(
 
 
 def _draft_agent_catalog(agents: list[dict]) -> list[dict[str, str]]:
+    from crew.team.roles import crew_builtin_agent_public
+
     return [
         {
             "id": str(agent.get("id") or ""),
@@ -425,6 +467,8 @@ def _draft_agent_catalog(agents: list[dict]) -> list[dict[str, str]]:
 
 
 def _draft_role_catalog() -> list[dict[str, Any]]:
+    from crew.team.roles import all_role_public_payloads
+
     roles: list[dict[str, Any]] = []
     for role in all_role_public_payloads():
         lane = str(role.get("workflow_lane") or "")
@@ -515,6 +559,12 @@ def create_runtimes_router(crew) -> APIRouter:
 
     def _external_store():
         require_external_agents_enabled(crew)
+        plugins = getattr(crew, "plugins", None)
+        resolver = getattr(plugins, "resolve_service", None)
+        if callable(resolver):
+            service = resolver(EXTERNAL_AGENT_CATALOG_SERVICE_KEY, default=None)
+            if service is not None:
+                return service
         if crew.external_agents is None:
             raise RuntimeError("外部智能体存储未初始化")
         return crew.external_agents
@@ -532,7 +582,7 @@ def create_runtimes_router(crew) -> APIRouter:
             detected = await discover_local_runtimes()
         finally:
             current_process_launch.reset(token)
-        synced = store.sync_runtimes(detected)
+        synced = await asyncio.to_thread(store.sync_runtimes, detected)
         return JSONResponse([_runtime_availability(runtime) for runtime in synced])
 
     @router.get("/api/runtimes")
@@ -651,20 +701,31 @@ def create_runtimes_router(crew) -> APIRouter:
 
     @router.get("/api/external-teams/roles")
     async def external_team_roles() -> JSONResponse:
+        from crew.team.roles import all_role_public_payloads
+
         _external_store()
         return JSONResponse(all_role_public_payloads())
 
     @router.post("/api/external-teams")
     async def create_external_team(request: Request, payload: dict) -> JSONResponse:
+        from crew.team.roles import all_role_public_payloads, intelligent_role_markdown, role_preset
+        from crew.team.team_spec import team_spec_for_creation
+
         owner = account_from_request(request).owner_account_id
         store = _external_store()
+        team_description = str(payload.get("description") or "").strip()
+        raw_team_spec = payload.get("team_spec")
         members = [
             dict(member)
             for member in (payload.get("members") or [])
             if isinstance(member, dict)
         ]
         leader_agent_id = str(payload.get("leader_agent_id") or "").strip()
-        team_goal = str(payload.get("description") or payload.get("name") or "").strip()
+        if _builtin_leader_unavailable(crew, owner, leader_agent_id):
+            return JSONResponse({
+                "ok": False, "code": "builtin_model_unavailable",
+                "error": "内置智能体当前处于演示模式，请先配置可用模型，或选择可用成员担任 Leader。",
+            }, status_code=409)
         existing_plan = (
             copy.deepcopy(payload.get("formation_plan"))
             if isinstance(payload.get("formation_plan"), dict)
@@ -690,6 +751,13 @@ def create_runtimes_router(crew) -> APIRouter:
                     log.warning("回滚临时成员失败: agent_id=%s", agent_id)
 
         try:
+            if raw_team_spec is not None and not isinstance(raw_team_spec, dict):
+                raise ValueError("team_spec 必须是结构化对象")
+            team_spec = team_spec_for_creation(
+                raw_team_spec,
+                description=team_description,
+            )
+            team_goal = str(team_spec.get("goal") or team_description).strip()
             valid_role_keys = {
                 str(role.get("key") or "")
                 for role in all_role_public_payloads()
@@ -773,9 +841,9 @@ def create_runtimes_router(crew) -> APIRouter:
                 name=str(payload.get("name") or "").strip() or "未命名团队",
                 leader_agent_id=leader_agent_id,
                 members=members,
-                description=str(payload.get("description") or "").strip(),
+                description=team_description,
                 instructions=str(payload.get("instructions") or payload.get("workflow") or "").strip(),
-                team_spec=payload.get("team_spec") if isinstance(payload.get("team_spec"), dict) else None,
+                team_spec=team_spec,
                 formation_plan=formation_plan,
             )
         except KeyError as exc:
@@ -793,8 +861,50 @@ def create_runtimes_router(crew) -> APIRouter:
             owner_account_id=owner,
         )[0])
 
+    @router.post("/api/external-teams/assess")
+    async def assess_external_team(request: Request, payload: dict):
+        owner = account_from_request(request).owner_account_id
+        members = payload.get("members")
+        required = payload.get("required_capabilities") or []
+        if not isinstance(members, list) or not all(isinstance(item, dict) for item in members) or not isinstance(required, list):
+            return JSONResponse({"ok": False, "error": "团队成员或能力列表无效"}, status_code=400)
+        try:
+            result = assess_roster(members, _formation_agent_catalog(_external_store(), owner_account_id=owner), required)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        if _builtin_leader_unavailable(crew, owner, CREW_BUILTIN_AGENT_ID):
+            for member in result["members"]:
+                if member["agent_id"] == CREW_BUILTIN_AGENT_ID:
+                    member["available"] = False
+        changes = payload.get("role_changes") or []
+        if not isinstance(changes, list) or len(changes) > 12 or not all(isinstance(item, dict) for item in changes):
+            return JSONResponse({"ok": False, "error": "角色调整列表无效"}, status_code=400)
+        if changes:
+            roster = {str(item.get("agent_id") or ""): str(item.get("role_key") or "") for item in members}
+            change_ids = [str(item.get("agent_id") or "") for item in changes]
+            valid_roles = {str(item["key"]) for item in all_role_public_payloads()} - {"unclassified"}
+            if (len(change_ids) != len(set(change_ids)) or any(
+                not agent_id or agent_id not in roster or roster[agent_id] != str(item.get("role_key") or "")
+                or roster[agent_id] not in valid_roles for agent_id, item in zip(change_ids, changes, strict=True)
+            )):
+                return JSONResponse({"ok": False, "error": "角色调整与当前阵容不一致"}, status_code=400)
+            if any(not item["available"] for item in result["members"] if item["agent_id"] in change_ids):
+                result["role_suggestions"] = []
+                result["role_suggestion_error"] = "member_unavailable"
+            else:
+                async with crew.owner_provider(owner) as provider:
+                    suggestions, error = await _suggest_changed_role_duties(
+                        provider, name=str(payload.get("team_name") or ""),
+                        goal=str(payload.get("team_goal") or ""), changes=changes,
+                    )
+                result["role_suggestions"] = suggestions
+                result["role_suggestion_error"] = error
+        return JSONResponse(result)
+
     @router.post("/api/external-teams/suggest")
     async def suggest_external_team(request: Request, payload: dict):
+        from crew.team.formation import formation_auto_decision
+
         requested_mode = str(payload.get("formation_mode") or "").strip().lower()
         if requested_mode not in FORMATION_MODES:
             return JSONResponse(
@@ -803,14 +913,25 @@ def create_runtimes_router(crew) -> APIRouter:
             )
         owner = account_from_request(request).owner_account_id
         store = _external_store()
-        agents = store.list_agents(owner_account_id=owner)
+        agents = _formation_agent_catalog(store, owner_account_id=owner)
+        requested_leader = str(payload.get("leader_agent_id") or CREW_BUILTIN_AGENT_ID).strip()
+        if _builtin_leader_unavailable(crew, owner, requested_leader):
+            return JSONResponse({
+                "ok": False, "code": "builtin_model_unavailable",
+                "error": "内置智能体当前处于演示模式，请先配置可用模型，或选择可用成员担任 Leader。",
+            }, status_code=409)
+        started_at = time.perf_counter()
+        fast_started_at = time.perf_counter()
+        fallback = fast_team_suggestion(payload, agents)
+        fast_ms = int((time.perf_counter() - fast_started_at) * 1000)
+        if _builtin_leader_unavailable(crew, owner, str(fallback.get("leader_agent_id") or "")):
+            return JSONResponse({
+                "ok": False, "code": "builtin_model_unavailable",
+                "error": "所选 Leader 不可用，内置智能体也未配置可用模型；请选择可用成员或配置模型。",
+            }, status_code=409)
 
         if requested_mode == "auto":
             async def stream():
-                started_at = time.perf_counter()
-                fast_started_at = time.perf_counter()
-                fallback = fast_team_suggestion(payload, agents)
-                fast_ms = int((time.perf_counter() - fast_started_at) * 1000)
                 first_event_ms = int((time.perf_counter() - started_at) * 1000)
                 yield _draft_stream_line({
                     "type": "suggestion",
@@ -854,6 +975,11 @@ def create_runtimes_router(crew) -> APIRouter:
                     return
 
                 requires_ai, auto_reasons = formation_auto_decision(payload, fallback)
+                raw_assignments = payload.get("member_assignments") if isinstance(payload.get("member_assignments"), list) else []
+                targets = recommendation_targets(fallback, raw_assignments)
+                if targets:
+                    requires_ai = True
+                    auto_reasons.append("member_responsibility_recommendation")
                 if not requires_ai:
                     final = _formation_response_payload(
                         fallback,
@@ -891,16 +1017,16 @@ def create_runtimes_router(crew) -> APIRouter:
                     for runtime in store.list_runtimes()
                 ]
                 async with crew.owner_provider(owner) as provider:
-                    final = await _run_formation_ai(
-                        provider=provider,
-                        payload=payload,
-                        agents=agents,
-                        fallback=fallback,
-                        runtimes=runtimes,
-                        requested_mode="auto",
-                        started_at=started_at,
-                        fast_ms=fast_ms,
-                    )
+                    if targets:
+                        final = await _run_responsibility_recommendations(
+                            provider=provider, payload=payload, agents=agents, fallback=fallback,
+                            requested_mode="auto", started_at=started_at, fast_ms=fast_ms,
+                        )
+                    else:
+                        final = await _run_formation_ai(
+                            provider=provider, payload=payload, agents=agents, fallback=fallback,
+                            runtimes=runtimes, requested_mode="auto", started_at=started_at, fast_ms=fast_ms,
+                        )
                 log.info(
                     "Formation Auto metrics decision=ai reasons=%s first_event_ms=%d "
                     "fast_ms=%d ai_ms=%d total_ms=%d",
@@ -920,10 +1046,6 @@ def create_runtimes_router(crew) -> APIRouter:
 
             return StreamingResponse(stream(), media_type="application/x-ndjson")
 
-        started_at = time.perf_counter()
-        fast_started_at = time.perf_counter()
-        fallback = fast_team_suggestion(payload, agents)
-        fast_ms = int((time.perf_counter() - fast_started_at) * 1000)
         if requested_mode == "fast":
             return JSONResponse(_formation_response_payload(
                 fallback,
@@ -946,23 +1068,26 @@ def create_runtimes_router(crew) -> APIRouter:
             for runtime in store.list_runtimes()
         ]
         async with crew.owner_provider(owner) as provider:
-            result = await _run_formation_ai(
-                provider=provider,
-                payload=payload,
-                agents=agents,
-                fallback=fallback,
-                runtimes=runtimes,
-                requested_mode=requested_mode,
-                started_at=started_at,
-                fast_ms=fast_ms,
-            )
+            raw_assignments = payload.get("member_assignments") if isinstance(payload.get("member_assignments"), list) else []
+            if recommendation_targets(fallback, raw_assignments):
+                result = await _run_responsibility_recommendations(
+                    provider=provider, payload=payload, agents=agents, fallback=fallback,
+                    requested_mode=requested_mode, started_at=started_at, fast_ms=fast_ms,
+                )
+            else:
+                result = await _run_formation_ai(
+                    provider=provider, payload=payload, agents=agents, fallback=fallback,
+                    runtimes=runtimes, requested_mode=requested_mode, started_at=started_at, fast_ms=fast_ms,
+                )
         return JSONResponse(result)
 
     @router.post("/api/external-teams/draft/description")
     async def draft_external_team_description(request: Request, payload: dict) -> StreamingResponse:
         owner = account_from_request(request).owner_account_id
-        agents = _external_store().list_agents(owner_account_id=owner)
+        agents = _formation_agent_catalog(_external_store(), owner_account_id=owner)
         description_payload = {"name": str(payload.get("name") or "").strip()}
+        if str(payload.get("description") or "").strip():
+            description_payload["description"] = str(payload["description"]).strip()[:4096]
         initial = build_team_draft(description_payload, agents)
         cache_key = _draft_cache_key(
             "description",
@@ -975,6 +1100,8 @@ def create_runtimes_router(crew) -> APIRouter:
             if not description_payload["name"] or await request.is_disconnected():
                 return
             cached = description_draft_cache.get(cache_key)
+            if cached is not None and description_payload.get("description") and not _is_numbered_goal(cached["description"]):
+                cached = None
             if cached is not None:
                 optimized = build_team_draft(
                     {
@@ -995,6 +1122,12 @@ def create_runtimes_router(crew) -> APIRouter:
 
             safe_payload = _truncate_user_payload(description_payload)
             prompt = (
+                "请将用户的团队目标整理为清晰的编号条目，每个条目单独一行，按 1.、2. 等顺序编号。"
+                "保留所有指定的成员、职责、限制和交付要求，不要增添未提及的事实或改变原意；"
+                "内容简短时可只输出一个条目，不要为了凑数量编造内容。"
+                "只返回 JSON：{\"description\":\"...\"}。\n"
+                f"输入：{json.dumps(safe_payload, ensure_ascii=False)}"
+            ) if description_payload.get("description") else (
                 "你是轻量团队目标助手。根据团队名称生成一份简短、可编辑的团队目标。"
                 "description 必须正好四行，依次以‘1. 负责范围：’、‘2. 所需能力：’、"
                 "‘3. 交付结果：’、‘4. 验收标准：’开头，每行只写一句，不举例。只返回 JSON："
@@ -1029,7 +1162,7 @@ def create_runtimes_router(crew) -> APIRouter:
                         f"finish_reason={finish_reason or 'unknown'} output_chars={len(raw_text)}"
                     )
                 description = str(raw.get("description") or "").strip()
-                if len(description) < 30:
+                if len(description) < (1 if description_payload.get("description") else 30):
                     raise ValueError("团队描述 LLM 返回内容过短")
                 goal_prefixes = (
                     "1. 负责范围：",
@@ -1038,20 +1171,22 @@ def create_runtimes_router(crew) -> APIRouter:
                     "4. 验收标准：",
                 )
                 goal_lines = [line.strip() for line in description.splitlines() if line.strip()]
-                if len(goal_lines) != len(goal_prefixes) or any(
+                if description_payload.get("description") and not _is_numbered_goal(description):
+                    raise ValueError("团队目标整理未按编号条目返回")
+                if not description_payload.get("description") and (len(goal_lines) != len(goal_prefixes) or any(
                     not line.startswith(prefix)
                     for line, prefix in zip(goal_lines, goal_prefixes, strict=True)
-                ):
+                )):
                     raise ValueError("团队描述 LLM 未按四点目标格式返回")
                 description = "\n".join(goal_lines)
                 optimized = build_team_draft(
-                    {"name": description_payload["name"], "description": description[:500]},
+                    {"name": description_payload["name"], "description": description[:4096]},
                     agents,
                 )
-                optimized["description"] = description[:500]
+                optimized["description"] = description[:4096]
                 elapsed_ms = int((time.perf_counter() - started_at) * 1000)
                 description_draft_cache.put(cache_key, {
-                    "description": description[:500],
+                    "description": description[:4096],
                     "llm_elapsed_ms": elapsed_ms,
                 })
                 if not await request.is_disconnected():
@@ -1081,7 +1216,7 @@ def create_runtimes_router(crew) -> APIRouter:
     @router.post("/api/external-teams/draft/formation")
     async def draft_external_team_formation(request: Request, payload: dict) -> StreamingResponse:
         owner = account_from_request(request).owner_account_id
-        agents = _external_store().list_agents(owner_account_id=owner)
+        agents = _formation_agent_catalog(_external_store(), owner_account_id=owner)
         formation_payload = {
             "name": str(payload.get("name") or "").strip(),
             "description": str(payload.get("description") or "").strip(),
@@ -1200,6 +1335,18 @@ def create_runtimes_router(crew) -> APIRouter:
             except KeyError:
                 return JSONResponse({"ok": False, "error": "智能体不存在"}, status_code=404)
         return JSONResponse(suggest_role_description(payload, agent))
+
+    @router.patch("/api/external-teams/{team_id}/staffing-policy")
+    async def update_external_team_staffing_policy(request: Request, team_id: str, payload: dict) -> JSONResponse:
+        owner = account_from_request(request).owner_account_id
+        allowed = {"formation_allow_system_fill", "runtime_allow_suggestions", "runtime_allow_auto_reassign"}
+        if not payload or set(payload) - allowed or any(not isinstance(value, bool) for value in payload.values()):
+            return JSONResponse({"ok": False, "error": "调配设置必须是布尔值。"}, status_code=400)
+        try:
+            team = _external_store().update_team_staffing_policy(team_id, payload, owner_account_id=owner)
+        except KeyError:
+            return JSONResponse({"ok": False, "error": "团队不存在"}, status_code=404)
+        return JSONResponse(team)
 
     @router.delete("/api/external-teams/{team_id}")
     async def delete_external_team(request: Request, team_id: str) -> JSONResponse:

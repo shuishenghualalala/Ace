@@ -48,3 +48,15 @@ def estimate_tokens(messages: list[Message]) -> int:
             args_json = json.dumps(tc.arguments, ensure_ascii=False)
             total += max(1, len(args_json) // 2)
     return total
+
+
+def estimate_prompt_tokens(messages: list[Message], tools: list[dict] | None = None) -> int:
+    """估算本次实际请求视图的 token 数。
+
+    与只统计 canonical history 不同，这里把最终发送的 system/message 视图和
+    tool schemas 一起纳入，作为 Provider 未返回 usage 时的本地上下文计数。
+    """
+    total = estimate_tokens(messages)
+    if tools:
+        total += _estimate_text_tokens(json.dumps(tools, ensure_ascii=False, separators=(",", ":")))
+    return total

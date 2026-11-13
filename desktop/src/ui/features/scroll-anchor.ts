@@ -5,7 +5,7 @@
  * 的 `useThreadScrollAnchor`——但翻译成 vanilla TS（无 React、无虚拟化）。
  *
  * 核心契约（与 hermes 一致）：
- *  - 故意不做「流式追底」：一旦回合在飞，视口停在用户离开的位置，不追流。
+ *  - 流式期间仅在用户仍停在底部时跟随；向上浏览后保持阅读位置。
  *  - 只在三个时机跳到底部：会话切换、空→非空、用户提交新消息（runStart）。
  *  - wheel-up / 手指下滑（想往上看）立即 disarm stickyBottom；用户滚回底部时 re-arm。
  *  - 程序滚动 guard：自己写的 scrollTop 会触发 scroll 事件，要避免把它误读成用户上滑。
@@ -48,6 +48,7 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
   // 用计数器而不是 boolean，因为同一帧内多次写 scrollTop 只触发一次 scroll 事件，
   // 计数器 > 1 永远不递减会导致后续真实用户上滑被吞。
   let programmaticScrollPending = 0;
+  let browsingHistory = false;
   // 上一帧的 scrollTop / scrollHeight / clientHeight，用于判定「scrollTop 减小是否真的
   // 是用户上滑」——内容增长 / 视口变化也会让 scrollTop 变化，要排除这些情况。
   let lastTop = container.scrollTop;
@@ -65,9 +66,22 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
 
   const onScroll = (): void => {
     const top = container.scrollTop;
+    const movedDown = top > lastTop + 1;
+
+    // 上滑意图优先于迟到的程序 scroll、布局变化和底部几何判断。
+    if (browsingHistory) {
+      if (movedDown && isAtBottom()) {
+        browsingHistory = false;
+        stickyBottom = true;
+      }
+      lastTop = top;
+      lastHeight = container.scrollHeight;
+      lastClientHeight = container.clientHeight;
+      return;
+    }
 
     // 程序自己写的 scrollTop 触发的 scroll 事件：不当成用户操作。
-    if (programmaticScrollPending > 0) {
+    if (programmaticScrollPending > 0 && Math.abs(top - lastTop) <= 1) {
       programmaticScrollPending -= 1;
       lastTop = top;
       lastHeight = container.scrollHeight;
@@ -76,14 +90,16 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
       stickyBottom = true;
       return;
     }
+    programmaticScrollPending = 0;
 
     // 仅当「内容高度和视口高度都稳定，且 scrollTop 真的减小」时才 disarm。
     // 单纯 `top < lastTop` 不安全：虚拟化测量、流式 markdown、composer resize、
     // 窗口 resize 都可能让 scrollTop 作为布局副作用变化。
     const heightGrew = container.scrollHeight > lastHeight;
     const clientHeightChanged = Math.abs(container.clientHeight - lastClientHeight) > 1;
-    if (!heightGrew && !clientHeightChanged && top + 1 < lastTop) {
+    if (top + 1 < lastTop && (!clientHeightChanged || !heightGrew)) {
       stickyBottom = false;
+      browsingHistory = true;
     }
 
     lastTop = top;
@@ -101,6 +117,8 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
   const onWheel = (e: WheelEvent): void => {
     if (e.deltaY < 0) {
       stickyBottom = false;
+      browsingHistory = true;
+      lastTop = container.scrollTop;
       programmaticScrollPending = 0;
     }
   };
@@ -118,6 +136,8 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
     // 手指下滑超过阈值 → 用户想把内容往上推、看上面 → disarm。
     if (y > lastTouchY + TOUCH_DIRECTION_THRESHOLD) {
       stickyBottom = false;
+      browsingHistory = true;
+      lastTop = container.scrollTop;
       programmaticScrollPending = 0;
     }
     lastTouchY = y;
@@ -141,6 +161,7 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
   // ---------- 对外接口 ----------
 
   const jumpToBottom = (): void => {
+    browsingHistory = false;
     stickyBottom = true;
     // 直接滚——这是用户提交/切会话的强制跳底，不需要 guard。
     scrollToBottom();
@@ -172,6 +193,7 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
 
   const disarm = (): void => {
     stickyBottom = false;
+    browsingHistory = true;
     programmaticScrollPending = 0;
   };
 

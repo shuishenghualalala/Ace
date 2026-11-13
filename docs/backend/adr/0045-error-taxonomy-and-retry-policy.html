@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0045 · 错误类型化与统一重试策略</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0045 · 错误类型化与统一重试策略</h1>
+<p>状态：<strong>已批准</strong> · 日期：2026-09-17 · 批次：agent-core-defects 批次 0。</p>
+<h2>背景与候选方案</h2>
+<p>现状：Ace 错误以字符串消息 / 通用异常传播，重试判定散落在多处且彼此不一致：</p>
+<ul>
+<li><code>crew/agent/providers/openai_provider.py</code> 与 <code>anthropic_provider.py</code> 各持一份<strong>字符串类名启发式</strong>重试判定（<code>_is_retryable</code> / <code>_error_category</code>），同一错误在两家的分类结论可能不同；</li>
+<li><code>loop/resilience.py:147</code> 还有<strong>第三份</strong>类名白名单，调用点绕开 provider 时完全无类型信息可用；</li>
+<li>429 / 503 响应的 <code>Retry-After</code> 在包装成 <code>ProviderError</code> 时被<strong>丢弃</strong>（连 status 都没存），重试退避只能盲算指数；</li>
+<li><code>ResponseChunk.error</code> 预留的 <code>code</code> 参数无人使用，错误帧只有自由文本 message。</li>
+</ul>
+<p>候选方案：</p>
+<p><strong>A. 全仓 40+ 个模块自建异常统一迁入 CrewError 层级</strong>——<em>否决</em>：改动面爆炸（40+ 模块的 raise/catch 点、跨边界序列化面），与本项收益不成比例；本 ADR 只收敛 LLM / 工具 / agent 主路径，其余模块留待各自批次。</p>
+<p><strong>B. 维持 ProviderError.retryable 布尔 + category 字符串</strong>——<em>否决</em>：category 是自由字符串，消费方无法穷举判定（字符串拼写漂移即静默行为变化）；<code>retry_delay</code> 无处安放；白名单分散问题原样保留。</p>
+<p><strong>C.（选定）CrewErrorKind 枚举 + kind/status/retry_delay 字段 + 类级 RETRYABLE_KINDS 白名单 + provider 层统一分类助手</strong>：判定收敛到一处，枚举穷举可静态检查，Retry-After 不再丢失。</p>
+<h2>决定</h2>
+<ul>
+<li><strong>CrewErrorKind 枚举</strong>：<code>crew/core/errors.py</code> 扩展 <code>CrewErrorKind</code>：stream / timeout / context_window_exceeded / usage_limit / quota / server_overloaded / auth / forbidden / unsupported_capability / tool / config / cancelled / internal / unknown。unknown 兜底，枚举穷举保证新错误不会静默落入错误分支。</li>
+<li><strong>统一重试白名单</strong>：<code>CrewError.is_retryable()</code> 按 kind 判定，类级 <code>RETRYABLE_KINDS</code> 常量一处维护，仅 stream / timeout / internal 可重试；<strong>server_overloaded 与 quota_exceeded 不可重试</strong>——overloaded 状态下对同一服务重试无意义（压测式重试只会加重过载），欠费重试不会恢复额度；429（usage_limit）由分类器显式携带 <code>retryable=True</code> 保留限流退避语义，是白名单之外的唯一例外。调用点不再各自做类名启发式。</li>
+<li><strong>ProviderError 扩展</strong>：增 <code>kind</code> / <code>status</code> / <code>retry_delay</code>；<code>category</code> 保留为兼容别名（映射到 kind 的同名字符串），旧消费方不破坏。重试时优先使用 <code>retry_delay</code>，指数退避只作为无 retry_delay 时的兜底（封顶）。</li>
+<li><strong>provider 统一分类助手</strong>：openai / anthropic provider 共用一份分类逻辑——HTTP status + 错误体解析为 kind；<code>Retry-After</code> 解析为 retry_delay（<strong>header 优先，body 的 retry_delay 字段兜底</strong>），429 / 503 时随 ProviderError 一并携带。resilience.py 的类名白名单废弃，改读 kind。</li>
+<li><strong>error 帧</strong>：<code>ResponseChunk.error</code> 带 <code>{kind, retryable, retry_delay}</code> 结构化 body（code 参数投入使用），不再只有自由文本。</li>
+<li><strong>工具层不加自动重试</strong>：工具失败语义由 agent 主循环裁决（可见、可恢复），本 ADR 不引入工具级自动重试。</li>
+<li><strong>语义对齐声明</strong>：kind 枚举 + is_retryable() + retry_delay 的设计语义与 codex <code>protocol/src/error.rs</code> 的 CodexErr / is_retryable() / retry_delay() 一致（错误类型化、可重试判定、服务端建议退避时长的三件套）。</li>
+</ul>
+<h2>跨平台影响</h2>
+<p>纯 Python 枚举类型与 header/body 解析逻辑，不触碰平台相关系统调用，mac / linux / windows 三平台无差异。</p>
+<h2>回退方式</h2>
+<p><code>category</code> 兼容别名保留，旧消费方（读 category / 自由字符串路径）在迁移窗口内不破坏；回退 = revert 对应 commit，重试白名单与分类助手整体撤销后旧的类名启发式不再存在——故回退动作需在同一批次内整体完成，不做部分回退。</p>
+<p><a href="0046-task-store-async-facade.html">ADR-0046</a> · <a href="../modules/agent.html">Agent 模块</a></p>
+</main></body></html>

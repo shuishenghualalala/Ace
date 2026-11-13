@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0012 · Cron Trigger Context Contributor</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0012 · Cron Trigger Context Contributor</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / Commit 6</div>
+
+  <h2>背景</h2>
+  <p>Agent Runtime 曾根据 <code>Envelope.channel == cron</code> 直接拼装定时任务触发文案。该分支虽然很小，却让 Agent 内核认识 Cron 产品语义；关闭 Cron 调度器也不会撤销这段行为。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>由 Cron 模块提供 <code>cron.trigger.reminder</code> Prompt Contributor。仅在 <code>cron_enabled</code> 时由 Cron bridge Scope 注册；Agent 只运行通用 Prompt Contributor，不再包含 Cron 文案或渠道判断。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>契约</th></tr></thead>
+    <tbody>
+      <tr><td>触发语义与文案</td><td>Cron</td><td>读取 channel 与 <code>cron_job_name</code>，输出单个瞬时 prompt fragment。</td></tr>
+      <tr><td>能力启用</td><td>Host 组合根</td><td>只有 <code>cron_enabled=true</code> 才注册 bridge Scope。</td></tr>
+      <tr><td>匹配与顺序</td><td>Feature Runtime</td><td>Prompt phase、priority 50、仅匹配 cron channel。</td></tr>
+      <tr><td>撤销</td><td>FeatureScope</td><td>应用关闭时 Contributor Token 随 Scope 精确释放。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>行为兼容</h2>
+  <ul>
+    <li>定时任务名、立即执行说明和“不要反问是否到时间”的约束保持原文。</li>
+    <li>当前时间仍由通用动态 reminder 提供，Cron fragment 与其在同一 request view 中合并。</li>
+    <li>普通 Web、CLI 或渠道请求不产生该 fragment。</li>
+    <li>该信息每次触发重新计算，不写入 canonical history。</li>
+  </ul>
+
+  <h2>边界与后续</h2>
+  <p>本次只迁移模型上下文。Cron Store、Scheduler、Tool、Router、Owner mount 和后台 Task 仍由组合根手工管理，阶段 3A 再把它们收敛到支持 restart 的完整 Cron Feature。</p>
+
+  <h2>跨平台</h2>
+  <p>Contributor 只处理 Envelope 字段与普通字符串，不依赖系统时区 API、进程信号或平台路径。</p>
+
+  <div class="nav"><a href="0011-wiki-attachment-context-contributor.html">ADR-0011</a> · <a href="../modules/cron.html">Cron 模块</a> · <a href="../modules/agent.html">Agent 模块</a> · <a href="../../testing/plugin-architecture-stage-2-cron-context.html">测试记录</a></div>
+</div>
+</body>
+</html>

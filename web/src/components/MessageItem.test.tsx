@@ -130,7 +130,7 @@ describe("MessageItem team process timeline", () => {
     expect(html).toContain("思考中");
   });
 
-  it("renders crew::builtin team messages with the built-in Crew identity", () => {
+  it("renders crew::builtin team messages with the Crew avatar", () => {
     const msg: UiMessage = {
       id: "team_crew",
       role: "team_internal",
@@ -142,8 +142,27 @@ describe("MessageItem team process timeline", () => {
 
     const html = renderToStaticMarkup(<MessageItem msg={msg} />);
 
+    expect(html).toContain('class="msg__avatar bot team-internal__avatar"');
     expect(html).toContain("msg-agent-logo");
+    expect(html).not.toContain("msg__avatar--team");
+    expect(html).not.toContain("session__team-logo");
     expect(html).toContain("<strong>Crew</strong>");
-    expect(html).not.toContain("agent-avatar--message");
+  });
+
+  it("renders the team planning turn with the shared black-white Team Logo", () => {
+    const html = renderToStaticMarkup(<MessageItem msg={{
+      id: "team_planning",
+      role: "team_internal",
+      text: "正在规划团队协作。",
+      agentId: "crew::builtin",
+      agentName: "像素开发团队",
+      eventType: "team_planning_progress",
+      displayMode: "collapsible",
+    }} />);
+
+    expect(html).toContain('msg__avatar--team');
+    expect(html).toContain('class="session__team-logo"');
+    expect(html.match(/session__team-logo[^>]*>[\s\S]*?<i><\/i>[\s\S]*?<i><\/i>/)?.[0]).toBeTruthy();
+    expect(html).not.toContain('msg-agent-logo');
   });
 });

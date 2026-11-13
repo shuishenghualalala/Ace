@@ -2,7 +2,7 @@
 
 import pytest
 
-from crew.gateway.hooks import HookRegistry
+from crew.features.hooks import HookRegistry
 
 
 @pytest.mark.asyncio

@@ -20,9 +20,9 @@ from urllib.parse import urlsplit
 from fastapi import Request as FastAPIRequest
 from fastapi import WebSocket
 
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
 from crew.security.settings import strict_security_enabled
 
-LOCAL_OWNER_ACCOUNT_ID = "local"
 REMOTE_AUTH_COOKIE = "crew_auth_session"
 _REMOTE_SESSION_VERSION = 1
 _REMOTE_KEY_DIRECTORY = ".auth"

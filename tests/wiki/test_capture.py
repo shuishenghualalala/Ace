@@ -18,7 +18,7 @@ from crew.wiki.store import FileSystemWikiStore
 def store():
     with tempfile.TemporaryDirectory() as tmp:
         s = FileSystemWikiStore(base_dir=tmp)
-        s.init_kb()
+        s.init_kb("A:uid-a")
         yield s
 
 
@@ -130,7 +130,7 @@ async def test_capture_image_describe_failure_marks_failed(store, monkeypatch):
 
 
 async def test_capture_skips_empty_content(store):
-    assert await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"") is None
+    assert await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"", owner_account_id="A:uid-a") is None
     assert store.list_raws("A:uid-a", "default") == []
 
 
@@ -164,10 +164,164 @@ async def test_capture_document_publish_failure_does_not_break_capture(store):
     assert raw.parse_status == "parsed"
 
 
+async def test_capture_document_publishes_source_before_metadata_finishes(store, monkeypatch):
+    """轻量元数据仍在生成时，全文 Source 页面已经可以被 Wiki 读取。"""
+    import asyncio
+
+    metadata_started = asyncio.Event()
+    release_metadata = asyncio.Event()
+
+    async def _metadata(_provider, _text):
+        metadata_started.set()
+        await release_metadata.wait()
+        return {
+            "summary": "摘要",
+            "tags": ["标签"],
+            "doc_type": "note",
+            "ingest_recommend": True,
+            "ingest_reason": "值得整理",
+        }
+
+    monkeypatch.setattr("crew.wiki.capture.generate_source_metadata", _metadata)
+    compiler = SimpleNamespace(publish_source_page=Mock())
+    task = asyncio.create_task(capture_upload_to_wiki(
+        store,
+        compiler,
+        WikiConfig(),
+        "note.txt",
+        b"hello wiki",
+        owner_account_id="A:uid-a",
+        provider=object(),
+    ))
+
+    await metadata_started.wait()
+    assert compiler.publish_source_page.call_count == 1
+    release_metadata.set()
+    raw = await task
+    assert raw is not None
+    assert compiler.publish_source_page.call_count == 2
+
+
 async def test_capture_never_raises(store, monkeypatch):
     """底层异常（如磁盘错误）被吞掉并返回 None，不影响上传主链路。"""
     monkeypatch.setattr(store, "_source_dir", Mock(side_effect=RuntimeError("disk full")))
     assert (
-        await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"x")
+        await capture_upload_to_wiki(store, None, WikiConfig(), "a.txt", b"x", owner_account_id="A:uid-a")
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# 文本捕获流水线（capture_text_source / save_parsed_source）
+# ---------------------------------------------------------------------------
+
+from crew.wiki.capture import (  # noqa: E402
+    CaptureError,
+    CaptureValidationError,
+    capture_text_source,
+)
+from crew.wiki.compiler import WikiCompiler  # noqa: E402
+
+
+@pytest.fixture
+def compiler(store):
+    from crew.core.mocks import FakeProvider
+
+    return WikiCompiler(store=store, provider=FakeProvider())
+
+
+def test_capture_text_source_classifies_note_by_default(store, compiler):
+    """无来源平台的粘贴文本归为 note。"""
+    outcome = capture_text_source(
+        store, compiler, title="随手记", content="一段普通笔记正文。",
+        owner_account_id="A:uid-a", kb_id="default",
+    )
+    assert outcome.duplicate is None
+    assert outcome.page is not None
+    assert outcome.raw.source_kind == "note"
+    assert outcome.raw.adapter_name == "builtin-text"
+
+
+def test_capture_text_source_classifies_article_for_known_platform(store, compiler):
+    """已知内容平台（web/微信/知乎等）归为 article，与 wiki_capture_text 工具一致。"""
+    outcome = capture_text_source(
+        store, compiler, title="标签页", content="浏览器标签页正文。",
+        owner_account_id="A:uid-a", kb_id="default",
+        source_platform="web", source_url="https://example.com/a",
+    )
+    assert outcome.raw.source_kind == "article"
+    assert outcome.raw.source_platform == "web"
+    assert outcome.raw.source_url == "https://example.com/a"
+
+
+def test_capture_text_source_session_kind(store, compiler):
+    """会话沉淀归为 session，平台与适配器随会话来源。"""
+    outcome = capture_text_source(
+        store, compiler, title="会话 s1", content="## user\n\n你好",
+        owner_account_id="A:uid-a", kb_id="default",
+        source_type="session", session_id="s1",
+    )
+    assert outcome.raw.source_kind == "session"
+    assert outcome.raw.source_platform == "crew"
+    assert outcome.raw.adapter_name == "builtin-session"
+    assert outcome.raw.session_id == "s1"
+
+
+def test_capture_text_source_empty_rejected_before_save(store, compiler):
+    """空标题/内容在落库前拒绝：不带 source_id，store 无残留。"""
+    with pytest.raises(CaptureValidationError) as excinfo:
+        capture_text_source(
+            store, compiler, title="  ", content="",
+            owner_account_id="A:uid-a", kb_id="default",
+        )
+    assert excinfo.value.source_id == ""
+    assert store.list_raws("A:uid-a", "default") == []
+
+
+def test_capture_text_source_quality_failure_is_validation_error(store, compiler):
+    """乱码内容校验失败归为 400 语义（CaptureValidationError 是 ValueError），raw 已落库可挽救。"""
+    with pytest.raises(CaptureValidationError) as excinfo:
+        capture_text_source(
+            store, compiler, title="坏文件", content="abc\ufffd\ufffd\ufffd",
+            owner_account_id="A:uid-a", kb_id="default",
+        )
+    assert isinstance(excinfo.value, ValueError)
+    source_id = excinfo.value.source_id
+    assert source_id.startswith("paste_")
+    assert store.load_raw(source_id, "A:uid-a", "default") is not None
+
+
+def test_capture_text_source_pipeline_failure_carries_source_id(store):
+    """发布等下游失败归为 CaptureError，带出已落库的 source_id 供挽救。"""
+    broken = SimpleNamespace(
+        publish_source_page=Mock(side_effect=RuntimeError("index broken")),
+        finalize_write=Mock(),
+    )
+    with pytest.raises(CaptureError) as excinfo:
+        capture_text_source(
+            store, broken, title="标签页", content="正常正文内容。",
+            owner_account_id="A:uid-a", kb_id="default",
+        )
+    assert "index broken" in str(excinfo.value)
+    source_id = excinfo.value.source_id
+    assert source_id.startswith("paste_")
+    saved = store.load_raw(source_id, "A:uid-a", "default")
+    assert saved is not None
+    assert saved.parse_status == "parsed"
+
+
+def test_capture_text_source_duplicate_skips_publish(store, compiler):
+    """相同内容重复捕获：第二次只落库不发页，duplicate 指向首次来源。"""
+    first = capture_text_source(
+        store, compiler, title="第一份", content="完全相同的正文内容。",
+        owner_account_id="A:uid-a", kb_id="default",
+    )
+    second = capture_text_source(
+        store, compiler, title="第二份", content="完全相同的正文内容。",
+        owner_account_id="A:uid-a", kb_id="default",
+    )
+    assert first.duplicate is None
+    assert second.duplicate is not None
+    assert second.duplicate.id == first.raw.id
+    assert second.page is None
+    assert store.get_source_page(second.raw.id, "A:uid-a", "default") is None

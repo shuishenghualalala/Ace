@@ -9,7 +9,7 @@ Windows system directory) slipped past it. These tests pin cross-platform parity
 
 from __future__ import annotations
 
-from crew.tools.terminal_guard import detect_dangerous_command, detect_hardline_command
+from crew.security.terminal_guard import detect_dangerous_command, detect_hardline_command
 
 
 def test_windows_hardline_blocks_irreversible_system_destruction() -> None:

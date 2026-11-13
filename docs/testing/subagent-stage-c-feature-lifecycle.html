@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Subagent Stage C 测试记录</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}.ok{color:#176b2c}a{color:#245a83}</style></head>
+<body><main>
+<h1>Subagent Stage C · Feature 生命周期测试记录</h1>
+<p>日期：2026-09-17 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 范围：Feature Bundle、Scope 资源所有权、路由、事件与应用装配。</p>
+
+<h2>1. 覆盖面</h2>
+<table><thead><tr><th>测试面</th><th>验证内容</th><th>测试文件</th></tr></thead><tbody>
+  <tr><td>生产装配</td><td><code>product.subagent</code> 激活，DRAIN/RESTART/optional 策略，Agent Factory 依赖，以及 context/event/route 贡献可见。</td><td><code>tests/test_core_features.py</code></td></tr>
+  <tr><td>生命周期事件</td><td>Runtime 产生 <code>run_started</code>/<code>run_settled</code>，Bundle 转换为版本 1 <code>feature_event</code>，第二次 dispatch 不重复消费。</td><td><code>tests/test_subagent_stage_c.py</code></td></tr>
+  <tr><td>停用边界</td><td>Feature 停用后兼容 runtime/active/store 视图清空，route contribution 摘除，后续 route resolve fail-closed。</td><td><code>tests/test_subagent_stage_c.py</code></td></tr>
+  <tr><td>多租户隔离</td><td>active snapshot 和历史 runs 使用同一 owner 口径；不同 owner 无法读取共享 session 的活跃子智能体。</td><td><code>tests/test_subagent_stage_c.py</code></td></tr>
+  <tr><td>兼容回归</td><td>既有 delegate/run/collect、策略、Runtime contract、批量、Stage B、Store 和 external provider 行为保持。</td><td>Stage C 定向回归命令</td></tr>
+</tbody></table>
+
+<h2>2. 执行命令</h2>
+<pre><code>uv run --frozen pytest tests/test_core_features.py tests/test_subagent_stage_c.py -q
+# 11 passed
+
+uv run --frozen pytest tests/test_subagent.py tests/test_subagent_contract.py \
+  tests/test_subagent_policy.py tests/test_subagent_runtime_contract.py \
+  tests/test_subagent_batch.py tests/test_subagent_stage_b.py \
+  tests/test_subagent_store.py tests/test_external_subagent_provider.py -q
+# 150 passed, 2 warnings</code></pre>
+
+<h2>3. 跨平台检查</h2>
+<ul>
+  <li>实现沿用 <code>asyncio</code>、<code>threading.Lock</code>、<code>pathlib</code> 和 SQLite；没有 Unix signal、<code>fork</code>、权限位或平台专用路径拼接。</li>
+  <li>Feature Scope 只使用统一的 async disposer 与 lease，不依赖某个事件循环实现之外的后台线程行为。</li>
+  <li>外部 Provider 的能力仍通过已有的 ServiceKey seam 接入，不改变 Windows/macOS/Linux 的工具协议。</li>
+</ul>
+
+<h2>4. 结论</h2>
+<p class="ok">Stage C 达到交付条件：子智能体内部资源和模型面贡献均归属同一 Feature Generation；停用可撤销装配、关闭资源并让路由 fail-closed；生命周期事件有稳定 envelope 和一次性消费语义；既有 Stage A/B 与 external provider 回归保持通过。</p>
+<p><a href="../backend/modules/subagent.html">模块文档</a> · <a href="../backend/adr/0047-subagent-stage-c-feature-lifecycle.html">ADR-0047</a> · <a href="subagent-stage-b-runlog-depth-notify.html">Stage B 测试</a></p>
+</main></body></html>

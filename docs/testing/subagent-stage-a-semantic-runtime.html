@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Subagent Stage A 测试记录</title>
+<style>body{font:15px/1.7 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}.pending{color:#8a5b00}.ok{color:#176b2c}a{color:#245a83}</style></head>
+<body><main>
+<h1>Subagent Stage A · 语义内核与传输分离测试记录</h1>
+<p>日期：2026-09-16 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 范围：A1–A7。</p>
+<h2>1. 测试目标</h2>
+<table><thead><tr><th>测试面</th><th>覆盖内容</th><th>证据</th></tr></thead><tbody>
+  <tr><td>契约</td><td>五位能力矩阵、未知/重名 Provider、strict name、深度、continuable 方法存在性</td><td><code>test_subagent_runtime_contract.py</code></td></tr>
+  <tr><td>生命周期</td><td>发布失败零残留、chunk error、idle/absolute 双超时、取消、清理失败、重复/并发 dispose</td><td><code>test_subagent_runtime_contract.py</code></td></tr>
+  <tr><td>策略</td><td>父授权交集、access control、黑名单、reserved、preset addition ceiling、模型能力门</td><td><code>test_subagent_policy.py</code></td></tr>
+  <tr><td>Factory</td><td>typed request、Feature service 发布/停用/替换、模型解析</td><td><code>test_agent_factory_feature.py</code></td></tr>
+  <tr><td>兼容</td><td>三个旧工具、前后台、结构化六字段结果、并发上限、preset 与轻量 prompt</td><td><code>test_subagent.py</code>、<code>test_subagent_contract.py</code></td></tr>
+  <tr><td>配置</td><td><code>features.subagent.delegation_mode</code> 的默认值、proactive 与非法值回退</td><td><code>test_config_features_namespace.py</code></td></tr>
+</tbody></table>
+<h2>2. 已执行命令</h2>
+<pre><code>/Users/ahuamao/Documents/Codes/Ace/.venv/bin/ruff check \
+  crew/state/config.py crew/agent/prompt_builder.py crew/agent/runtime.py \
+  crew/app.py crew/agent/subagent tests/test_subagent*.py \
+  tests/test_subagent_policy.py tests/test_agent_factory_feature.py \
+  tests/test_config_features_namespace.py
+
+/Users/ahuamao/Documents/Codes/Ace/.venv/bin/python -m pytest -q \
+  tests/test_agent_factory_feature.py tests/test_subagent_policy.py \
+  tests/test_subagent_runtime_contract.py tests/test_subagent.py \
+  tests/test_subagent_contract.py tests/test_task_runtime.py \
+  tests/test_feature_presets.py tests/test_config_features_namespace.py \
+  tests/gateway/test_wiki_router.py</code></pre>
+<h2>3. 阶段性结果</h2>
+<ul>
+  <li class="ok">Stage A 定向回归：208 项通过（含 Subagent、Factory、Policy、Tasks、Preset、配置、Wiki 专属 preset，以及三个公开工具 schema 的完整兼容快照）。</li>
+  <li class="ok">全仓静态检查：Ruff 通过；<code>compileall</code> 通过；Import Linter 分析 376 个文件、1504 条依赖，9 条契约全部保持。</li>
+  <li class="ok">全量 pytest：受管沙箱内 4545 通过、43 跳过、20 deselected；34 项因禁止 loopback bind、进程检查或 native security runtime 而失败/报错。将涉及的 6 个测试文件在获准的非沙箱环境复跑，共 162 项全部通过，覆盖并消除了这 34 项环境失败；因此有效结果为 4579 通过、43 跳过、20 deselected，0 个代码失败。</li>
+</ul>
+<h2>4. 跨平台检查</h2>
+<ul>
+  <li>实现不使用 POSIX signal、<code>os.fork</code>、Unix 文件锁或权限位。</li>
+  <li>并发与超时均使用 <code>asyncio</code>；配置与文档路径由 <code>pathlib</code>/现有 loader 管理。</li>
+  <li>共享工作区语义由提示词声明，不假定 worktree 或文件系统隔离。</li>
+</ul>
+<h2>5. 结论</h2>
+<p class="ok">阶段 A 的契约、生命周期、权限、兼容与跨模块回归均通过。沙箱权限造成的测试噪声已用同一代码在非沙箱环境逐项复验，不计为产品失败。</p>
+<p><a href="../backend/modules/subagent.html">模块文档</a> · <a href="../backend/adr/0045-subagent-capability-seam.html">ADR-0045</a></p>
+</main></body></html>

@@ -95,11 +95,21 @@ def collect_gate_results(root: Path = ROOT) -> list[dict[str, Any]]:
 
     vlm_policy = gates["vlm-credential-contract"]
     vlm_evidence: dict[str, Any] = {}
-    for slug in ("image-understanding", "video-understanding"):
-        skill_dir = root / "crew" / "skills" / slug
-        source_path = skill_dir / "scripts" / ("image_understand.py" if slug.startswith("image") else "video_understand.py")
+    # 图片理解已内化为 wiki 装配点的进程内实现，契约检查落到 multimodal 模块本体；
+    # 视频理解仍为 crew/skills/ 下的 skill 脚本。
+    vlm_targets: dict[str, tuple[Path, str]] = {
+        "image-understanding": (
+            root / "packages" / "crew-wiki" / "src" / "crew" / "wiki" / "multimodal.py",
+            "in-process",
+        ),
+        "video-understanding": (
+            root / "crew" / "skills" / "video-understanding" / "scripts" / "video_understand.py",
+            _skill_version(root / "crew" / "skills" / "video-understanding"),
+        ),
+    }
+    for slug, (source_path, version) in vlm_targets.items():
         vlm_evidence[slug] = {
-            "version": _skill_version(skill_dir),
+            "version": version,
             "violations": _vlm_credential_violations(source_path),
         }
     results.append(

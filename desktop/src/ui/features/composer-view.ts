@@ -19,14 +19,15 @@ import {
   resetTextareaHeight,
   shouldComposerSend,
 } from './composer-input';
-import { serializeMentionInput } from './composer-mention';
+import { getUserAgentMentions, serializeMentionInput, type UserAgentMention } from './composer-mention';
 import { registerPrimaryComposerRoot } from './composer-scope';
+import { registerRunningIntroTarget } from './running-intro';
 import type { PanelAttachments } from './attachments';
 
 const MAX_INPUT_HEIGHT = 180;
 
 export interface ComposerViewOptions {
-  submit(text: string): void | Promise<void>;
+  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -325,7 +326,10 @@ export function createComposerView(
       ? options.attachments.list().length
       : messages.attachments.length;
     const hasDraft = Boolean(input.value.trim() || attachmentCount);
-    const blocked = !authStore.get().isLoggedIn || !uiStore.get().backendConnected;
+    const ui = uiStore.get();
+    const backendCanSend = ui.backendCanSend
+      || (ui.backendConnected && ui.backendTransportState === 'unknown');
+    const blocked = !authStore.get().isLoggedIn || !backendCanSend;
     input.disabled = blocked;
     send.disabled = blocked || submitting || !hasDraft;
     send.hidden = busy && !hasDraft;
@@ -337,7 +341,7 @@ export function createComposerView(
     editBanner.hidden = !(sessionId && session.editFromIdx[sessionId] != null);
     status.textContent = submitError || (!authStore.get().isLoggedIn
       ? '登录后可发送消息'
-      : (!uiStore.get().backendConnected ? '服务离线' : ''));
+      : (!backendCanSend ? '服务暂不可用' : ''));
     renderQueue();
   };
 
@@ -347,7 +351,10 @@ export function createComposerView(
     submitError = '';
     refresh();
     try {
-      await options.submit(serializeMentionInput(input.value));
+      await options.submit(
+        serializeMentionInput(input.value),
+        getUserAgentMentions(input.value),
+      );
       input.value = '';
       resetTextareaHeight(input);
       input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -403,6 +410,8 @@ export function createComposerView(
   const unsubscribeUi = uiStore.subscribe(refresh);
   const unsubscribeSession = sessionStore.subscribe(refresh);
   const unsubscribeMessages = messageStore.subscribe(refresh);
+  // running-intro 槽位按本实例自己的会话来源注册：主对话与 Wiki 面板各自独立显示。
+  const unregisterRunningIntro = registerRunningIntroTarget(runningSlot, getSessionId);
   refresh();
 
   return {
@@ -418,6 +427,7 @@ export function createComposerView(
       unsubscribeUi();
       unsubscribeSession();
       unsubscribeMessages();
+      unregisterRunningIntro();
       for (const { source, nodes } of movedContext) source.append(...nodes);
       host.replaceChildren();
     },

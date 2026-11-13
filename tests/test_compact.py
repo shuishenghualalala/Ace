@@ -2,25 +2,35 @@
 
 from __future__ import annotations
 
+import logging
+
 from crew.agent.compact import estimate_tokens
 from crew.agent.compact.microcompact import (
     CLEARED_PLACEHOLDER,
     FILE_UNCHANGED_STUB,
+    INSTRUCTION_REPLACED_STUB,
+    RESOURCE_REPLACED_STUB,
     TOOL_SUMMARY_PREFIX,
     micro_compact,
 )
 from crew.agent.compact.pipeline import ContextCompactor
 from crew.agent.compact.store import SummaryState, SummaryStore
-from crew.agent.compact.summary import SUMMARY_MARKER
+from crew.agent.compact.summary import (
+    FULL_SUMMARY_PROMPT,
+    SUMMARY_MARKER,
+    summarize_full,
+)
 from crew.core.errors import ProviderError
-from crew.core.types import ChatResponse, Message, ToolCall
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
+from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
+from crew.core.observability import install_sink
 
 
 # --------------------------------------------------------------------------- #
 # 测试替身
 # --------------------------------------------------------------------------- #
 class FakeProvider:
-    """记录每次 chat 的入参，返回固定摘要。"""
+    """记录每次流式调用的入参，返回固定摘要。"""
 
     def __init__(self, reply: str = "摘要内容") -> None:
         self.reply = reply
@@ -30,17 +40,19 @@ class FakeProvider:
         self.calls.append(messages)
         return ChatResponse(text=self.reply)
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
-        yield  # pragma: no cover
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append(list(messages))
+        yield StreamChunk(delta_text=self.reply, done=True, finish_reason="stop")
 
 
 class BoomProvider:
-    """chat 永远抛异常，用于验证容错。"""
+    """调用永远抛异常，用于验证容错。"""
 
     async def chat(self, messages, tools=None):  # noqa: ANN001
         raise RuntimeError("provider down")
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        raise RuntimeError("provider down")
         yield  # pragma: no cover
 
 
@@ -48,12 +60,38 @@ def _tool_msg(i: int) -> Message:
     return Message.tool(tool_call_id=f"call_{i}", content=f"工具结果{i}" * 50, name="Read")
 
 
+def _test_result_policy(tool_name: str, args: dict) -> ToolResultPolicy:
+    if tool_name in {"Read", "terminal"}:
+        return ToolResultPolicy(ToolResultRetention.TEMPORARY)
+    if tool_name == "file_read":
+        path = str(args.get("path") or "")
+        return ToolResultPolicy(
+            ToolResultRetention.RESOURCE,
+            identity=f"path={path}" if path else "",
+        )
+    if tool_name == "skill_view":
+        name = str(args.get("name") or "")
+        file_path = str(args.get("file_path") or "")
+        if file_path:
+            return ToolResultPolicy(
+                ToolResultRetention.RESOURCE,
+                identity=f"skill={name}|file={file_path}",
+            )
+        return ToolResultPolicy(
+            ToolResultRetention.INSTRUCTION,
+            identity=f"skill={name}",
+        )
+    return ToolResultPolicy()
+
+
 # --------------------------------------------------------------------------- #
 # L1 MicroCompact
 # --------------------------------------------------------------------------- #
 def test_l1_clears_old_tool_results():
     msgs = [Message.user("开始")] + [_tool_msg(i) for i in range(10)]
-    out = micro_compact(msgs, keep_recent_tools=3)
+    out = micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
 
     assert len(out) == len(msgs)  # 长度不变
     tools = [m for m in out if m.role == "tool"]
@@ -68,22 +106,54 @@ def test_l1_clears_old_tool_results():
 
 def test_l1_noop_when_under_threshold():
     msgs = [Message.user("hi")] + [_tool_msg(i) for i in range(3)]
-    out = micro_compact(msgs, keep_recent_tools=6)
+    out = micro_compact(
+        msgs, keep_recent_tools=6, result_policy_resolver=_test_result_policy
+    )
     assert out is msgs  # 同一引用，瞬时 no-op
 
 
 def test_l1_idempotent():
     msgs = [Message.user("开始")] + [_tool_msg(i) for i in range(10)]
-    once = micro_compact(msgs, keep_recent_tools=3)
-    twice = micro_compact(once, keep_recent_tools=3)
+    once = micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
+    twice = micro_compact(
+        once, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
     assert [m.content for m in once] == [m.content for m in twice]
 
 
 def test_l1_does_not_mutate_input():
     msgs = [_tool_msg(i) for i in range(10)]
     before = [m.content for m in msgs]
-    micro_compact(msgs, keep_recent_tools=3)
+    micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
     assert [m.content for m in msgs] == before  # 入参未被修改
+
+
+def test_compact_preview_view_matches_real_l1_without_calling_provider():
+    provider = FakeProvider()
+    comp = ContextCompactor(
+        provider,
+        token_budget=1_000_000,
+        keep_recent_tools=2,
+        max_tool_result_chars=20_000,
+        result_policy_resolver=_test_result_policy,
+    )
+    msgs = [Message.user("开始")] + [_tool_msg(i) for i in range(12)]
+
+    preview = comp.compact_preview_view(msgs)
+    expected = micro_compact(
+        msgs,
+        keep_recent_tools=2,
+        max_tool_result_chars=20_000,
+        result_policy_resolver=_test_result_policy,
+    )
+
+    assert [message.content for message in preview] == [message.content for message in expected]
+    assert estimate_tokens(preview) < estimate_tokens(msgs)
+    assert provider.calls == []
 
 
 # --------------------------------------------------------------------------- #
@@ -104,26 +174,31 @@ def test_l1_file_read_dedup_same_content():
     """相同路径的 file_read 重复返回相同内容时，旧结果用 FILE_UNCHANGED_STUB。"""
     same_result = "相同的文件内容" * 100
     msgs = _file_read_msgs(5, "/tmp/test.txt", lambda _i: same_result)
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
 
     # 最近 1 条保留原样
     assert tools[4].content == same_result
-    # 第 0 条首次出现，保留原内容
-    assert tools[0].content == same_result
-    # 第 1-3 条与最近一次相同，用 stub
+    # 同一资源只保留最新版本，前 4 条相同内容都用 unchanged stub。
     stub = FILE_UNCHANGED_STUB.format(path="/tmp/test.txt")
-    assert all(t.content == stub for t in tools[1:4])
+    assert all(t.content == stub for t in tools[:4])
 
 
 def test_l1_file_read_dedup_different_content():
     """相同路径的 file_read 返回不同内容时，各自保留原内容。"""
     msgs = _file_read_msgs(5, "/tmp/test.txt", lambda i: f"内容版本{i}" * 50)
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
 
-    # 所有内容都不同，不应出现 stub
-    assert all(FILE_UNCHANGED_STUB.split("{", 1)[0] not in t.content for t in tools[:4])
+    # 旧版本明确标记为已被新资源替换，最新版本保持完整。
+    assert all(
+        t.content.startswith(RESOURCE_REPLACED_STUB.split("{", 1)[0])
+        for t in tools[:4]
+    )
     assert tools[4].content == "内容版本4" * 50
 
 
@@ -144,15 +219,16 @@ def test_l1_file_read_dedup_multiple_paths():
         msgs.append(Message.assistant("读B", tool_calls=tc_b))
         msgs.append(Message.tool(tool_call_id=f"call_b_{i}", content=content_b, name="file_read"))
 
-    out = micro_compact(msgs, keep_recent_tools=2)
+    out = micro_compact(
+        msgs, keep_recent_tools=2, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
 
-    # 最近 2 条保留
+    # 每个资源只保留最近版本。
     assert tools[4].content == content_a
     assert tools[5].content == content_b
-    # 前 4 条：第 0 轮首次出现保留，第 1 轮重复用 stub
-    assert tools[0].content == content_a
-    assert tools[1].content == content_b
+    assert tools[0].content == FILE_UNCHANGED_STUB.format(path="/tmp/a.txt")
+    assert tools[1].content == FILE_UNCHANGED_STUB.format(path="/tmp/b.txt")
     assert tools[2].content == FILE_UNCHANGED_STUB.format(path="/tmp/a.txt")
     assert tools[3].content == FILE_UNCHANGED_STUB.format(path="/tmp/b.txt")
 
@@ -162,7 +238,9 @@ def test_l1_non_file_read_tools_use_summary():
     msgs = [Message.user("开始")]
     for i in range(5):
         msgs.append(Message.tool(tool_call_id=f"call_{i}", content=f"terminal结果{i}" * 50, name="terminal"))
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
     assert tools[4].content == "terminal结果4" * 50  # 最近 1 条保留原内容
     # 前 4 条压缩为信息摘要，保留工具名
@@ -170,107 +248,227 @@ def test_l1_non_file_read_tools_use_summary():
     assert all("[terminal]" in m.content for m in tools[:4])
 
 
-def test_l1_no_tool_name_falls_back_to_placeholder():
-    """完全拿不到工具名（无 tool_call_map 且 m.name 为空）时降级为纯占位符。"""
+def test_l1_unknown_tool_defaults_to_important():
+    """拿不到工具名时按重要结果保护，未知插件结果不会被误清理。"""
     msgs = [Message.user("开始")]
     for i in range(5):
         # name="" 且无对应 assistant(tool_calls)
         msgs.append(Message.tool(tool_call_id=f"call_{i}", content=f"结果{i}" * 50, name=""))
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
     assert tools[4].content == "结果4" * 50
-    assert all(m.content == CLEARED_PLACEHOLDER for m in tools[:4])
+    assert all(m.content == f"结果{i}" * 50 for i, m in enumerate(tools))
 
 
 def test_l1_file_read_dedup_idempotent():
     """已包含 FILE_UNCHANGED_STUB 的结果再次压缩应保持不变。"""
     same_result = "相同的文件内容" * 50
     msgs = _file_read_msgs(5, "/tmp/test.txt", lambda _i: same_result)
-    once = micro_compact(msgs, keep_recent_tools=1)
-    twice = micro_compact(once, keep_recent_tools=1)
+    once = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
+    twice = micro_compact(
+        once, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     assert [m.content for m in once] == [m.content for m in twice]
 
 
-def test_l1_file_read_without_tool_call_map_fallback():
-    """file_read 消息找不到 assistant(tool_calls) 且无参数时，用 m.name 生成信息摘要。"""
+def test_l1_resource_without_identity_defaults_to_full_result():
+    """资源缺少稳定标识时不猜测、不清理，避免误删未知内容。"""
     msgs = [
         Message.tool(tool_call_id="call_0", content="文件内容" * 50, name="file_read"),
         Message.tool(tool_call_id="call_1", content="文件内容" * 50, name="file_read"),
     ]
-    out = micro_compact(msgs, keep_recent_tools=1)
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
     tools = [m for m in out if m.role == "tool"]
     assert tools[1].content == "文件内容" * 50  # 最近 1 条保留
-    # 无参数的 file_read 降级为信息摘要（保留工具名 + 内容长度）
-    assert tools[0].content.startswith(TOOL_SUMMARY_PREFIX)
-    assert "[file_read]" in tools[0].content
+    assert tools[0].content == "文件内容" * 50
 
 
-# --------------------------------------------------------------------------- #
-# Post-Compact 文件恢复
-# --------------------------------------------------------------------------- #
-def _build_file_read_history(paths_contents: list[tuple[str, str]]) -> list[Message]:
-    """构造多轮 file_read 历史。"""
+def test_l1_many_temporary_results_do_not_evict_loaded_skill():
+    """Skill 后出现超过保留窗口的并行结果时，完整指令仍对模型可见。"""
+    skill_call = ToolCall(
+        id="skill_call",
+        name="skill_view",
+        arguments={"name": "sites-building"},
+    )
+    skill_content = "完整建站指令" * 100
+    msgs = [
+        Message.user("创建网站"),
+        Message.assistant("读取技能", tool_calls=[skill_call]),
+        Message.tool("skill_call", skill_content, name="skill_view"),
+    ]
+    for i in range(12):
+        msgs.append(
+            Message.tool(
+                tool_call_id=f"terminal_{i}",
+                content=f"临时输出{i}" * 50,
+                name="terminal",
+            )
+        )
+
+    out = micro_compact(
+        msgs, keep_recent_tools=3, result_policy_resolver=_test_result_policy
+    )
+    skill_result = next(m for m in out if m.tool_call_id == "skill_call")
+    terminal_results = [m for m in out if m.name == "terminal"]
+    assert skill_result.content == skill_content
+    assert sum(m.content.startswith(TOOL_SUMMARY_PREFIX) for m in terminal_results) == 9
+
+
+def test_l1_important_result_does_not_consume_temporary_window():
+    """用户回答等重要结果既不被清理，也不挤占临时结果保留窗口。"""
+    msgs = [
+        Message.tool("answer", '{"answers":[{"value":"保留方案A"}]}', name="ask_followup_question"),
+        *[
+            Message.tool(f"terminal_{i}", f"输出{i}" * 50, name="terminal")
+            for i in range(5)
+        ],
+    ]
+    out = micro_compact(
+        msgs, keep_recent_tools=2, result_policy_resolver=_test_result_policy
+    )
+    assert out[0].content == '{"answers":[{"value":"保留方案A"}]}'
+    assert all(m.content.startswith(TOOL_SUMMARY_PREFIX) for m in out[1:4])
+    assert all(not m.content.startswith(TOOL_SUMMARY_PREFIX) for m in out[4:])
+
+
+def test_l1_instruction_keeps_only_latest_loaded_version():
     msgs: list[Message] = []
-    for i, (path, content) in enumerate(paths_contents):
-        msgs.append(Message.user(f"第{i}轮"))
-        tc = [ToolCall(id=f"call_{i}", name="file_read", arguments={"path": path})]
+    for i, content in enumerate(("旧版指令", "新版指令")):
+        call = ToolCall(
+            id=f"skill_{i}",
+            name="skill_view",
+            arguments={"name": "sites-building"},
+        )
+        msgs.extend(
+            [
+                Message.assistant("读取技能", tool_calls=[call]),
+                Message.tool(call.id, content, name="skill_view"),
+            ]
+        )
+    out = micro_compact(
+        msgs, keep_recent_tools=1, result_policy_resolver=_test_result_policy
+    )
+    tools = [m for m in out if m.role == "tool"]
+    assert tools[0].content == INSTRUCTION_REPLACED_STUB.format(
+        identity="skill=sites-building"
+    )
+    assert tools[1].content == "新版指令"
+
+
+# --------------------------------------------------------------------------- #
+# Post-Compact 文件恢复（按 path 去重 + 磁盘重读最新内容）
+# --------------------------------------------------------------------------- #
+def _build_file_read_history(paths_args: list[tuple[str, dict]]) -> list[Message]:
+    """构造多轮 file_read 历史（工具结果内容是压缩时的旧快照）。"""
+    msgs: list[Message] = []
+    for i, (path, args) in enumerate(paths_args):
+        tc = [ToolCall(id=f"call_{i}", name="file_read", arguments={"path": path, **args})]
         msgs.append(Message.assistant("读取文件", tool_calls=tc))
-        msgs.append(Message.tool(tool_call_id=f"call_{i}", content=content, name="file_read"))
+        msgs.append(Message.tool(tool_call_id=f"call_{i}", content=f"旧快照{i}", name="file_read"))
     return msgs
 
 
-def test_post_compact_collects_recent_file_contents():
-    """从 old 段中收集最近读取的文件内容。"""
-    from crew.agent.compact.post_compact import collect_recent_file_contents
+def test_post_compact_collects_recent_file_reads_dedups_shards(tmp_path):
+    """同一文件的多个 offset/limit 分片合并为单个文件级条目（保留最后一次分片参数）。"""
+    from crew.agent.compact.post_compact import collect_recent_file_reads
+
+    p = str(tmp_path / "a.txt")
+    msgs = _build_file_read_history([
+        (p, {"offset": 1, "limit": 100}),
+        (p, {"offset": 101, "limit": 100}),
+    ])
+    reads = collect_recent_file_reads(msgs, max_files=3)
+    assert len(reads) == 1
+    assert reads[0][0] == p
+    assert reads[0][1]["offset"] == 101
+
+
+def test_post_compact_file_limit_uses_actual_read_order():
+    """文件恢复按最后读取顺序选择，而不是按路径字母顺序。"""
+    from crew.agent.compact.post_compact import collect_recent_file_reads
 
     msgs = _build_file_read_history([
-        ("/tmp/a.txt", "A 旧内容"),
-        ("/tmp/a.txt", "A 新内容"),
-        ("/tmp/b.txt", "B 内容"),
+        ("/tmp/z-first.txt", {}),
+        ("/tmp/a-latest.txt", {}),
     ])
-    contents = collect_recent_file_contents(msgs, max_files=3, max_chars_per_file=5000)
-    assert contents == {"/tmp/a.txt": "A 新内容", "/tmp/b.txt": "B 内容"}
+    reads = collect_recent_file_reads(msgs, max_files=1)
+    assert [path for path, _args in reads] == ["/tmp/a-latest.txt"]
 
 
-def test_post_compact_limits_file_count_and_length():
-    """最多保留 N 个文件，且单文件超长时截断。"""
-    from crew.agent.compact.post_compact import collect_recent_file_contents
-
-    msgs = _build_file_read_history([
-        ("/tmp/a.txt", "A"),
-        ("/tmp/b.txt", "B"),
-        ("/tmp/c.txt", "C"),
-        ("/tmp/d.txt", "D" * 100),
-    ])
-    contents = collect_recent_file_contents(msgs, max_files=2, max_chars_per_file=10)
-    # 只保留最近 2 个文件（按路径排序后取最后）
-    assert set(contents.keys()) == {"/tmp/c.txt", "/tmp/d.txt"}
-    assert contents["/tmp/d.txt"].startswith("D" * 10)
-    assert "内容已截断" in contents["/tmp/d.txt"]
-
-
-def test_post_compact_builds_attachment_message():
-    """构造的附件消息包含文件路径和内容。"""
+def test_post_compact_rereads_latest_content_from_disk(tmp_path):
+    """恢复内容来自磁盘最新内容，而非压缩时的旧快照。"""
     from crew.agent.compact.post_compact import (
         POST_COMPACT_FILES_MARKER,
         build_post_compact_file_attachments,
     )
 
-    msgs = _build_file_read_history([
-        ("/tmp/a.txt", "A 内容"),
-        ("/tmp/b.txt", "B 内容"),
-    ])
-    attachments = build_post_compact_file_attachments(msgs, max_files=3, max_chars_per_file=5000)
+    p = tmp_path / "a.txt"
+    p.write_text("磁盘上的新内容", encoding="utf-8")
+    msgs = _build_file_read_history([(str(p), {})])
+    attachments = build_post_compact_file_attachments(msgs)
     assert len(attachments) == 1
     assert attachments[0].role == "system"
     assert POST_COMPACT_FILES_MARKER in attachments[0].content
-    assert "### 文件：/tmp/a.txt" in attachments[0].content
-    assert "A 内容" in attachments[0].content
-    assert "B 内容" in attachments[0].content
+    assert "磁盘上的新内容" in attachments[0].content
+    assert "旧快照0" not in attachments[0].content
+
+
+def test_post_compact_file_attachments_respect_shard_pagination(tmp_path):
+    """按原 offset/limit 分片重读：只恢复当时读取的行区间。"""
+    from crew.agent.compact.post_compact import build_post_compact_file_attachments
+
+    p = tmp_path / "lines.txt"
+    p.write_text("\n".join(f"第{i}行" for i in range(1, 11)), encoding="utf-8")
+    msgs = _build_file_read_history([(str(p), {"offset": 3, "limit": 2})])
+    attachments = build_post_compact_file_attachments(msgs)
+    assert len(attachments) == 1
+    assert "第3行" in attachments[0].content
+    assert "第4行" in attachments[0].content
+    assert "第1行" not in attachments[0].content
+
+
+def test_post_compact_file_attachments_skip_missing_files(tmp_path):
+    """已删除的文件跳过；全部不可读时返回空列表。"""
+    from crew.agent.compact.post_compact import build_post_compact_file_attachments
+
+    alive = tmp_path / "alive.txt"
+    alive.write_text("还在", encoding="utf-8")
+    msgs = _build_file_read_history([
+        (str(tmp_path / "gone.txt"), {}),
+        (str(alive), {}),
+    ])
+    attachments = build_post_compact_file_attachments(msgs)
+    assert len(attachments) == 1
+    assert "还在" in attachments[0].content
+    assert "gone.txt" not in attachments[0].content
+
+    msgs_gone = _build_file_read_history([(str(tmp_path / "gone.txt"), {})])
+    assert build_post_compact_file_attachments(msgs_gone) == []
+
+
+def test_post_compact_file_attachments_survive_multiple_compactions(tmp_path):
+    """上一轮压缩生成的文件附件在下一轮压缩时仍被识别并重读。"""
+    from crew.agent.compact.post_compact import build_post_compact_file_attachments
+
+    p = tmp_path / "a.txt"
+    p.write_text("跨压缩存活", encoding="utf-8")
+    first = build_post_compact_file_attachments(_build_file_read_history([(str(p), {})]))
+    assert len(first) == 1
+
+    # 第二轮压缩：old 段只剩上一轮的附件（原 file_read tool_calls 已被摘要掉）
+    second = build_post_compact_file_attachments([Message.user("后续"), *first])
+    assert len(second) == 1
+    assert "跨压缩存活" in second[0].content
 
 
 def test_post_compact_no_attachments_when_no_files():
-    """没有 file_read 结果时返回空列表。"""
+    """没有 file_read 调用时返回空列表。"""
     from crew.agent.compact.post_compact import build_post_compact_file_attachments
 
     msgs = [
@@ -279,6 +477,70 @@ def test_post_compact_no_attachments_when_no_files():
     ]
     attachments = build_post_compact_file_attachments(msgs)
     assert attachments == []
+
+
+def test_post_compact_protected_results_survive_multiple_compactions():
+    from crew.agent.compact.post_compact import (
+        POST_COMPACT_RESULTS_MARKER,
+        build_post_compact_attachments,
+    )
+
+    skill_call = ToolCall(
+        id="skill", name="skill_view", arguments={"name": "sites-building"}
+    )
+    answer_call = ToolCall(
+        id="answer", name="ask_followup_question", arguments={"questions": []}
+    )
+    msgs = [
+        Message.assistant("读取", tool_calls=[skill_call, answer_call]),
+        Message.tool("skill", "必须遵循的完整 Skill 指令", name="skill_view"),
+        Message.tool("answer", "用户选择：方案 A", name="ask_followup_question"),
+    ]
+    first = build_post_compact_attachments(
+        msgs,
+        result_policy_resolver=_test_result_policy,
+        max_resources=3,
+        max_chars_per_resource=5000,
+    )
+    second = build_post_compact_attachments(
+        first,
+        result_policy_resolver=_test_result_policy,
+        max_resources=3,
+        max_chars_per_resource=5000,
+    )
+
+    assert len(first) == len(second) == 2
+    assert all(POST_COMPACT_RESULTS_MARKER in m.content for m in second)
+    assert any("完整 Skill 指令" in m.content for m in second)
+    assert any("用户选择：方案 A" in m.content for m in second)
+
+
+def test_registry_exposes_skill_and_unknown_tool_result_policies():
+    from crew.tools.registry import Registry
+    from crew.tools.skills_tools import register_skills_tools
+
+    registry = Registry()
+    register_skills_tools(registry)
+    registry.register(
+        name="plugin_unknown",
+        schema={"name": "plugin_unknown", "parameters": {}},
+        handler=lambda _args: "result",
+    )
+
+    main = registry.result_policy("skill_view", {"name": "sites-building"})
+    explicit_main = registry.result_policy(
+        "skill_view", {"name": "sites-building", "file_path": "SKILL.md"}
+    )
+    reference = registry.result_policy(
+        "skill_view",
+        {"name": "sites-building", "file_path": "references/runtime.md"},
+    )
+    unknown = registry.result_policy("plugin_unknown", {})
+
+    assert main.retention is ToolResultRetention.INSTRUCTION
+    assert explicit_main.retention is ToolResultRetention.INSTRUCTION
+    assert reference.retention is ToolResultRetention.RESOURCE
+    assert unknown.retention is ToolResultRetention.IMPORTANT
 
 
 # --------------------------------------------------------------------------- #
@@ -343,6 +605,25 @@ def test_summary_keeps_short_tool_arguments_intact():
     assert "内容已截断" not in transcript
 
 
+def test_summary_web_extract_uses_url_argument():
+    """microcompact 摘要应读取 web_extract 的 url 参数（schema 是单数 url）。"""
+    from crew.agent.compact.microcompact import TOOL_SUMMARY_PREFIX, _summarize_tool_result
+
+    summary = _summarize_tool_result(
+        "web_extract", {"url": "https://example.com/a"}, "x" * 100
+    )
+
+    assert summary == f"{TOOL_SUMMARY_PREFIX}[web_extract] https://example.com/a (100 chars)"
+
+
+def test_summary_web_extract_missing_url_falls_back_to_placeholder():
+    from crew.agent.compact.microcompact import _summarize_tool_result
+
+    summary = _summarize_tool_result("web_extract", {}, "x" * 10)
+
+    assert "[web_extract] ? (10 chars)" in summary
+
+
 # --------------------------------------------------------------------------- #
 # L1 单条 tool result 预算
 # --------------------------------------------------------------------------- #
@@ -377,18 +658,354 @@ def test_l1_keeps_short_tool_result_unchanged():
 # 边界对齐
 # --------------------------------------------------------------------------- #
 def test_safe_split_does_not_break_tool_pairs():
-    # assistant(tool_calls) 后跟 tool 结果，split 必须落在 user 边界
+    # assistant(tool_calls) 后跟 tool 结果，split 不得落在 tool 上切断配对
     msgs = [
         Message.user("q1"),
-        Message.assistant("", [ToolCall(id="c1", name="Read")]),
+        Message.assistant("local", [ToolCall(id="c1", name="Read")]),
         Message.tool("c1", "结果"),
         Message.user("q2"),
-        Message.assistant("", [ToolCall(id="c2", name="Read")]),
+        Message.assistant("local", [ToolCall(id="c2", name="Read")]),
         Message.tool("c2", "结果"),
     ]
     split = ContextCompactor._safe_split(msgs, keep_recent=2)
-    # 倒数 2 是 [assistant, tool]，向前回退到 user 边界（下标 3）
-    assert msgs[split].role == "user"
+    # 倒数 2 是 [assistant, tool]：assistant 是安全边界，配对完整保留在 recent
+    assert split == 4
+    assert msgs[split].role == "assistant"
+    assert [m.role for m in msgs[split:]] == ["assistant", "tool"]
+
+
+def test_safe_split_accepts_assistant_boundary_within_long_turn():
+    """单个长回合内只有回合开头一个 user 边界：split 落在 assistant 边界，
+    回合内早期迭代由此可被摘要（修复前退回回合开头，整个回合受保护）。"""
+    msgs = [Message.user("长回合开始")]
+    for i in range(20):
+        msgs.append(Message.assistant(f"步骤{i}", [ToolCall(id=f"c{i}", name="terminal")]))
+        msgs.append(Message.tool(f"c{i}", f"输出{i}"))
+    split = ContextCompactor._safe_split(msgs, keep_recent=6)
+    assert split > 1  # 未退回回合开头的 user，也未降级为 0
+    assert msgs[split].role == "assistant"  # recent 不以 tool 开头：配对完整
+
+
+def test_safe_split_falls_back_without_boundary():
+    """没有任何 user/assistant 边界时安全降级为 0（不压缩）。"""
+    msgs = [Message.system("sys")] + [Message.tool(f"c{i}", "结果") for i in range(10)]
+    assert ContextCompactor._safe_split(msgs, keep_recent=2) == 0
+
+
+# --------------------------------------------------------------------------- #
+# overflow 兜底：无模型剪枝 + compact_now 手动入口
+# --------------------------------------------------------------------------- #
+def test_prune_tool_results_keeps_head_and_tail():
+    """单条 tool result 超 8192 字符时无模型剪枝：保留头 4096 + 尾 1024，幂等。"""
+    from crew.agent.compact.microcompact import prune_tool_results
+
+    long_content = "A" * 20000
+    msgs = [
+        Message.user("执行"),
+        Message.assistant("执行", tool_calls=[ToolCall(id="c1", name="terminal")]),
+        Message.tool("c1", long_content, name="terminal"),
+    ]
+    out = prune_tool_results(msgs)
+    pruned = [m for m in out if m.role == "tool"][0].content
+    assert len(pruned) < len(long_content)
+    assert pruned.startswith("A" * 100)
+    assert pruned.endswith("A" * 100)
+    assert "tool result 已截断" in pruned
+    # 幂等：二次剪枝不再改写
+    out2 = prune_tool_results(out)
+    assert [m.content for m in out2] == [m.content for m in out]
+
+
+def test_prune_tool_results_leaves_short_results_untouched():
+    from crew.agent.compact.microcompact import prune_tool_results
+
+    msgs = [Message.tool("c1", "短结果", name="terminal")]
+    assert prune_tool_results(msgs) is msgs  # 同一引用，无超长线
+
+
+async def test_compact_now_runs_without_watermark():
+    """手动 compact_now 不依赖水位/防抖/断路器：低水位历史也能立即压缩。"""
+    provider = FakeProvider(reply="手动摘要")
+    comp = ContextCompactor(provider, token_budget=10**9, keep_recent=2)
+    history = await _big_history(10)
+    view, changed = await comp.compact_now(history, "sess-now")
+    assert changed
+    assert view[0].content.startswith(SUMMARY_MARKER)
+    assert len(provider.calls) == 1
+    # L2 状态已写入：下一轮低水位也能复用
+    assert comp._get_state("sess-now") is not None
+
+
+async def test_compact_observation_keeps_owner_and_session_context():
+    class Sink:
+        def __init__(self):
+            self.records = []
+
+        def accept(self, record):
+            self.records.append(record)
+            return True
+
+        def capture_payload(self, *args, **kwargs):
+            raise AssertionError("compact should not capture payloads")
+
+        def flush(self, timeout=None):
+            return True
+
+        def close(self, timeout=None):
+            return True
+
+    sink = Sink()
+    install_sink(sink)
+    try:
+        comp = ContextCompactor(FakeProvider(), token_budget=10**9)
+        await comp.compact_view([], session_id="session-a", owner_account_id="owner-a")
+        assert sink.records
+        assert all(record.context.owner_account_id == "owner-a" for record in sink.records)
+        assert all(record.context.session_id == "session-a" for record in sink.records)
+    finally:
+        install_sink(None)
+
+
+async def test_compact_now_returns_unchanged_when_nothing_to_compact():
+    provider = FakeProvider(reply="手动摘要")
+    comp = ContextCompactor(provider, token_budget=10**9, keep_recent=50)
+    history = await _big_history(2)
+    view, changed = await comp.compact_now(history, "sess-now2")
+    assert not changed
+    assert len(provider.calls) == 0
+    assert view[0].content.startswith("问题0")
+
+
+# --------------------------------------------------------------------------- #
+# 文件清单：从工具历史提取 read/modified，作为持久会话信息跨轮继承
+# --------------------------------------------------------------------------- #
+def _history_with_file_ops() -> list[Message]:
+    return [
+        Message.user("看下文件"),
+        Message.assistant(
+            "读取",
+            tool_calls=[ToolCall(id="r1", name="file_read", arguments={"path": "/a.py"})],
+        ),
+        Message.tool("r1", "内容", name="file_read"),
+        Message.assistant(
+            "再读并修改",
+            tool_calls=[
+                ToolCall(id="r2", name="file_read", arguments={"path": "/b.py"}),
+                ToolCall(id="w1", name="file_write", arguments={"path": "/a.py"}),
+                ToolCall(id="p1", name="patch", arguments={"path": "/c.py"}),
+            ],
+        ),
+        Message.tool("r2", "内容", name="file_read"),
+        Message.tool("w1", "已写", name="file_write"),
+        Message.tool("p1", "已改", name="patch"),
+    ]
+
+
+def test_extract_file_manifest_read_and_modified():
+    from crew.agent.compact.file_manifest import extract_file_manifest
+
+    read, modified = extract_file_manifest(_history_with_file_ops())
+    assert read == ["/a.py", "/b.py"]  # 首次出现顺序去重
+    assert modified == ["/a.py", "/c.py"]
+
+
+def test_upsert_file_manifest_appends_then_refreshes_in_place():
+    from crew.agent.compact.file_manifest import (
+        FILE_MANIFEST_MARKER,
+        is_file_manifest_message,
+        upsert_file_manifest,
+    )
+
+    history = _history_with_file_ops()
+    upsert_file_manifest(history)
+    manifests = [m for m in history if is_file_manifest_message(m)]
+    assert len(manifests) == 1
+    manifest = manifests[0]
+    assert manifest.is_meta
+    assert manifest.content.startswith(FILE_MANIFEST_MARKER)
+    assert "/a.py" in manifest.content and "/c.py" in manifest.content
+
+    # 新工具调用出现 → 原地刷新，不追加第二条
+    history.append(
+        Message.assistant(
+            "又改了",
+            tool_calls=[ToolCall(id="w2", name="file_write", arguments={"path": "/d.py"})],
+        )
+    )
+    upsert_file_manifest(history)
+    manifests = [m for m in history if is_file_manifest_message(m)]
+    assert len(manifests) == 1
+    assert "/d.py" in manifests[0].content
+
+
+def test_upsert_file_manifest_noop_without_file_ops():
+    from crew.agent.compact.file_manifest import upsert_file_manifest
+
+    history = [Message.user("hi"), Message.assistant("hello")]
+    assert upsert_file_manifest(history) is history
+    assert len(history) == 2  # 无文件操作不注入空清单
+
+
+async def test_compact_reinjects_shadowed_file_manifest():
+    """压缩把清单摘要进 old 段时，清单作为持久会话信息重新注入视图。"""
+    from crew.agent.compact.file_manifest import is_file_manifest_message, upsert_file_manifest
+
+    provider = FakeProvider(reply="压缩摘要")
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
+    history = _history_with_file_ops()
+    # 模拟 runtime：清单已随 canonical 注入
+    upsert_file_manifest(history)
+    # 再垫几轮把清单挤进 old 段
+    for i in range(6):
+        history.append(Message.user(f"后续问题{i} " * 100))
+        history.append(Message.assistant(f"后续回答{i} " * 100))
+
+    out = await comp.maybe_compact(history, "sess-manifest")
+    assert out[0].content.startswith(SUMMARY_MARKER)
+    # 清单消息在压缩后的视图里存活（被重新注入）
+    assert any(is_file_manifest_message(m) for m in out)
+    manifest = next(m for m in out if is_file_manifest_message(m))
+    assert "/a.py" in (manifest.content or "")
+
+
+
+def test_safe_split_pairing_counter_falls_back_toward_head():
+    """切点落在「未闭合 toolCall 之后」的 assistant 上时（配对余额非 0），
+    向头部回退到最近余额为 0 的边界，绝不拆散 toolCall/results 组。"""
+    msgs = [
+        Message.user("q1"),
+        Message.assistant("回答1"),
+        Message.user("q2"),
+        Message.assistant("有调用无结果", [ToolCall(id="c1", name="terminal")]),
+        Message.assistant("接续文本"),
+        Message.user("q3"),
+    ]
+    # 倒数 2 处是 assistant「接续文本」：角色上是边界，但前面 c1 未闭合（余额 +1），
+    # 必须回退到「有调用无结果」之前（bal=0）而不是落在「接续文本」。
+    split = ContextCompactor._safe_split(msgs, keep_recent=2)
+    assert split == 3
+    assert msgs[split].role == "assistant"
+    # recent 以未闭合调用自身开头：call 与（未来的）result 不会被切点拆散
+    assert msgs[split].tool_calls[0].id == "c1"
+
+
+def test_safe_split_open_pair_blocks_cut_before_tool_result():
+    """cut 不得出现在 tool result 前（call 在 old、result 在 recent）。"""
+    msgs = [
+        Message.user("q1"),
+        Message.assistant("调用", [ToolCall(id="c1", name="terminal")]),
+        Message.tool("c1", "结果1"),
+        Message.assistant("再次调用", [ToolCall(id="c2", name="terminal")]),
+        Message.tool("c2", "结果2"),
+        Message.user("q2"),
+        Message.assistant("回答"),
+    ]
+    for keep in range(1, 4):
+        split = ContextCompactor._safe_split(msgs, keep_recent=keep)
+        if split > 0:
+            assert msgs[split].role in ("user", "assistant")
+
+
+async def test_summary_must_be_smaller_or_transaction_fails():
+    """「摘要必须更小」校验失败 → 整个压缩事务失败，历史不变，且计一次失败。"""
+    provider = FakeProvider(reply="冗长摘要 " * 5000)  # 比任何 old 段都长
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
+    history = await _big_history(10)
+
+    out = await comp.maybe_compact(history, "sess-smaller")
+    assert out is history or [m.content for m in out] == [m.content for m in history]
+    assert out[0].content == history[0].content
+    # 事务失败：无摘要状态写入，断路器计数 +1
+    assert comp._get_state("sess-smaller") is None
+    assert comp._failure_counts[("local", "sess-smaller")] == 1
+
+
+async def test_compact_pairing_fallback_rejects_unbalanced_cut():
+    """_safe_split 返回的切点若落在 tool result 上（异常输入），提交前再校验回退。"""
+    provider = FakeProvider(reply="短摘要")
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
+    history = [
+        Message.user("q1 " * 50),
+        Message.assistant("调用1", [ToolCall(id="c1", name="terminal")]),
+        Message.tool("c1", "结果1 " * 50),
+        Message.user("q2 " * 50),
+        Message.assistant("调用2", [ToolCall(id="c2", name="terminal")]),
+        Message.tool("c2", "结果2 " * 50),
+    ]
+    original_safe_split = ContextCompactor._safe_split
+
+    def _lying_split(messages, keep_recent):  # 模拟异常选区：切点落在 tool result 上
+        return len(messages) - 1
+
+    ContextCompactor._safe_split = staticmethod(_lying_split)
+    try:
+        out = await comp.maybe_compact(history, "sess-pairing")
+    finally:
+        ContextCompactor._safe_split = staticmethod(original_safe_split)
+    # 回退到最近余额为 0 的消息边界（调用2 之前）：recent 以未闭合配对的 call 开头，
+    # result 紧随其后，绝不拆散；q2 被正常摘要。
+    assert out[0].role == "system" and out[0].content.startswith(SUMMARY_MARKER)
+    assert out[1].role == "assistant" and out[1].tool_calls[0].id == "c2"
+    assert out[2].role == "tool" and out[2].tool_call_id == "c2"
+    state = comp._get_state("sess-pairing")
+    assert state is not None and state.covered_count == 4
+
+
+def test_builtin_file_read_is_temporary():
+    """内置 file_read 声明为 TEMPORARY：旧分片由 L1 清理，恢复靠磁盘重读。"""
+    from crew.tools.builtin import register_builtin_tools
+    from crew.tools.registry import Registry
+
+    registry = Registry()
+    register_builtin_tools(registry)
+    policy = registry.result_policy("file_read", {"path": "/tmp/x", "offset": 1, "limit": 10})
+    assert policy.retention is ToolResultRetention.TEMPORARY
+
+
+async def test_compact_view_compacts_within_single_long_turn():
+    """单个长回合（一次 user + 多次工具迭代）内超水位时，L3 能在 assistant 边界下刀。"""
+    provider = FakeProvider(reply="短摘要")
+    comp = ContextCompactor(provider, token_budget=10, keep_recent=4)
+    msgs = [Message.user("长回合")]
+    for i in range(12):
+        msgs.append(Message.assistant(f"步骤{i}", [ToolCall(id=f"c{i}", name="terminal")]))
+        msgs.append(Message.tool(f"c{i}", f"输出{i} " * 100))
+    out = await comp.compact_view(msgs, "intra-turn")
+    assert len(provider.calls) == 1  # 修复前：找不到 user 边界，L3 永不触发
+    assert out[0].content.startswith(SUMMARY_MARKER)
+    # 最近的工具迭代逐字保留
+    assert any("输出11" in (m.content or "") for m in out)
+
+
+async def test_summary_message_includes_history_hint():
+    """摘要消息附完整历史回溯指引（数据库路径 + session_id）。"""
+    provider = FakeProvider(reply="摘要")
+    comp = ContextCompactor(
+        provider, token_budget=10, keep_recent=2, history_db_path="/data/crew.db"
+    )
+    history = await _big_history(10)
+    out = await comp.maybe_compact(history, "sess-hint")
+    assert "crew.db" in out[0].content
+    assert "sess-hint" in out[0].content
+
+
+def test_post_compact_attachment_budgets_configurable():
+    """指令/重要结论的恢复条数预算可由调用方配置（默认 5/8，最近优先）。"""
+    from crew.agent.compact.post_compact import build_post_compact_attachments
+
+    msgs: list[Message] = []
+    for i in range(5):
+        call = ToolCall(id=f"a{i}", name="ask_followup_question", arguments={})
+        msgs.append(Message.assistant("问", tool_calls=[call]))
+        msgs.append(Message.tool(f"a{i}", f"回答{i}", name="ask_followup_question"))
+    out = build_post_compact_attachments(
+        msgs,
+        result_policy_resolver=_test_result_policy,
+        max_important=2,
+    )
+    assert len(out) == 2
+    assert any("回答4" in m.content for m in out)  # 最近优先
+    assert not any("回答0" in m.content for m in out)
 
 
 # --------------------------------------------------------------------------- #
@@ -506,8 +1123,107 @@ class OverflowThenOkProvider:
             raise ProviderError("maximum context length exceeded", retryable=False)
         return ChatResponse(text=self.reply)
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
-        yield  # pragma: no cover
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append(list(messages))
+        if len(self.calls) <= self.fail_times:
+            raise ProviderError("maximum context length exceeded", retryable=False)
+        yield StreamChunk(delta_text=self.reply, done=True, finish_reason="stop")
+
+
+# --------------------------------------------------------------------------- #
+# 摘要调用策略：KV 前缀复用 / 隔离 + purpose + maxTokens 封顶
+# --------------------------------------------------------------------------- #
+class DeepSeekStyleProvider:
+    """记录流式调用入参；model 含 deepseek → 命中前缀复用策略。"""
+
+    model = "deepseek-chat"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
+        return ChatResponse(text="结构化摘要")
+
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
+        yield StreamChunk(delta_text="结构化摘要", done=True, finish_reason="stop")
+
+
+class TruncatingProvider(DeepSeekStyleProvider):
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls.append({"messages": list(messages), "tools": tools, "kwargs": dict(kwargs)})
+        yield StreamChunk(delta_text="半截摘要", done=True, finish_reason="length")
+
+
+async def _old_segment(n: int = 6) -> list[Message]:
+    return await _big_history(n)
+
+
+async def test_summary_prefix_reuse_replays_conversation_prefix(caplog):
+    """DeepSeek/Anthropic 前缀缓存场景：复放原 system+消息前缀，指令作最后一条 user。"""
+    provider = DeepSeekStyleProvider()
+    old = await _old_segment()
+    with caplog.at_level(logging.INFO, logger="crew.providers.aux"):
+        out = await summarize_full(
+            provider, old,
+            system_prompt="原会话系统提示",
+            tools=[{"type": "function", "function": {"name": "terminal"}}],
+            max_tokens=4096,
+        )
+    assert out == "结构化摘要"
+    call = provider.calls[0]
+    req = call["messages"]
+    assert req[0].role == "system" and req[0].content == "原会话系统提示"
+    assert req[-1].role == "user"
+    assert "压缩" in (req[-1].content or "")
+    # 原消息前缀被复放（结构化 Message，而非纯文本 transcript）
+    replayed = req[1:-1]
+    assert len(replayed) == len(old)
+    assert replayed[0].content == old[0].content
+    # tools 随前缀透传以命中 KV cache
+    assert call["tools"] is not None
+    # maxTokens 封顶；purpose 经 stream_aux 计量日志打点（不进 provider 请求体）
+    assert call["kwargs"]["max_tokens"] == 4096
+    records = [r for r in caplog.records if r.name == "crew.providers.aux"]
+    assert any("purpose=compaction" in r.getMessage() for r in records)
+
+
+async def test_summary_isolated_for_unknown_provider():
+    """其他 provider 走隔离调用：独立压缩器 system、不带 tools、不透传前缀。"""
+    provider = FakeProvider(reply="结构化摘要")
+    old = await _old_segment()
+    out = await summarize_full(
+        provider, old,
+        system_prompt="原会话系统提示",
+        tools=[{"type": "function"}],
+        max_tokens=4096,
+    )
+    assert out == "结构化摘要"
+    req = provider.calls[0]
+    assert req[0].role == "system" and "对话历史压缩器" in req[0].content
+    assert req[0].content == FULL_SUMMARY_PROMPT
+    # 原前缀不复放：只有压缩器 system + 单条 transcript user
+    assert len(req) == 2
+    assert "问题0" in (req[1].content or "")
+
+
+async def test_summary_prefix_reuse_disabled_by_config():
+    """summary_prefix_reuse=False 时即使 DeepSeek provider 也走隔离调用。"""
+    provider = DeepSeekStyleProvider()
+    old = await _old_segment()
+    await summarize_full(provider, old, system_prompt="原系统", prefix_reuse=False)
+    req = provider.calls[0]["messages"]
+    assert req[0].content == FULL_SUMMARY_PROMPT
+    assert provider.calls[0]["tools"] is None
+
+
+async def test_summary_truncation_is_failure():
+    """maxTokens 截断（finish_reason=length）视为失败，返回 None。"""
+    provider = TruncatingProvider()
+    old = await _old_segment()
+    assert await summarize_full(provider, old, max_tokens=8192) is None
+    assert len(provider.calls) == 1  # 截断不触发 PTL 砍头重试
 
 
 async def test_l3_ptl_truncates_head_and_retries():
@@ -539,7 +1255,7 @@ async def test_anti_thrash_skips_after_two_ineffective():
     provider = FakeProvider()
     comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
     # 预置：该 session 已连续 2 次无效压缩
-    comp._mem[("", "t1")] = SummaryState(text="旧摘要", covered_count=0, ineffective_count=2)
+    comp._mem[("local", "t1")] = SummaryState(text="旧摘要", covered_count=0, ineffective_count=2)
     history = await _big_history(10)
     out = await comp.maybe_compact(history, "t1")
     # 跳过摘要：provider 未被调用，结果不含摘要标记
@@ -548,32 +1264,36 @@ async def test_anti_thrash_skips_after_two_ineffective():
 
 
 async def test_ineffective_count_increments_on_low_savings():
-    # summary 巨大 → 压缩后反而更大 → 省 <10% → 计数 +1
-    provider = FakeProvider(reply="摘要" * 50000)
+    # summary 只略小于 old（recent 占比巨大）→ 全视图省 <10% → 压缩成功但计数 +1
+    provider = FakeProvider(reply="摘" * 300)
     comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
-    history = await _big_history(10)
+    history = await _big_history(8)
+    history += [
+        Message.user("最新问题 " + "x" * 200000),
+        Message.assistant("最新回答 " + "y" * 200000),
+    ]
     await comp.maybe_compact(history, "t2")
-    assert comp._mem[("", "t2")].ineffective_count == 1
+    assert comp._mem[("local", "t2")].ineffective_count == 1
 
 
 async def test_ineffective_count_resets_on_good_savings():
     provider = FakeProvider(reply="短摘要")  # 极小 → 省很多
     comp = ContextCompactor(provider, token_budget=10, keep_recent=2)
-    comp._mem[("", "t3")] = SummaryState(text="x", covered_count=0, ineffective_count=1)
+    comp._mem[("local", "t3")] = SummaryState(text="x", covered_count=0, ineffective_count=1)
     history = await _big_history(10)
     await comp.maybe_compact(history, "t3")
-    assert comp._mem[("", "t3")].ineffective_count == 0
+    assert comp._mem[("local", "t3")].ineffective_count == 0
 
 
 async def test_force_compact_bypasses_anti_thrash_and_resets():
     provider = FakeProvider(reply="短摘要")
     comp = ContextCompactor(provider, token_budget=10, keep_recent=4)
-    comp._mem[("", "t4")] = SummaryState(text="x", covered_count=0, ineffective_count=2)
+    comp._mem[("local", "t4")] = SummaryState(text="x", covered_count=0, ineffective_count=2)
     history = await _big_history(10)
     out = await comp.force_compact(history, "t4")
     # 兜底不受防抖限制：照常压缩并把计数清零
     assert out[0].content.startswith(SUMMARY_MARKER)
-    assert comp._mem[("", "t4")].ineffective_count == 0
+    assert comp._mem[("local", "t4")].ineffective_count == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -589,7 +1309,9 @@ class CountingBoomProvider:
         self.calls += 1
         raise RuntimeError("provider down")
 
-    async def stream_chat(self, messages, tools=None):  # noqa: ANN001
+    async def stream_chat(self, messages, tools=None, **kwargs):  # noqa: ANN001
+        self.calls += 1
+        raise RuntimeError("provider down")
         yield  # pragma: no cover
 
 
@@ -617,12 +1339,12 @@ async def test_circuit_breaker_resets_on_success():
 
     for _ in range(2):
         await comp.maybe_compact(history, "cb2")
-    assert comp._failure_counts.get(("", "cb2"), 0) == 2
+    assert comp._failure_counts.get(("local", "cb2"), 0) == 2
 
     # 换成功 provider 后再压缩
     comp.provider = FakeProvider(reply="摘要")
     await comp.maybe_compact(history, "cb2")
-    assert comp._failure_counts.get(("", "cb2"), 0) == 0
+    assert comp._failure_counts.get(("local", "cb2"), 0) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -630,16 +1352,16 @@ async def test_circuit_breaker_resets_on_success():
 # --------------------------------------------------------------------------- #
 def test_summary_store_roundtrip(tmp_path):
     store = SummaryStore(str(tmp_path / "c.db"))
-    assert store.get("s") is None
-    store.put("s", SummaryState(text="摘要A", covered_count=5, ineffective_count=1))
-    got = store.get("s")
+    assert store.get("s", owner_account_id="local") is None
+    store.put("s", SummaryState(text="摘要A", covered_count=5, ineffective_count=1), owner_account_id="local")
+    got = store.get("s", owner_account_id="local")
     assert got.text == "摘要A" and got.covered_count == 5 and got.ineffective_count == 1
     # 覆盖更新
-    store.put("s", SummaryState(text="摘要B", covered_count=9))
-    got2 = store.get("s")
+    store.put("s", SummaryState(text="摘要B", covered_count=9), owner_account_id="local")
+    got2 = store.get("s", owner_account_id="local")
     assert got2.text == "摘要B" and got2.covered_count == 9 and got2.ineffective_count == 0
-    store.delete("s")
-    assert store.get("s") is None
+    store.delete("s", owner_account_id="local")
+    assert store.get("s", owner_account_id="local") is None
 
 
 def test_summary_store_is_owner_scoped(tmp_path):
@@ -649,7 +1371,7 @@ def test_summary_store_is_owner_scoped(tmp_path):
 
     assert store.get("same", owner_account_id="A:uid-a").text == "摘要A"
     assert store.get("same", owner_account_id="B:uid-b").text == "摘要B"
-    assert store.get("same") is None
+    assert store.get("same", owner_account_id="local") is None
 
 
 async def test_compactor_in_memory_cache_is_owner_scoped():
@@ -709,6 +1431,27 @@ async def test_compact_view_under_budget_no_llm():
     assert len(out) == len(msgs)  # 无工具结果可清理，原样返回
 
 
+async def test_compact_view_includes_fixed_request_overhead_in_threshold():
+    """system/tools 等统一请求开销必须参与 compact 水位判断。"""
+    provider = FakeProvider(reply="短摘要")
+    comp = ContextCompactor(provider, token_budget=100_000, keep_recent=2)
+    msgs = [Message.user("hello world " * 500) for _ in range(5)]
+
+    assert comp.will_compact_view(
+        msgs,
+        "s-overhead",
+        prompt_overhead_tokens=1_000_000,
+    ) is True
+    out = await comp.compact_view(
+        msgs,
+        "s-overhead",
+        prompt_overhead_tokens=1_000_000,
+    )
+
+    assert len(provider.calls) == 1
+    assert any(SUMMARY_MARKER in (message.content or "") for message in out)
+
+
 async def test_compact_view_over_budget_triggers_l3():
     """超水位：走 L3 全量摘要，视图变短且含 SUMMARY_MARKER。"""
     provider = FakeProvider(reply="短摘要")
@@ -743,3 +1486,41 @@ async def test_compact_view_circuit_breaker_after_consecutive_failures():
         await comp.compact_view(msgs, "s1")  # 3 次失败，累计断路器
     out = await comp.compact_view(msgs, "s1")  # 第 4 次：断路器跳过
     assert len(out) == len(msgs)  # 原样返回
+
+
+async def test_compaction_success_emits_self_contained_event():
+    """压缩落库经 event_sink 内联 replacement 摘要 + 重锚定估算（W5）。"""
+    events: list[tuple] = []
+    comp = ContextCompactor(
+        FakeProvider(reply="短摘要"),
+        token_budget=10,
+        keep_recent=2,
+        event_sink=lambda sid, owner, summary, covered, estimate: events.append(
+            (sid, owner, summary, covered, estimate)
+        ),
+    )
+    history = await _big_history(10)
+    view = await comp.maybe_compact(history, "sess-evt", owner_account_id="A:uid-a")
+    assert view[0].content.startswith(SUMMARY_MARKER)
+    assert len(events) == 1
+    sid, owner, summary, covered, estimate = events[0]
+    assert sid == "sess-evt"
+    assert owner == "A:uid-a"
+    assert summary == "短摘要"
+    assert covered > 0
+    assert estimate > 0
+
+
+async def test_compaction_event_sink_failure_does_not_break_compact():
+    def _boom(*args):  # noqa: ANN002, ANN003
+        raise RuntimeError("db down")
+
+    comp = ContextCompactor(
+        FakeProvider(reply="短摘要"),
+        token_budget=10,
+        keep_recent=2,
+        event_sink=_boom,
+    )
+    history = await _big_history(10)
+    view = await comp.maybe_compact(history, "sess-evt2")
+    assert view[0].content.startswith(SUMMARY_MARKER)

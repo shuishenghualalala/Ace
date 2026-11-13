@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import yaml
@@ -12,12 +12,17 @@ from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
 from crew.app import build_app
+from crew.channels import channel_config
+from crew.channels.platform_registry import PlatformConfig, PlatformEntry, platform_registry
+from crew.channels.router_helpers import _platform_error_kind
 from crew.core.interfaces import Channel, MessageHandler
-from crew.gateway import channel_config
-from crew.gateway.platform_registry import PlatformConfig, PlatformEntry, platform_registry
-from crew.gateway.routers.channels import _platform_error_kind
 from crew.gateway.server import create_app
-from crew.state.config import load_config, owner_overlay_config_path, resolve_writable_env_path, write_env_key
+from crew.state.config import (
+    load_config,
+    owner_overlay_config_path,
+    resolve_writable_env_path,
+    write_env_key,
+)
 
 OWNER_A = "A:uid-a"
 
@@ -41,7 +46,7 @@ class DummyChannel(Channel):
     starts: int = 0
     stops: int = 0
     stop_delay: float = 0.0
-    started_configs: list[dict[str, Any]] = []
+    started_configs: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(self, config: PlatformConfig) -> None:
         self.config = config
@@ -84,7 +89,7 @@ class DummySecureChatChannel(Channel):
 class DummyFeishuChannel(Channel):
     name = "feishu"
     starts: int = 0
-    started_configs: list[dict[str, Any]] = []
+    started_configs: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(self, config: PlatformConfig) -> None:
         self.config = config
@@ -243,9 +248,10 @@ async def test_save_platform_config_persists_without_secret(channel_api, auth_he
     assert "TESTCHAT_API_KEY=sk-secret" in env_text
 
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    assert persisted["channels"]["testchat"]["enabled"] is True
-    assert persisted["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
-    assert "apiKey" not in persisted["channels"]["testchat"]
+    # 写侧终态：overlay 首次写回即创建 features.channels，不再生产旧 channels 节
+    assert persisted["features"]["channels"]["testchat"]["enabled"] is True
+    assert persisted["features"]["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
+    assert "apiKey" not in persisted["features"]["channels"]["testchat"]
 
 
 @pytest.mark.asyncio
@@ -317,7 +323,7 @@ def _assert_channel_restores_on_gateway_startup(
             assert connected.status_code == 200, connected.text
             assert connected.json()["ok"] is True
             assert dummy_cls.starts == 1
-            assert app.state.crew.channel_bindings.get_binding(platform) == "A:uid-a"
+            assert app.state.crew.channel_bindings.get_binding(platform, owner_account_id="A:uid-a") == "A:uid-a"
 
         cfg = load_config(config_path=str(config_yaml))
         crew = build_app(config=cfg, enable_team=False)
@@ -528,7 +534,7 @@ async def test_local_owner_can_save_platform_config(channel_api, auth_headers):
     body = resp.json()
     assert body["ok"] is True
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    assert persisted["channels"]["testchat"]["enabled"] is True
+    assert persisted["features"]["channels"]["testchat"]["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -613,8 +619,8 @@ async def test_disconnect_platform_stops_channel_without_deleting_account(channe
     env_text = (_owner_overlay_path(config_yaml.parent).parent / ".env").read_text(encoding="utf-8")
     assert "TESTCHAT_API_KEY=sk-secret" in env_text
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    assert persisted["channels"]["testchat"]["enabled"] is False
-    assert persisted["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
+    assert persisted["features"]["channels"]["testchat"]["enabled"] is False
+    assert persisted["features"]["channels"]["testchat"]["serverUrl"] == "wss://dummy.example/ws"
 
 
 @pytest.mark.asyncio
@@ -636,7 +642,9 @@ async def test_delete_platform_account_clears_id_and_key_but_keeps_fixed_url(cha
                             "client_id": "nested-client",
                             "keep": "kept",
                         },
-                    }
+                    },
+                    # 其它 legacy 通道条目：不受写回影响，仍可读
+                    "feishu": {"token": "keep-me"},
                 },
             },
             allow_unicode=True,
@@ -659,12 +667,19 @@ async def test_delete_platform_account_clears_id_and_key_but_keeps_fixed_url(cha
     assert "TESTCHAT_API_KEY" not in env_text
 
     persisted = yaml.safe_load(_owner_overlay_path(config_yaml.parent).read_text(encoding="utf-8"))
-    testchat = persisted["channels"]["testchat"]
+    # 写侧终态：legacy-only overlay 的写回落 features.channels，旧位置按通道清理
+    assert "testchat" not in persisted["channels"]
+    testchat = persisted["features"]["channels"]["testchat"]
     assert testchat["enabled"] is False
     assert testchat["serverUrl"] == "wss://fixed.example/ws"
     assert "clientId" not in testchat
     assert "apiKey" not in testchat
     assert testchat["extra"] == {"keep": "kept"}
+    # 未写回的其它 legacy 条目原样保留，读取路径（双读归一）仍然生效
+    assert persisted["channels"]["feishu"] == {"token": "keep-me"}
+    assert app.state.crew.config.channel_config("feishu", owner_account_id=OWNER_A) == {
+        "token": "keep-me"
+    }
 
 
 @pytest.mark.asyncio

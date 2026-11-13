@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="820" viewBox="0 0 1120 820" role="img" aria-labelledby="title desc">
+<title id="title">Ace 追踪导出弹窗：筛选范围、格式和内容选择</title>
+<desc id="desc">Ace 开发者追踪面板设计稿。所有记录和数值均为示例，不是实际采集结果。</desc>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#171717;font-size:14px} .muted{fill:#6b6b6b}.mono{font-family:"SFMono-Regular",Consolas,monospace;font-variant-numeric:tabular-nums}.tiny{font-size:12px}.small{font-size:13px}.strong{font-weight:600}.large{font-size:21px;font-weight:600}.white{fill:#fff}.blue{fill:#245b9f}.green{fill:#2f6b45}.red{fill:#9f2f2f}.amber{fill:#765300}</style>
+<rect x="0" y="0" width="1120" height="820" rx="0" fill="#fff"/>
+<rect x="0" y="0" width="1120" height="820" rx="0" fill="#f0f0f0"/>
+<text x="40" y="45" class="large">追踪 / 导出当前筛选结果</text>
+<text x="40" y="72" class="small muted">界面设计稿 · 示例数据</text>
+<rect x="242" y="101" width="636" height="660" rx="12" fill="#fff" stroke="#d9d9d9"/>
+<text x="270" y="141" class="large">导出筛选结果</text>
+<text x="844" y="141" class="muted" style="font-size:22px" text-anchor="end">×</text>
+<text x="270" y="172" class="small muted">导出符合当前条件的全部记录，包含未翻到的页面。</text>
+<line x1="270" y1="190" x2="850" y2="190" stroke="#e8e8e8"/>
+<text x="270" y="220" class="strong">范围</text>
+<text x="344" y="220" class="small">交互追踪  ·  最近 1 小时</text>
+<rect x="344" y="234" width="97" height="23" rx="4" fill="#eaf2fc"/>
+<text x="392.5" y="250" class="tiny blue" text-anchor="middle">模块：Wiki</text>
+<rect x="451" y="234" width="151" height="23" rx="4" fill="#fff3d6"/>
+<text x="526.5" y="250" class="tiny amber" text-anchor="middle">包含错误阶段</text>
+<text x="344" y="283" class="small muted">以创建导出任务时的数据为准，后续新记录不加入。</text>
+<text x="270" y="322" class="strong">格式</text>
+<rect x="344" y="301" width="100" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="394.0" y="322" class="small" text-anchor="middle">JSON</text>
+<rect x="454" y="301" width="124" height="32" rx="6" fill="#171717"/>
+<text x="516.0" y="322" class="white small" text-anchor="middle">JSONL</text>
+<rect x="588" y="301" width="100" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="638.0" y="322" class="small" text-anchor="middle">CSV</text>
+<text x="344" y="351" class="small muted">JSONL：适合批量调用链，保留结构和逐条记录。</text>
+<text x="270" y="396" class="strong">内容</text>
+<rect x="344" y="380" width="17" height="17" rx="3" fill="#171717" stroke="#171717"/>
+<text x="352.5" y="393" class="white tiny" text-anchor="middle">✓</text>
+<text x="373" y="393" class="small">包含脱敏后的输入 / 输出</text>
+<rect x="344" y="414" width="17" height="17" rx="3" fill="#171717" stroke="#171717"/>
+<text x="352.5" y="427" class="white tiny" text-anchor="middle">✓</text>
+<text x="373" y="427" class="small">包含匹配 Trace 的完整调用链</text>
+<text x="373" y="459" class="tiny muted">会包含未命中的父子阶段，并标记实际匹配记录。</text>
+<rect x="344" y="481" width="17" height="17" rx="3" fill="#fff" stroke="#b8b8b8"/>
+<text x="373" y="494" class="small">纳入关联的后台任务 Trace</text>
+<line x1="270" y1="522" x2="850" y2="522" stroke="#e8e8e8"/>
+<text x="270" y="551" class="strong">文件中包含什么</text>
+<text x="270" y="580" class="small muted">过滤条件、采集截止点、记录版本、调用链和内容状态。</text>
+<text x="270" y="605" class="small muted">超过数量或文件预算时，导出会标记为部分完成。</text>
+<text x="270" y="630" class="small muted">文件在生成后保留 1 小时，可在导出任务中保存。</text>
+<line x1="270" y1="654" x2="850" y2="654" stroke="#e8e8e8"/>
+<rect x="629" y="678" width="87" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="672.5" y="699" class="small" text-anchor="middle">取消</text>
+<rect x="728" y="678" width="122" height="32" rx="6" fill="#171717"/>
+<text x="789.0" y="699" class="white small" text-anchor="middle">生成导出</text>
+<text x="270" y="708" class="tiny muted">默认不包含输入 / 输出；图示为手动勾选后。</text>
+</svg>

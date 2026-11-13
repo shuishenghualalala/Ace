@@ -17,6 +17,12 @@ metadata:
 
 Convert Markdown documents to PDF with various formatting options.
 
+> Scope: this skill converts already-finished Markdown files. If the Markdown
+> was assembled by a swarm writing skill and carries standard footnote
+> citations (`[^id]` + `[^id]: Title. Date. URL`), use the **pdf** skill's
+> `md2pdf` route instead — it normalizes citations into a consolidated
+> References section.
+
 ## Quick Start
 
 ### Method 1: Pandoc (Recommended for Complex Documents)

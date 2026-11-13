@@ -6,7 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from crew.core.runctx import current_attachment_paths, current_owner_account_id, current_session_id
+from crew.core.runctx import (
+    LOCAL_OWNER_ACCOUNT_ID,
+    current_attachment_paths,
+    current_owner_account_id,
+    current_push_fn,
+    current_session_id,
+    current_task_activity_fn,
+)
+from crew.core.types import tool_arguments_for_ui
 from crew.tools.registry import Registry
 from crew.wiki.compiler import WikiCompiler
 from crew.wiki.manager import WikiSessionManager
@@ -44,6 +52,9 @@ def wiki_mocks():
     manager = MagicMock(spec=WikiSessionManager)
     # 默认会话活跃 KB：各用例的 kb_active 断言都依赖它，个别用例可自行覆盖。
     manager.get_kb_id.return_value = "kb_active"
+    # 默认无批量授权：MagicMock 默认返回真值会让阻塞确认直接放行，
+    # 需要确认行为的用例应得到被动确认卡（测试环境无 push_fn → unavailable 回退）。
+    manager.has_action_grant.return_value = False
     registry = Registry()
     config = WikiConfig.from_raw({"ingest": {"auto_apply": False}})
     register_wiki_tools(registry, store, compiler, querier, manager, config=config)
@@ -60,6 +71,15 @@ def wiki_mocks():
 def _set_context(session_id: str = "sid", owner: str = "owner"):
     current_session_id.set(session_id)
     current_owner_account_id.set(owner)
+
+
+@pytest.fixture(autouse=True)
+def _restore_runctx_defaults():
+    """_set_context 裸 set contextvar 不 reset，值会泄漏给同进程的后续用例。
+    每个用例结束后恢复默认值（owner 的默认即本机 local）。"""
+    yield
+    current_session_id.set("")
+    current_owner_account_id.set(LOCAL_OWNER_ACCOUNT_ID)
 
 
 @pytest.fixture
@@ -124,6 +144,37 @@ def test_wiki_tool_ui_labels_render_placeholders(wiki_mocks):
     assert registry.toolset_for("wiki_search") == WIKI_READ_TOOLSET
     assert registry.toolset_for("wiki_read") == WIKI_READ_TOOLSET
     assert registry.toolset_for("wiki_apply_ingest") == WIKI_MANAGE_TOOLSET
+
+
+def test_wiki_source_ui_labels_use_title_and_hide_internal_id(wiki_mocks):
+    registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
+    store.get_source_titles.return_value = {"s1": "知识库概览"}
+
+    label = registry.render_ui_label(
+        "wiki_plan_ingest",
+        {},
+        raw_args={"source_id": "s1"},
+    )
+
+    assert label == "盘算《知识库概览》该写进哪些页面"
+    assert "s1" not in label
+    assert tool_arguments_for_ui("wiki_plan_ingest", {"source_id": "s1"}) == {}
+
+
+def test_wiki_source_ui_labels_fallback_without_title(wiki_mocks):
+    registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
+    store.get_source_titles.return_value = {"s1": "s1"}
+
+    label = registry.render_ui_label(
+        "wiki_apply_ingest",
+        {},
+        raw_args={"source_id": "s1"},
+    )
+
+    assert label == "把《这份素材》的改动写进知识库"
+    assert "s1" not in label
     assert registry.toolset_for("wiki_delete_kb") == WIKI_MANAGE_TOOLSET
     assert registry.toolset_for("wiki_refresh_source") == WIKI_MANAGE_TOOLSET
     assert registry.toolset_for("wiki_digest") == WIKI_MANAGE_TOOLSET
@@ -564,6 +615,75 @@ async def test_wiki_list_sources_uses_active_kb_and_status_filter(wiki_mocks):
     assert result.count('"source_id"') == 2
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"view": "inbox"}, ["retry", "recommended", "pending"]),
+        ({"view": "inbox", "include_history": True}, ["retry", "recommended", "pending"]),
+        ({"view": "inbox", "status": "parsed", "limit": 2}, ["retry", "recommended"]),
+        ({"view": "inbox", "status": "failed"}, []),
+        ({"status": "failed"}, ["parse_failed"]),
+        ({}, ["parse_failed", "unparsed", "ignored", "ingested", "not_recommended", "retry", "recommended", "pending"]),
+        ({"include_history": True, "limit": 2}, ["historical", "parse_failed"]),
+    ],
+)
+async def test_list_sources_views_preserve_inbox_and_history_semantics(wiki_mocks, args, expected):
+    import json
+
+    from crew.wiki.schemas import RawSource
+
+    variants = [
+        ("pending", {}),
+        ("recommended", {"ingest_status": "recommended"}),
+        ("retry", {"ingest_status": "failed"}),
+        ("not_recommended", {"ingest_recommend": False}),
+        ("ingested", {"ingest_status": "ingested"}),
+        ("ignored", {"ingest_status": "ignored"}),
+        ("unparsed", {"parse_status": "pending"}),
+        ("parse_failed", {"parse_status": "failed"}),
+        ("historical", {"superseded_by": "pending"}),
+    ]
+    raws = []
+    for i, (source_id, overrides) in enumerate(variants):
+        fields = dict(parse_status="parsed", ingest_status="pending", ingest_recommend=True)
+        fields.update(overrides)
+        raws.append(RawSource(
+            id=source_id, title=source_id, source_type="paste", parsed_path="",
+            created_at=float(i), summary="摘要", tags=["标签"], doc_type="article",
+            ingest_reason="适合整理", **fields,
+        ))
+    wiki_mocks["store"].list_raws.return_value = raws
+    _set_context()
+    result = json.loads(await wiki_mocks["registry"].get("wiki_list_sources").run({
+        **args, "kb_id": "other_kb",
+    }))
+    assert [r["source_id"] for r in result["sources"]] == expected
+    assert result["count"] == len(expected)
+    assert result["kb_id"] == "other_kb"
+    wiki_mocks["store"].list_raws.assert_called_once_with(owner_account_id="owner", kb_id="other_kb")
+    for source in result["sources"]:
+        assert source["summary"] == "摘要"
+        assert source["tags"] == ["标签"]
+        assert source["doc_type"] == "article"
+        assert source["ingest_reason"] == "适合整理"
+        raw = next(r for r in raws if r.id == source["source_id"])
+        assert source["parse_status"] == raw.parse_status
+        assert source["ingest_status"] == raw.ingest_status
+        assert source["ingest_recommend"] == raw.ingest_recommend
+
+
+async def test_list_sources_rejects_unknown_view_and_removes_duplicate_tool(wiki_mocks):
+    from crew.core.errors import ToolNotFoundError
+
+    registry = wiki_mocks["registry"]
+    with pytest.raises(ToolNotFoundError):
+        registry.get("wiki_list_inbox")
+    assert "wiki_list_inbox" not in WIKI_READ_TOOLS
+    result = await registry.get("wiki_list_sources").run({"view": "unknown"})
+    assert "无效的 view" in result
+    wiki_mocks["store"].list_raws.assert_not_called()
+
+
 # ---- wiki_delete_source ----
 
 async def test_wiki_delete_source_uses_active_kb(wiki_mocks):
@@ -599,7 +719,8 @@ async def test_wiki_delete_source_requires_confirmation(wiki_mocks):
 
     store.delete_raw.assert_not_called()
     assert "requires_confirmation" in result
-    assert "s1" in result
+    assert "a.xlsx" in result
+    assert "s1" not in result
 
 
 async def test_wiki_delete_source_returns_error_when_not_found(wiki_mocks):
@@ -716,6 +837,91 @@ async def test_wiki_apply_ingest_passes_chunk_options(wiki_mocks):
     assert call_kwargs["use_chunking"] is True
 
 
+async def test_ingest_concurrent_confirmation_retry_writes_once(wiki_mocks):
+    import asyncio
+    import json
+
+    from crew.wiki.schemas import IngestResult, PlanResult, WikiPage
+
+    compiler = wiki_mocks["compiler"]
+    manager = wiki_mocks["manager"]
+    manager.consume_confirmation.side_effect = [{
+        "source_id": "s1", "plan_fingerprint": "fp",
+        "source_content_sha256": "sh", "planned_titles": ["Topic"],
+    }, None]
+    compiler.load_plan.return_value = PlanResult(
+        source_id="s1", plan_fingerprint="fp", source_content_sha256="sh",
+    )
+    compiler.apply_ingest = AsyncMock(return_value=IngestResult(
+        source_id="s1", pages=[WikiPage(id="p1", title="Topic", page_type="topic", file_path="wiki/Topic.md", content="x" * 60000)],
+    ))
+    _set_context()
+    tool = wiki_mocks["registry"].get("wiki_apply_ingest")
+    args = {"source_id": "s1", "confirmation_id": "wcf_once"}
+    first, second = await asyncio.gather(tool.run(args), tool.run(args))
+    assert first == second
+    assert len(first) < 1000
+    assert json.loads(first)["pages"][0]["id"] == "p1"
+    compiler.apply_ingest.assert_awaited_once()
+    manager.consume_confirmation.assert_called_once()
+    _set_context(owner="other")
+    assert "error" in json.loads(await tool.run(args))
+    compiler.apply_ingest.assert_awaited_once()
+
+
+async def test_wiki_apply_ingest_progress_touches_current_task(wiki_mocks):
+    """Wiki 自己推送的分块进度同样要保活当前 agent turn。"""
+    from crew.wiki.schemas import PlanResult
+
+    registry = wiki_mocks["registry"]
+    compiler = wiki_mocks["compiler"]
+    manager = wiki_mocks["manager"]
+    manager.consume_confirmation.return_value = {
+        "source_id": "s1",
+        "plan_fingerprint": "fp",
+        "source_content_sha256": "sh",
+        "planned_titles": [],
+    }
+    compiler.load_plan.return_value = PlanResult(
+        source_id="s1",
+        planned_pages=[],
+        plan_fingerprint="fp",
+        source_content_sha256="sh",
+    )
+    ingest_result = MagicMock(source_id="s1", pages=[], issues=[])
+
+    async def apply_ingest(*_args, progress, **_kwargs):
+        await progress("chunking", 3, {"total": 12})
+        return ingest_result
+
+    compiler.apply_ingest = AsyncMock(side_effect=apply_ingest)
+    activity: list[dict] = []
+    pushed: list[dict] = []
+
+    async def push(_session_id: str, payload: dict) -> None:
+        pushed.append(payload)
+
+    activity_token = current_task_activity_fn.set(lambda progress: activity.append(progress or {}))
+    push_token = current_push_fn.set(push)
+    try:
+        _set_context()
+        await registry.get("wiki_apply_ingest").run({
+            "source_id": "s1",
+            "confirmation_id": "wcf_test",
+        })
+    finally:
+        current_push_fn.reset(push_token)
+        current_task_activity_fn.reset(activity_token)
+
+    assert activity == [{
+        "last_tool": "wiki_ingest",
+        "tool_phase": "progress",
+        "stage": "chunking",
+        "step": 3,
+    }]
+    assert pushed[0]["kind"] == "tool_progress"
+
+
 async def test_wiki_apply_ingest_rejects_stale_confirmation_when_plan_regenerated(wiki_mocks):
     """确认的计划指纹与磁盘 plan 不符（计划已被重新生成）时拒绝应用。"""
     from crew.wiki.schemas import PlanResult
@@ -804,7 +1010,34 @@ async def test_wiki_plan_ingest_returns_brief_content(wiki_mocks):
     assert result.count("C") < 1000  # 不应包含完整长内容
 
 
-async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wiki_mocks):
+async def test_wiki_plan_ingest_brief_result_omits_claim_payload(wiki_mocks):
+    import json
+
+    from crew.wiki.schemas import PlannedPage, PlanResult, WikiClaim, WikiEvidence
+
+    compiler = wiki_mocks["compiler"]
+    compiler.plan_ingest = AsyncMock(return_value=PlanResult(
+        source_id="s1",
+        planned_pages=[PlannedPage(
+            title="Topic",
+            page_type="topic",
+            action="create",
+            claims=[WikiClaim(
+                statement="重要结论",
+                evidence=[WikiEvidence(source_id="s1", excerpt="证据")],
+            )],
+        )],
+    ))
+    _set_context()
+    result = await wiki_mocks["registry"].get("wiki_plan_ingest").run({"source_id": "s1"})
+    assert json.loads(result)["planned_pages"][0]["claims"] == []
+
+
+@pytest.mark.parametrize("issue", [
+    "LLM 分析失败: 2/2 个分块全部失败；已解析内容仍保留，可稍后重试",
+    "LLM 分析部分失败: 1/2 个分块未提取到内容；已解析内容仍保留",
+])
+async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wiki_mocks, issue):
     from crew.wiki.schemas import PlanResult
 
     registry = wiki_mocks["registry"]
@@ -813,7 +1046,7 @@ async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wik
     compiler.plan_ingest = AsyncMock(
         return_value=PlanResult(
             source_id="s1",
-            issues=["LLM 分析失败: 2/2 个分块全部失败；已解析内容仍保留，可稍后重试"],
+            issues=[issue],
         )
     )
 
@@ -822,6 +1055,8 @@ async def test_wiki_plan_ingest_capacity_failure_does_not_issue_confirmation(wik
 
     assert '"analysis_status": "failed"' in result
     assert '"retryable": true' in result
+    assert '"automatic_retry": false' in result
+    assert '"next_action": "report_incomplete"' in result
     assert "已解析 Markdown 与 Source 页面仍保留" in result
     manager.issue_confirmation.assert_not_called()
 
@@ -862,8 +1097,10 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     from crew.wiki.schemas import PlanResult
 
     registry = wiki_mocks["registry"]
+    store = wiki_mocks["store"]
     compiler = wiki_mocks["compiler"]
     manager = wiki_mocks["manager"]
+    store.get_source_titles.return_value = {"s1": "资料标题"}
     manager.issue_confirmation.return_value = {
         "requires_confirmation": True,
         "confirmation_id": "wcf_manual",
@@ -880,6 +1117,57 @@ async def test_wiki_plan_ingest_returns_confirmation_when_auto_apply_disabled(wi
     assert '"confirmation_id": "wcf_manual"' in result
     compiler.apply_ingest.assert_not_awaited()
     manager.issue_confirmation.assert_called_once()
+    assert manager.issue_confirmation.call_args.kwargs["summary"] == "应用《资料标题》的 Wiki 变更计划"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_wiki_plan_ingest_runs_in_calling_turn(wiki_mocks, cancel):
+    """整理等待当前调用完成；取消直接传到分析，不留下独立 worker。"""
+    import asyncio
+    import json
+    from crew.wiki.schemas import PlanResult
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    stopped = asyncio.Event()
+    caller = None
+
+    async def plan(*_args, progress, **_kwargs):
+        assert asyncio.current_task() is caller
+        started.set()
+        try:
+            await release.wait()
+            return PlanResult(source_id="s1", total_new=1, plan_fingerprint="fp")
+        finally:
+            stopped.set()
+
+    wiki_mocks["compiler"].plan_ingest = AsyncMock(side_effect=plan)
+    wiki_mocks["manager"].issue_confirmation.return_value = {
+        "requires_confirmation": True,
+        "confirmation_id": "wcf_foreground",
+    }
+    _set_context()
+    caller = asyncio.create_task(
+        wiki_mocks["registry"].get("wiki_plan_ingest").run({"source_id": "s1"})
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert not caller.done()
+        if cancel:
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            wiki_mocks["manager"].issue_confirmation.assert_not_called()
+        else:
+            release.set()
+            result = json.loads(await caller)
+            assert result["confirmation_id"] == "wcf_foreground"
+            assert "background" not in result
+            assert "task_id" not in result
+        assert stopped.is_set()
+    finally:
+        caller.cancel()
+        await asyncio.gather(caller, return_exceptions=True)
 
 
 async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, fs_wiki):
@@ -894,7 +1182,7 @@ async def test_capture_attachment_only_accepts_current_turn_allowlist(tmp_path, 
     registry = fs_wiki["registry"]
     current_attachment_paths.set((str(allowed),))
 
-    with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
+    with patch("crew.state.home.get_upload_dir", return_value=uploads):
         rejected = await registry.get("wiki_capture_attachment").run({"path": str(old)})
         accepted = await registry.get("wiki_capture_attachment").run({"path": str(allowed)})
 
@@ -919,7 +1207,7 @@ async def test_capture_attachment_uses_original_name_and_content_type_not_displa
     current_attachment_paths.set((str(stored),))
     current_attachment_files.set(((str(stored), "机票预订单.pdf"),))
 
-    with patch("crew.gateway.context._get_upload_dir", return_value=uploads):
+    with patch("crew.state.home.get_upload_dir", return_value=uploads):
         result = await registry.get("wiki_capture_attachment").run({"path": str(stored)})
         titled_result = await registry.get("wiki_capture_attachment").run({
             "path": str(stored),
@@ -1251,3 +1539,128 @@ async def test_find_source_kb_locates_raw_across_kbs(tmp_path):
 
     assert store.find_source_kb("s1", owner_account_id="owner") == "kb_work"
     assert store.find_source_kb("missing", owner_account_id="owner") is None
+
+
+# ---- 阻塞式确认（_ask_blocking_confirmation） ----
+
+
+def _mock_blocking(monkeypatch, answers):
+    """替换 crew.wiki.tools 里的 followup 发送/等待，返回记录发送次数的列表。"""
+    calls = []
+
+    async def fake_send(questions, title="", *, record_history=True):
+        calls.append({"questions": questions, "title": title, "record_history": record_history})
+        return ("sid", "q1")
+
+    async def fake_wait(session_id, question_id, *, timeout=300.0):
+        return answers
+
+    monkeypatch.setattr("crew.wiki.tools.send_followup_question", fake_send)
+    monkeypatch.setattr("crew.wiki.tools.wait_for_answer", fake_wait)
+    return calls
+
+
+def _delete_source_mocks(wiki_mocks):
+    from crew.wiki.schemas import RawSource
+
+    store = wiki_mocks["store"]
+    store.load_raw.return_value = RawSource(id="s1", title="a.xlsx", source_type="upload", parsed_path="")
+    store.list_pages_by_source.return_value = []
+    store.delete_raw.return_value = True
+    return store
+
+
+async def test_blocking_confirm_allow_once_executes(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    calls = _mock_blocking(monkeypatch, [{"id": "wiki_confirm", "answers": ["allow_once"]}])
+    _set_context()
+
+    await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    assert len(calls) == 1
+    assert calls[0]["record_history"] is False
+    question = calls[0]["questions"][0]["question"]
+    assert "删除《a.xlsx》及关联页面" in question
+    assert "s1" not in question
+    store.delete_raw.assert_called_once()
+
+
+async def test_blocking_confirm_deny_skips(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    _mock_blocking(monkeypatch, [{"id": "wiki_confirm", "answers": ["deny"]}])
+    _set_context()
+
+    result = await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    import json as _json
+
+    assert _json.loads(result)["cancelled"] is True
+    store.delete_raw.assert_not_called()
+
+
+async def test_blocking_confirm_timeout_aborts(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    _mock_blocking(monkeypatch, [])
+    _set_context()
+
+    result = await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    assert "超时" in result
+    store.delete_raw.assert_not_called()
+
+
+async def test_blocking_confirm_allow_batch_grants_session(wiki_mocks, monkeypatch):
+    store = _delete_source_mocks(wiki_mocks)
+    manager = wiki_mocks["manager"]
+    manager.has_action_grant.side_effect = [False, True]
+    calls = _mock_blocking(monkeypatch, [{"id": "wiki_confirm", "answers": ["allow_batch"]}])
+    _set_context()
+
+    tool = wiki_mocks["registry"].get("wiki_delete_source")
+    await tool.run({"source_id": "s1"})
+    await tool.run({"source_id": "s1"})
+
+    # 第一次弹窗确认并登记授权；第二次命中授权直接执行，不再询问
+    manager.grant_action.assert_called_once()
+    assert len(calls) == 1
+    assert store.delete_raw.call_count == 2
+
+
+async def test_blocking_confirm_unavailable_falls_back_to_passive_card(wiki_mocks, monkeypatch):
+    from crew.core.errors import ToolError
+
+    store = _delete_source_mocks(wiki_mocks)
+    wiki_mocks["manager"].issue_confirmation.return_value = {
+        "requires_confirmation": True,
+        "confirmation_id": "wcf_test",
+        "action": "delete_source",
+        "kb_id": "kb_active",
+        "summary": "删除 RawSource s1 及关联页面",
+        "impact": {},
+        "expires_at": 0,
+    }
+
+    async def fake_send(*args, **kwargs):
+        raise ToolError("当前运行环境不支持追问交互（无 push 函数）")
+
+    monkeypatch.setattr("crew.wiki.tools.send_followup_question", fake_send)
+    _set_context()
+
+    result = await wiki_mocks["registry"].get("wiki_delete_source").run({"source_id": "s1"})
+
+    import json as _json
+
+    payload = _json.loads(result)
+    assert payload["requires_confirmation"] is True
+    assert payload["confirmation_id"]
+    store.delete_raw.assert_not_called()
+
+
+def test_action_grant_roundtrip():
+    manager = WikiSessionManager()
+    assert not manager.has_action_grant("s1", action="delete_source", kb_id="kb", owner_account_id="o")
+    manager.grant_action("s1", action="delete_source", kb_id="kb", owner_account_id="o")
+    assert manager.has_action_grant("s1", action="delete_source", kb_id="kb", owner_account_id="o")
+    # 不同 action / 不同会话不受影响
+    assert not manager.has_action_grant("s1", action="delete_kb", kb_id="kb", owner_account_id="o")
+    assert not manager.has_action_grant("s2", action="delete_source", kb_id="kb", owner_account_id="o")

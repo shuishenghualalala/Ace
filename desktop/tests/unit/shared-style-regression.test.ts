@@ -7,7 +7,11 @@ const studioCss = readFileSync(resolve(stylesDir, 'studio.css'), 'utf8');
 const layoutCss = readFileSync(resolve(stylesDir, 'layouts.css'), 'utf8');
 const chatCss = readFileSync(resolve(stylesDir, 'chat.css'), 'utf8');
 const webMessagesCss = readFileSync(resolve(stylesDir, 'web-messages.css'), 'utf8');
+const wikiPageCss = readFileSync(resolve(stylesDir, 'wiki-page.css'), 'utf8');
+const kanbanCss = readFileSync(resolve(stylesDir, 'kanban-board.css'), 'utf8');
 const composerCss = readFileSync(resolve(stylesDir, 'composer.css'), 'utf8');
+const composerContextCss = readFileSync(resolve(stylesDir, 'composer-context.css'), 'utf8');
+const processTimelineCss = readFileSync(resolve(stylesDir, 'process-timeline.css'), 'utf8');
 const streamChatCss = readFileSync(resolve(stylesDir, 'stream-chat.css'), 'utf8');
 const uiPreviewCss = readFileSync(resolve(stylesDir, 'ui-preview.css'), 'utf8');
 const securityCenterCss = readFileSync(resolve(stylesDir, 'security-center.css'), 'utf8');
@@ -77,6 +81,84 @@ describe('shared chat chrome styles', () => {
     expect(runningImage).not.toContain('translate(');
     expect(uiPreviewCss).not.toMatch(/(?:^|\n)\s*\.chat-composer\s*\{/);
   });
+
+  it('keeps Request/Response code readable on light process surfaces', () => {
+    expect(ruleBody(processTimelineCss, '.mw-process-timeline .process-code-block pre')).toContain(
+      'color: var(--mw-code-text)',
+    );
+    expect(ruleBody(streamChatCss, '.process-code-block pre')).toContain(
+      'color: var(--mw-code-text)',
+    );
+  });
+
+  it('does not let web-flow prose styles override fenced code blocks', () => {
+    expect(webMessagesCss).toContain(
+      '.chat-messages.web-flow .md-body code:not(.chat-md-code code)',
+    );
+    expect(webMessagesCss).toContain(
+      '.chat-messages.web-flow .md-body pre:not(.chat-md-code)',
+    );
+    const prosePre = ruleBody(
+      webMessagesCss,
+      '.chat-messages.web-flow .md-body pre:not(.chat-md-code)',
+    );
+    expect(prosePre).toContain('background: var(--mw-bg-subtle)');
+
+    const block = ruleBody(chatCss, '.chat-markdown .chat-md-code');
+    expect(block).toContain('background: var(--mw-code-bg)');
+    expect(block).toContain('color: var(--mw-code-text)');
+  });
+
+  it('keeps Wiki detail editor code blocks on the shared high-contrast surface', () => {
+    const block = ruleBody(wikiPageCss, '.wiki-editor__content pre');
+    expect(block).toContain('background: var(--mw-code-bg)');
+    expect(block).toContain('color: var(--mw-code-text)');
+
+    const nestedCode = ruleBody(wikiPageCss, '.wiki-editor__content pre code');
+    expect(nestedCode).toContain('background: transparent');
+    expect(nestedCode).toContain('color: inherit');
+
+    const inlineCode = ruleBody(wikiPageCss, '.wiki-editor__content :not(pre) > code');
+    expect(inlineCode).toContain('background: var(--mw-bg-selected)');
+    expect(inlineCode).toContain('color: var(--mw-text-primary)');
+  });
+
+  it('keeps selected mention input text from duplicating the overlay copy', () => {
+    const source = ruleBody(chatCss, '.chat-input-container textarea.chat-input-overlay-source');
+    const selection = ruleBody(
+      chatCss,
+      '.chat-input-container textarea.chat-input-overlay-source::selection',
+    );
+    const overlay = ruleBody(composerContextCss, '.chat-input-overlay');
+
+    expect(source).toContain('color: transparent');
+    expect(selection).toContain('color: transparent');
+    expect(selection).toContain('-webkit-text-fill-color: transparent');
+    expect(overlay).toContain('pointer-events: none');
+  });
+
+  it('keeps Team member avatars and bubbles visibly colored for the first tones', () => {
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-0'))
+      .toContain('background: var(--mw-status-success-bg)');
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-1'))
+      .toContain('background: var(--mw-status-info-bg)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-0'))
+      .toContain('border-color: var(--mw-status-success)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-1'))
+      .toContain('border-color: var(--mw-status-info)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew)'))
+      .toContain('var(--mw-status-success)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew)'))
+      .toContain('var(--mw-status-info)');
+  });
+
+  it('anchors the Team file count badge on the folder button corner', () => {
+    const badge = ruleBody(kanbanCss, '.team-collaboration-board .board-files-btn i');
+    expect(badge).toContain('top: 0');
+    expect(badge).toContain('right: 0');
+    expect(badge).toContain('transform: translate(50%, -50%)');
+    expect(badge).not.toMatch(/top:\s*-\d/);
+  });
 });
 
 describe('security center scroll contract', () => {
@@ -91,7 +173,7 @@ describe('security center scroll contract', () => {
 describe('Crew shell and Welcome identity', () => {
   it('keeps the responsive full-height rail with a compact icon-only mode', () => {
     const tokens = ruleBody(tokensCss, ':root');
-    expect(tokens).toContain('--mw-app-rail-width: 128px');
+    expect(tokens).toContain('--mw-app-rail-width: 96px');
     expect(tokens).toContain('--mw-app-rail-width-compact: 56px');
     const brand = ruleBody(shellCss, '.mw-sidebar-brand');
     expect(brand).toContain('flex-direction: column');
@@ -102,7 +184,7 @@ describe('Crew shell and Welcome identity', () => {
     );
     expect(shellCss).toContain('grid-template-columns: 22px minmax(0, 32px)');
     expect(shellCss).toContain(
-      'grid-template-columns: var(--mw-app-rail-width-compact) 240px minmax(0, 1fr)',
+      'grid-template-columns: var(--mw-app-rail-width-compact) var(--mw-app-context-width, 240px) 5px minmax(0, 1fr)',
     );
     expect(shellCss).toContain('.mw-sidebar-brand__label');
   });
@@ -118,5 +200,54 @@ describe('Crew shell and Welcome identity', () => {
       'position: relative',
     );
     expect(welcomeCss).toContain('@media (prefers-reduced-motion: reduce)');
+  });
+
+  it('lifts the mascot clear of the Composer in minimum-height windows', () => {
+    const compactHeightStart = welcomeCss.indexOf('@media (max-height: 680px)');
+    const reducedMotionStart = welcomeCss.indexOf('@media (prefers-reduced-motion: reduce)');
+    const compactHeightCss = welcomeCss.slice(compactHeightStart, reducedMotionStart);
+
+    expect(compactHeightStart).toBeGreaterThanOrEqual(0);
+    expect(reducedMotionStart).toBeGreaterThan(compactHeightStart);
+    expect(compactHeightCss).toContain(
+      'padding: var(--mw-space-2) var(--mw-space-4) var(--mw-space-4)',
+    );
+    expect(compactHeightCss).toContain('width: 140px');
+    expect(compactHeightCss).toContain('height: 140px');
+    expect(compactHeightCss).not.toContain('.mw-composer__welcome-paws');
+  });
+
+  it('keeps the mention canvas above the Welcome mascot without lifting the project strip', () => {
+    expect(welcomeCss).toContain(
+      'body.welcome-active #chat-composer-root:has(.mention-pop)',
+    );
+    expect(welcomeCss).toContain(
+      '#chat-composer-root:has(.mention-pop) .mw-composer',
+    );
+    expect(
+      ruleBody(
+        welcomeCss,
+        'body.welcome-active\n  #chat-composer-root\n  .mw-composer__panel:has(.mention-pop)',
+      ),
+    ).toContain('z-index: 3');
+  });
+
+  it('lets compact Welcome content scroll instead of clipping its text', () => {
+    const compactHeightStart = welcomeCss.indexOf('@media (max-height: 680px)');
+    const reducedMotionStart = welcomeCss.indexOf('@media (prefers-reduced-motion: reduce)');
+    const compactHeightCss = welcomeCss.slice(compactHeightStart, reducedMotionStart);
+
+    expect(compactHeightCss).toContain('overflow-y: auto');
+    expect(compactHeightCss).toContain('scroll-padding-block: var(--mw-space-4)');
+    expect(compactHeightCss).toContain('grid-row: 1');
+    expect(compactHeightCss).toContain('grid-row: auto');
+    expect(welcomeCss).toContain(
+      'grid-template-rows: minmax(min-content, 1fr) auto minmax(0, 1fr)',
+    );
+    expect(compactHeightCss).not.toContain(
+      'grid-template-rows: minmax(0, 1fr) auto auto',
+    );
+    expect(compactHeightCss).not.toContain('translate(-50%, 0) rotate(-8deg)');
+    expect(compactHeightCss).not.toContain('translate(50%, 0) rotate(8deg)');
   });
 });

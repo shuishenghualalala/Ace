@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="870" viewBox="0 0 1440 870" role="img" aria-labelledby="title desc">
+<title id="title">Ace 系统日志：按 Wiki 模块筛选并查看错误上下文</title>
+<desc id="desc">Ace 开发者追踪面板设计稿。所有记录和数值均为示例，不是实际采集结果。</desc>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#171717;font-size:14px} .muted{fill:#6b6b6b}.mono{font-family:"SFMono-Regular",Consolas,monospace;font-variant-numeric:tabular-nums}.tiny{font-size:12px}.small{font-size:13px}.strong{font-weight:600}.large{font-size:21px;font-weight:600}.white{fill:#fff}.blue{fill:#245b9f}.green{fill:#2f6b45}.red{fill:#9f2f2f}.amber{fill:#765300}</style>
+<rect x="0" y="0" width="1440" height="870" rx="0" fill="#fff"/>
+<rect x="0" y="0" width="96" height="870" rx="0" fill="#f7f7f7"/>
+<line x1="96" y1="0" x2="96" y2="870" stroke="#e8e8e8"/>
+<text x="48" y="40" class="large" text-anchor="middle">Ace</text>
+<text x="48" y="88" class="muted" text-anchor="middle">对话</text>
+<text x="48" y="150" class="muted" text-anchor="middle">外援</text>
+<text x="48" y="212" class="muted" text-anchor="middle">技能</text>
+<text x="48" y="274" class="muted" text-anchor="middle">知识</text>
+<text x="48" y="336" class="muted" text-anchor="middle">灵感</text>
+<text x="48" y="398" class="muted" text-anchor="middle">任务</text>
+<text x="48" y="460" class="muted" text-anchor="middle">安全</text>
+<rect x="12" y="495" width="72" height="46" rx="8" fill="#171717"/>
+<text x="48" y="522" class="white strong" text-anchor="middle">追踪</text>
+<text x="48" y="584" class="muted" text-anchor="middle">系统</text>
+<rect x="27" y="804" width="42" height="23" rx="4" fill="#f0f0f0"/>
+<text x="48.0" y="820" class="tiny muted" text-anchor="middle">DEV</text>
+<text x="48" y="846" class="muted small" text-anchor="middle">设置</text>
+<text x="120" y="40" class="large">追踪</text>
+<rect x="179" y="21" width="70" height="23" rx="4" fill="#f0f0f0"/>
+<text x="214.0" y="37" class="tiny muted" text-anchor="middle">开发模式</text>
+<text x="266" y="39" class="small muted">本地 Gateway  /  AHUAMAO</text>
+<text x="120" y="64" class="tiny muted">界面设计稿 · 示例数据</text>
+<circle cx="1053" cy="34" r="3" fill="#2f6b45"/>
+<text x="1065" y="39" class="small green">实时更新</text>
+<rect x="1148" y="20" width="90" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="1193.0" y="41" class="small" text-anchor="middle">暂停刷新</text>
+<rect x="1250" y="20" width="166" height="32" rx="6" fill="#171717"/>
+<text x="1333.0" y="41" class="white small" text-anchor="middle">导出筛选结果</text>
+<rect x="120" y="83" width="142" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="191.0" y="104" class="small" text-anchor="middle">最近 1 小时  ▾</text>
+<rect x="274" y="83" width="342" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="288" y="104" class="muted small">搜索摘要、模块、请求 ID…</text>
+<rect x="628" y="83" width="126" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="691.0" y="104" class="small" text-anchor="middle">模块 · Wiki  ▾</text>
+<rect x="766" y="83" width="150" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="841.0" y="104" class="small" text-anchor="middle">组件 / 功能  ▾</text>
+<rect x="928" y="83" width="124" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="990.0" y="104" class="small" text-anchor="middle">状态 · 全部  ▾</text>
+<rect x="1064" y="83" width="110" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="1119.0" y="104" class="small" text-anchor="middle">更多筛选</text>
+<text x="120" y="146" class="small muted">快捷筛选</text>
+<rect x="189" y="125" width="105" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="241.5" y="146" class="small" text-anchor="middle">Agent Loop</text>
+<rect x="304" y="125" width="72" height="32" rx="6" fill="#171717"/>
+<text x="340.0" y="146" class="white small" text-anchor="middle">Wiki</text>
+<rect x="386" y="125" width="108" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="440.0" y="146" class="small" text-anchor="middle">上下文压缩</text>
+<text x="526" y="146" class="small muted">范围：本组件 + 下游调用  ▾</text>
+<text x="120" y="192" class="muted">交互追踪</text>
+<text x="236" y="192" class="strong">系统日志</text>
+<line x1="236" y1="206" x2="292" y2="206" stroke="#171717"/>
+<text x="790" y="192" class="small muted">内容已脱敏   ·   写入正常   ·   丢弃 0   ·   保留 7 天</text>
+<line x1="96" y1="215" x2="1440" y2="215" stroke="#e8e8e8"/>
+<rect x="120" y="231" width="105" height="23" rx="4" fill="#eaf2fc"/>
+<text x="172.5" y="247" class="tiny blue" text-anchor="middle">模块：Wiki</text>
+<rect x="234" y="231" width="127" height="23" rx="4" fill="#fff3d6"/>
+<text x="297.5" y="247" class="tiny amber" text-anchor="middle">级别：警告 + 错误</text>
+<text x="380" y="248" class="small muted">清除筛选</text>
+<text x="1416" y="248" class="small muted" text-anchor="end">3 条示例  ·  全部匹配结果可导出</text>
+<text x="120" y="288" class="tiny muted">时间</text>
+<text x="248" y="288" class="tiny muted">级别</text>
+<text x="352" y="288" class="tiny muted">模块 / 功能</text>
+<text x="557" y="288" class="tiny muted">消息</text>
+<text x="1050" y="288" class="tiny muted">关联请求</text>
+<text x="1290" y="288" class="tiny muted">来源</text>
+<line x1="120" y1="303" x2="1416" y2="303" stroke="#e8e8e8"/>
+<rect x="108" y="306" width="1320" height="49" rx="4" fill="#fafafa"/>
+<rect x="108" y="312" width="3" height="37" rx="1" fill="#9f2f2f"/>
+<text x="120" y="336" class="mono small">14:19:05.824</text>
+<text x="248" y="336" class="small red">ERROR</text>
+<text x="352" y="336" class="small">wiki / ingest</text>
+<text x="557" y="336" class="small">搜索服务返回 503，文档导入已停止</text>
+<text x="1050" y="336" class="mono small">req_f821c4</text>
+<text x="1290" y="336" class="small">backend</text>
+<line x1="120" y1="356" x2="1416" y2="356" stroke="#e8e8e8"/>
+<text x="120" y="387" class="mono small">14:19:05.012</text>
+<text x="248" y="387" class="small amber">WARN</text>
+<text x="352" y="387" class="small">wiki / ingest</text>
+<text x="557" y="387" class="small">远端暂不可用，将进行第 2 次尝试</text>
+<text x="1050" y="387" class="mono small">req_f821c4</text>
+<text x="1290" y="387" class="small">backend</text>
+<line x1="120" y1="407" x2="1416" y2="407" stroke="#e8e8e8"/>
+<text x="120" y="438" class="mono small">14:12:27.441</text>
+<text x="248" y="438" class="small amber">WARN</text>
+<text x="352" y="438" class="small">wiki / index</text>
+<text x="557" y="438" class="small">增量索引检测到已移除的源文件</text>
+<text x="1050" y="438" class="mono small">req_b192ab</text>
+<text x="1290" y="438" class="small">backend</text>
+<line x1="120" y1="458" x2="1416" y2="458" stroke="#e8e8e8"/>
+<text x="120" y="486" class="small muted">当前筛选没有更多记录</text>
+<line x1="96" y1="508" x2="1440" y2="508" stroke="#e8e8e8"/>
+<text x="120" y="540" class="large">搜索服务返回 503</text>
+<rect x="334" y="522" width="63" height="23" rx="4" fill="#fbeaea"/>
+<text x="365.5" y="538" class="tiny red" text-anchor="middle">ERROR</text>
+<rect x="1168" y="520" width="114" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="1225.0" y="541" class="small" text-anchor="middle">查看调用链</text>
+<rect x="1294" y="520" width="122" height="32" rx="6" fill="#fff" stroke="#d9d9d9"/>
+<text x="1355.0" y="541" class="small" text-anchor="middle">复制日志</text>
+<text x="120" y="575" class="small muted">wiki / ingest  ·  backend  ·  req_f821c4  ·  trace_4bf92d  ·  2026-09-22 14:19:05.824 +08:00</text>
+<text x="120" y="616" class="strong">结构化详情</text>
+<text x="764" y="616" class="strong">前后日志上下文</text>
+<line x1="120" y1="633" x2="1416" y2="633" stroke="#e8e8e8"/>
+<line x1="731" y1="651" x2="731" y2="812" stroke="#e8e8e8"/>
+<text x="120" y="660" class="mono small muted">operation</text>
+<text x="338" y="660" class="mono small">wiki.ingest</text>
+<text x="120" y="691" class="mono small muted">service / status</text>
+<text x="338" y="691" class="mono small">search / 503</text>
+<text x="120" y="722" class="mono small muted">attempt / elapsed</text>
+<text x="338" y="722" class="mono small">2 / 1.82 s</text>
+<text x="120" y="753" class="mono small muted">error.kind</text>
+<text x="338" y="753" class="mono small">service_unavailable</text>
+<text x="120" y="784" class="mono small muted">capture_state</text>
+<text x="338" y="784" class="mono small">redacted</text>
+<text x="764" y="662" class="small">14:19:03.904  INFO   开始导入「产品需求文档」</text>
+<text x="764" y="693" class="small">14:19:05.012  WARN   搜索调用失败，等待重试</text>
+<text x="764" y="724" class="small red">14:19:05.824  ERROR  第二次尝试失败，停止导入</text>
+<text x="764" y="755" class="small">14:19:05.851  INFO   已发送用户可见错误提示</text>
+<text x="764" y="802" class="tiny muted">上下文包含同一请求的未命中级别，已明确标识。</text>
+<text x="120" y="843" class="tiny muted">日志与内容均按当前账号范围读取；点击请求 ID 可以定位完整 Trace。</text>
+</svg>

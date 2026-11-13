@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3B · Wiki CLI Consumer 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{border-left:3px solid #999;padding:8px 16px;background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3B · Wiki CLI Consumer</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-05 · 编码与测试：相互独立的 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>21 个 Wiki 叶子命令全部经过统一 Service Gate，Skill 命令不受 Wiki 生命周期影响。</li>
+    <li>每次命令动态选择当前 Knowledge Service；同步与异步 Handler 在成功、异常和 drain 期间正确持有、释放同代 Lease。</li>
+    <li>外部 Service 只在没有产品 Feature 记录时生效，不会掩盖 inactive 或 draining 状态。</li>
+    <li>KB、页面、来源、搜索、编译、图谱、查询、lint、confirmation 与上传只调用稳定 Service，Owner、KB 和命令输出语义保持。</li>
+    <li>SessionStore 保持 Host 所有权；CLI 源码不再导入或读取 Wiki Store、Parser、Compiler、Querier、Manager 和本地数据目录。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>新增 Wiki CLI Service / Gate / Lease / upload 契约</td><td class="ok">67 passed</td></tr>
+      <tr><td>通用 CLI + 新增契约</td><td>86 passed，1 个环境基线失败</td></tr>
+      <tr><td>Feature Runtime / Services / Manager / Lifecycle + Wiki + Gateway Wiki</td><td>484 passed，7 个认证基线失败</td></tr>
+      <tr><td>Cron / Sites / Browser / Feature 邻接回归</td><td class="ok">421 passed</td></tr>
+      <tr><td>Ruff、compileall、git diff check</td><td class="ok">全部通过</td></tr>
+      <tr><td>Import Linter</td><td class="ok">6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>测试组存在重叠，不将数量相加作为全量总数。新增测试集中在 <code>tests/test_cli_wiki_service.py</code>。</p>
+
+  <h2>既有基线说明</h2>
+  <div class="note">通用 CLI 的唯一失败是当前受限 macOS 环境拒绝 Seatbelt preflight，native sandbox 返回 exit code 71；Gateway 组的 7 项失败来自既有空认证 fixture 返回 401。两类失败均与 Wiki CLI Service 迁移无关，新增契约与邻接回归全部通过。</div>
+
+  <h2>关键场景</h2>
+  <p>覆盖全叶子 missing/draining 表、g1 到 g2 动态切换、同步成功与异常单次释放、异步 ingest 阻塞期间的 drain 等待、外部 Provider 条件回退、严格 fake Service 参数透传、上传八类结果、省略或非法 relations，以及真实 parser 和 CLI main smoke。</p>
+
+  <div class="nav"><a href="../backend/adr/0022-wiki-cli-knowledge-service-consumer.html">ADR-0022</a> · <a href="../backend/modules/cli.html">CLI 模块</a> · <a href="../backend/modules/wiki.html">Wiki 模块</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

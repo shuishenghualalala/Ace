@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import Composer from "./Composer";
+import Composer, { formatTeamMentionToken, teamMemberMentionId } from "./Composer";
 import ExternalAgentAvatar from "./ExternalAgentAvatar";
+import { EXTERNAL_AGENTS_FEATURE_ID } from "../lib/featureFlags";
 import type { AppConfig } from "../types";
 
 const noop = () => {};
@@ -12,7 +13,13 @@ const config = (externalAgentsEnabled: boolean): AppConfig => ({
   active_model_id: "test",
   models: [],
   wiki: { enabled: true },
-  external_agents: { enabled: externalAgentsEnabled },
+  feature_capabilities: {
+    [EXTERNAL_AGENTS_FEATURE_ID]: {
+      state: externalAgentsEnabled ? "enabled" : "disabled",
+      available: externalAgentsEnabled,
+      generation: null,
+    },
+  },
 });
 
 describe("Composer team execution tier picker", () => {
@@ -81,6 +88,28 @@ describe("Composer team execution tier picker", () => {
     expect(enabledHtml).toContain(">外援</button>");
     expect(enabledHtml).toContain("external-agent-avatar");
     expect(enabledHtml).not.toContain(">Agents</button>");
+  });
+});
+
+describe("Composer team member mention display", () => {
+  it("uses the stable Team Runtime member id instead of the display name", () => {
+    expect(teamMemberMentionId({
+      agentId: "agent_c6f06632e6a4",
+      isLeader: false,
+    })).toBe("agent_c6f06632e6a4");
+    expect(teamMemberMentionId({
+      agentId: "agent_leader",
+      isLeader: true,
+    })).toBe("leader");
+  });
+
+  it("uses the member name instead of the internal agent id", () => {
+    expect(formatTeamMentionToken({ agentId: "agent_c6f06632e6a4", name: "kk" })).toBe("@kk");
+  });
+
+  it("keeps spaced names readable", () => {
+    expect(formatTeamMentionToken({ agentId: "crew-builtin", name: " Crew   内置智能体 " }))
+      .toBe("@Crew 内置智能体");
   });
 });
 

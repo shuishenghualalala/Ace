@@ -41,7 +41,8 @@ export interface AgentHubState {
   message?: string;
   featureEnabled?: boolean;
   scanning?: boolean;
-  form?: HTMLElement;
+  /** Render the active create form into the Hub-owned region. */
+  renderForm?: (region: HTMLElement) => void;
 }
 
 export interface AgentHubOptions {
@@ -84,6 +85,14 @@ function createExternalAgentAvatar(provider: string, displayBadge?: string): HTM
   initial.textContent = externalAgentInitial(provider, displayBadge);
   avatar.append(initial);
   return avatar;
+}
+
+function createTeamLogo(): HTMLElement {
+  const logo = document.createElement('span');
+  logo.className = 'session__team-logo';
+  logo.setAttribute('aria-hidden', 'true');
+  logo.append(document.createElement('i'), document.createElement('i'));
+  return logo;
 }
 
 function action(
@@ -215,7 +224,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
         action('派活', 'useTeam', team.id, (id) => options.onUseTeam?.(id), 'primary', !team.available),
         action('删除', 'deleteTeam', team.id, (id) => options.onDeleteTeam?.(id), 'danger'),
       );
-      card.append(createIcon('icon-team', { size: 40 }), copy, cardActions);
+      card.append(createTeamLogo(), copy, cardActions);
       teamGrid.append(card);
     }
     if (!current.teams.length) teamGrid.append(textElement('p', 'mw-hub-state', '还没有小队'));
@@ -310,7 +319,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
       const formRegion = document.createElement('section');
       formRegion.className = 'mw-agent-hub__form';
       formRegion.dataset.agentFormRegion = '';
-      if (current.form) formRegion.append(current.form);
+      if (current.renderForm) current.renderForm(formRegion);
       else formRegion.append(textElement('p', 'mw-hub-state', '表单正在准备…'));
       results.append(formRegion);
     }

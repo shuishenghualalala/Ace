@@ -41,17 +41,40 @@ def _within(path: Path, root: Path) -> bool:
 
 
 class SiteManager:
-    def __init__(self, store: SQLiteSiteStore) -> None:
+    def __init__(
+        self,
+        store: SQLiteSiteStore,
+        *,
+        legacy_db_path: str | Path | None = None,
+    ) -> None:
         self.store = store
+        # blueprint 与 store 同住 sites.db（ADR-0038 拆库收尾批）；legacy 路径
+        # 由装配线传入并转发给 BlueprintStore，两半各自 copy-on-first-activate。
         self.blueprint = BlueprintManager(
-            BlueprintStore(str(store.db_path), wal_enabled=store.wal_enabled)
+            BlueprintStore(
+                str(store.db_path),
+                wal_enabled=store.wal_enabled,
+                legacy_db_path=legacy_db_path,
+            )
         )
+        self._closed = False
 
     async def start(self) -> None:
         await self.blueprint.start()
 
     async def stop(self) -> None:
         await self.blueprint.stop()
+
+    async def close(self) -> None:
+        """停止调度并关闭本 Generation 拥有的两类 Store。"""
+        if self._closed:
+            return
+        try:
+            await self.stop()
+        finally:
+            self.store.close()
+            self.blueprint.store.close()
+            self._closed = True
 
     def _root(self, owner: str) -> Path:
         root = get_owner_runtime_home(owner, create=True) / "sites"
@@ -370,7 +393,7 @@ class SiteManager:
                 f'style="grid-column:{int(layout["x"]) + 1}/span {int(layout["w"])};'
                 f'grid-row:{int(layout["y"]) + 1}/span {int(layout["h"])}">'
                 f'<iframe title="{escape(widget["title"])}" src="{escape(src)}" '
-                'sandbox="allow-scripts allow-forms allow-modals allow-same-origin"></iframe></section>'
+                'sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-popups"></iframe></section>'
             )
         empty = '<p class="empty">这个 App 还没有内容。</p>' if not cards else ""
         bridge = "" if offline else """

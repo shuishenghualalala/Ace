@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ace 流式首 token 性能诊断</title>
+<style>
+body{margin:0;color:#222;background:#fff;font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:900px;margin:0 auto;padding:48px 24px 80px}h1{font-size:28px;margin:0 0 8px}h2{margin-top:36px;font-size:20px;border-bottom:1px solid #eee;padding-bottom:8px}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f6f6f6;padding:2px 5px;border-radius:4px}li{margin:8px 0}.note{color:#666}
+</style>
+</head>
+<body>
+<main>
+<p class="note">Ace / 前端 / 流式性能</p>
+<h1>流式首 token 性能诊断</h1>
+<p>该诊断用于区分模型 TTFT、Ace 网关转发和桌面端渲染耗时。埋点只记录时间、请求标识和请求规模，不记录 prompt、回答正文或密钥。</p>
+<h2>开启方式</h2>
+<ol>
+<li>桌面端 DevTools Console 执行 <code>__mmStreamDebug.enable()</code>，然后刷新页面。</li>
+<li>发送一条消息，执行 <code>__mmStreamDebug.dump()</code> 查看最近事件，按同一个 <code>request_id</code> 串联。</li>
+<li>关闭时执行 <code>__mmStreamDebug.disable()</code>。</li>
+</ol>
+<h2>关键事件</h2>
+<ul>
+<li><code>dispatch / send-ws</code>：桌面端发起时间。</li>
+<li><code>gateway_request_received</code>：网关接收时间。</li>
+<li><code>llm_first_event</code>：provider 首个流事件，包含模型首 reasoning、正文或工具事件类型。</li>
+<li><code>llm_first_text</code>：provider 首个正文增量。</li>
+<li><code>gateway_first_push</code>：网关完成首帧 WS 推送。</li>
+<li><code>ws-renderer / proxy-event-message</code>：桌面端收到 WS 帧。</li>
+<li><code>ttft-first-visible-text</code>：前端收到首个有效正文。</li>
+<li><code>ttft-first-dom-patch</code>：前端首次将正文 patch 到 DOM。</li>
+</ul>
+<h2>判读</h2>
+<ul>
+<li><code>llm_first_event</code> 本身很慢：主要是模型/上游服务或请求负载问题。</li>
+<li>provider 首事件很快、<code>gateway_first_push</code> 明显变慢：检查网关发送限流或连接状态。</li>
+<li>网关已 push、前端收到很快但 DOM patch 变慢：检查渲染主线程或 Markdown 增量渲染。</li>
+</ul>
+</main>
+</body>
+</html>

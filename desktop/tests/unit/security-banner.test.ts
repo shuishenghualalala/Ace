@@ -16,6 +16,7 @@ import {
   deriveState,
   refreshSecurityBanner,
   stopSecurityBannerRefresh,
+  SECURITY_BANNER_ENABLED,
 } from '../../src/ui/features/security-banner';
 
 beforeEach(() => {
@@ -82,7 +83,7 @@ describe('security banner deriveState', () => {
     })).toBe('off');
   });
 
-  it('shows the sandbox install prompt above the composer', async () => {
+  it.skipIf(!SECURITY_BANNER_ENABLED)('shows the sandbox install prompt above the composer', async () => {
     await refreshSecurityBanner();
 
     const banner = document.getElementById('security-sandbox-banner');
@@ -96,7 +97,7 @@ describe('security banner deriveState', () => {
     expect(banner?.nextElementSibling?.classList.contains('composer-edit-banner')).toBe(true);
   });
 
-  it('uses the in-app confirmation before requesting administrator access', async () => {
+  it.skipIf(!SECURITY_BANNER_ENABLED)('uses the in-app confirmation before requesting administrator access', async () => {
     const securitySetup = vi.fn(async () => ({ ok: true, exitCode: 0 }));
     Object.assign(window.Crew, { securitySetup });
 

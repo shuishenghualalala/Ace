@@ -15,13 +15,11 @@ import type {
   Attachment,
   BackendConfig,
   BackendSession,
-  CronJob,
   Mode,
   Task,
   Workspace,
 } from './backend-client';
-import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus, ToolCallInfo } from './chat-render';
-import type { BackendChatSocket } from './backend-client';
+import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus } from './chat-render';
 import {
   sessionStore,
   messageStore,
@@ -45,6 +43,26 @@ import {
 // stream-reassembly 零依赖（不 import state/features），故 state.ts 可安全 import 无循环。
 import { resetSession as resetReassembly } from './stream-reassembly';
 
+export interface TeamWikiReadGrant {
+  teamId: string;
+  kbId: string;
+  kbName?: string;
+}
+
+const teamWikiReadGrants = new Map<string, TeamWikiReadGrant>();
+
+export function setTeamWikiReadGrant(sessionId: string, grant: TeamWikiReadGrant | null): void {
+  const key = String(sessionId || '').trim();
+  if (!key) return;
+  if (grant?.teamId && grant.kbId) teamWikiReadGrants.set(key, { ...grant });
+  else teamWikiReadGrants.delete(key);
+}
+
+export function getTeamWikiReadGrant(sessionId: string, teamId: string): TeamWikiReadGrant | null {
+  const grant = teamWikiReadGrants.get(String(sessionId || '').trim());
+  return grant && grant.teamId === String(teamId || '').trim() ? { ...grant } : null;
+}
+
 export type TabKey =
   | 'chat'
   | 'agents'
@@ -54,6 +72,7 @@ export type TabKey =
   | 'cron'
   | 'security'
   | 'audit'
+  | 'tracing'
   | 'system';
 export type SystemPanelKey = 'overview' | 'logs' | 'usage';
 export type ComposerMode = 'craft' | 'plan' | 'ask';
@@ -101,6 +120,7 @@ export interface PendingFollowup {
     id: string;
     question: string;
     options: Array<{ label: string; value: string; description?: string }>;
+    inputMode?: 'choice' | 'text' | string;
     allowFreeText: boolean;
     multiSelect: boolean;
   }>;
@@ -255,6 +275,9 @@ function buildSnapshot(): AppState {
     queueHints: m.queueHints,
     pendingQueues: m.pendingQueues,
     attachments: m.attachments,
+    historyLoadErrors: m.historyLoadErrors,
+    historyLoading: m.historyLoading,
+    historyPaging: m.historyPaging,
     tasks: t.tasks,
     taskBoardOpen: t.taskBoardOpen,
     taskBoardWidth: t.taskBoardWidth,
@@ -278,6 +301,11 @@ function buildSnapshot(): AppState {
     activeTab: u.activeTab,
     activeSystemPanel: u.activeSystemPanel,
     backendConnected: u.backendConnected,
+    backendProcessState: u.backendProcessState,
+    backendHealthState: u.backendHealthState,
+    backendTransportState: u.backendTransportState,
+    backendLoopLagMs: u.backendLoopLagMs,
+    backendCanSend: u.backendCanSend,
     socket: u.socket as AppState['socket'],
     feedbackDraft: u.feedbackDraft,
     feedbackList: u.feedbackList,
@@ -308,6 +336,9 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   queueHints: () => messageStore,
   pendingQueues: () => messageStore,
   attachments: () => messageStore,
+  historyLoadErrors: () => messageStore,
+  historyLoading: () => messageStore,
+  historyPaging: () => messageStore,
   tasks: () => taskStore,
   taskBoardOpen: () => taskStore,
   taskBoardWidth: () => taskStore,
@@ -682,6 +713,7 @@ export function clearAttachments(): void {
  *  busySessions / queueHints / editFromIdx / pendingQueues。订阅交给调用方通过
  *  addSubscribedSessions / BackendChatSocket.unsubscribe 处理。 */
 export function removeSessionState(sessionId: string): void {
+  teamWikiReadGrants.delete(sessionId);
   // 修法3：会话删除 → 清掉它的 delta 重组缓冲，防泄漏。
   resetReassembly(sessionId);
   const curMessages = messageStore.get().messages;
@@ -701,6 +733,21 @@ export function removeSessionState(sessionId: string): void {
     const next = { ...curPending };
     delete next[sessionId];
     messageStore.set({ pendingQueues: next });
+  }
+  if (messageStore.get().historyLoadErrors.has(sessionId)) {
+    const nextErrors = new Set(messageStore.get().historyLoadErrors);
+    nextErrors.delete(sessionId);
+    messageStore.set({ historyLoadErrors: nextErrors });
+  }
+  if (messageStore.get().historyLoading.has(sessionId)) {
+    const nextLoading = new Set(messageStore.get().historyLoading);
+    nextLoading.delete(sessionId);
+    messageStore.set({ historyLoading: nextLoading });
+  }
+  if (messageStore.get().historyPaging[sessionId]) {
+    const nextPaging = { ...messageStore.get().historyPaging };
+    delete nextPaging[sessionId];
+    messageStore.set({ historyPaging: nextPaging });
   }
   const curBooks = sessionStore.get().books;
   if (sessionId in curBooks) {
@@ -823,6 +870,48 @@ export function setQueueHint(sessionId: string, hint: string): void {
   messageStore.set({ queueHints: { ...messageStore.get().queueHints, [sessionId]: hint } });
 }
 
+/** 读取某 session 的队列提示。 */
+export function getQueueHint(sessionId: string): string {
+  return messageStore.get().queueHints[sessionId] ?? '';
+}
+
+/** 标记某 session 的历史回填失败（聊天区显示「加载失败 + 重试」卡）。 */
+export function markHistoryLoadError(sessionId: string): void {
+  if (messageStore.get().historyLoadErrors.has(sessionId)) return;
+  const next = new Set(messageStore.get().historyLoadErrors);
+  next.add(sessionId);
+  messageStore.set({ historyLoadErrors: next });
+}
+
+/** 清除某 session 的历史回填失败标记（回填成功 / 重新加载时）。 */
+export function clearHistoryLoadError(sessionId: string): void {
+  if (!messageStore.get().historyLoadErrors.has(sessionId)) return;
+  const next = new Set(messageStore.get().historyLoadErrors);
+  next.delete(sessionId);
+  messageStore.set({ historyLoadErrors: next });
+}
+
+/** 标记某 session 的历史窗口分页游标（loadBackendHistory / loadOlderHistoryPage 写入）。 */
+export function setHistoryPaging(
+  sessionId: string,
+  paging: { hasMore: boolean; nextBefore: string | null } | null,
+): void {
+  const next = { ...messageStore.get().historyPaging };
+  if (paging) next[sessionId] = paging;
+  else delete next[sessionId];
+  messageStore.set({ historyPaging: next });
+}
+
+/** 标记/清除某 session 的历史回填进行中（聊天区骨架占位）。 */
+export function setHistoryLoading(sessionId: string, loading: boolean): void {
+  const cur = messageStore.get().historyLoading;
+  if (loading === cur.has(sessionId)) return;
+  const next = new Set(cur);
+  if (loading) next.add(sessionId);
+  else next.delete(sessionId);
+  messageStore.set({ historyLoading: next });
+}
+
 /** 设置当前 workspace 选中。 */
 export function setCurrentWorkspaceId(workspaceId: string): void {
   workspaceStore.set({ currentWorkspaceId: workspaceId });
@@ -879,6 +968,8 @@ export function setSelectedSessions(map: Record<string, boolean>): void {
 
 /** 设置某 session 绑定的外源 Team id。 */
 export function setActiveExternalTeamForSession(sessionId: string, teamId: string): void {
+  const previousTeamId = externalStore.get().activeExternalTeamIdBySession[sessionId] || '';
+  if (previousTeamId !== teamId) teamWikiReadGrants.delete(sessionId);
   externalStore.set({ activeExternalTeamIdBySession: { ...externalStore.get().activeExternalTeamIdBySession, [sessionId]: teamId } });
 }
 

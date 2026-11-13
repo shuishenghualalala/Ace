@@ -24,6 +24,11 @@ import { imageDisplayUrl, isAbsoluteLocalPath, screenshotResultPath } from './to
 import { buildChippedNodes } from './features/composer-mention';
 import { isPlanDocumentPath } from './plan-document-path';
 import { createIcon, type IconId } from './components/icon';
+import { renderToolInteractionCard } from './components/interaction-card';
+import { patchTranscriptMarkdown } from './components/transcript';
+import { getLocale, t } from './lib/i18n';
+import { spriteSymbolRef } from './lib/sprite-symbol';
+import { revealPendingWikiConfirmation } from './features/wiki-confirmation-state';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -48,8 +53,10 @@ export interface ToolCallInfo {
   status: 'generating' | 'running' | 'done' | 'error';
   startedAt: number;
   duration?: number | undefined;
-  /** 运行中的阶段进度文案（phase=progress 帧），完成/失败后为空。 */
+  /** 最近一条阶段进度文案（兼容旧数据与运行态摘要）。 */
   progressText?: string | undefined;
+  /** 按到达顺序保留的阶段进度行，供过程时间线逐行渲染。 */
+  progressHistory?: string[] | undefined;
 }
 
 /** 同回合内 assistant 段的语义角色：过程（进折叠区）vs 最终答案（折叠外可见）。 */
@@ -92,6 +99,11 @@ export interface ChatMessage {
   /** 多轮工具 loop 内该 assistant 段是过程还是最终答案；由 reducer 写入，历史回放可推断。 */
   segmentRole?: SegmentRole | undefined;
   thinking?: string | undefined;
+  /** 思考流起点（首个 thinking 帧到达时刻，由 thinkingReducer 记录）。
+   *  纯前端计时，历史回放无此数据时思考块不展示时长。 */
+  thinkingStartedAt?: number | undefined;
+  /** 思考流总耗时（ms）：回合 final/error 封口时由 reducer 依据 thinkingStartedAt 计算写回。 */
+  thinkingDurationMs?: number | undefined;
   toolCalls?: ToolCallInfo[] | undefined;
   streaming?: boolean | undefined;
   attachments?: Attachment[] | undefined;
@@ -116,6 +128,11 @@ export interface ChatMessage {
   mentionFrom?: string | undefined;
   mentionTo?: string[] | undefined;
   mentionIntent?: string | undefined;
+  communicationKind?: string | undefined;
+  communicationStatus?: string | undefined;
+  requestId?: string | undefined;
+  replyTo?: string | undefined;
+  communicationRequestText?: string | undefined;
   displayMode?: string | undefined;
   collapsedTitle?: string | undefined;
   processText?: string | undefined;
@@ -143,7 +160,7 @@ export interface ChatMessage {
   } | undefined;
   /** 被停止/断连截断的半截回复：不再显示执行中，但仍按流式 Markdown 容错渲染。 */
   interrupted?: boolean | undefined;
-  /** Wiki Agent 回合引用的 Wiki 页面卡片（wiki_cards 帧 → wikiCardsReducer patch 进来）；
+  /** Wiki Agent 回合引用的 Wiki 页面卡片（wiki.cards 事件 → wikiCardsReducer patch 进来）；
    *  chat-render 据此在正文下方渲染「Wiki 结果」卡片网格。 */
   wikiCards?: WikiPage[] | undefined;
 }
@@ -159,6 +176,10 @@ export interface PendingMessage {
   clientIntent?: 'revision';
   /** 已乐观渲染成 user 气泡的消息 id；队列面板隐藏，发送时复用避免重复气泡。 */
   optimisticUserMessageId?: string;
+  /** 用户在 Team Composer 中选择的成员 mention。 */
+  userMentions?: { kind: 'team_member'; member_id: string }[];
+  /** Explicit per-turn consent for external team agents to read one Wiki KB. */
+  externalWikiReadKbId?: string;
 }
 
 export type SessionStatus = 'idle' | 'running' | 'queued' | 'error';
@@ -174,7 +195,7 @@ function createChatAvatar(): HTMLElement {
   svg.setAttribute('viewBox', '0 0 32 32');
   svg.setAttribute('aria-hidden', 'true');
   const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-  use.setAttribute('href', CHAT_BOT_AVATAR_SYMBOL);
+  use.setAttribute('href', spriteSymbolRef(CHAT_BOT_AVATAR_SYMBOL));
   svg.appendChild(use);
   avatar.appendChild(svg);
   return avatar;
@@ -318,6 +339,9 @@ const PROCESS_SUBAGENT_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><
 const PROCESS_MEMORY_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>';
 const PROCESS_SKILL_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.4 7.2H22l-6 4.8 2.3 7.2-6.3-4.5-6.3 4.5L8 14 2 9.2h7.6z"/></svg>';
 
+/** 时间线可展开项的折叠箭头（chevron），details[open] 时由 CSS 旋转 90° 朝向下。 */
+const TIMELINE_CHEVRON_SVG = '<svg class="process-timeline__chevron" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"></polyline></svg>';
+
 /** 工具时间线图标类别。 */
 export type ToolIconKind =
   | 'write' | 'read' | 'search' | 'web' | 'todo' | 'team' | 'memory' | 'skill' | 'cron' | 'terminal';
@@ -371,28 +395,41 @@ function prettyBlock(value?: string): string {
   }
 }
 
-function renderThinkingBlock(thinking: string, messageId: string, streaming: boolean): HTMLElement {
-  // 时间线项默认态对齐 web：思考中展开、完成后收起。
+function renderThinkingBlock(message: ChatMessage, turnLive: boolean): HTMLElement {
+  // 「思考进行中」判定：消息仍在流式、且正文/工具尚未落到同一条消息上
+  // （thinking 帧先到达，content/toolCalls 到达即视为思考阶段结束）。
   // data-thinking-for 供流式分片定点更新 body（patchStreamingTurn），保持外层 DOM 不变。
+  const streaming = Boolean(
+    message.streaming && turnLive && !message.content?.trim() && !(message.toolCalls?.length),
+  );
+  const seconds = message.thinkingDurationMs != null
+    ? Math.round(Math.max(0, message.thinkingDurationMs) / 1000)
+    : 0;
+  const title = !streaming && seconds >= 3
+    ? t('chat.thinking.measured', { seconds })
+    : t('chat.thinking.brief');
   const details = createTrustedElement<HTMLDetailsElement>(
     `<details class="process-timeline__content process-timeline__details">
       <summary class="process-timeline__row">
         <span class="process-timeline__title"></span>
-        <span class="process-timeline__chevron">›</span>
+        ${TIMELINE_CHEVRON_SVG}
       </summary>
-      <div class="process-timeline__thinking"></div>
+      <div class="process-timeline__thinking md-body chat-markdown"></div>
     </details>`,
   );
   details.open = streaming;
-  details.querySelector<HTMLElement>('.process-timeline__title')!.textContent =
-    streaming ? '思考中' : '思考已完成';
-  details.querySelector<HTMLElement>('.process-timeline__thinking')!.textContent = thinking;
+  details.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
+  patchTranscriptMarkdown(
+    details.querySelector<HTMLElement>('.process-timeline__thinking')!,
+    message.thinking ?? '',
+    streaming,
+  );
   const item = renderTimelineItem(
     PROCESS_THINKING_ICON_SVG,
     streaming ? 'process-timeline__icon--running' : '',
     details,
   );
-  item.dataset.thinkingFor = messageId;
+  item.dataset.thinkingFor = message.id;
   return item;
 }
 
@@ -505,7 +542,7 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
       <summary class="process-timeline__row subagent-card__header">
         <span class="process-timeline__title subagent-card__title"></span>
         <span class="process-timeline__duration" ${durationAttr} ${startedAtAttr}>${initialDuration}</span>
-        <span class="process-timeline__chevron">›</span>
+        ${TIMELINE_CHEVRON_SVG}
       </summary>
       <div class="subagent-card__body"></div>
     </details>`,
@@ -575,6 +612,73 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
   return renderTimelineItem(PROCESS_SUBAGENT_ICON_SVG, iconClass, details);
 }
 
+/** 进度折叠阈值：完成后实际行数超过该值（或总字符超长）才收进折叠块；短状态保持平铺。 */
+const PROGRESS_FOLD_LINES = 2;
+const PROGRESS_FOLD_CHARS = 160;
+
+/** 命令行工具的 progress 不是可读进度，而是原始 stdout 增量（builtin.py 执行期实时透传），
+ *  渲染出来是整段命令输出，直接不渲染；最终结果仍由 Response 块承载。 */
+const STDOUT_PROGRESS_TOOLS = new Set(['bash', 'terminal', 'process']);
+
+/**
+ * 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。
+ * 运行中平铺实时输出；工具结束后长输出默认折叠成「实时输出 · N 行」，
+ * 避免 terminal 等命令的调试输出在完成后仍常驻占屏（展开选择经 fold-state 持久化）。
+ * 注意 terminal 进度按 ~0.5s 增量整块推送，一个 entry 可含多行，须按实际行数判定。
+ */
+function appendToolProgressLines(
+  parent: HTMLElement,
+  tool: ToolCallInfo,
+  ctx: { isActive: boolean; foldKey: string },
+): void {
+  if (STDOUT_PROGRESS_TOOLS.has(String(tool.name || '').trim().toLowerCase())) return;
+  const lines = tool.progressHistory?.length
+    ? tool.progressHistory
+    : tool.progressText
+      ? [tool.progressText]
+      : [];
+  if (lines.length === 0) return;
+
+  const lineCount = lines.reduce((sum, s) => sum + s.split('\n').length, 0);
+  const charCount = lines.reduce((sum, s) => sum + s.length, 0);
+
+  const appendLines = (container: HTMLElement): void => {
+    for (const line of lines) {
+      const item = document.createElement('div');
+      item.className = 'process-timeline__stage';
+      item.textContent = line;
+      container.appendChild(item);
+    }
+  };
+
+  if (ctx.isActive || (lineCount <= PROGRESS_FOLD_LINES && charCount <= PROGRESS_FOLD_CHARS)) {
+    const progress = document.createElement('div');
+    progress.className = 'process-timeline__progress';
+    appendLines(progress);
+    parent.appendChild(progress);
+    return;
+  }
+
+  // 复用工具卡片 fold 委托（details.process-timeline__details + data-fold-key），
+  // 折叠键派生 :progress 后缀，与 Request/Response 主详情的折叠偏好互不影响。
+  const foldKey = `${ctx.foldKey}:progress`;
+  const details = createTrustedElement<HTMLDetailsElement>(
+    `<details class="process-timeline__details process-timeline__details--progress">
+      <summary class="process-timeline__row">
+        <span class="process-timeline__progress-label"></span>
+        <span class="process-timeline__chevron">›</span>
+      </summary>
+      <div class="process-timeline__progress"></div>
+    </details>`,
+  );
+  details.open = getToolFold(foldKey) ?? false;
+  details.setAttribute('data-fold-key', foldKey);
+  details.querySelector<HTMLElement>('.process-timeline__progress-label')!.textContent =
+    `实时输出 · ${lineCount} 行`;
+  appendLines(details.querySelector<HTMLElement>('.process-timeline__progress')!);
+  parent.appendChild(details);
+}
+
 function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   if (SUBAGENT_CARD_TOOLS.has(tool.name)) return renderSubagentCard(tool, messageId);
   const isActive = tool.status === 'running' || tool.status === 'generating';
@@ -603,7 +707,7 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
         <summary class="process-timeline__row">
           <span class="process-timeline__title"></span>
           <span class="process-timeline__duration" ${durationAttr} ${startedAtAttr}>${initialDuration}</span>
-          <span class="process-timeline__chevron">›</span>
+          ${TIMELINE_CHEVRON_SVG}
         </summary>
         <div class="process-timeline__detail">
           <section class="process-code-block" data-section="args">
@@ -623,13 +727,6 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     details.setAttribute('data-fold-key', foldKey);
     const titleEl = details.querySelector<HTMLElement>('.process-timeline__title')!;
     titleEl.textContent = title;
-    // 长耗时工具的阶段进度（phase=progress）：折叠状态也可见，跟随标题行。
-    if (isActive && tool.progressText) {
-      const stage = document.createElement('span');
-      stage.className = 'process-timeline__stage';
-      stage.textContent = tool.progressText;
-      titleEl.after(stage);
-    }
     const durSpan = details.querySelector<HTMLElement>('.process-timeline__duration')!;
     if (!initialDuration && !isActive) durSpan.remove();
     const argsSection = details.querySelector<HTMLElement>('[data-section="args"]')!;
@@ -646,10 +743,15 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
       const contentWrap = document.createElement('div');
       contentWrap.className = 'process-timeline__tool-media';
       contentWrap.appendChild(details);
+      appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
       contentWrap.appendChild(buildInlineImage(shotPath, '页面截图', shotPath, 'tool'));
       return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
     }
-    return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, details);
+    const contentWrap = document.createElement('div');
+    contentWrap.className = 'process-timeline__tool';
+    contentWrap.appendChild(details);
+    appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
+    return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
   }
 
   const content = createTrustedElement<HTMLElement>(
@@ -662,15 +764,13 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
   );
   const titleEl = content.querySelector<HTMLElement>('.process-timeline__title')!;
   titleEl.textContent = title;
-  if (isActive && tool.progressText) {
-    const stage = document.createElement('span');
-    stage.className = 'process-timeline__stage';
-    stage.textContent = tool.progressText;
-    titleEl.after(stage);
-  }
   const durSpan = content.querySelector<HTMLElement>('.process-timeline__duration')!;
   if (!initialDuration && !isActive) durSpan.remove();
-  return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, content);
+  const contentWrap = document.createElement('div');
+  contentWrap.className = 'process-timeline__tool';
+  contentWrap.appendChild(content);
+  appendToolProgressLines(contentWrap, tool, { isActive, foldKey });
+  return renderTimelineItem(TOOL_ICON_SVGS[toolIconKind(tool.name)], iconClass, contentWrap);
 }
 
 interface WikiConfirmationResult {
@@ -682,10 +782,17 @@ interface WikiConfirmationResult {
   expires_at?: number;
 }
 
+interface WikiBackgroundResult {
+  background_task?: boolean;
+  background_status?: string;
+  message?: string;
+}
+
 function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | null {
   if (!tool.name.startsWith('wiki_') || !tool.result) return null;
   try {
     const value = JSON.parse(tool.result) as WikiConfirmationResult;
+    if (value.expires_at && value.expires_at * 1000 <= Date.now()) return null;
     return value.requires_confirmation && value.confirmation_id ? value : null;
   } catch {
     return null;
@@ -693,25 +800,101 @@ function parseWikiConfirmation(tool: ToolCallInfo): WikiConfirmationResult | nul
 }
 
 function renderWikiConfirmationCard(value: WikiConfirmationResult): HTMLElement {
+  const confirmationId = value.confirmation_id || '';
+  const dialogId = `wiki-permission-${confirmationId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const wrap = document.createElement('div');
+  // Wiki 变更确认与其他受控操作共用 permission card 的浮层定位和盒模型。
+  wrap.className = 'followup-card-wrap followup-card-wrap--permission wiki-confirmation-card-wrap';
+  wrap.setAttribute('aria-hidden', 'true');
+  void revealPendingWikiConfirmation(confirmationId, wrap);
+
   const card = document.createElement('section');
-  card.className = 'wiki-confirmation-card';
-  const title = document.createElement('strong');
-  title.textContent = value.summary || '需要确认 Wiki 操作';
-  const impact = document.createElement('pre');
-  impact.textContent = JSON.stringify(value.impact || {}, null, 2);
+  card.className = 'followup-card followup-card--permission wiki-confirmation-card';
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'false');
+  card.setAttribute('aria-labelledby', `${dialogId}-title`);
+  card.setAttribute('aria-describedby', `${dialogId}-description`);
+
+  const head = document.createElement('div');
+  head.className = 'followup-card__header';
+  const icon = document.createElement('span');
+  icon.className = 'followup-card__header-icon';
+  icon.appendChild(createTrustedElement<SVGElement>('<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>'));
+  const headerCopy = document.createElement('div');
+  headerCopy.className = 'followup-card__header-copy';
+  const title = document.createElement('div');
+  title.className = 'followup-card__title';
+  title.id = `${dialogId}-title`;
+  title.textContent = '允许执行 Crew 笔记操作？';
+  const hint = document.createElement('div');
+  hint.className = 'followup-card__subtitle';
+  hint.id = `${dialogId}-description`;
+  hint.textContent = 'Crew 请求执行以下操作';
+  headerCopy.append(title, hint);
+  head.append(icon, headerCopy);
+
+  const body = document.createElement('div');
+  body.className = 'permission-dialog__body';
+  const operation = document.createElement('div');
+  operation.className = 'permission-dialog__operation';
+  const context = document.createElement('span');
+  context.className = 'permission-dialog__context';
+  context.textContent = 'Crew 笔记（Wiki）';
+  const summary = document.createElement('strong');
+  summary.className = 'permission-dialog__summary';
+  summary.textContent = value.summary || '执行知识库变更操作';
+  operation.append(context, summary);
+  const impactText = value.impact && Object.keys(value.impact).length > 0
+    ? `影响\n${JSON.stringify(value.impact, null, 2)}`
+    : '';
+  if (impactText) {
+    const impact = document.createElement('code');
+    impact.className = 'permission-dialog__command';
+    impact.textContent = impactText;
+    operation.appendChild(impact);
+  }
+  body.appendChild(operation);
+
   const actions = document.createElement('div');
-  actions.className = 'wiki-confirmation-card__actions';
+  actions.className = 'permission-dialog__actions';
   const confirm = document.createElement('button');
   confirm.type = 'button';
-  confirm.dataset.wikiConfirm = value.confirmation_id || '';
+  confirm.className = 'permission-dialog__button permission-dialog__button--primary';
+  confirm.dataset.wikiConfirm = confirmationId;
   confirm.dataset.wikiAction = value.action || '';
   confirm.textContent = '确认执行';
   const cancel = document.createElement('button');
   cancel.type = 'button';
-  cancel.dataset.wikiCancel = value.confirmation_id || '';
+  cancel.className = 'permission-dialog__button permission-dialog__button--secondary';
+  cancel.dataset.wikiCancel = confirmationId;
   cancel.textContent = '取消';
-  actions.append(confirm, cancel);
-  card.append(title, impact, actions);
+  actions.append(cancel, confirm);
+  card.append(head, body, actions);
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function parseWikiBackgroundResult(tool: ToolCallInfo): WikiBackgroundResult | null {
+  if (tool.name !== 'wiki_plan_ingest' || !tool.result) return null;
+  try {
+    const value = JSON.parse(tool.result) as WikiBackgroundResult & WikiConfirmationResult;
+    if (!value.background_task || value.requires_confirmation) return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function renderWikiBackgroundResultCard(value: WikiBackgroundResult): HTMLElement {
+  const card = document.createElement('section');
+  card.className = 'wiki-confirmation-card wiki-ingest-result-card';
+  const title = document.createElement('strong');
+  title.textContent = value.background_status === 'failed' ? 'Wiki 深度整理失败' : 'Wiki 深度整理完成';
+  const detail = document.createElement('p');
+  detail.textContent = value.message || (value.background_status === 'failed'
+    ? '整理没有完成，可以稍后重试。'
+    : '整理结果已经写入知识库。');
+  card.append(title, detail);
   return card;
 }
 
@@ -753,6 +936,28 @@ export function formatDuration(ms: number): string {
   const h = Math.floor(m / 60);
   const rm = m % 60;
   return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+}
+
+/**
+ * 回合级计时头的时长格式：跟随界面语言。
+ * 中文输出「42 秒 / 10 分 22 秒 / 1 小时 5 分」；英文复用 formatDuration 的短形式。
+ * 显示秒最小取 1，避免流式首秒出现「0 秒」。 */
+export function formatTurnDuration(ms: number): string {
+  const safe = Math.max(0, ms);
+  if (getLocale() !== 'zh-CN') return formatDuration(safe);
+  const totalSec = Math.max(1, Math.floor(safe / 1000));
+  if (totalSec < 60) return `${totalSec} 秒`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return s > 0 ? `${m} 分 ${s} 秒` : `${m} 分`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h} 小时 ${rm} 分` : `${h} 小时`;
+}
+
+/** 回合顶部计时头文案：「已工作 X 分 X 秒」，流式中由 ticker 每秒原地刷新。 */
+export function resolveTurnHeaderLabel(durationMs: number): string {
+  return t('chat.turn.working', { duration: formatTurnDuration(durationMs) });
 }
 
 /**
@@ -850,6 +1055,8 @@ export interface AgentTurnOptions {
    *  由 renderChat 从回合 assistant 消息的 turnStartedAt/turnDurationMs 推导后传入，
    *  替代原先用首末消息 timestamp 相减的错误算法（timestamp 不随 patch 更新）。 */
   turnDurationMs: number;
+  /** 覆盖回合顶部计时头文案（Team 规划等专属标题用）；缺省走统一「已工作 X 分 X 秒」。 */
+  turnHeaderLabel?: string | undefined;
   /** 嵌入式对话可隐藏助手身份行；主对话默认显示。 */
   showAssistantName?: boolean;
   /** 仅外部 ACP Agent / 外部 Team 传入；缺省继续走原 Crew 头像与名称。 */
@@ -1053,7 +1260,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
     }
     // assistant：thinking + tools 进折叠区（空白 thinking 同样跳过，避免只显示标题的空思考项）
     if (m.thinking?.trim()) {
-      processParts.push(renderThinkingBlock(m.thinking, m.id, Boolean(m.streaming && options.isStreaming)));
+      processParts.push(renderThinkingBlock(m, options.isStreaming));
     }
 
     // Markdown 渲染入口：只看消息是否仍在流式或被截断，不看 session busy。
@@ -1073,7 +1280,10 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
       div.className = 'process-timeline__narration msg__text md-body chat-markdown';
       if (m.streaming && i === lastTextIdx) div.dataset.textFor = m.id;
       div.appendChild(createTrustedFragment(md));
-      processParts.push(renderTimelineItem('', 'process-timeline__icon--ghost', div));
+      // 旁白不占图标列：通栏渲染，文字左缘与折叠区外正文顶格对齐（ghost 图标列空白会显得悬空）。
+      const item = renderTimelineItem('', 'process-timeline__icon--ghost', div);
+      item.classList.add('process-timeline__item--narration');
+      processParts.push(item);
     }
 
     if (m.toolCalls && m.toolCalls.length > 0) {
@@ -1082,6 +1292,10 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
       for (const t of m.toolCalls) {
         const confirmation = parseWikiConfirmation(t);
         if (confirmation) textParts.push(renderWikiConfirmationCard(confirmation));
+        const backgroundResult = parseWikiBackgroundResult(t);
+        if (backgroundResult) textParts.push(renderWikiBackgroundResultCard(backgroundResult));
+        const interaction = renderToolInteractionCard(t);
+        if (interaction) textParts.push(interaction);
       }
     }
     if (m.planReview) {
@@ -1123,7 +1337,6 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   });
 
   const answerTextStarted = hasVisibleAnswerText(messages);
-  const hasProcess = processParts.length > 0 || turnHasProcessContent(messages);
 
   // open 状态：
   //   手动折叠 → 永远尊重；
@@ -1136,25 +1349,19 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   else if (options.userPinnedOpen === true) open = true;
   else open = true;
 
-  // summary 文案：空乐观占位「正在思考」；一旦有过程或正文流式输出 →「正在执行」；
-  // 结束：有工具调用 →「已执行 Xs，已调用 N 个工具」；纯思考回合 →「已思考 Xs」。
-  const liveLabel = resolveLiveFoldLabel(durationMs, hasProcess || answerTextStarted);
-  const toolCallCount = messages.reduce((n, m) => n + (m.toolCalls?.length ?? 0), 0);
-  const doneLabel = toolCallCount > 0
-    ? `已执行 ${formatDuration(durationMs)}，已调用 ${toolCallCount} 个工具`
-    : `已思考 ${formatDuration(durationMs)}`;
-  const label = isLive ? liveLabel : doneLabel;
+  // 顶部计时头文案：统一「已工作 X 分 X 秒」（Team 等专属回合由 turnHeaderLabel 覆盖）。
+  const label = options.turnHeaderLabel ?? resolveTurnHeaderLabel(durationMs);
 
-  // 折叠条显示条件：
+  // 计时头显示条件：
   // - 有过程内容（thinking/tools/旁白/status）→ 始终显示；
-  // - live 回合 → 始终显示（含「仅旁白、工具未到」的计划模式前奏），避免「正在执行」闪没；
+  // - live 回合 → 始终显示（含「仅旁白、工具未到」的计划模式前奏），避免计时头闪没；
   // - 已结束且无过程 → 不显示（纯正文回答）。
   if (processParts.length > 0 || isLive) {
     const details = document.createElement('details');
     details.className = `msg__foldable${isLive ? ' msg__foldable--live' : ''}`;
     if (open) details.open = true;
     const summary = document.createElement('summary');
-    summary.className = `msg__fold-summary${isLive ? ' msg__fold-summary--live' : ''}`;
+    summary.className = `msg__turn-header${isLive ? ' msg__fold-summary--live' : ''}`;
     if (isLive) {
       const spinner = document.createElement('span');
       spinner.className = 'msg__fold-spinner';
@@ -1306,14 +1513,54 @@ function renderTeamArtifacts(artifacts: TeamArtifactCard[] | undefined): HTMLEle
   return wrap;
 }
 
-/** Web TeamAgentTurnBubble 的 Desktop TypeScript DOM 等价实现。 */
-export function renderTeamInternalMessage(message: ChatMessage, isStreaming = false): HTMLElement {
+function resolveTeamCommunicationRole(message: ChatMessage, fallback: string): string {
+  const role = String(fallback || '').trim();
+  const target = (message.mentionTo || [])
+    .map((item) => String(item || '').trim())
+    .find(Boolean);
+  if (!target || !/^向\s+\S+/.test(role)) return role;
+  const label = target === CREW_BUILTIN_AGENT_ID ? 'Crew' : target;
+  return role.replace(/^向\s+\S+/, `向 ${label}`);
+}
+
+/**
+ * Team 消息标题只展示可读的职责摘要；完整的 Team 配置属于执行上下文，
+ * 不应把工作原则、协作关系等内部提示词直接铺在聊天标题里。
+ */
+function compactTeamRole(role: string): string {
+  const normalized = String(role || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[`*_#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return '';
+
+  const summary = normalized
+    .split(/(?:工作原则|团队协作关系|输出格式|工作安排|边界)\s*[-:：]?/i)[0]
+    .replace(/^(职责|角色|职能)\s*[-:：]?\s*/i, '')
+    .replace(/^[-*\d.、)\s]+/, '')
+    .trim();
+  const compact = summary || normalized;
+  return compact.length > 48 ? `${compact.slice(0, 48).trimEnd()}…` : compact;
+}
+
+const RETRYABLE_MENTION_STATUSES = new Set(['failed', 'expired', 'cancelled']);
+const ACTIVE_MENTION_STATUSES = new Set(['published', 'waiting_reply', 'queued', 'delivered']);
+
+export function renderTeamInternalMessage(
+  message: ChatMessage,
+  isStreaming = false,
+  actionState: { canRetry?: boolean; canCancel?: boolean } = {},
+): HTMLElement {
   const isPlanning = message.eventType === 'team_planning_progress';
   const isCrew = String(message.agentId || '').trim() === CREW_BUILTIN_AGENT_ID;
   const name = isPlanning
     ? String(message.agentName || '团队').trim()
     : isCrew ? 'Crew' : String(message.agentName || message.agentId || 'Agent').trim();
-  const role = isPlanning ? '' : message.isLeader ? 'leader' : String(message.agentRole || '').trim();
+  const role = isPlanning ? '' : compactTeamRole(resolveTeamCommunicationRole(
+    message,
+    message.isLeader ? 'leader' : String(message.agentRole || '').trim(),
+  ));
   const tone = Number.isFinite(message.agentTone) ? Number(message.agentTone) % 6 : 0;
   const processMessage: ChatMessage = {
     ...message,
@@ -1355,6 +1602,8 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
     // 其他 Team Agent Turn 继续完全沿用普通回合规则。
     userPinnedOpen: isPlanning && !isStreaming ? false : null,
     turnDurationMs,
+    // Team 回合保留专属计时头文案（规划标题 / 「已思考 X」），不套用统一「已工作」。
+    turnHeaderLabel: resolveTeamTurnFoldLabel(message, turnDurationMs, isStreaming),
     identity: isPlanning
       ? { kind: 'team', name, badge: '' }
       : { kind: 'external', name, badge: name.slice(0, 1).toUpperCase() },
@@ -1365,7 +1614,9 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
 
   const currentAvatar = root.querySelector<HTMLElement>(':scope > .msg__avatar');
   if (!isPlanning) {
-    const avatar = isCrew ? createChatAvatar() : document.createElement('span');
+    const avatar = isCrew
+      ? createChatAvatar()
+      : document.createElement('span');
     if (isCrew) {
       avatar.classList.add('team-internal__avatar');
     } else {
@@ -1400,9 +1651,33 @@ export function renderTeamInternalMessage(message: ChatMessage, isStreaming = fa
   const artifacts = renderTeamArtifacts(message.artifacts);
   if (artifacts) bubble.appendChild(artifacts);
 
-  if (isPlanning) {
-    const label = bubble.querySelector<HTMLElement>('.msg__fold-label');
-    if (label) label.textContent = resolveTeamTurnFoldLabel(message, turnDurationMs, isStreaming);
+  const mentionStatus = String(message.communicationStatus || '').trim();
+  if (message.communicationKind === 'user_mention_answer') {
+    const actions = document.createElement('div');
+    actions.className = 'team-internal__communication-actions';
+    if (actionState.canRetry !== false && RETRYABLE_MENTION_STATUSES.has(mentionStatus) && message.communicationRequestText) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = '重试';
+      retry.dataset.teamCommunicationAction = 'retry';
+      actions.appendChild(retry);
+    }
+    if (actionState.canCancel !== false && ACTIVE_MENTION_STATUSES.has(mentionStatus)) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      cancel.dataset.teamCommunicationAction = 'cancel';
+      actions.appendChild(cancel);
+    }
+    if (actions.childElementCount > 0) bubble.appendChild(actions);
+  }
+
+  // 历史回放可能只留下一个没有正文、过程或产物的规划事件。不要把这个
+  // 空事件渲染成浅绿色气泡；流式中的空事件仍需保留，用于显示规划进度。
+  if (!isStreaming && bubble.childElementCount === 0) {
+    const empty = document.createElement('div');
+    empty.dataset.empty = 'true';
+    return empty;
   }
   body.insertBefore(bubble, footer);
   return root;
@@ -1421,6 +1696,7 @@ function parseInspirationSurface(raw?: string): InspirationSurface | null {
     const data = JSON.parse(raw) as { surface?: unknown };
     if (!data.surface || typeof data.surface !== 'object') return null;
     const surface = data.surface as Record<string, unknown>;
+    if (surface.display === 'inline') return null;
     if (surface.kind !== 'inspiration' || !['site', 'canvas', 'widget'].includes(String(surface.mode || ''))) return null;
     if (typeof surface.sessionId !== 'string' || typeof surface.title !== 'string') return null;
     return surface as unknown as InspirationSurface;
@@ -1763,7 +2039,7 @@ function renderWikiCard(page: WikiPage): HTMLElement {
   return card;
 }
 
-/** 「Wiki 结果」卡片网格（wiki_cards 帧渲染，对齐 web AgentTurn 的 wiki-cards-panel）。 */
+/** 「Wiki 结果」卡片网格（wiki.cards 事件渲染，对齐 web AgentTurn 的 wiki-cards-panel）。 */
 export function renderWikiCardsPanel(pages: WikiPage[]): HTMLElement {
   const panel = document.createElement('div');
   panel.className = 'wiki-cards-panel';
@@ -2178,6 +2454,38 @@ export function renderQueueHintCard(hint: string): HTMLElement {
   const text = document.createElement('span');
   text.textContent = hint;
   card.appendChild(spinner);
+  card.appendChild(text);
+  return card;
+}
+
+/**
+ * 历史加载失败卡：历史回填失败且当前无消息可显示时的兜底可见态。
+ * 失败不再静默清空对话（用户看到的不再是"空会话"）；重试按钮经
+ * conversation-renderer 的事件委托重新触发 loadBackendHistory。
+ */
+export function renderHistoryErrorCard(): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'render-error-card';
+  const text = document.createElement('span');
+  text.className = 'render-error-card__text';
+  text.textContent = '会话历史加载失败，请检查网络后重试。';
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'render-error-card__retry';
+  retry.setAttribute('data-history-retry', '1');
+  retry.textContent = '重试';
+  card.appendChild(text);
+  card.appendChild(retry);
+  return card;
+}
+
+/** 单元构建失败的降级占位：一条坏消息只损失自己，其余单元照常渲染。 */
+export function renderUnitErrorCard(): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'render-error-card';
+  const text = document.createElement('span');
+  text.className = 'render-error-card__text';
+  text.textContent = '该消息渲染失败，重新打开会话可重试。';
   card.appendChild(text);
   return card;
 }

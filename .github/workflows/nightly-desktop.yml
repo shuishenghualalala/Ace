@@ -1,0 +1,114 @@
+name: nightly-desktop
+
+# 每夜构建未签名的桌面端裸目录（dir target），作为尝鲜渠道。
+# 不做代码签名/公证/自动更新；正式发布流水线成熟前，这是外部用户
+# 获取可运行桌面包的唯一渠道。产物保留 7 天。
+#
+# 各平台步骤与 security-*.yml 对齐：先构建 Rust 安全运行时并 stage 到
+# desktop/security-runtime-bin（electron-builder.yml 的 extraResources 依赖它），
+# 再执行 electron-builder 的 dist:*。
+
+on:
+  schedule:
+    - cron: "43 18 * * *" # 每日 18:43 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-desktop
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: cargo build --manifest-path security-runtime/Cargo.toml --release --locked
+      - run: >-
+          node desktop/scripts/prepare-security-runtime.mjs
+          --runtime security-runtime/target/release/ace-security-runtime
+          --bwrap /usr/bin/bwrap
+          --bwrap-license /usr/share/doc/bubblewrap/copyright
+          --bwrap-version "$(dpkg-query -W -f='${Version}' bubblewrap)"
+          --output desktop/security-runtime-bin
+      - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
+      - working-directory: desktop
+        run: npm ci
+      - working-directory: desktop
+        run: npm run dist:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crew-desktop-nightly-linux-x64
+          path: desktop/release/linux-unpacked/
+          retention-days: 7
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: >-
+          cargo build --manifest-path security-runtime/Cargo.toml --release --locked
+          --target x86_64-pc-windows-msvc
+      - run: >-
+          node desktop/scripts/prepare-security-runtime.mjs
+          --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe
+          --output desktop/security-runtime-bin
+      - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
+      - working-directory: desktop
+        run: npm ci
+      - working-directory: desktop
+        run: npm run dist:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crew-desktop-nightly-windows-x64
+          path: desktop/release/win-unpacked/
+          retention-days: 7
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: >-
+          cargo build --manifest-path security-runtime/Cargo.toml --release --locked
+          --target aarch64-apple-darwin
+      - run: >-
+          node desktop/scripts/prepare-security-runtime.mjs
+          --runtime security-runtime/target/aarch64-apple-darwin/release/ace-security-runtime
+          --output desktop/security-runtime-bin
+      - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
+      - working-directory: desktop
+        run: npm ci
+      # macos-14 为 arm64 主机，dist:mac 只构建 host arch（见 electron-builder.yml 注释）
+      - working-directory: desktop
+        run: npm run dist:mac:arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crew-desktop-nightly-macos-arm64
+          path: desktop/release/mac-arm64/
+          retention-days: 7

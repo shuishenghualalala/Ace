@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "github-advanced-search": {
+      "name": "GitHub 高级搜索与开源项目筛选",
+      "zip_url": "https://api.skillhub.cn/api/v1/download?slug=github-advanced-search",
+      "source": "community",
+      "version": "1.0.0",
+      "installedAt": "2026-08-13T09:13:20Z"
+    }
+  }
+}

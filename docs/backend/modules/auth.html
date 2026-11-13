@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ace Gateway Owner 会话与资源隔离</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#888;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box} body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px} h1{font-size:28px;font-weight:800;margin:0 0 6px}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:8px}.sub{color:var(--t3);margin-bottom:36px}
+  h2{font-size:20px;font-weight:700;margin:42px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+  h3{font-size:16px;margin:24px 0 8px} p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:8px;padding:14px;overflow-x:auto;font-size:13px;line-height:1.6}
+  pre code{background:none;border:0;padding:0} table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0}
+  th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top} th{background:var(--soft);font-weight:600}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)} a:hover{border-bottom-color:var(--text)}
+  .ok{color:#16a34a;font-weight:600}.nav{margin-top:30px;color:var(--t3);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 后端模块 / Gateway Auth</div>
+  <h1>Owner 会话与资源隔离</h1>
+  <div class="sub">记录日期：2026-08-17 · 认证会话、退出清理、Cron、渠道和 Desktop 错误透传</div>
+
+  <h2>1. Owner 会话模型</h2>
+  <p>Gateway 的登录身份由请求 Cookie 解析为 <code>AccountContext</code>，其 <code>owner_account_id</code> 是所有持久化数据和运行态资源的隔离键。邮箱账号分别形成 <code>email:user-a@example.com</code> 与 <code>email:user-b@example.com</code>，互不覆盖。</p>
+  <table>
+    <thead><tr><th>数据</th><th>隔离键</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr><td><code>owner_session_lease</code></td><td><code>owner_account_id</code></td><td>登记每个已验证账号的会话租约；同一账号重复请求只刷新自己的 <code>verified_at</code>。</td></tr>
+      <tr><td><code>owner_logout_intent</code></td><td><code>owner_account_id</code></td><td>记录某个账号在退出清理超时后需要在下次 Gateway 启动完成的退出意图。</td></tr>
+      <tr><td>HTTP / WebSocket</td><td>当前请求的 Owner</td><td>普通请求只 claim/refresh 当前 Owner，不检查或抢占其它账号的租约。</td></tr>
+      <tr><td>渠道 / Delivery</td><td><code>(platform, owner_account_id)</code></td><td>同一平台的不同账号使用不同配置、实例、锁、入站处理器和出站 sender。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Gateway 鉴权流程</h2>
+  <ol>
+    <li>登录接口签发 <code>crew_auth_session</code> Cookie。每个受保护 HTTP 请求或 WebSocket 连接从 Cookie 确定 <code>AccountContext</code>。</li>
+    <li>Gateway 对当前 Owner 调用 <code>active_owner.claim(owner)</code> 并激活该 Owner 的 Dispatcher、Task Runtime、Cron 和渠道；不会因为其它 Owner 已登录而返回跨账号冲突。</li>
+    <li><code>/api/auth/session</code>、业务 API 与 WebSocket 都只访问当前 Owner 的数据。退出请求进入该 Owner 的 <code>LogoutCoordinator</code>，其它 Owner 的连接和任务继续工作。</li>
+    <li>WebSocket 的关闭、订阅、回放和连接注册都带 Owner；关闭 A 的连接不会关闭 B。</li>
+  </ol>
+  <pre><code>Cookie → AccountContext(owner)
+       → owner_session_lease(owner)
+       → owner-scoped Dispatcher / Task / Cron / Channel / Socket</code></pre>
+
+  <h2>3. Cron、渠道和退出清理</h2>
+  <h3>3.1 Cron</h3>
+  <p><code>CronService</code> 使用 <code>mounted_owners</code> 和按 Owner 的 Job 集合。挂载 A 不会卸载 B；到期执行、取消、重试和调度同步都校验 Job 的 Owner。A 退出只撤下 A 的任务。</p>
+  <h3>3.2 渠道</h3>
+  <p><code>ChannelManager</code> 以复合键管理实例、状态、生命周期锁和 Owner 注入的入站处理器。<code>ChannelBindingsStore</code> 以 <code>(platform, owner_account_id)</code> 保存绑定；旧的单平台绑定会在打开数据库时迁移。飞书 webhook 会按候选实例验证 token，入站 envelope 携带实例 Owner；<code>DeliveryRouter</code> 按 Owner 选择 sender，避免 Cron 或渠道回复串号。</p>
+  <p>明确的渠道级断开、重连和删除只影响当前 Owner。第三方平台若拒绝同平台多连接，错误收敛在该渠道实例，不会回滚或阻塞账号认证。</p>
+  <h3>3.3 LogoutCoordinator</h3>
+  <p>退出顺序保持为：Owner draining → 撤下 Cron → 停止 Dispatcher / Team / Task → 停止该 Owner 渠道 → 关闭该 Owner WebSocket → 释放该 Owner 租约。清理失败会保留该 Owner 租约和 draining fence，便于重试；超时会持久化该 Owner 的 restart fence，不把 Gateway 其它账号变成不可用。</p>
+
+  <h2>4. 数据迁移与异常重启</h2>
+  <ul>
+    <li>旧的 <code>active_owner_lease</code> 单行记录和 <code>active_owner_logout_intent</code> 单行记录会复制到新的 Owner 表；旧数据不会再作为全局锁，因此旧账号残留不会阻塞新邮箱登录。</li>
+    <li>旧的 <code>channel_bindings</code> 单平台主键会迁移到复合主键，保留已有绑定并允许另一个 Owner 建立同平台绑定。</li>
+    <li>Gateway 启动先完成所有遗留 restart logout，再启动业务；没有可恢复凭据的旧 <code>local</code> 租约在 email/remote 模式启动边界释放。</li>
+    <li>正常退出只删除当前 Owner 的租约；异常退出留下的租约最多影响该 Owner 的恢复流程，新的 Owner 可以直接建立自己的会话。</li>
+  </ul>
+
+  <h2>5. Desktop 错误契约</h2>
+  <p><code>DesktopAuthSession.refreshConfig()</code> 验证 Cookie 失败时仍清理本地 Cookie 和持久化会话，但保存 Gateway 返回的 JSON <code>error</code>、<code>code</code> 与 HTTP 状态。<code>loginWithEmail()</code> 将这些字段返回给现有登录 UI，因此账号冲突、Gateway 清理中或其它认证错误不会被统一改写为“邮箱会话验证失败，请重试”。</p>
+
+  <h2>6. 测试记录</h2>
+  <p class="ok">2026-08-17 · 后端定向回归：253 passed，5 skipped。</p>
+  <ul>
+    <li>Owner 租约：多账号并发 claim、刷新、释放、旧单行迁移和 restart logout。</li>
+    <li>Gateway：邮箱 A/B 同时登录、独立 <code>/api/auth/session</code>、A 退出不影响 B、HTTP/WS Owner 门禁。</li>
+    <li>Cron：多 Owner 同时挂载、到期执行和独立卸载。</li>
+    <li>渠道：复合绑定迁移、同平台双 Owner 实例、独立停止、入站 Owner 绑定和出站 sender 路由。</li>
+    <li>Desktop：<code>auth-session.test.ts</code> 验证失败会话清理及 Gateway 错误透传。</li>
+  </ul>
+  <p>Desktop 全量 Vitest 当前工作区仍有其它既有模块失败；本次交付使用认证定向测试、TypeScript typecheck、构建和相关检查作为认证改动的验收依据，失败明细不归因于本次认证模块。</p>
+
+  <div class="nav">返回：<a href="index.html">后端模块索引</a> · <a href="../../frontend/desktop-frontend.html">Desktop 前端文档</a></div>
+</div>
+</body>
+</html>

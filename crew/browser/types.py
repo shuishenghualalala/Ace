@@ -8,6 +8,34 @@ from typing import Any, Literal
 
 BrowserControlMode = Literal["ai", "human", "paused"]
 
+# 动作治理档位（governance_mode）的合法取值：
+# - off：全部放行，不弹任何审批（兼容旧行为）
+# - confirm_sensitive：默认。提交表单/回车/上传/下载/接受弹窗/页面内执行代码等
+#   传「或高危」动作弹一次性审批卡；普通读写动作不打扰
+# - confirm_writes：所有写交互（click/type/press/select/check/drag/fill_form/drop）
+#   也弹审批
+# - read_only：写交互与高危动作直接拒绝
+GOVERNANCE_MODES = frozenset({"off", "confirm_sensitive", "confirm_writes", "read_only"})
+
+# batch 步骤 action → 逻辑工具名。**词表唯一来源**：plugins/browser 的
+# _ACTION_LOGICAL / _BATCHABLE_ACTIONS 与 manager 的治理分类都从这里取，
+# 新增可批量动作只改这一处——治理档位不可能漏登记（fail-open 静默放行）。
+BATCH_STEP_TOOLS: dict[str, str] = {
+    "click": "browser_click",
+    "drag": "browser_drag",
+    "type": "browser_type",
+    "fill_form": "browser_fill_form",
+    "select": "browser_select",
+    "check": "browser_check",
+    "hover": "browser_hover",
+    "scroll": "browser_scroll",
+    "press": "browser_press",
+    "keydown": "browser_keydown",
+    "keyup": "browser_keyup",
+    "wait": "browser_wait",
+    "find": "browser_find",
+}
+
 
 @dataclass
 class BrowserConfig:
@@ -26,6 +54,8 @@ class BrowserConfig:
     idle_timeout_seconds: int = 600
     command_timeout_seconds: int = 30
     navigation_timeout_seconds: int = 60
+    # 同一账号动作串行时，后续动作最多排队多久；0 表示不设排队超时。
+    queue_timeout_seconds: float = 30.0
     # 单次输出的期望规模。**不是硬截断**：真实内网页面的完整快照经常超过它，
     # 按它截断会让模型基于半张页面下结论。只有远超它（见 manager 的护栏倍数）
     # 才按行截断并如实报出。
@@ -38,6 +68,8 @@ class BrowserConfig:
     # LoopbackPolicyProxy 的实际 DNS/连接路径，不是只做展示的配置项。
     allowed_private_hosts: list[str] = field(default_factory=list)
     allowed_private_cidrs: list[str] = field(default_factory=list)
+    # 浏览器动作治理档位，取值见 GOVERNANCE_MODES。非法值回落默认档。
+    governance_mode: str = "confirm_sensitive"
 
     @classmethod
     def from_raw(cls, raw: Any) -> "BrowserConfig":
@@ -58,6 +90,10 @@ class BrowserConfig:
         ):
             if name in values:
                 values[name] = max(0, int(values[name]))
+        if "queue_timeout_seconds" in values:
+            values["queue_timeout_seconds"] = max(
+                0.0, float(values["queue_timeout_seconds"])
+            )
         for name in ("blocked_hosts", "allowed_private_hosts", "allowed_private_cidrs"):
             if name in values:
                 value = values[name]
@@ -65,11 +101,15 @@ class BrowserConfig:
         for name in ("enabled", "headed"):
             if name in values:
                 values[name] = bool(values[name])
+        if "governance_mode" in values:
+            mode = str(values["governance_mode"]).strip()
+            values["governance_mode"] = (
+                mode if mode in GOVERNANCE_MODES else defaults.governance_mode
+            )
         return cls(**values)
 
     def public_dict(self) -> dict[str, Any]:
         return asdict(self)
-
 
 @dataclass(frozen=True)
 class BrowserRef:
@@ -113,6 +153,10 @@ class BrowserPageState:
     viewport_height: int = 0
     can_go_back: bool = False
     can_go_forward: bool = False
+    queue_depth: int = 0
+    last_queue_wait_ms: float = 0.0
+    last_operation_ms: float = 0.0
+    queue_timeouts: int = 0
     tabs: list[dict[str, str]] = field(default_factory=list)
     console_count: int = 0
     network_count: int = 0
@@ -120,71 +164,3 @@ class BrowserPageState:
 
     def public_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-# ── 录制工作流的能力词表（唯一权威） ─────────────────────────────────────
-#
-# 这份顺序是**四方共享的契约**：编译器产出 plan、workflow_store 校验并签名
-# artifact、replay_tool 要求 capabilities 精确等于 plan、validate_generated_skill
-# 校验 SKILL.md 里的声明顺序。
-#
-# 放在 crew/browser 而不是 plugins/browser：按仓库既定原则，Crew 定规范、
-# 插件适配 Crew。让 crew/agent/skills.py 去 import plugins/ 是层次倒置。
-#
-# **不要在任何地方维护副本。** 曾经 skills.py 抄了一份，然后新增
-# assert_state / handle_overlay 时只改了权威表——后果是任何含状态断言或遮挡
-# 处理的工作流在安装时 100% 校验失败，而两侧的测试恰好都没用到这两项，
-# 全绿也暴露不了。顺序漂移这种 bug 只能靠"只有一份"来根治。
-WORKFLOW_CAPABILITY_ORDER_V2: tuple[str, ...] = (
-    "navigate",
-    "dialog",
-    "click",
-    "dblclick",
-    "drag",
-    "press",
-    "fill_form",
-    "fill",
-    "select",
-    "check",
-    "upload",
-    "scroll",
-    "assert_state",
-    "handle_overlay",
-    "snapshot_full",
-    "takeover",
-)
-
-WORKFLOW_CAPABILITY_ORDER_V3: tuple[str, ...] = (
-    "open_page",
-    "close_page",
-    "navigate",
-    "activate_page",
-    "resize",
-    "hover",
-    "click",
-    "dblclick",
-    "drag",
-    "drop",
-    "pointer_gesture",
-    "press",
-    "fill",
-    "select",
-    "check",
-    "upload",
-    "scroll",
-    "wait_page",
-    "wait_navigation",
-    "wait_page_closed",
-    "wait_download",
-    "wait_dialog",
-    "assert_state",
-    "handle_overlay",
-    "snapshot_full",
-    "takeover",
-    # 原子 effect 也是可执行行为，不是建议性元数据。
-    "popup",
-    "navigation_effect",
-    "download",
-    "dialog",
-    "page_closed",
-)

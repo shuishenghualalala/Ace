@@ -3,7 +3,7 @@ name: widget
 description: Use when creating, showing, updating, validating, deleting, rendering,
   or troubleshooting Daimon Blueprint Widgets, their responsive index.html UI, data
   slots, submit events, input state, files, and workspace resources. You MUST read
-  widgetdesign skill before creating any widget.
+  widgetdesign skill before creating an HTML widget. Native Widget.render rich replies use references/native-visual.md instead.
 metadata:
   skillCategoryName: 通用办公
   zh_name: Widget 组件管理
@@ -12,7 +12,15 @@ metadata:
 ---
 # Widget
 
-Widget owns one responsive `index.html`, display data, input state, events, files, and workspace resources. Every surface renders `data.metadata.roots.workspaceRoot/index.html`.
+## Native desktop answers (preferred)
+
+For ordinary charts, cards, tables, parameter exploration and forms inside a desktop chat, read
+`references/native-visual.md` and call `Widget.render` with a declarative `spec`.
+This is a native frontend renderer: do not create a Widget asset, write HTML/JS,
+open a browser, or call validate/show for this flow. The HTML workflow below is
+for independent apps or existing HTML assets, not ordinary answer charts.
+
+An HTML Widget owns one responsive `index.html`, display data, input state, events, files, and workspace resources. Its panel and Canvas surfaces render `data.metadata.roots.workspaceRoot/index.html`; native chat replies use `Widget.render` instead.
 
 ## Create And Show
 
@@ -37,9 +45,9 @@ Then:
 
 `creationHints` accepts 1-6 short progress lines. The host displays them while the page is being authored. Static Widgets need no slots, events, Binding, or Automation.
 
-For appearance and responsive layout, load `widgetdesign/SKILL.md` before writing HTML/CSS. It is
-the self-contained Widget design authority; do not load another Widget Design Skill for the same
-work.
+For appearance and responsive layout, load the widgetdesign skill with `skill_view(name="widgetdesign")`
+before writing HTML/CSS. It is an independent skill, not a file inside this directory; do not pass it
+as `file_path` of the `widget` skill, and do not load another Widget Design Skill for the same work.
 
 ## Inspect And Modify An Existing Widget
 
