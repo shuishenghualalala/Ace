@@ -45,7 +45,7 @@
   <table>
     <tr><th>方式</th><th>触发条件</th><th>说明</th></tr>
     <tr><td>自动</td><td>推送 <code>v*</code> tag（例如 <code>v1.1.0</code>）</td><td>同时构建四个任务并上传到对应 GitHub Release</td></tr>
-    <tr><td>手动</td><td>Actions 页面选择 <code>release-desktop</code>，填写 <code>tag</code> 输入</td><td>适合打包已存在的旧 tag，例如 <code>v1.1.0</code></td></tr>
+    <tr><td>手动</td><td>Actions 页面选择 <code>release-desktop</code>；填写已有 <code>tag</code>，或留空验证所选分支</td><td>tag 留空时只上传 Artifacts，不发布 Release；version 留空读取分支中的版本文件</td></tr>
   </table>
   <div class="note">自动触发只对“包含该 workflow 的提交上打出的 tag”生效。仓库中已存在的旧 tag 不会自动触发，需要用手动方式，或先合入代码后打新 tag。</div>
 
@@ -109,7 +109,7 @@ git push origin v1.1.0</pre>
 
   <h2>注意事项</h2>
   <ul>
-    <li>当前产物未做 Apple 签名与公证，macOS 首次打开需要右键打开；Windows 侧未做 Authenticode 签名时 SmartScreen 可能拦截。</li>
+    <li>macOS 产物会做 ad hoc 完整性签名，尚未配置 Developer ID 签名与 Apple 公证；Windows 侧未做 Authenticode 签名时 SmartScreen 可能拦截。</li>
     <li>每个构建任务都在目标原生平台 runner 上执行，不做交叉编译。</li>
     <li>Linux 构建依赖 Docker，Windows 构建依赖 Inno Setup 6，workflow 已自动安装。</li>
     <li>内嵌 Python 的办公/绘图依赖（pandas / matplotlib 及其 numpy 依赖）是技能脚本的运行时必需，<code>pack_exe.ps1</code> 的 staging 清理列表（sympy/onnxruntime/scipy）不得重新纳入 pandas/numpy——否则打包态 <code>import pandas / matplotlib</code> 直接 ImportError（2026-09-14 修复并加注释防护；Windows 打包态实际 import 实测结果待回填）。</li>

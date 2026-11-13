@@ -57,7 +57,7 @@ jobs:
       - name: Install Chromium host dependencies
         if: runner.os == 'Linux'
         run: sudo node node_modules/playwright-core/cli.js install-deps chromium
-      - run: npm run browser:stage
+      # The contract drives Electron's own Chromium; no separate browser is staged.
       - name: Real hidden Electron contract (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run --auto-servernum npm run test:pw-contract
@@ -122,7 +122,7 @@ jobs:
       - name: Install Chromium host dependencies
         if: runner.os == 'Linux'
         run: sudo node node_modules/playwright-core/cli.js install-deps chromium
-      - run: npm run browser:stage
+      # The contract drives Electron's own Chromium; no separate browser is staged.
       - name: Real hidden Electron contract (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run --auto-servernum npm run test:pw-contract

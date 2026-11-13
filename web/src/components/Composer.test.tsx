@@ -34,11 +34,11 @@ describe("Composer team execution tier picker", () => {
     />,
   );
 
-  it("renders the bottom Mode picker with auto selected for Team sessions", () => {
+  it("renders the execution mode picker with 自动判断 selected for Team sessions", () => {
     const html = renderComposer(true);
     expect(html).toContain("team-mode-picker");
-    expect(html).toContain(">Mode</span>");
-    expect(html).toContain(">auto</span>");
+    expect(html).toContain(">处理方式</span>");
+    expect(html).toContain(">自动判断</span>");
   });
 
   it("does not render the Team Mode picker for single-Agent sessions", () => {

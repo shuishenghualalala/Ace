@@ -31,7 +31,7 @@
   color: var(--mw-text-primary);
 }
 #chat-team-wiki-read-btn[hidden] {
-  display: none !important;
+  display: none;
 }
 
 .mw-context-chip:focus-visible,

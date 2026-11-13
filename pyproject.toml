@@ -173,7 +173,8 @@ line-length = 100
 extend-exclude = ["crew/skills"]
 
 [tool.ruff.lint]
-# 不显式 select 即为 ruff 默认集（E4/E7/E9/F）。后续可加 I / UP / B 等。
+# 固定上述最低基线，避免 Ruff 升级改变默认规则集。后续可加 I / UP / B 等。
+select = ["E4", "E7", "E9", "F"]
 ignore = []
 
 [dependency-groups]

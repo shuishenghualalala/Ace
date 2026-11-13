@@ -182,6 +182,8 @@ COPY desktop/esbuild.config.mjs desktop/tsconfig.json desktop/electron-builder.y
 COPY desktop/src ./src
 COPY desktop/assets ./assets
 COPY desktop/scripts ./scripts
+# The validator generator resolves this schema relative to desktop/scripts.
+COPY crew/sites/rich_reply.schema.json /crew/sites/rich_reply.schema.json
 COPY --from=security-runtime-builder /security-runtime/target/release/ace-security-runtime /tmp/ace-security-runtime
 COPY --from=security-runtime-builder /usr/bin/bwrap /tmp/bwrap
 COPY --from=security-runtime-builder /usr/share/doc/bubblewrap/copyright /tmp/bwrap-copyright

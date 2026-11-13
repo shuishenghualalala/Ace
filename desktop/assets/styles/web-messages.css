@@ -650,7 +650,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
   height: 1.08em;
   margin-left: 0.18em;
   vertical-align: -0.16em;
-  border-radius: 999px;
+  border-radius: var(--mw-radius-fine-999);
   background-image: var(--mw-chat-stream-gradient);
   background-position: 0% 50%;
   background-size: 230% 100%;
@@ -1101,17 +1101,17 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 .chat-messages.web-flow .agent-avatar--message.agent-tone-5 { color: var(--mw-status-info); background: var(--mw-bg-subtle); border-color: var(--mw-status-info); }
 
 .chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew) { background: color-mix(in srgb, var(--mw-status-success) 12%, var(--mw-bg-surface)); border-color: color-mix(in srgb, var(--mw-status-success) 28%, transparent); }
-.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew) { background: #f5f5f3; border-color: #d5d5d0; }
-.chat-messages.web-flow .team-internal__bubble--tone-2:not(.is-crew) { background: #fbf4e5; border-color: #e4d3ab; }
-.chat-messages.web-flow .team-internal__bubble--tone-3:not(.is-crew) { background: #fcf0e9; border-color: #e7cbb9; }
-.chat-messages.web-flow .team-internal__bubble--tone-4:not(.is-crew) { background: #eef4fa; border-color: #c4d6e7; }
-.chat-messages.web-flow .team-internal__bubble--tone-5:not(.is-crew) { background: #f3f0f9; border-color: #d6cde7; }
+.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew) { background: var(--mw-team-tone-neutral-bg); border-color: var(--mw-team-tone-neutral-bubble-border); }
+.chat-messages.web-flow .team-internal__bubble--tone-2:not(.is-crew) { background: var(--mw-team-tone-amber-bg); border-color: var(--mw-team-tone-amber-bubble-border); }
+.chat-messages.web-flow .team-internal__bubble--tone-3:not(.is-crew) { background: var(--mw-team-tone-clay-bg); border-color: var(--mw-team-tone-clay-bubble-border); }
+.chat-messages.web-flow .team-internal__bubble--tone-4:not(.is-crew) { background: var(--mw-team-tone-blue-bg); border-color: var(--mw-team-tone-blue-bubble-border); }
+.chat-messages.web-flow .team-internal__bubble--tone-5:not(.is-crew) { background: var(--mw-team-tone-violet-bg); border-color: var(--mw-team-tone-violet-bubble-border); }
 
-.chat-messages.web-flow .agent-avatar--message.agent-tone-1 { color: #626662; background: #f5f5f3; border-color: #929992; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-2 { color: #8a6725; background: #fbf4e5; border-color: #b9934d; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-3 { color: #9a664d; background: #fcf0e9; border-color: #bf927b; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-4 { color: #4a7191; background: #eef4fa; border-color: #80a3be; }
-.chat-messages.web-flow .agent-avatar--message.agent-tone-5 { color: #716185; background: #f3f0f9; border-color: #a398b5; }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-1 { color: var(--mw-team-tone-neutral-text); background: var(--mw-team-tone-neutral-bg); border-color: var(--mw-team-tone-neutral-border); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-2 { color: var(--mw-team-tone-amber-text); background: var(--mw-team-tone-amber-bg); border-color: var(--mw-team-tone-amber-border); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-3 { color: var(--mw-team-tone-clay-text); background: var(--mw-team-tone-clay-bg); border-color: var(--mw-team-tone-clay-border); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-4 { color: var(--mw-team-tone-blue-text); background: var(--mw-team-tone-blue-bg); border-color: var(--mw-team-tone-blue-border); }
+.chat-messages.web-flow .agent-avatar--message.agent-tone-5 { color: var(--mw-team-tone-violet-text); background: var(--mw-team-tone-violet-bg); border-color: var(--mw-team-tone-violet-border); }
 
 .chat-messages.web-flow .team-artifacts {
   display: grid;
@@ -1279,7 +1279,7 @@ body.welcome-active .security-banner { width: min(720px, 100%); }
 
 /* Native answer visuals share the transcript surface and theme. */
 .native-visual {
-  margin: var(--mw-space-4) 0 var(--mw-space-4) calc(38px + var(--mw-space-3) + var(--mw-space-4));
+  margin: var(--mw-space-4) 0 var(--mw-space-4) calc(var(--mw-space-fine-38) + var(--mw-space-3) + var(--mw-space-4));
   color: var(--mw-text-primary);
   min-width: 0;
   overflow-wrap: anywhere;

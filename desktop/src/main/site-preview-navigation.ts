@@ -1,10 +1,10 @@
 /** Route inspiration links to the system browser without creating renderer windows. */
-import { shell, type WebContents } from 'electron';
+import type { WebContents } from 'electron';
 import { parseSitePreviewUrl } from './site-preview-protocol';
 
 export function installSitePreviewNavigation(
   contents: WebContents,
-  openExternal: (url: string) => Promise<unknown> = (url) => shell.openExternal(url),
+  openExternal: (url: string) => Promise<unknown>,
 ): void {
   const openWebLink = (rawUrl: string): void => {
     try {

@@ -409,8 +409,8 @@ function renderWaterfall(spans: ObservationSpan[], trace: ObservationTrace): HTM
     bar.className = `tracing-waterfall__bar tracing-waterfall__bar--${spanItem.status}`;
     const start = Math.max(0, Number(spanItem.started_at_us) - origin);
     const duration = Math.max(1, Number(spanItem.duration_ms || 0) * 1_000);
-    bar.style.left = `${Math.min(99, start / total * 100)}%`;
-    bar.style.width = `${Math.max(0.8, Math.min(100, duration / total * 100))}%`;
+    bar.style.setProperty('--mw-trace-span-start', `${Math.min(99, start / total * 100)}%`);
+    bar.style.setProperty('--mw-trace-span-width', `${Math.max(0.8, Math.min(100, duration / total * 100))}%`);
     bar.title = `${spanItem.name} · ${fmtDuration(spanItem.duration_ms)}`;
     track.append(bar);
     const durationText = document.createElement('span');

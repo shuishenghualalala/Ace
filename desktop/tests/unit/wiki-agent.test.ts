@@ -72,6 +72,7 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       sessionTodos: vi.fn(),
       tasks: vi.fn(async () => []),
       getSessionModel: vi.fn(),
+      getSessionAgentConfig: vi.fn(async () => ({ executor: 'crew' })),
       setSessionModel: vi.fn(),
       deleteSession: vi.fn(async () => ({ ok: true })),
       sessions: vi.fn(async () => []),

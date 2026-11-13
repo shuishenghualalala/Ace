@@ -246,7 +246,7 @@ describe('sites page annotation handoff', () => {
     expect(main).toContain("mainWindow.webContents.send('inspiration:window-state-changed'");
     expect(main).toContain('if (!win.isDestroyed()) win.destroy()');
     expect(main).toContain('sandbox: true');
-    expect(main).toContain('installSitePreviewNavigation(win.webContents)');
+    expect(main).toContain('installSitePreviewNavigation(win.webContents, externalLinkBridge.openUrl)');
     expect(main).toContain('for (const win of inspirationWindows.values())');
     expect(main).toContain('inspirationWindows.clear()');
     expect(main).toContain("segments[1] === 'exports'");

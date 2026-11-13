@@ -763,7 +763,7 @@ export default function App() {
               teamExecutionTier={sessionTeamTiers[currentSessionId] ?? "auto"}
               externalWikiReadKbId={(() => {
                 const grant = sessionTeamWikiReadGrants[currentSessionId];
-                return grant?.teamId === sessionExternalTeams[currentSessionId]
+                return grant && grant.teamId === sessionExternalTeams[currentSessionId]
                   ? grant.kbId
                   : undefined;
               })()}

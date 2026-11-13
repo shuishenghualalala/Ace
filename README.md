@@ -320,6 +320,15 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 图片和视频理解服务的环境变量见 `config/.env.example`；没有完整配置时不会发送媒体数据。
 视频上传还需要用户逐次确认。项目运行不依赖远程技能市场。
 
+## 📦 构建桌面发行包（可选）
+
+完整安装包可通过 GitHub Actions 的 `release-desktop` workflow 构建，覆盖 macOS arm64/x64、Linux UOS/Kylin 与 Windows x64。
+
+- 分支验证：选择待验证分支，`tag` 留空；`version` 留空读取 `deb-package/version.txt`。结果仅上传到 Artifacts，不创建 Release。
+- 正式发布：推送 `v*` tag，或在手动运行时填写已存在的 tag；版本取自 tag，`version` 留空。
+
+安装包包含 Electron、Gateway 源码、内嵌 Python/Node 与安全运行组件，不包含 `web/dist`。详细流程见[桌面发行包说明](docs/deploy/release-packaging.html)。
+
 ## 🧱 代码结构
 
 我们的架构：

@@ -134,7 +134,7 @@
 
 .semantic-config__summary-status {
   flex: 0 0 auto;
-  padding: 3px var(--mw-space-2);
+  padding: var(--mw-space-fine-3) var(--mw-space-2);
   border: 1px solid var(--mw-border-subtle);
   border-radius: var(--mw-radius-full);
   background: var(--mw-bg-surface);

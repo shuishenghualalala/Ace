@@ -9,6 +9,7 @@ export interface AgentHubAgent {
   id: string;
   name: string;
   provider: string;
+  providerId?: string;
   displayBadge?: string;
   detail: string;
   tags: string[];
@@ -202,7 +203,7 @@ export function createAgentHubView(options: AgentHubOptions): AgentHubView {
         action('派活', 'useAgent', agent.id, (id) => options.onUseAgent?.(id), 'primary', !agent.available),
         action('删除', 'deleteAgent', agent.id, (id) => options.onDeleteAgent?.(id), 'danger'),
       );
-      card.append(createExternalAgentAvatar(agent.provider, agent.displayBadge), copy, cardActions);
+      card.append(createExternalAgentAvatar(agent.providerId ?? agent.provider, agent.displayBadge), copy, cardActions);
       agentGrid.append(card);
     }
     if (!current.agents.length) agentGrid.append(textElement('p', 'mw-hub-state', '阵容还是空的'));

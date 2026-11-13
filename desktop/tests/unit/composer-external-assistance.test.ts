@@ -242,8 +242,8 @@ describe('composer 外援入口', () => {
     expect(leaderTrigger?.textContent).toContain('内置');
     expect(leaderTrigger?.textContent).not.toContain('队长');
     document.querySelector<HTMLElement>('[data-toggle-team-constraints]')?.click();
-    expect(document.querySelector('[data-agents-select-key="team-required-agent"]')?.textContent).toContain('选择外援');
-    expect(document.querySelector('[data-agents-select-key="team-excluded-agent"]')?.textContent).toContain('选择外援');
+    expect(document.querySelector('[data-agents-select-key="team-required-agent"]')?.textContent).toContain('添加必须参与的成员');
+    expect(document.querySelector('[data-agents-select-key="team-excluded-agent"]')?.textContent).toContain('选择要排除的 Agent');
     expect(document.querySelector('.team-constraints')?.textContent).not.toContain('选择 Agent');
   });
 
@@ -524,7 +524,7 @@ describe('composer 外援入口', () => {
       timing: { fast_ms: 2, ai_ms: 35_000, total_ms: 35_002 },
     });
     await vi.waitFor(() => {
-      expect(document.querySelector('.formation-progress')?.textContent).toContain('智能检查暂未完成');
+      expect(document.querySelector('.formation-progress')?.textContent).toContain('模型调用未完成，已保留初步阵容');
       expect(document.querySelector('.formation-progress')?.textContent).toMatch(/智能检查优化\s*·\s*\d+s/);
       expect(document.querySelector('[data-recheck-formation]')).not.toBeNull();
       expect(document.querySelector<HTMLTextAreaElement>('[data-member-role="crew::builtin"]')?.value)

@@ -19,9 +19,10 @@ const shellCss = readFileSync(resolve(stylesDir, 'shell.css'), 'utf8');
 const tokensCss = readFileSync(resolve(stylesDir, 'tokens.css'), 'utf8');
 const welcomeCss = readFileSync(resolve(stylesDir, 'welcome-scenarios.css'), 'utf8');
 
-function ruleBody(css: string, selector: string): string {
+function ruleBody(css: string, selector: string, last = false): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`));
+  const matches = [...css.matchAll(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'g'))];
+  const match = (last ? matches.at(-1) : matches[0]) ?? null;
   expect(match, `missing CSS rule: ${selector}`).not.toBeNull();
   return match?.[1] ?? '';
 }
@@ -137,19 +138,19 @@ describe('shared chat chrome styles', () => {
     expect(overlay).toContain('pointer-events: none');
   });
 
-  it('keeps Team member avatars and bubbles visibly colored for the first tones', () => {
-    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-0'))
-      .toContain('background: var(--mw-status-success-bg)');
-    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-1'))
-      .toContain('background: var(--mw-status-info-bg)');
-    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-0'))
+  it('keeps the final Team avatar and bubble rules on semantic tone palettes', () => {
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-0', true))
+      .toContain('background: var(--mw-team-tone-green-bg)');
+    expect(ruleBody(kanbanCss, '.team-collaboration-board .agent-tone-1', true))
+      .toContain('background: var(--mw-team-tone-neutral-bg)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-0', true))
       .toContain('border-color: var(--mw-status-success)');
-    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-1'))
-      .toContain('border-color: var(--mw-status-info)');
-    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew)'))
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .agent-avatar--message.agent-tone-1', true))
+      .toContain('border-color: var(--mw-team-tone-neutral-border)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-0:not(.is-crew)', true))
       .toContain('var(--mw-status-success)');
-    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew)'))
-      .toContain('var(--mw-status-info)');
+    expect(ruleBody(webMessagesCss, '.chat-messages.web-flow .team-internal__bubble--tone-1:not(.is-crew)', true))
+      .toContain('var(--mw-team-tone-neutral-bg)');
   });
 
   it('anchors the Team file count badge on the folder button corner', () => {

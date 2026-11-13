@@ -6,9 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
-import os
 import re
-import shutil
 import time
 from typing import Any
 
@@ -371,7 +369,6 @@ async def _run_formation_ai(
 ) -> dict[str, Any]:
     """Run one Formation AI audit and compile it into the stable public shape."""
 
-    from crew.team.formation import apply_formation_ai_audit, formation_ai_context
 
     context = formation_ai_context(payload, agents, fallback, runtimes)
     prompt, context_json = _formation_ai_prompt(context)
@@ -708,8 +705,7 @@ def create_runtimes_router(crew) -> APIRouter:
 
     @router.post("/api/external-teams")
     async def create_external_team(request: Request, payload: dict) -> JSONResponse:
-        from crew.team.roles import all_role_public_payloads, intelligent_role_markdown, role_preset
-        from crew.team.team_spec import team_spec_for_creation
+        from crew.team.roles import all_role_public_payloads, role_preset
 
         owner = account_from_request(request).owner_account_id
         store = _external_store()
@@ -903,7 +899,6 @@ def create_runtimes_router(crew) -> APIRouter:
 
     @router.post("/api/external-teams/suggest")
     async def suggest_external_team(request: Request, payload: dict):
-        from crew.team.formation import formation_auto_decision
 
         requested_mode = str(payload.get("formation_mode") or "").strip().lower()
         if requested_mode not in FORMATION_MODES:

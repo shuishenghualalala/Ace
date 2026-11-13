@@ -29,6 +29,7 @@ from crew.team.roles import (
     all_role_public_payloads,
     compile_role_responsibility,
     crew_builtin_agent_public,
+    infer_role_key,
     intelligent_role_markdown,
     is_crew_builtin_agent,
     public_responsibility,

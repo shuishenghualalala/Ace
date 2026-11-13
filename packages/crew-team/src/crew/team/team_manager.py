@@ -5449,8 +5449,6 @@ class InProcessTeamManager(TeamManager):
                         inputs=resolved_inputs, ask=ask_decision,
                         current_team=current_team,
                     )
-                    task_id = str((workflow.get("task") or {}).get("task_id") or "")
-                    plan_id = str(workflow.get("collaboration_plan_id") or "")
                     if self._collaboration_execution_store is None:
                         self._collaboration_execution_store = ExecutionStore(self.config.db_path, wal_enabled=self.config.sqlite_wal)
                     self._collaboration_execution_store.admit(owner_account_id, workflow)

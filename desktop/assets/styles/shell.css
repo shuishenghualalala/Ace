@@ -199,7 +199,7 @@
   grid-row: 2;
   align-self: stretch;
   justify-self: center;
-  margin: 0 -6px;
+  margin: 0 var(--mw-space-fine-neg-6);
   border: 0;
   background: transparent;
   cursor: col-resize;

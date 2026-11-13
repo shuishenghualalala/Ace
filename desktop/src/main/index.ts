@@ -30,6 +30,7 @@ import {
 } from './crew-file-protocol';
 import { registerSitePreviewProtocol } from './site-preview-protocol';
 import { installSitePreviewNavigation } from './site-preview-navigation';
+import { createExternalLinkBridge } from './external-link-bridge';
 import { authorizeOwnedImagePath, writeOwnedImageToClipboard } from './image-clipboard';
 import {
   managedGatewayModeEnv,
@@ -82,7 +83,6 @@ import {
 import {
   GatewayFetchArgs,
   GatewayUploadArgs,
-  ShellOpenExternalArgs,
   ShellOpenPathArgs,
   WorkspaceDirectoryArgs,
   ShellOpenPathWithArgs,
@@ -241,6 +241,7 @@ let resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
 // re-invocation prevents duplicate ipcMain handlers (which would otherwise
 // throw "attempt to register a second handler").
 let ipcRegistered = false;
+const externalLinkBridge = createExternalLinkBridge();
 
 const gatewayRestartController = new GatewayRestartController(async () => {
   if (isQuitting) return;
@@ -1084,7 +1085,7 @@ function openInspirationWindow(inspirationId: string, title = '灵感'): Browser
   inspirationWindows.set(inspirationId, win);
   pushInspirationWindowState(inspirationId, true);
   const target = `ace-site://${encodeURIComponent(inspirationId)}/`;
-  installSitePreviewNavigation(win.webContents);
+  installSitePreviewNavigation(win.webContents, externalLinkBridge.openUrl);
   win.webContents.on('will-navigate', (event, url) => {
     try {
       const parsed = new URL(url);
@@ -1141,7 +1142,7 @@ function createWindow() {
   if (!browserHostDisposePromise) ensureBrowserHost();
 
   mainWindow.loadFile(path.join(__dirname, '../assets/index.html'));
-  installSitePreviewNavigation(mainWindow.webContents);
+  installSitePreviewNavigation(mainWindow.webContents, externalLinkBridge.openUrl);
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const expected = path.join(__dirname, '../assets/index.html');
     if (!isTrustedRendererFileUrl(url, expected)) event.preventDefault();
@@ -2802,10 +2803,9 @@ function registerIpc() {
     e.sender.send('window:maximized-changed', false);
   });
 
-  trustedHandle('shell:openExternal', (_e, raw: unknown) => {
-    const args = parseOrThrow(ShellOpenExternalArgs.parse(raw), 'shell:openExternal');
-    return shell.openExternal(args.url);
-  });
+  trustedHandle('shell:openExternal', externalLinkBridge.register((url) => {
+    return shell.openExternal(url);
+  }));
 
   trustedHandle('shell:openPath', (_e, raw: unknown) => {
     const args = parseOrThrow(ShellOpenPathArgs.parse(raw), 'shell:openPath');

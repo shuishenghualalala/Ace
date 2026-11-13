@@ -757,7 +757,9 @@ def _user_responsibility_member(unit: WorkUnit, members: list[TeamMemberSpec]) -
 
 def _literal_responsibility_candidates(text: str, members: list[TeamMemberSpec]) -> list[tuple[TeamMemberSpec, str]]:
     """Conservatively recover explicit duties when the planner omits a quote."""
-    compact = lambda value: "".join(ch for ch in str(value or "").casefold() if ch.isalnum())[:1000]
+    def compact(value: str) -> str:
+        return "".join(ch for ch in str(value or "").casefold() if ch.isalnum())[:1000]
+
     target = compact(text)
     if len(target) < 6:
         return []

@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from crew.wiki.benchmark import (
+from crew.wiki.benchmark import (  # noqa: E402 - direct script bootstraps the repository path
     DEFAULT_VARIANTS,
     VARIANTS,
     load_beir,
@@ -27,16 +27,16 @@ from crew.wiki.benchmark import (
     run_benchmark,
     write_report,
 )
-from crew.wiki.benchmark_models import (
+from crew.wiki.benchmark_models import (  # noqa: E402 - repository path bootstrapped above
     CachedEmbeddingProvider,
     CachedRerankingProvider,
     ModelOutputCache,
     PacedRerankingProvider,
 )
-from crew.wiki.config import WikiRerankConfig, WikiSemanticConfig
-from crew.wiki.embedding import build_embedding_provider
-from crew.wiki.rerank import HTTPRerankingProvider
-from crew.wiki.schemas import WikiPage
+from crew.wiki.config import WikiRerankConfig, WikiSemanticConfig  # noqa: E402 - repository path bootstrapped above
+from crew.wiki.embedding import build_embedding_provider  # noqa: E402 - repository path bootstrapped above
+from crew.wiki.rerank import HTTPRerankingProvider  # noqa: E402 - repository path bootstrapped above
+from crew.wiki.schemas import WikiPage  # noqa: E402 - repository path bootstrapped above
 
 SCIFACT_URL = "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip"
 SCIFACT_MD5 = "5f7d1de60b170fc8027bb7898e2efca1"

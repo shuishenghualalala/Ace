@@ -59,13 +59,13 @@
   margin-bottom: var(--mw-space-4);
 }
 
-.tracing-button--quiet { padding: 5px 9px; font-size: var(--mw-type-caption-size); }
+.tracing-button--quiet { padding: var(--mw-space-fine-5) var(--mw-space-fine-9); font-size: var(--mw-type-caption-size); }
 .tracing-button.is-selected { border-color: var(--mw-action-primary); color: var(--mw-action-primary); }
 
 .tracing-button {
   border: 1px solid var(--mw-border-subtle);
   border-radius: var(--mw-radius-2);
-  padding: 7px 11px;
+  padding: var(--mw-space-fine-7) var(--mw-space-fine-11);
   background: var(--mw-bg-surface);
   color: var(--mw-text-primary);
   cursor: pointer;
@@ -80,7 +80,7 @@
 .tracing-button--primary {
   border-color: var(--mw-action-primary);
   background: var(--mw-action-primary);
-  color: var(--mw-action-on-primary, #fff);
+  color: var(--mw-action-primary-text);
 }
 
 .tracing-page__status {
@@ -108,7 +108,7 @@
   min-width: 130px;
   border: 1px solid var(--mw-border-subtle);
   border-radius: var(--mw-radius-2);
-  padding: 7px 9px;
+  padding: var(--mw-space-fine-7) var(--mw-space-fine-9);
   background: var(--mw-bg-canvas);
   color: var(--mw-text-primary);
   font: inherit;
@@ -189,7 +189,7 @@
   padding: var(--mw-space-4);
   border-bottom: 1px solid var(--mw-border-subtle);
   background: color-mix(in srgb, var(--mw-bg-surface) 94%, transparent);
-  backdrop-filter: blur(8px);
+  backdrop-filter: var(--mw-effect-tracing-backdrop);
 }
 
 .tracing-detail__content {
@@ -207,24 +207,24 @@
 
 .tracing-card h2 { margin-bottom: var(--mw-space-3); font-size: var(--mw-type-body-size); }
 .tracing-waterfall__rows { display: grid; gap: var(--mw-space-2); }
-.tracing-waterfall__row { width: 100%; gap: var(--mw-space-2); min-width: 0; padding: 4px 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.tracing-waterfall__row { width: 100%; gap: var(--mw-space-2); min-width: 0; padding: var(--mw-space-1) 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .tracing-waterfall__row:hover,
 .tracing-waterfall__row:focus-visible,
 .tracing-waterfall__row.is-selected { border-radius: var(--mw-radius-2); background: var(--mw-bg-selected); }
 .tracing-waterfall__label { width: 150px; flex: 0 0 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--mw-type-caption-size); }
 .tracing-waterfall__track { position: relative; flex: 1; height: 12px; border-radius: var(--mw-radius-full); background: var(--mw-bg-subtle); }
-.tracing-waterfall__bar { position: absolute; top: 2px; height: 8px; min-width: 3px; border-radius: var(--mw-radius-full); background: var(--mw-text-secondary); }
+.tracing-waterfall__bar { position: absolute; top: 2px; height: 8px; min-width: 3px; border-radius: var(--mw-radius-full); background: var(--mw-text-secondary); left: var(--mw-trace-span-start, 0%); width: var(--mw-trace-span-width, 0%); }
 .tracing-waterfall__bar--failed { background: var(--mw-status-danger); }
 .tracing-waterfall__bar--running { background: var(--mw-status-warning); }
 .tracing-waterfall__duration { width: 74px; flex: 0 0 74px; color: var(--mw-text-secondary); font-size: var(--mw-type-caption-size); text-align: right; }
 
 .tracing-events__list,
 .tracing-payloads__list { display: grid; gap: var(--mw-space-2); }
-.tracing-event-row { display: grid; gap: 2px; padding-block: var(--mw-space-1); }
+.tracing-event-row { display: grid; gap: var(--mw-space-fine-2); padding-block: var(--mw-space-1); }
 .tracing-event-row,
 .tracing-log-row { width: 100%; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .tracing-event-row span { color: var(--mw-text-secondary); font-size: var(--mw-type-caption-size); }
-.tracing-log-row { display: grid; gap: 2px; padding: var(--mw-space-2); border-bottom: 1px solid var(--mw-border-subtle); }
+.tracing-log-row { display: grid; gap: var(--mw-space-fine-2); padding: var(--mw-space-2); border-bottom: 1px solid var(--mw-border-subtle); }
 .tracing-log-row:hover,
 .tracing-log-row:focus-visible,
 .tracing-event-row:hover,
@@ -234,9 +234,9 @@
 .tracing-log-detail__message,
 .tracing-log-detail__structured { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--mw-type-caption-size) var(--mw-font-mono); }
 .tracing-log-detail__actions { display: flex; gap: var(--mw-space-2); align-items: center; }
-.tracing-export-dialog { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: var(--mw-space-4); background: color-mix(in srgb, #000 44%, transparent); }
+.tracing-export-dialog { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: var(--mw-space-4); background: color-mix(in srgb, var(--mw-black) 44%, transparent); }
 .tracing-export-dialog[hidden] { display: none; }
-.tracing-export-dialog__card { display: grid; gap: var(--mw-space-3); width: min(636px, 100%); padding: var(--mw-space-5); border: 1px solid var(--mw-border-subtle); border-radius: var(--mw-radius-3); background: var(--mw-bg-surface); box-shadow: var(--mw-shadow-3, 0 12px 36px rgb(0 0 0 / 24%)); }
+.tracing-export-dialog__card { display: grid; gap: var(--mw-space-3); width: min(636px, 100%); padding: var(--mw-space-5); border: 1px solid var(--mw-border-subtle); border-radius: var(--mw-radius-3); background: var(--mw-bg-surface); box-shadow: var(--mw-tracing-dialog-shadow); }
 .tracing-export-dialog__card label { display: grid; gap: var(--mw-space-1); }
 .tracing-export-dialog__card input[type='checkbox'] { margin-right: var(--mw-space-2); }
 .tracing-export-dialog__actions { display: flex; justify-content: flex-end; gap: var(--mw-space-2); }
