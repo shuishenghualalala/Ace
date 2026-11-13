@@ -21,6 +21,7 @@ def package_lock_directories(repo_root: Path) -> list[Path]:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     found = {
         (repo_root / entry).parent

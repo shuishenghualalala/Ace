@@ -2342,7 +2342,7 @@ app.whenReady().then(async () => {
 
       const clicked = await captureCompleted(1, async () => execute(
         'click',
-        [await refFor('#download-click')],
+        [await refFor('click attachment')],
         true,
       ));
       if (
@@ -2461,7 +2461,7 @@ app.whenReady().then(async () => {
 
       const multi = await captureCompleted(2, async () => execute(
         'click',
-        [await refFor('#download-multi')],
+        [await refFor('multi attachment')],
         true,
       ));
       const multiResponse = responseDownloads(multi.response);

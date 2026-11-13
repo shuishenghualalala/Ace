@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+# Match the UTF-8 mode used by Desktop's managed and packaged Python on Windows.
+env:
+  PYTHONUTF8: '1'
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -25,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runs-on: [ubuntu-24.04, windows-2025, macos-14]
+        runs-on: [ubuntu-24.04, windows-2025, macos-15]
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 45
     steps:

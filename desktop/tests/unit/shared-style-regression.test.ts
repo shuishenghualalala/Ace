@@ -21,7 +21,7 @@ const welcomeCss = readFileSync(resolve(stylesDir, 'welcome-scenarios.css'), 'ut
 
 function ruleBody(css: string, selector: string, last = false): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const matches = [...css.matchAll(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'g'))];
+  const matches = [...css.replace(/\r\n/g, '\n').matchAll(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`, 'g'))];
   const match = (last ? matches.at(-1) : matches[0]) ?? null;
   expect(match, `missing CSS rule: ${selector}`).not.toBeNull();
   return match?.[1] ?? '';

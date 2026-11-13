@@ -4469,7 +4469,8 @@ describe('BrowserHost', () => {
       method: 'Page.captureScreenshot',
       params: { format: 'png', fromSurface: true, captureBeyondViewport: false },
     });
-    expect((await stat(output)).mode & 0o777).toBe(0o600);
+    // Win32 stat synthesizes POSIX mode bits; NTFS access is inherited from the private owner directory.
+    if (process.platform !== 'win32') expect((await stat(output)).mode & 0o777).toBe(0o600);
     await host.dispose();
   });
 

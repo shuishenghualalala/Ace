@@ -21,7 +21,7 @@ importers:
         specifier: ^0.4.0
         version: 0.4.1
       dompurify:
-        specifier: ^3.4.11
+        specifier: ^3.4.17
         version: 3.4.17
       echarts:
         specifier: ^6.1.0

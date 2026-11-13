@@ -12,7 +12,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import yaml
 from dotenv import dotenv_values, load_dotenv
@@ -23,8 +23,7 @@ from crew.state.credentials import read_stored_key
 
 from crew.state.logging import get_logger
 
-if TYPE_CHECKING:
-    from crew.wiki.config import WikiRerankConfig, WikiSemanticConfig
+from crew.state.retrieval_config import WikiRerankConfig, WikiSemanticConfig
 
 import sys
 
@@ -539,11 +538,8 @@ class Config:
 
     def owner_rerank_config(self, owner_account_id: str | None = None) -> "WikiRerankConfig":
         """Merge owner reranking settings without resolving or exporting credentials."""
-        # 延迟导入：wiki 包内部经 _llm 引用 crew.providers，而 providers 初始化
-        # 会经 crew.state 回到本模块，顶层导入会形成循环。
-        from crew.wiki.config import WikiConfig, WikiRerankConfig
-
-        global_cfg = WikiConfig.from_raw(self.wiki_config).rerank
+        raw_defaults = self.wiki_config if isinstance(self.wiki_config, dict) else {}
+        global_cfg = WikiRerankConfig.from_raw(raw_defaults.get("rerank"))
         raw = (self.owner_overlay_data(owner_account_id).get("wiki") or {}).get("rerank")
         if not isinstance(raw, dict):
             return global_cfg
@@ -555,11 +551,8 @@ class Config:
         不在此解析 api_key（``WikiSemanticConfig`` 只存 ``api_key_env`` 变量名）；
         key 由调用方经 ``owner_env_map`` + ``_lookup_api_key`` 解析。
         """
-        # 延迟导入：wiki 包内部经 _llm 引用 crew.providers，而 providers 初始化
-        # 会经 crew.state 回到本模块，顶层导入会形成循环。
-        from crew.wiki.config import WikiConfig, WikiSemanticConfig
-
-        global_cfg = WikiConfig.from_raw(self.wiki_config).semantic
+        raw_defaults = self.wiki_config if isinstance(self.wiki_config, dict) else {}
+        global_cfg = WikiSemanticConfig.from_raw(raw_defaults.get("semantic"))
         overlay = self.owner_overlay_data(owner_account_id)
         raw = (overlay.get("wiki") or {}).get("semantic")
         if not isinstance(raw, dict):

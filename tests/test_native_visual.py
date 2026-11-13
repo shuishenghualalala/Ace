@@ -7,8 +7,8 @@ import pytest
 from crew.sites.native_visual import validate_visual
 
 FIXTURES = Path(__file__).parent / 'fixtures'
-SPEC = json.loads((FIXTURES / 'native-visual.json').read_text())
-INVALID = json.loads((FIXTURES / 'native-visual-invalid.json').read_text())
+SPEC = json.loads((FIXTURES / 'native-visual.json').read_text(encoding="utf-8"))
+INVALID = json.loads((FIXTURES / 'native-visual-invalid.json').read_text(encoding="utf-8"))
 
 
 def test_shared_native_visual_contract():

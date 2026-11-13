@@ -82,7 +82,7 @@ jobs:
           retention-days: 7
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +104,7 @@ jobs:
       - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
       - working-directory: desktop
         run: npm ci
-      # macos-14 为 arm64 主机，dist:mac 只构建 host arch（见 electron-builder.yml 注释）
+      # macos-15 为 arm64 主机，dist:mac 只构建 host arch（见 electron-builder.yml 注释）
       - working-directory: desktop
         run: npm run dist:mac:arm64
       - uses: actions/upload-artifact@v4
