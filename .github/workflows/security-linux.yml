@@ -42,6 +42,18 @@ jobs:
         env:
           ACE_REQUIRE_NATIVE_TESTS: '1'
       - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/release/ace-security-runtime --bwrap /usr/bin/bwrap --bwrap-license /usr/share/doc/bubblewrap/copyright --bwrap-version "$(dpkg-query -W -f='${Version}' bubblewrap)" --output desktop/security-runtime-bin
+      - name: Allow the verified packaged sandbox to create its user namespace
+        run: |
+          sudo chown root:root desktop/security-runtime-bin/bwrap
+          sudo chmod 0755 desktop/security-runtime-bin/bwrap
+          sudo tee /etc/apparmor.d/crew-ci-packaged-bwrap >/dev/null <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile crew-ci-packaged-bwrap "$GITHUB_WORKSPACE/desktop/security-runtime-bin/bwrap" flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/crew-ci-packaged-bwrap
       - run: uv run pytest tests/security -q --basetemp "$RUNNER_TEMP/ace-security-tests"
       - run: python tests/security/security_matrix.py --platform linux --runtime security-runtime/target/release/ace-security-runtime
         env:

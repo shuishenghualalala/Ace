@@ -574,12 +574,9 @@ _WINDOWS_SENSITIVE_TOP_LEVEL = frozenset(
 def _windows_full_disk_read_roots() -> tuple[Path, ...]:
     """Enumerate precise Windows read roots without recursive drive ACL changes."""
     roots: list[Path] = []
-    for name in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
-        value = os.environ.get(name)
-        if value:
-            root = Path(value).expanduser().resolve(strict=False)
-            if root.exists() and root not in roots:
-                roots.append(root)
+    # The dedicated sandbox account already has ordinary Users read access to
+    # OS/program folders. A request-scoped lease must not rewrite ACLs owned by
+    # TrustedInstaller there. The native runner handles executable access.
     home = Path.home().expanduser().resolve(strict=False)
     try:
         children = tuple(home.iterdir())

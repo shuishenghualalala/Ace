@@ -1080,3 +1080,21 @@ async def test_captured_exit_does_not_wait_forever_for_inherited_pipe(
     assert "leader-out" in result.stdout
     # leader 立即退出：总耗时 ~= 排干宽限（0.3s），远小于孙进程存活 10s
     assert elapsed < 5
+
+
+def test_default_windows_read_roots_do_not_lease_system_acl(tmp_path, monkeypatch):
+    from crew.security.launch import _windows_full_disk_read_roots
+
+    home = tmp_path / "home"
+    home.mkdir()
+    documents = home / "Documents"
+    documents.mkdir()
+    (home / ".ssh").mkdir()
+    system = tmp_path / "Windows"
+    system.mkdir()
+    monkeypatch.setenv("SystemRoot", str(system))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    roots = _windows_full_disk_read_roots()
+    assert documents in roots
+    assert system not in roots
+    assert home / ".ssh" not in roots

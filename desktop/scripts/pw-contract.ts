@@ -51,9 +51,6 @@ import type { Dialog, Page } from '../src/main/browser/playwright-compat';
 // Electron with no ordinary BrowserWindow.
 app.on('window-all-closed', () => undefined);
 
-// Xvfb runners have no GPU device; use Chromium's software compositor.
-if (process.platform === 'linux' && process.env.CI) app.disableHardwareAcceleration();
-
 async function cleanupContractRoot(root: string): Promise<void> {
   try {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
