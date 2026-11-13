@@ -298,7 +298,7 @@ def create_security_router(crew) -> APIRouter:
         ).get("live") != "idle":
             # 每个 turn 在入口捕获一次 ProcessLaunch。模式变化时终止活跃/排队 turn，
             # 否则后续工具仍会沿用旧的 managed/disabled 快照；idle 会话无需误触其它工作流。
-            crew.dispatcher.stop(
+            await crew.dispatcher.stop(
                 payload.session_id,
                 reason="安全模式已切换，请重新执行当前操作",
                 owner_account_id=ctx.owner_account_id,

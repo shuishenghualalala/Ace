@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ADR-0047 · Subagent Feature 生命周期收口</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}a{color:#245a83}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}.ok{color:#176b2c}</style></head>
+<body><main>
+<h1>ADR-0047 · Subagent Stage C：Feature 生命周期收口</h1>
+<p>状态：<strong>已批准，阶段 C 已实施</strong> · 日期：2026-09-17 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 前置：<a href="0045-subagent-capability-seam.html">ADR-0045</a>、<a href="0046-subagent-stage-b-runlog-depth-notify.html">ADR-0046</a>。</p>
+
+<h2>背景</h2>
+<p>阶段 B 已建立 Subagent 的语义 Runtime、持久账本、四态通知和批量调度，但 build_app 仍直接构造 Store、Runtime、ActiveSubagents、通知队列和工具。这样工具、路由、事件和后台任务没有共同的 Generation，也无法通过统一 Feature Runtime 做停用、重启与代际租约。</p>
+
+<h2>决定</h2>
+<ol>
+  <li>以 <code>product.subagent</code> 作为唯一 Subagent Feature ID。它必需依赖 <code>core.agent-factory</code>，提供 <code>ServiceKey("subagent")</code>，策略为 <code>stop=DRAIN</code>、<code>update=RESTART</code>、<code>required_by_product=false</code>。</li>
+  <li>Bundle 每个 Generation 自己构造并关闭 <code>SubagentRuntime</code>、<code>ActiveSubagents</code>、<code>SubagentStore</code> 和后台任务。Store 继续使用既有 <code>subagent.db</code>、WAL、legacy copy-on-first-activate 与保留期配置。</li>
+  <li>工具注册通过 Feature-owned disposer 进入 Registry，并在 handler 外层持有 Generation Lease；通知 context、lifecycle event、preset contribution 与 <code>product.subagent</code> route 同属该 Scope。</li>
+  <li>Gateway 只在启动装配时挂载 Route Registry 的稳定路由对象，运行期由 route gate 和 service lease 选择当前代；<code>GET /api/subagents</code> 返回当前 owner 的 active snapshot 与历史 runs。</li>
+  <li>Runtime 只发布与 Feature 无关的生命周期记录，Bundle 在事件贡献者中转成版本化 <code>feature_event(feature="subagent")</code>，并按 parent session 一次性 drain。</li>
+  <li>保留 <code>CrewApp.subagent_*</code> 作为兼容视图。组合根只负责创建 Registry、读取 Config、按依赖顺序激活 Bundle；不再手写 Store、Runtime 或工具注册。</li>
+</ol>
+
+<h2>装配顺序</h2>
+<pre><code>core.agent-factory
+        │
+        ▼
+product.wiki  ── claim Wiki preset
+        │
+        ▼
+product.subagent ── own runtime/store/tools/context/events/routes/presets
+        │
+        ▼
+product.external-agents ── optional Subagent Service consumer</code></pre>
+<p>Wiki 在 Subagent 前认领自身 preset，避免通用 preset Registry 发生所有权冲突；external-agents 在 Subagent 后激活，确保其 owner-aware Provider resolver 只依赖稳定服务契约。</p>
+
+<h2>生命周期不变量</h2>
+<table><thead><tr><th>不变量</th><th>保证方式</th></tr></thead><tbody>
+  <tr><td>停用不接收新请求</td><td>FeatureScope 进入 draining；工具、路由、服务租约都从同一代 admission boundary 获取。</td></tr>
+  <tr><td>在途请求可完成</td><td>工具 handler 和 route gate 在请求边界持有 generation lease，DRAIN 等待释放后再清理。</td></tr>
+  <tr><td>旧代不误删新代</td><td>Registry、Route Registry、Preset Registry 与 disposer 均按 Generation/对象 identity 精确撤销。</td></tr>
+  <tr><td>资源关闭顺序稳定</td><td>贡献先撤销，后台任务与 Runtime/Store 再按 Scope resource phase 关闭。</td></tr>
+  <tr><td>事件不重复</td><td>Runtime 按 owner/session 入队，Feature Event contributor 原子 drain；同一回合第二次 dispatch 得到空集合。</td></tr>
+</tbody></table>
+
+<h2>后果</h2>
+<p>Subagent 现在可以被统一能力诊断、停用和重启，新增消费方只依赖 <code>SubagentService</code>。组合根的兼容字段仍存在，因此旧 CLI、工具测试和中断链路无需同步重写。Bundle 的 route/event 贡献需要在 Gateway 构造期注册，FastAPI 路由树本身仍不在运行期物理增删；可用性由 Registry gate 表达。</p>
+
+<h2>验证</h2>
+<p class="ok">Stage C 专项与核心 Feature 测试：11 passed。子智能体既有定向回归：150 passed，2 warnings。专项测试覆盖 Feature event 版本化/一次性 drain、真实 Gateway route、owner 隔离、兼容视图清理、停用后的 Store/Runtime 释放以及生产装配记录。</p>
+<p><a href="../modules/subagent.html">Subagent 模块文档</a> · <a href="../../testing/subagent-stage-c-feature-lifecycle.html">Stage C 测试记录</a></p>
+</main></body></html>

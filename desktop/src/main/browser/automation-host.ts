@@ -86,7 +86,13 @@ export class AutomationHost {
       skipTaskbar: true,
       // 即便某条路径误调 show()，也不该抢走用户焦点。
       focusable: false,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        // The host compositor must stay active along with its child views.
+        backgroundThrottling: false,
+      },
     });
     this.window.on('closed', () => {
       this.window = null;

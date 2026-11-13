@@ -58,6 +58,15 @@ async def test_system_metrics_returns_real_indicators(api, auth_headers):
     assert "cpu_percent" in data
     assert "memory" in data
     assert data["memory"]["total_gb"] > 0
+    memory = data["memory"]
+    assert memory["available_gb"] >= 0
+    # used_gb 与 percent 使用同一 total - available 口径（允许展示保留 1 位小数误差）。
+    assert memory["used_gb"] + memory["available_gb"] == pytest.approx(memory["total_gb"], abs=0.2)
+    # GB 字段各自保留 1 位小数，反推百分比时允许四舍五入误差。
+    assert memory["percent"] == pytest.approx(
+        memory["used_gb"] / memory["total_gb"] * 100,
+        abs=1.0,
+    )
 
 
 @pytest.mark.asyncio

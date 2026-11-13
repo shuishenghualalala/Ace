@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage } from "../types";
+import type { AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage, UserAgentMention } from "../types";
 import { api } from "../api";
 import MessageList from "./MessageList";
 import Composer from "./Composer";
@@ -7,9 +7,11 @@ import QueuePanel from "./QueuePanel";
 import ScenarioHub from "./ScenarioHub";
 import RunningIntro from "./RunningIntro";
 import TodoProgressPanel from "./TodoProgressPanel";
+import SubagentActivityView from "./SubagentActivityView";
 import { shouldShowTodoPanel } from "../lib/todoUtils";
 
 export interface Props {
+  sessionId?: string;
   messages: UiMessage[];
   busy: boolean;
   compactingContext?: boolean;
@@ -17,7 +19,7 @@ export interface Props {
   pendingQueue: PendingMessage[];
   config: AppConfig | null;
   attachments: Attachment[];
-  onSend: (text: string, attachments: Attachment[], subScenario?: string) => void;
+  onSend: (text: string, attachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => void;
   onStop?: () => void;
   onSteer?: (text: string) => void;
   onRemoveFromQueue?: (index: number) => void;
@@ -28,6 +30,8 @@ export interface Props {
   currentAgentLabel?: Session["agent_label"];
   isTeamSession?: boolean;
   teamExecutionTier?: TeamExecutionTier;
+  externalWikiReadKbId?: string;
+  onExternalWikiReadKbChange?: (kbId: string) => void;
   onTeamExecutionTierChange?: (tier: TeamExecutionTier) => void;
   teamMembers?: TeamMemberView[];
   compactTools?: boolean;
@@ -50,9 +54,13 @@ export interface Props {
   todos?: TodoItem[];
   editDraft?: { messageId: string; text: string } | null;
   onEditMessage?: (message: UiMessage) => void;
+  onRetryMention?: (message: UiMessage) => void;
+  onCancelMention?: (message: UiMessage) => void;
   onCancelEdit?: () => void;
   /** 附件上传归属（wiki 会话时传入）：透传给 Composer 的上传调用 */
   uploadContext?: { sessionId?: string; kbId?: string };
+  /** 传入后回答正文中的 [[Wiki 页面名]] 引用渲染为可点击链接（Wiki 问答场景）。 */
+  onWikiLink?: (title: string) => void;
 }
 
 const SKILL_ICONS: Record<string, string> = {
@@ -61,6 +69,7 @@ const SKILL_ICONS: Record<string, string> = {
 };
 
 export default function ChatPanel({
+  sessionId,
   messages,
   busy,
   compactingContext = false,
@@ -79,6 +88,8 @@ export default function ChatPanel({
   currentAgentLabel,
   isTeamSession,
   teamExecutionTier,
+  externalWikiReadKbId,
+  onExternalWikiReadKbChange,
   onTeamExecutionTierChange,
   teamMembers,
   compactTools,
@@ -97,11 +108,25 @@ export default function ChatPanel({
   onDismissFollowup,
   editDraft,
   onEditMessage,
+  onRetryMention,
+  onCancelMention,
   onCancelEdit,
   todos = [],
   uploadContext,
+  onWikiLink,
 }: Props) {
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [reviewKbs, setReviewKbs] = useState<{ id: string; name: string }[]>([]);
+  const [kbError, setKbError] = useState("");
+  useEffect(() => {
+    let active = true;
+    if (isTeamSession) {
+      api.wikiKBs().then((result) => {
+        if (active) { setReviewKbs(result.kbs); setKbError(""); }
+      }).catch(() => { if (active) setKbError("知识库列表读取失败；请检查服务后重新打开会话"); });
+    }
+    return () => { active = false; };
+  }, [isTeamSession, sessionId]);
   const isEmpty = messages.length === 0 && !busy && !followupQuestion && !isTeamSession;
   // 场景化推荐：预填文本 + nonce（触发注入）+ 当前激活的场景 chip
   const [prefillText, setPrefillText] = useState("");
@@ -116,6 +141,17 @@ export default function ChatPanel({
 
   return (
     <div className="chat-panel">
+      {isTeamSession && onExternalWikiReadKbChange && (
+        <label title="选择即授权本轮团队只读所选知识库来源快照">
+          团队只读资料：
+          <select aria-label="团队只读知识库" disabled={busy} value={externalWikiReadKbId || ""}
+            onChange={(event) => onExternalWikiReadKbChange(event.target.value)}>
+            <option value="">不读取知识库</option>
+            {reviewKbs.map((kb) => <option key={kb.id} value={kb.id}>{kb.name}</option>)}
+          </select>
+          {kbError && <span role="alert">{kbError}</span>}
+        </label>
+      )}
       {isEmpty ? (
         <div className="welcome">
           {/* Mascot */}
@@ -280,10 +316,14 @@ export default function ChatPanel({
             onAnswerFollowup={onAnswerFollowup}
             onDismissFollowup={onDismissFollowup}
             onEditMessage={onEditMessage}
+            onRetryMention={onRetryMention}
+            onCancelMention={onCancelMention}
             teamMembers={teamMembers}
             showEmptyState={!isTeamSession}
             currentAgentLabel={currentAgentLabel}
+            onWikiLink={onWikiLink}
           />
+          <SubagentActivityView sessionId={sessionId} messages={messages} busy={busy} />
           <QueuePanel
             queue={pendingQueue}
             queueHint={queueHint}
@@ -319,6 +359,7 @@ export default function ChatPanel({
             onModelChange={onModelChange}
             currentAgentLabel={currentAgentLabel}
             isTeamSession={isTeamSession}
+            teamMembers={teamMembers}
             teamExecutionTier={teamExecutionTier}
             onTeamExecutionTierChange={onTeamExecutionTierChange}
             canSelectAgent={canSelectAgent}

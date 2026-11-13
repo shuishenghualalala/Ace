@@ -17,6 +17,8 @@ interface Props {
   onRejectPlan?: () => void;
   onRejectAndExitPlan?: () => void;
   onAsk?: (text: string) => void;
+  /** 传入后回答正文中的 [[Wiki 页面名]] 引用渲染为可点击链接（Wiki 问答场景）。 */
+  onWikiLink?: (title: string) => void;
 }
 
 // 从消息中提取计时信息。
@@ -68,6 +70,7 @@ export default function AgentTurn({
   onApprovePlan,
   onRejectPlan,
   onRejectAndExitPlan,
+  onWikiLink,
 }: Props) {
   const [pinnedOpen, setPinnedOpen] = useState<boolean | null>(null);
   const [viewingPage, setViewingPage] = useState<WikiPage | null>(null);
@@ -196,6 +199,7 @@ export default function AgentTurn({
                 isStreaming={
                   isStreaming && !thinkingLooksLikeOnlyAnswer
                 }
+                onWikiLink={onWikiLink}
               />
             </div>,
           );
@@ -219,7 +223,7 @@ export default function AgentTurn({
     });
 
     return { processItems, textParts, fileChanges };
-  }, [messages, isStreaming, onApprovePlan, onRejectPlan, onRejectAndExitPlan]);
+  }, [messages, isStreaming, onApprovePlan, onRejectPlan, onRejectAndExitPlan, onWikiLink]);
 
   const defaultOpen = isStreaming;
   const open = pinnedOpen ?? defaultOpen;

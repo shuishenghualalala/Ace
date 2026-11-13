@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ADR-0046 · 子智能体阶段 B：run log、深度账本与四态投递</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}</style></head>
+<body><main>
+<h1>ADR-0046 · 子智能体阶段 B：run log、深度账本、四态投递与批量调度</h1>
+<p>状态：<strong>已批准，阶段 B 已实施</strong> · 日期：2026-09-16 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 前置：<a href="0045-subagent-capability-seam.html">ADR-0045</a>。</p>
+<h2>背景</h2>
+<p>阶段 A 留下的 one-shot 运行时是纯内存的：子身份一次性、结局是 provider 自报字符串、通知只有"下一轮注入"一种投递、批量只有并发信号量。这四件事分别对应四类做不到：审计与恢复（无日志）、嵌套委派治理（无深度账本）、父级状态感知（无路由）、限流下的批量纪律（无调度）。</p>
+<h2>决定</h2>
+<ol>
+  <li><strong>run log 是结局的唯一推导入口</strong>。每个 run 持有 append-only 事件流（<code>run/start</code> / <code>turn/start</code> / <code>turn/end</code> / <code>output/final</code> / <code>run/settle</code>），<code>fold_run_outcome()</code> 从最后一次记账 turn 折叠出 <code>stop_reason</code>：<code>blocked→refusal</code>、<code>interrupted→aborted</code>、不可名状按 <code>error</code>；<strong>已记录的 error 优先于其后的取消</strong>。provider 自报值与日志冲突时以日志为准；超时是运行时按 <code>timeout_kind</code> 生成的结论，不进入折叠。</li>
+  <li><strong>三张 Feature 自有表</strong>（<code>subagent_runs</code> / <code>subagent_edges</code> / <code>subagent_descriptors</code>）落在 <code>crew_data/subagent.db</code>（ADR-0038 db-per-feature）。descriptor 版本化 + <strong>first-wins</strong>：同名后续声明不能改写出生证明；未知字段与版本不符在读写两侧都拒绝。边表 child 为主键、软删除；run/descriptor/edge 按 <code>retain_runs_days</code>（默认 30 天）在开库时清理。App 直构、随 App 存亡（与 TaskRuntime 同语义）；阶段 C 收进 Feature Bundle 时迁入 Scope。</li>
+  <li><strong>深度账本是单调下界</strong>。子深度 = max(运行时父深度, 持久化父深度) + 1；恢复/重放带来的归零运行时值无法借持久层冒充顶层。<code>allow_nested</code> 默认 false，其默认值下的工具可见性与旧版逐字一致；开启后子级可见委派工具仍受 <code>max_depth</code>（默认 3）与父授权快照双重约束，外援通道任何深度都不放行。</li>
+  <li><strong>通知四态路由</strong>：父已消失（teardown 登记的肯定式证据）→ 静默丢弃；宿主拆除中（<code>_shutdown_started</code>）→ 只入队；父忙（dispatcher 运行轮探测）→ 入队并 steer 进当前轮，steer 成功即摘除队列副本；父空闲 → 入队，TaskRuntime 恢复轮负责唤醒。"库里查无此行"不构成消失证据——隐藏子会话与测试环境可能从未落库。三条硬不变量（恰好一次、collect 后不再注入、文案逐字稳定）保持且有回归锁。</li>
+  <li><strong>内容单通道</strong>：后台 subagent 完成的正文只经通知队列进入上下文。恢复回合不再对 <code>kind=subagent</code> 携带 <code>task_notifications</code>（shell 等保持原通路）；完成回调先于任务落库执行，消除恢复轮 drain 空队列的竞态。</li>
+  <li><strong>批量调度器</strong>：首发 <code>initial_burst</code> 个、此后每 <code>launch_interval</code> 放 1 个；疑似限流（429/Too Many Requests/rate limit 启发式，配额耗尽除外）的条目按 <code>backoff_base×factor^n</code> 指数退避重排（同一简报原样重放），容量收缩（进入限流时取已成功起跑数并立即 -1，此后每 <code>shrink_interval</code> 至多 -1，下限 1）、静默 <code>recover_seconds</code> 后逐档恢复；重试超 <code>max_retries</code> 或该条目已是唯一未完成槽时按失败落槽（防死等）；结果按原始索引定序。时钟与 sleep 可注入，时序测试确定性。<strong>同构批量</strong>：<code>delegate_task</code> 新增 <code>prompt_template</code>（必须含 <code>{item}</code>）+ <code>items</code>（上限 <code>max_batch_items</code>，展开重复即拒绝），与 <code>goal</code>/<code>tasks</code> 互斥；后台模式仍只支持单任务。</li>
+  <li><strong>摘要兜底</strong>：正常交卷但短于 <code>summary_min_chars</code>（默认 200）时在同一子级上追加扩写轮（最多 <code>summary_retries</code>，默认 1）；max_tokens/refusal/超时/取消等非正常交卷与绝对预算耗尽不触发；扩写轮只补正文，不把主轮结论改写成失败。阈值挂在 preset（<code>summary_min_chars</code>/<code>summary_retries</code>）可覆盖全局默认。</li>
+  <li><strong>工具面只增不改</strong>：<code>to_legacy_dict</code> 新增 <code>stop_reason</code>/<code>timeout_kind</code>，旧 <code>status</code> 映射保持；三个工具 schema 中仅 <code>delegate_task</code> 描述与参数因模板模式扩充，快照基线随之更新。</li>
+</ol>
+<h2>关键不变量</h2>
+<table><thead><tr><th>不变量</th><th>保证方式</th></tr></thead><tbody>
+  <tr><td>结局可只读日志复算</td><td><code>fold_run_outcome</code> 是唯一推导入口；落库 <code>stop_reason</code> 与 provider 自报冲突时以折叠为准（有告警日志）。</td></tr>
+  <tr><td>先失败后取消算失败</td><td>折叠扫描保留 <code>error_recorded</code> 标记，末次记账为 aborted 时回退 error。</td></tr>
+  <tr><td>descriptor 不可篡改</td><td>first-wins INSERT + 读侧版本/未知字段校验。</td></tr>
+  <tr><td>深度不回退</td><td>持久父深度是下界；<code>delegation_blocked_toolsets</code> 真值表收敛可见性。</td></tr>
+  <tr><td>内容恰好投一次</td><td>busy-steer 成功即摘除队列副本；subagent 恢复轮不携带 task_notifications。</td></tr>
+  <tr><td>批量失败隔离与定序</td><td>条目级重排不取消兄弟；<code>results[index]</code> 保持输入序。</td></tr>
+  <tr><td>限流不无限循环</td><td>max_retries 上限 + 唯一未完成槽豁免；配额耗尽不判限流。</td></tr>
+  <tr><td>停用只撤装配不删数据</td><td>库表与 TaskRuntime 同语义随 App 存亡；行级清理只按保留期。</td></tr>
+</tbody></table>
+<h2>后果</h2>
+<p>每次委派新增三次同步 SQLite 写（发布、结算、边关闭），发布写失败按 fail-loud 拒绝委派——这是"日志是真相"的代价；WAL + 写助手重试（沿用仓库基建）缓解锁竞争。限流重试是"同一简报重放"：进程内 one-shot 子级没有可复用的轮次上下文，按请求原样重放；子级上下文复用型重试随阶段 D continuable 引入。四态路由新增对 dispatcher 运行态的只读探测（<code>is_running</code>）与会话 teardown 的登记钩子。</p>
+<h2>未选择的方案</h2>
+<ul>
+  <li>把 run log 建成独立事件表再 JOIN：单行 JSON 列满足"复算 + 审计 + 冷恢复"且少一次联结；事件词汇刻意保持最小（5 种）。</li>
+  <li>"库里查无会话行"当消失证据：对隐藏子会话与测试环境误伤，改为 teardown 肯定式登记。</li>
+  <li>限流时无限退避重排（无上限）：与 kimi 语义一致的观测行为保留，但加 max_retries 与唯一槽豁免两道终止阀，防止工具调用永挂。</li>
+  <li>在 provider 内做全局容量管理：容量属于批次调度（runtime），provider 只报告结局。</li>
+</ul>
+<h2>回退</h2>
+<p>阶段 B 无数据迁移（新表首建）。按文件回退 store/runtime/providers 的阶段 B 段、context 路由、tools 模板段与 app 接线即可回到阶段 A 形态；<code>subagent.db</code> 可直接删除。快照基线哈希随 schema 回退同步还原。</p>
+<p><a href="../modules/subagent.html">Subagent 模块文档</a> · <a href="../../testing/subagent-stage-b-runlog-depth-notify.html">阶段 B 测试记录</a></p>
+</main></body></html>

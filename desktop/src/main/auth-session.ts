@@ -63,6 +63,7 @@ export class DesktopAuthSession {
   private providerId = 'custom';
   private cookie = '';
   private user: AuthUserSnapshot | null = null;
+  private sessionVerificationError: Record<string, unknown> | null = null;
 
   private endpoint(baseUrl: string, pathname: string): string {
     const target = new URL(baseUrl);
@@ -73,6 +74,7 @@ export class DesktopAuthSession {
   }
 
   async refreshConfig(baseUrl: string): Promise<AuthStateSnapshot> {
+    this.sessionVerificationError = null;
     const previousMode = this.mode;
     const previousProviderId = this.providerId;
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/config'), {
@@ -103,7 +105,15 @@ export class DesktopAuthSession {
           headers: { Cookie: this.cookie },
           redirect: 'error',
         }).catch(() => null);
-        if (!sessionResponse || !sessionResponse.ok) {
+        const sessionPayload = sessionResponse
+          ? parseJson(await sessionResponse.text())
+          : {};
+        if (!sessionResponse || !sessionResponse.ok || sessionPayload.ok !== true) {
+          this.sessionVerificationError = {
+            ...sessionPayload,
+            ok: false,
+            status: sessionResponse?.status || 0,
+          };
           this.cookie = '';
           this.user = null;
           this.clearPersistedSession();
@@ -227,9 +237,19 @@ export class DesktopAuthSession {
     this.cookie = cookie;
     this.user = user;
     this.persistRemoteSession();
+    this.mode = 'email';
+    this.providerId = 'email';
     const verified = await this.refreshConfig(baseUrl);
     if (!verified.isLoggedIn) {
-      return { ok: false, status: 401, error: '邮箱会话验证失败，请重试' };
+      const failure = this.sessionVerificationError;
+      return {
+        ...(failure || {}),
+        ok: false,
+        status: Number(failure?.status) || 401,
+        error: typeof failure?.error === 'string' && failure.error.trim()
+          ? failure.error
+          : '邮箱会话验证失败，请重试',
+      };
     }
     return { ok: true, status: response.status, user: verified.user };
   }

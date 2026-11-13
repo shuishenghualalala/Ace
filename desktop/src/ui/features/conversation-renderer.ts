@@ -17,25 +17,37 @@ import {
   hasVisibleAnswerText,
   renderAgentTurn,
   renderEmptyState,
+  renderHistoryErrorCard,
   renderMessageHtml,
   renderQueueHintCard,
   renderTeamInternalMessage,
   renderTypingIndicator,
+  renderUnitErrorCard,
   resolveTurnDurationMs,
 } from '../chat-render';
+import { reportRendererError, safeStringify } from '../renderer-error-report';
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
 import { getSessionAgentDisplay } from './workspaces';
+import { isExternalAgentSession, isExternalTeamSession } from './external-agents-feature';
 import {
   resolveTeamCollaborationMember,
+  resolveTeamCollaborationMentionText,
   resolveTeamCollaborationName,
 } from './team-collaboration-board';
 import { applyFoldState } from '../render-utils';
 import { setToolFold, setTurnFold } from './fold-state';
-import { bindFollowupCard, isRuntimeStaffingFollowup, renderFollowupCardElement } from '../followup';
+import {
+  bindFollowupCard,
+  isRuntimeStaffingFollowup,
+  renderFollowupCardElement,
+  syncPermissionCardPositions,
+} from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import { attachCopyButtons } from './copy-button';
 import { renderMermaidBlocks } from './mermaid-render';
+import { inlineSurfaces } from './inline-surfaces';
+import { hydrateNativeVisuals, renderNativeVisual } from './native-visual';
 import { showFileOpenMenu } from './file-open-menu';
 import { mountBlueprintSurface } from './blueprint-surface';
 import { openBrowserArtifact, openUserBrowser } from './browser-panel';
@@ -48,6 +60,7 @@ import {
   notify,
   state,
 } from '../state';
+import { openWikiPageByTitle } from './wiki-page';
 
 // ---------- scroll anchor：按容器多实例（原 chat-controller 单例的多实例化） ----------
 
@@ -87,6 +100,24 @@ export function jumpConversationToBottom(containerId: string): void {
 
 /** 「已编辑文件」卡：打开看板 Files / 在资源管理器中显示（与 fold 委托同容器、各绑一次）。 */
 const fileChangesBoundContainers = new WeakSet<HTMLElement>();
+
+/** 「历史加载失败」卡的重试按钮（各容器绑一次；动态 import 破除与 session-controller 的循环）。 */
+const historyRetryBoundContainers = new WeakSet<HTMLElement>();
+function ensureHistoryRetryDelegation(
+  container: HTMLElement,
+  getSessionId: () => string | null,
+): void {
+  if (historyRetryBoundContainers.has(container)) return;
+  historyRetryBoundContainers.add(container);
+  container.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const btn = target?.closest<HTMLElement>('[data-history-retry]');
+    if (!btn || !container.contains(btn)) return;
+    const sid = getSessionId();
+    if (!sid) return;
+    void import('./session-controller').then(({ loadBackendHistory }) => loadBackendHistory(sid));
+  });
+}
 export function ensureFileChangesDelegation(container: HTMLElement): void {
   if (fileChangesBoundContainers.has(container)) return;
   fileChangesBoundContainers.add(container);
@@ -153,6 +184,13 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
         }
       }
     }
+    const wikiLink = target.closest<HTMLElement>('[data-rel-title]');
+    if (wikiLink && container.contains(wikiLink)) {
+      event.preventDefault();
+      const title = wikiLink.getAttribute('data-rel-title') || '';
+      if (title) void openWikiPageByTitle(title);
+      return;
+    }
     const openBtn = target.closest<HTMLElement>('[data-file-changes-open]');
     if (openBtn && container.contains(openBtn)) {
       event.preventDefault();
@@ -190,6 +228,51 @@ export function ensureFileChangesDelegation(container: HTMLElement): void {
       }
       openInspectorToTab('files', { expandFilePath: expandPath, filePaths, fileChanges: fileChanges ?? null });
     }
+  });
+}
+
+type TeamCommunicationActionHandlers = {
+  onRetry: (message: ChatMessage) => void;
+  onCancel: (message: ChatMessage) => void;
+};
+
+const teamCommunicationBoundContainers = new WeakMap<HTMLElement, {
+  handlers: TeamCommunicationActionHandlers;
+  messages: () => ChatMessage[];
+}>();
+
+function ensureTeamCommunicationDelegation(
+  container: HTMLElement,
+  handlers: TeamCommunicationActionHandlers | undefined,
+  messages: () => ChatMessage[],
+): void {
+  const existing = teamCommunicationBoundContainers.get(container);
+  if (existing) {
+    existing.handlers = handlers ?? { onRetry: () => {}, onCancel: () => {} };
+    existing.messages = messages;
+    return;
+  }
+  const binding = {
+    handlers: handlers ?? { onRetry: () => {}, onCancel: () => {} },
+    messages,
+  };
+  teamCommunicationBoundContainers.set(container, binding);
+  container.addEventListener('click', (event) => {
+    const target = event.target instanceof Element
+      ? event.target.closest<HTMLElement>('[data-team-communication-action]')
+      : null;
+    if (!target || !container.contains(target)) return;
+    const root = target.closest<HTMLElement>('.msg[data-message-id]');
+    const messageId = root?.dataset.messageId;
+    const message = messageId
+      ? binding.messages().find((item) => item.id === messageId)
+      : undefined;
+    if (!message) return;
+    event.preventDefault();
+    event.stopPropagation();
+    target.setAttribute('disabled', 'true');
+    if (target.dataset.teamCommunicationAction === 'retry') binding.handlers.onRetry(message);
+    if (target.dataset.teamCommunicationAction === 'cancel') binding.handlers.onCancel(message);
   });
 }
 
@@ -385,7 +468,7 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
   const files = (msg.turnFileChanges || []).map((file) =>
     `${file.path}|${file.status}|${file.added}|${file.removed}|${file.binary ? '1' : '0'}`,
   ).join(';');
-  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
+  return `team|${msg.id}|${msg.content}|${msg.thinking || ''}|${msg.thinkingStartedAt ?? ''}|${msg.thinkingDurationMs ?? ''}|${tools}|${artifacts}|${files}|${msg.agentId || ''}|${msg.agentName || ''}|${msg.agentRole || ''}|${msg.agentTone || 0}|${msg.eventType || ''}|${msg.nodeId || ''}|${msg.displayMode || ''}|${msg.collapsedTitle || ''}|${msg.processText || ''}|${msg.communicationKind || ''}|${msg.communicationStatus || ''}|${msg.requestId || ''}|${msg.replyTo || ''}|${msg.communicationRequestText || ''}|${durationBucket}|${isStreaming ? '1' : '0'}`;
 }
 
 /** 一段 batch（同一回合的连续 agent 消息）的 sig。
@@ -394,7 +477,8 @@ function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
  *  流结束时 streaming/tool 状态本身会改变 sig，届时再渲染最终时长。
  *
  *  覆盖 renderAgentTurn 的全部输入：isStreaming / userPinnedOpen / turnDurationMs 桶 /
- *  batch 内每条消息的 role|content|thinking|toolCalls|planReview|todoSnapshot|turnFileChanges|
+ *  batch 内每条消息的 role|content|thinking|thinkingStartedAt|thinkingDurationMs|
+ *  toolCalls|planReview|todoSnapshot|turnFileChanges|
  *  streaming|agentName|model|timestamp。
  *  toolCall 逐项展开（name/args/result/status/startedAt/duration）确保工具状态变化触发 patch。
  *  planReview / todoSnapshot / turnFileChanges 同样展开，否则 todo_updated / plan_review /
@@ -427,11 +511,11 @@ function sigAgentTurn(
           .map((f) => `${f.path}|${f.added}|${f.removed}|${f.status}`)
           .join(US)
       : '';
-    // Wiki 卡片同样进 sig，否则 wiki_cards patch 后增量渲染复用旧 DOM。
+    // Wiki 卡片同样进 sig，否则 wiki.cards patch 后增量渲染复用旧 DOM。
     const wc = m.wikiCards
       ? m.wikiCards.map((p) => `${p.id}|${p.title}`).join(US)
       : '';
-    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}`;
+    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.thinkingStartedAt ?? ''}|${m.thinkingDurationMs ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}`;
   });
   return `t|${isStreaming ? '1' : '0'}|${userPinnedOpen === null ? '_' : userPinnedOpen ? '1' : '0'}|${parts.join('||')}`;
 }
@@ -443,14 +527,15 @@ function sessionTurnIdentity(sessionId: string | null): AgentTurnOptions['identi
   if (!sessionId) return undefined;
   const display = getSessionAgentDisplay(sessionId);
   const provider = String(display?.agentLabel?.provider || '').trim().toLowerCase();
-  if (!provider || provider === 'crew' || provider === 'builtin' || provider === 'client') return undefined;
   // Team 是会话容器，不是发言者。团队消息由 team_internal.agent_id 决定头像；
   // 首帧前的通用等待态沿用内置 Leader（Crew），聊天区不展示 Team Logo。
-  if (provider === 'team') return undefined;
-  const name = String(display?.agentLabel?.name || 'Agent').trim();
+  if (isExternalTeamSession(display?.agentBinding)) return undefined;
   if (provider === 'sites') {
+    const name = String(display?.agentLabel?.name || 'Agent').trim();
     return { kind: 'external', name, badge: '', icon: 'icon-inspiration' };
   }
+  if (!isExternalAgentSession(display?.agentBinding)) return undefined;
+  const name = String(display?.agentLabel?.name || 'Agent').trim();
   const badge = provider.includes('codex') ? 'X' : (name || provider).slice(0, 1).toUpperCase();
   return { kind: 'external', name, badge };
 }
@@ -467,6 +552,7 @@ export interface ConversationRenderHooks {
     onSubmit: (questionId: string, answers: FollowupAnswer[]) => void;
     onCancel: (questionId: string) => void;
   };
+  teamCommunicationHandlers?: TeamCommunicationActionHandlers;
   /** DOM apply 之后、软钉底之前的渲染后钩子（todo 槽位 / running intro / composer 刷新等）。 */
   afterRender?: (sessionId: string | null) => void;
 }
@@ -525,11 +611,39 @@ export function renderConversation(
     build: () => HTMLElement | null;
   }
   const plans: UnitPlan[] = [];
+  const latestVisuals = sessionId ? inlineSurfaces(messages, sessionId).visuals : [];
   const pushPlan = (key: string, sig: string, build: () => HTMLElement | null): void => {
     plans.push({ meta: { key, sig }, build });
   };
+  // 单元构建异常隔离：一条坏消息只损失自己（降级错误占位卡），整轮渲染不被拖垮。
+  // sig 未变 → reuse 不会重试 build；数据变化（流式继续）→ sig 变化 → patch 自然重试。
+  const buildUnitSafely = (key: string, build: () => HTMLElement | null): HTMLElement | null => {
+    try {
+      return build();
+    } catch (err) {
+      reportRendererError('render', err, { unitKey: key });
+      return renderUnitErrorCard();
+    }
+  };
+  // sig 计算异常隔离：sig 与 build 读同一批消息字段，字段形状异常（非数组等）必须同样
+  // 只损失自己——否则在 diff 之前就抛错，整轮渲染失败、会话界面冻结在旧 DOM。
+  // 回落 sig 用安全摘要而非常量，保证「数据变化 → sig 变化 → 重试」语义仍然成立。
+  const safeSig = (key: string, compute: () => string, source: unknown): string => {
+    try {
+      return compute();
+    } catch (err) {
+      reportRendererError('render', err, { unitKey: key, phase: 'sig' });
+      return `${key}|__sig-error|${safeStringify(source)}`;
+    }
+  };
 
-  if (messages.length === 0 && !busy && !editing) {
+  if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoadErrors.has(sessionId)) {
+    // 历史回填失败且无消息可显示：错误卡（带重试）优先于默认空态，失败不再表现为「空会话」。
+    pushPlan('__history_error', 'history-error', () => renderHistoryErrorCard());
+  } else if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoading.has(sessionId)) {
+    // 首屏窗口在途（P1-6）：骨架占位先于空态，openSession 不再等历史返回才渲染。
+    pushPlan('__history_loading', 'history-loading', () => renderQueueHintCard('正在加载会话历史…'));
+  } else if (messages.length === 0 && !busy && !editing) {
     pushPlan('__empty', 'empty', () => hooks.emptyState?.() ?? renderEmptyState());
   } else if (messages.length === 0 && editing) {
     // 编辑态 + 空流：留白（提示条已在输入框上方）—— 不 push 任何单元
@@ -555,12 +669,14 @@ export function renderConversation(
         let sig: string;
         if (msg.role === 'team_internal') {
           const member = resolveTeamCollaborationMember(sessionId, msg);
+          const displayText = resolveTeamCollaborationMentionText(sessionId, msg.content);
           const isPlanning = msg.eventType === 'team_planning_progress';
           const sessionTeamName = String(getSessionAgentDisplay(sessionId)?.agentLabel?.name || '').trim();
           const teamName = resolveTeamCollaborationName(sessionId) || sessionTeamName || '团队';
           const displayed = isPlanning
             ? {
                 ...msg,
+                content: displayText,
                 agentName: teamName,
                 agentRole: '',
                 isLeader: false,
@@ -568,27 +684,38 @@ export function renderConversation(
             : member
             ? {
                 ...msg,
+                content: displayText,
                 ...(member.agentId ? { agentId: member.agentId } : {}),
                 agentName: member.name,
                 agentRole: member.isLeader ? 'leader' : (msg.agentRole || member.role),
                 agentTone: member.tone,
                 isLeader: Boolean(member.isLeader || msg.isLeader),
               }
-            : msg;
+            : {
+                ...msg,
+                text: displayText,
+              };
           // Team Turn 使用自身 streaming 生命周期，不借用 Session 全局 busy。
           // 这样新节点启动时不会“复活”已完成的成员回合。
           const isStreaming = msg.streaming === true;
-          sig = sigTeamInternal(displayed, isStreaming);
+          sig = safeSig(
+            msg.id,
+            () => `${sigTeamInternal(displayed, isStreaming)}|actions:${busy ? 'busy' : 'idle'}`,
+            displayed,
+          );
           const captured = displayed;
-          pushPlan(msg.id, sig, () => renderTeamInternalMessage(captured, isStreaming));
+          pushPlan(msg.id, sig, () => renderTeamInternalMessage(captured, isStreaming, {
+            canRetry: !busy,
+            canCancel: busy,
+          }));
           i += 1;
           continue;
         } else if (msg.role === 'status' && msg.workflowProgress) {
-          sig = sigWorkflowProgress(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigWorkflowProgress(msg, state.configModel), msg);
         } else if (msg.agentName) {
-          sig = sigAgentRoleCard(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigAgentRoleCard(msg, state.configModel), msg);
         } else {
-          sig = sigUserMessage(msg, state.configModel);
+          sig = safeSig(msg.id, () => sigUserMessage(msg, state.configModel), msg);
         }
         const captured = msg;
         pushPlan(msg.id, sig, () => renderMessageHtml(captured, state.configModel));
@@ -641,8 +768,17 @@ export function renderConversation(
       const identitySig = turnIdentity
         ? `${turnIdentity.kind}|${turnIdentity.name}|${turnIdentity.badge}`
         : 'crew';
-      const sig = `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`;
+      const sig = safeSig(
+        turnId,
+        () => `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`,
+        batch,
+      );
       const capturedBatch = batch;
+      const surfaces = sessionId ? inlineSurfaces(batch, sessionId) : null;
+      for (const visual of surfaces?.visuals ?? []) {
+        const readOnly = latestVisuals.some(latest => latest.spec.id === visual.spec.id && latest.spec.revision > visual.spec.revision);
+        pushPlan(visual.key, JSON.stringify([visual.spec, readOnly]), () => renderNativeVisual({ ...visual, readOnly }));
+      }
       pushPlan(turnId, sig, () =>
         renderAgentTurn(capturedBatch, {
           isStreaming,
@@ -707,7 +843,7 @@ export function renderConversation(
   for (const op of ops) {
     if (op.type !== 'patch') continue;
     const build = buildByPlan.get(op.key)!;
-    const fresh = build();
+    const fresh = buildUnitSafely(op.key, build);
     const old = lastUnits.get(op.key);
     if (isPresent(fresh)) {
       if (old && old.parentNode === wrapper) {
@@ -731,7 +867,7 @@ export function renderConversation(
   for (const op of ops) {
     if (op.type !== 'append') continue;
     const build = buildByPlan.get(op.key)!;
-    const fresh = build();
+    const fresh = buildUnitSafely(op.key, build);
     if (isPresent(fresh)) {
       lastUnits.set(op.key, fresh);
     } else {
@@ -739,24 +875,29 @@ export function renderConversation(
     }
   }
 
-  // 4) 强制 DOM 顺序 == next 顺序：按 nextMetas 顺序对每个 present 单元 appendChild。
-  //    appendChild 一个已挂载节点 = 移动它（cheap）；新建节点首次挂载也是 appendChild。
-  //    缺席单元（absent / 不在 Map）跳过 —— 它们本就不该出现在 DOM 里。
-  //    这一步同时把 anchor 排到最后（它是 nextMetas 最后一项）。
+  // 只移动位置确实变化的节点，保留历史消息的浏览器滚动锚点与选区。
+  // 每帧把全部节点 append 到末尾会暂时拆散整个列表，即使最终顺序相同。
+  let cursor = wrapper.firstChild;
   for (const meta of nextMetas) {
     if (absentKeys.has(meta.key)) continue;
     const node = lastUnits.get(meta.key);
-    if (node) wrapper.appendChild(node);
+    if (!node) continue;
+    if (node !== cursor) wrapper.insertBefore(node, cursor);
+    cursor = node.nextSibling;
   }
 
   // ---- 副作用：全部与主对话 renderChat 保持一致 ----
   ensureFoldDelegation(container, getSessionId);
   ensureFileChangesDelegation(container);
+  ensureHistoryRetryDelegation(container, getSessionId);
+  ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
   // 代码块复制按钮：patch/append 后新节点需重新绑定（幂等，旧节点跳过）。
   attachCopyButtons(container);
   // Mermaid 图表：懒加载 mermaid.js 渲染 [data-mermaid] 占位。幂等，已渲染的跳过。
   // 不 await：渲染是异步的，不阻塞 DOM 布局；失败时保留源码占位，下次 patch 重试。
   void renderMermaidBlocks(container);
+  hydrateNativeVisuals(container);
+  syncPermissionCardPositions(container);
   bindFollowupCard(container, hooks.followupHandlers ?? noopFollowupHandlers);
   hooks.afterRender?.(sessionId);
   // 软钉底：用户停在底部时才追底（与主对话 scrollChatToBottom 同一 rAF 节奏）。

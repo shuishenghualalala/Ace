@@ -13,7 +13,10 @@ import { setRuntimeStyle } from '../components/runtime-style';
 import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import { getSkills, onSkillsChange } from './skill-store';
 import { queryPrimaryComposer } from './composer-scope';
-import { $, $$, ensureSessionBook, escapeHtml, notify, patchBook, state, type ComposerMode } from '../state';
+import {
+  $, $$, ensureSessionBook, escapeHtml, getTeamWikiReadGrant, notify,
+  patchBook, setTeamWikiReadGrant, state, type ComposerMode,
+} from '../state';
 import {
   canSwitchComposerWorkspace,
   composerWorkspaceId,
@@ -22,11 +25,9 @@ import {
   getSessionAgentDisplay,
   setComposerTargetWorkspace,
   visibleProjectWorkspaces,
-  workspaceForSessionDispatch,
   workspaceLabel,
 } from './workspaces';
-import { composerModelOptions, setSessionModel, activeComposerModelId, resolveComposerModelLabel } from './session-model';
-import { syncModelUi } from './model-picker';
+import { createComposerModelControl, syncModelUi, type ComposerModelControl } from './model-picker';
 import {
   loadExternalConversationCatalog,
   useAgent,
@@ -96,10 +97,12 @@ function visibleCraftOptions(): typeof CRAFT_OPTIONS {
     : CRAFT_OPTIONS.filter((option) => option.value !== 'external');
 }
 
-let modelPopoverOpen = false;
+/** 模型 chip 控制器（model-picker 提供的实例级实现）；行为委托给它，这里只持句柄。 */
+let modelControl: ComposerModelControl | null = null;
 let skillsPopoverOpen = false;
 let craftPopoverOpen = false;
 let workspacePopoverOpen = false;
+let teamWikiPopoverOpen = false;
 let securityModePopoverOpen = false;
 let toolbarController: AbortController | null = null;
 let toolbarBoundTrigger: HTMLElement | null = null;
@@ -202,9 +205,7 @@ function closeCraftPopover(): void {
 }
 
 function closeModelPopover(): void {
-  modelPopoverOpen = false;
-  $('#chat-model-inline-popover')?.remove();
-  $('#chat-model-picker-inline-btn')?.classList.remove('is-open');
+  modelControl?.close();
 }
 
 function closeSecurityModeInline(): void {
@@ -218,6 +219,13 @@ function closeSkillsPopover(): void {
   skillsPopoverOpen = false;
   $('#chat-skills-inline-popover')?.remove();
   $('#chat-skills-btn')?.classList.remove('is-open');
+}
+
+function closeTeamWikiPopover(): void {
+  teamWikiPopoverOpen = false;
+  $('#chat-team-wiki-popover')?.remove();
+  $('#chat-team-wiki-read-btn')?.classList.remove('is-open');
+  $('#chat-team-wiki-read-btn')?.setAttribute('aria-expanded', 'false');
 }
 
 let externalPopoverOpen = false;
@@ -256,7 +264,7 @@ function syncComposerWorkspaceLabel(): void {
 
   const id = composerWorkspaceId();
   const isDefault = id === 'default';
-  label.textContent = isDefault ? '不在项目中工作' : workspaceLabel(id);
+  label.textContent = isDefault ? '在默认目录中工作' : workspaceLabel(id);
   btn.title = isDefault ? '选择项目' : `项目：${label.textContent}`;
   btn.classList.toggle('is-named', !isDefault);
   btn.classList.remove('is-locked');
@@ -315,7 +323,7 @@ function renderWorkspacePopover(): void {
       <button type="button" class="composer-select-item${current === 'default' ? ' is-selected' : ''}" data-workspace-id="default">
         <span class="composer-select-item__plain-icon"><svg class="mw-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#icon-close"></use></svg></span>
         <span class="composer-select-item__body">
-          <span class="composer-select-item__title">不在项目中工作</span>
+          <span class="composer-select-item__title">在默认目录中工作</span>
         </span>
         ${current === 'default' ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
       </button>
@@ -360,6 +368,7 @@ function closeAllPopovers(): void {
   closeModelPopover();
   closeSecurityModeInline();
   closeSkillsPopover();
+  closeTeamWikiPopover();
   closeExternalPopover();
   closeWorkspacePopover();
 }
@@ -388,6 +397,8 @@ export function syncCraftLabel(): void {
   const btn = $('#chat-craft-btn') as HTMLElement | null;
   const selection = $('#chat-craft-inline');
   const clear = $('#chat-craft-clear') as HTMLButtonElement | null;
+  const wikiRead = $('#chat-team-wiki-read-btn') as HTMLButtonElement | null;
+  const wikiReadLabel = $('#chat-team-wiki-read-label');
   if (!label) return;
   const externalDisplay = getSessionAgentDisplay(state.activeSessionId);
   const externalKind = externalDisplay?.agentBinding?.kind;
@@ -398,6 +409,18 @@ export function syncCraftLabel(): void {
     && (externalKind === 'external_agent' || externalKind === 'external_team'),
   );
   const externalTeamSelected = externalKind === 'external_team' || externalProvider.toLowerCase() === 'team';
+  const activeSessionId = state.activeSessionId || '';
+  const teamId = state.activeExternalTeamIdBySession[activeSessionId] || '';
+  const wikiGrant = teamId ? getTeamWikiReadGrant(activeSessionId, teamId) : null;
+  const wikiReadEnabled = Boolean(wikiGrant);
+  if (wikiRead) {
+    wikiRead.hidden = !externalTeamSelected;
+    wikiRead.classList.toggle('is-selected', wikiReadEnabled);
+    wikiRead.title = wikiReadEnabled
+      ? `团队外援可只读访问「${wikiGrant?.kbName || wikiGrant?.kbId}」；点击更换或关闭`
+      : '选择供团队外援只读访问的知识库';
+  }
+  if (wikiReadLabel) wikiReadLabel.textContent = wikiGrant ? `知识库：${wikiGrant.kbName || wikiGrant.kbId}` : '选择知识库';
   let title = 'Craft · Plan · Ask';
   // 选中外援后，按钮直接显示外援名，不再带模式前缀
   if (externalSelected) {
@@ -552,59 +575,57 @@ function renderCraftPopover(): void {
   });
 }
 
-function renderModelPopover(): void {
+async function renderTeamWikiPopover(): Promise<void> {
+  const anchor = $('#chat-team-wiki-read-btn') as HTMLButtonElement | null;
+  const sessionId = state.activeSessionId || '';
+  const teamId = state.activeExternalTeamIdBySession[sessionId] || '';
+  if (!anchor || !sessionId || !teamId) return;
   closeAllPopovers();
-  const anchor = $('#chat-model-picker-inline-btn') as HTMLButtonElement | null;
-  if (!anchor || anchor.disabled || !state.config) return;
-
-  const models = composerModelOptions();
-  const active = activeComposerModelId();
   const popover = document.createElement('div');
-  popover.id = 'chat-model-inline-popover';
-  popover.setAttribute('role', 'listbox');
-  popover.setAttribute('aria-label', '选择模型');
-  const modelTourHelp = `
-    <div class="composer-select-popover__header">
-      <span>选择模型</span>
-      <button type="button" class="composer-select-popover__help" data-model-tour-open aria-label="打开模型配置引导" title="打开模型配置引导">?</button>
-    </div>`;
-  popover.innerHTML = models.length
-    ? `
-      ${modelTourHelp}
-      <div class="composer-select-popover__section">可用模型</div>
-      <div class="composer-select-popover__list">
-        ${models
-          .map(
-            (m) => `
-          <button type="button" class="composer-select-item composer-select-item--model${m.id === active ? ' is-selected' : ''}" data-model-id="${escapeHtml(m.id)}" title="${escapeHtml(m.description)}" aria-label="${escapeHtml(`${m.label}${m.description ? `，${m.description}` : ''}`)}"${m.selectable ? '' : ' disabled'}>
-            <span class="composer-select-item__body composer-select-item__body--model">
-              <span class="composer-select-item__title">${escapeHtml(m.label)}${m.default ? ' · 默认' : ''}</span>
-              ${m.warning ? `<span class="composer-select-item__meta composer-select-item__meta--warn">${escapeHtml(m.description)}</span>` : ''}
-            </span>
-            ${m.id === active ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
-          </button>
-        `,
-          )
-          .join('')}
-      </div>
-    `
-    : `${modelTourHelp}<div class="composer-select-popover__empty">暂无模型，请前往配置页</div>`;
-
-  mountSelectPopover(anchor, popover, 300, 'end');
-  modelPopoverOpen = true;
+  popover.id = 'chat-team-wiki-popover';
+  popover.innerHTML = '<div class="composer-select-popover__empty">正在读取知识库…</div>';
+  mountSelectPopover(anchor, popover, 300, 'start', 'auto', 340);
+  teamWikiPopoverOpen = true;
   anchor.classList.add('is-open');
-
-  popover.querySelector<HTMLButtonElement>('[data-model-tour-open]')?.addEventListener('click', (event) => {
-    event.stopPropagation();
-    closeModelPopover();
-    startModelTour();
-  });
-
-  $$('.composer-select-item[data-model-id]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.getAttribute('data-model-id');
-      if (id) void setSessionModel(id);
-      closeModelPopover();
+  anchor.setAttribute('aria-expanded', 'true');
+  let kbs: { id: string; name: string }[];
+  try {
+    kbs = (await backendApi.wikiKBs()).kbs;
+  } catch (error) {
+    if (popover.isConnected) popover.innerHTML = `<div class="composer-select-popover__empty">知识库加载失败：${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`;
+    return;
+  }
+  if (!teamWikiPopoverOpen || !popover.isConnected || state.activeSessionId !== sessionId
+    || state.activeExternalTeamIdBySession[sessionId] !== teamId) return;
+  const selected = getTeamWikiReadGrant(sessionId, teamId);
+  popover.innerHTML = `<div class="composer-select-popover__list" role="listbox" aria-label="选择知识库">
+    <button type="button" class="composer-select-item" data-team-kb="" role="option" aria-selected="${!selected}">
+      <span class="composer-select-item__body"><span class="composer-select-item__title">不使用知识库</span></span>${!selected ? selectChevron() : ''}</button>
+    ${kbs.map((kb) => `<button type="button" class="composer-select-item" data-team-kb="${escapeHtml(kb.id)}" role="option" aria-selected="${selected?.kbId === kb.id}">
+      <span class="composer-select-item__body"><span class="composer-select-item__title">${escapeHtml(kb.name || kb.id)}</span><span class="composer-select-item__desc">团队外援只读访问</span></span>${selected?.kbId === kb.id ? selectChevron() : ''}</button>`).join('')}
+    </div>${kbs.length ? '' : '<div class="composer-select-popover__empty">暂无知识库，请先在 Crew 笔记中创建。</div>'}`;
+  scheduleFloatingPopoverPosition(anchor, popover, 300, 'start', 'auto', 340);
+  popover.querySelectorAll<HTMLButtonElement>('[data-team-kb]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const kbId = button.dataset.teamKb || '';
+      if (!kbId) {
+        setTeamWikiReadGrant(sessionId, null);
+        closeTeamWikiPopover();
+        syncCraftLabel();
+        return;
+      }
+      const kb = kbs.find((item) => item.id === kbId);
+      if (!kb || selected?.kbId === kbId) { closeTeamWikiPopover(); return; }
+      closeTeamWikiPopover();
+      void showConfirmDialog({
+        title: '授权团队只读检索知识库',
+        message: `允许当前团队的外援 Agent 搜索并读取「${kb.name || kb.id}」中的页面。检索到的内容会发送给对应的外部模型；外援不能通过此授权访问其他知识库或修改知识库。`,
+        confirmText: '允许只读访问',
+      }).then((accepted) => {
+        if (!accepted || state.activeSessionId !== sessionId || state.activeExternalTeamIdBySession[sessionId] !== teamId) return;
+        setTeamWikiReadGrant(sessionId, { teamId, kbId, kbName: kb.name || kb.id });
+        syncCraftLabel();
+      });
     });
   });
 }
@@ -681,8 +702,7 @@ async function renderSkillsPopover(): Promise<void> {
 }
 
 function syncComposerModelChip(): void {
-  const label = document.getElementById('chat-model-picker-inline-label');
-  if (label) label.textContent = resolveComposerModelLabel() || '模型';
+  modelControl?.refresh();
 }
 
 /** 安全模式 chip 标签：据当前生效模式（会话绑定优先，否则新对话预设）渲染。 */
@@ -795,7 +815,6 @@ function externalTeamLeaderLabel(
 
 function bindExternalModeSwitch(
   popover: HTMLElement,
-  anchor: HTMLElement,
 ): void {
   popover.querySelectorAll<HTMLElement>('[data-expert-mode-switch]').forEach((btn) => {
     btn.addEventListener('click', (event) => {
@@ -831,7 +850,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
   externalPopoverOpen = true;
   resolvedAnchor.classList.add('is-open');
   resolvedAnchor.setAttribute('aria-expanded', 'true');
-  bindExternalModeSwitch(popover, resolvedAnchor);
+  bindExternalModeSwitch(popover);
 
   let catalog: ExternalConversationCatalog;
   try {
@@ -842,7 +861,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       ${renderComposerModeSwitch('external')}
       <div class="composer-select-popover__empty">加载外援失败：${escapeHtml((error as Error).message)}</div>
     `;
-    bindExternalModeSwitch(popover, resolvedAnchor);
+    bindExternalModeSwitch(popover);
     scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
     return;
   }
@@ -907,7 +926,7 @@ async function renderExternalPopover(anchor?: HTMLElement | null): Promise<void>
       </div>
     `}
   `;
-  bindExternalModeSwitch(popover, resolvedAnchor);
+  bindExternalModeSwitch(popover);
   // 初次定位发生在“正在加载”短内容阶段；目录渲染后高度改变，必须重新贴合锚点。
   scheduleFloatingPopoverPosition(resolvedAnchor, popover, 340);
 
@@ -986,6 +1005,19 @@ export function bindComposerToolbar(): () => void {
   toolbarBoundTrigger = trigger;
   const { signal } = toolbarController;
 
+  // 模型 chip：与 Wiki 问答面板共用 model-picker 的实例级控制器（浮层/文案/会话级切换）。
+  const modelAnchor = $('#chat-model-picker-inline-btn') as HTMLButtonElement | null;
+  modelControl?.dispose();
+  modelControl = modelAnchor
+    ? createComposerModelControl(modelAnchor, {
+      getSessionId: () => state.activeSessionId,
+      onBeforeOpen: closeAllPopovers,
+      onModelTour: () => {
+        startModelTour();
+      },
+    })
+    : null;
+
   $('#chat-craft-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
     if (craftPopoverOpen) closeAllPopovers();
@@ -999,10 +1031,10 @@ export function bindComposerToolbar(): () => void {
     notify('已切回默认主智能体');
   }, { signal });
 
-  $('#chat-model-picker-inline-btn')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (modelPopoverOpen) closeModelPopover();
-    else renderModelPopover();
+  $('#chat-team-wiki-read-btn')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (teamWikiPopoverOpen) closeTeamWikiPopover();
+    else void renderTeamWikiPopover();
   }, { signal });
 
   $('#chat-security-mode-btn')?.addEventListener('click', (e) => {
@@ -1040,9 +1072,9 @@ export function bindComposerToolbar(): () => void {
       && !t.closest('#chat-craft-popover')
       && !t.closest('#chat-craft-btn')
     ) closeCraftPopover();
-    if (modelPopoverOpen && !t.closest('#chat-model-inline-popover') && !t.closest('#chat-model-picker-inline-btn')) closeModelPopover();
     if (securityModePopoverOpen && !t.closest('#chat-security-mode-inline-popover') && !t.closest('#chat-security-mode-btn')) closeSecurityModeInline();
     if (skillsPopoverOpen && !t.closest('#chat-skills-inline-popover') && !t.closest('#chat-skills-btn')) closeSkillsPopover();
+    if (teamWikiPopoverOpen && !t.closest('#chat-team-wiki-popover') && !t.closest('#chat-team-wiki-read-btn')) closeTeamWikiPopover();
     if (externalPopoverOpen && !t.closest('#chat-external-inline-popover') && !t.closest('#chat-craft-btn')) closeExternalPopover();
     if (workspacePopoverOpen && !t.closest('#chat-workspace-popover') && !t.closest('#chat-workspace-btn')) closeWorkspacePopover();
   }, { signal, capture: true });
@@ -1060,6 +1092,7 @@ export function bindComposerToolbar(): () => void {
   window.addEventListener('security:config-change', () => syncSecurityModeChip(), { signal });
   window.addEventListener('workspace:context-changed', () => syncComposerWorkspaceLabel(), { signal });
   window.addEventListener('session:changed', () => {
+    closeTeamWikiPopover();
     syncComposerWorkspaceLabel();
     syncCraftLabel();
   }, { signal });
@@ -1084,6 +1117,8 @@ export function bindComposerToolbar(): () => void {
     toolbarController?.abort();
     toolbarController = null;
     toolbarBoundTrigger = null;
+    modelControl?.dispose();
+    modelControl = null;
     unsubscribeSkills();
     unsubscribeSession();
     closeAllPopovers();

@@ -7,10 +7,59 @@
  */
 
 import { locatorFromRef, snapshotRefSelector } from './playwright-compat';
-import { classifyFieldTier } from '../browser-recorder';
 
 import type { Locator, Page } from './playwright-compat';
-import type { FieldProbe, FieldTier } from '../browser-recorder';
+
+export type FieldTier = 'plain' | 'identifier' | 'secret' | 'handoff';
+
+export interface FieldProbe {
+  type: string;
+  autocomplete: string;
+  name: string;
+  id: string;
+  placeholder: string;
+  ariaLabel: string;
+  labelText: string;
+}
+
+/** Classify editable fields for snapshot metadata without changing actions. */
+export function classifyFieldTier(probe: FieldProbe): FieldTier {
+  const textOf = (value: unknown) => String(value || '');
+  const type = textOf(probe.type).toLowerCase();
+  if (type === 'password') return 'secret';
+  const autoTokens = textOf(probe.autocomplete).toLowerCase().split(/\s+/).filter(Boolean);
+  if (autoTokens.indexOf('current-password') >= 0 || autoTokens.indexOf('new-password') >= 0) return 'secret';
+  if (autoTokens.indexOf('one-time-code') >= 0) return 'handoff';
+  const CC_SECRET = ['cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year'];
+  if (CC_SECRET.some((token) => autoTokens.indexOf(token) >= 0)) return 'secret';
+  const hay = ' ' + [
+    textOf(probe.name),
+    textOf(probe.id),
+    textOf(probe.placeholder),
+    textOf(probe.ariaLabel),
+    textOf(probe.labelText),
+  ]
+    .join(' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[^A-Za-z0-9一-鿿]+/g, ' ')
+    .toLowerCase() + ' ';
+  if (/ (otp|captcha|verify ?code|vcode|sms ?code|auth ?code) |验证码|校验码|动态码/.test(hay)) {
+    return 'handoff';
+  }
+  const SECRET_WORDS = ['password', 'passwd', 'pwd', 'passcode'];
+  if (new RegExp(' (' + SECRET_WORDS.join('|') + ') ').test(hay) || /密码|口令/.test(hay)) {
+    return 'secret';
+  }
+  const ID_TOKENS = ['username', 'email', 'tel', 'tel-national', 'cc-name'];
+  if (ID_TOKENS.some((token) => autoTokens.indexOf(token) >= 0)) return 'identifier';
+  if (
+    / (account|user ?name|user ?id|login ?name|staff ?(no|code)|emp ?no|mobile|phone|email) |工号|账号|帐号|手机号|邮箱|用户名/
+      .test(hay)
+  ) {
+    return 'identifier';
+  }
+  return 'plain';
+}
 
 /**
  * DOM 元数据探针的并发度只控制调度压力，不限制输出数量。所有记录最终都会被尝试，
@@ -21,7 +70,7 @@ const FINGERPRINT_CONCURRENCY = 16;
 export interface RefRecord {
   /**
    * 完整 Playwright 选择器。快照 ref 的私有 `aria-ref` 拼法只由 compat 层产生；
-   * 稳定 selector 则由录制/locate 传入。
+   * 运行时 selector 由快照或内部调用传入。
    */
   selector: string;
   /** Playwright 原始 ref（`e5` / `f1e2`）；稳定 selector 来路为空。 */
@@ -48,7 +97,7 @@ export interface RefRecord {
   documentBaseURI: string;
   /** 元素所属真实 document 的 location.href；与可被 <base> 改写的 baseURI 分开。 */
   documentURL: string;
-  /** 回放字段证明；全部来自生成 security 的同一次 DOM 采集。 */
+  /** 运行时字段证明；全部来自生成 security 的同一次 DOM 采集。 */
   tag: string;
   inputType: string;
   contentEditable: boolean;
@@ -370,7 +419,7 @@ function sanitizeUntrustedMetadataText(value: string): string {
  *
  * 这是 Locator.evaluate 的回调，必须完全自包含。它把节点的动态语义、document base、
  * 解析后的目的地、form 语义、完整 select option 集合和动作类别绑定到同一份材料。
- * 不截断属性、文本或关联 label，避免长控件在快照与回放间失真。
+ * 不截断属性、文本或关联 label，避免长控件在快照与动作执行间失真。
  */
 function fingerprintInPage(element: Element): FingerprintMaterial {
   const normalized = (value: string): string => value.replace(/\s+/g, ' ').trim();
@@ -390,7 +439,7 @@ function fingerprintInPage(element: Element): FingerprintMaterial {
   } catch {}
   const documentBaseURI = document.baseURI;
   // 与 baseURI 分开保存：页面可用 <base href> 合法改写 baseURI，但无法借此改变
-  // 元素实际所属 frame 的 document.location。回放必须用后者做 frame host 约束。
+  // 元素实际所属 frame 的 document.location；后续安全校验使用它做 frame host 约束。
   const documentURL = document.location.href;
 
   const resolveURL = (value: string): string => {
@@ -407,7 +456,7 @@ function fingerprintInPage(element: Element): FingerprintMaterial {
   if (tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT' || tag === 'TEXTAREA') {
     try {
       // 使用浏览器归一化后的 IDL 属性：缺失/非法 input type 会成为 text，
-      // select/textarea/button 也得到与录制器完全相同的控件类型。
+      // select/textarea/button 也得到浏览器归一化后的控件类型。
       inputType = String(
         (element as Element & { type?: unknown }).type ?? inputType,
       ).toLowerCase();
@@ -690,7 +739,7 @@ async function fingerprintLocator(
   try {
     fieldTier = classifyFieldTier(state.fieldProbe);
   } catch {
-    // 分类异常按最敏感处理；这与录制器页面侧的 fail-closed 语义一致。
+    // 分类异常按最敏感处理，保持 fail-closed 语义。
   }
   const tag = String(state.tag ?? '').toLowerCase();
   const inputType = String(state.inputType ?? '').toLowerCase();
@@ -778,8 +827,8 @@ export interface AriaIdentity {
  * Read the browser's actual current accessible role/name for one strict locator.
  *
  * Default-mode ariaSnapshot is intentionally used instead of reimplementing the accessible
- * name algorithm. It refreshes Playwright's aria-ref cache; callers must first materialize a
- * stable selector and invalidate Crew's current ref generation.
+ * name algorithm. It refreshes Playwright's aria-ref cache; callers must first materialize
+ * the target locator and invalidate Crew's current ref generation.
  */
 export async function ariaIdentityForLocator(
   locator: Locator,

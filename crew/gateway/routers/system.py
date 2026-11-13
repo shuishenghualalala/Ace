@@ -68,9 +68,14 @@ def create_system_router(crew) -> APIRouter:
             import psutil  # 延迟导入，未安装时降级
             vm = psutil.virtual_memory()
             payload["cpu_percent"] = psutil.cpu_percent(interval=None)
+            # vm.used 与 vm.percent 在 macOS/Linux 上不是同一口径：
+            # vm.used 会排除部分可回收缓存，而 vm.percent 按 total - available
+            # 计算。系统总览展示的是主机资源压力，因此 used_gb 统一按
+            # total - available 计算，使其与 percent、进度条保持一致。
             payload["memory"] = {
                 "total_gb": _gb(vm.total),
-                "used_gb": _gb(vm.used),
+                "used_gb": _gb(vm.total - vm.available),
+                "available_gb": _gb(vm.available),
                 "percent": round(vm.percent, 1),
             }
             # 网络累计 IO（自进程启动）

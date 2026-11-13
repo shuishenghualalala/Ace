@@ -125,8 +125,12 @@ async def test_gateway_security_headers_cover_authentication_failures(api):
 
 @pytest.mark.asyncio
 async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
-    api,
+    api, monkeypatch,
 ):
+    async def available_runtime():
+        return object(), True, False, "test"
+
+    monkeypatch.setattr("crew.gateway.routers.security._live_filesystem_runtime", available_runtime)
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await _put_json(
@@ -308,8 +312,15 @@ async def test_decision_is_bound_to_nonce_and_owner(api):
             {"session_id": "s1", "nonce": request["nonce"], "decision": "once"},
             owner="b",
         )
+    # 决定绑定 nonce：错 nonce 是可重试的 409（nonce 不匹配）。
+    # 决定绑定 owner：ad93ad5 起 gateway 支持多 owner 会话隔离，移除了
+    # 单 owner 时代的 423 ACTIVE_OWNER_CONFLICT 门禁；跨 owner 决定改由
+    # 审批层的上下文绑定拒绝（approvals._request_session_matches 的
+    # owner_account_id 严格相等），同样是 409，但 detail 与 nonce 冲突可区分。
     assert wrong_nonce.status_code == 409
-    assert other_owner.status_code == 423
+    assert "nonce 不匹配" in wrong_nonce.json()["detail"]
+    assert other_owner.status_code == 409
+    assert "上下文不匹配" in other_owner.json()["detail"]
 
 
 @pytest.mark.asyncio

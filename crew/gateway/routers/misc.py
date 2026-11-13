@@ -8,6 +8,7 @@ import base64
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from crew.features.runtime import FeatureLeaseUnavailableError
 from crew.agent.skills import (
     install_skill,
     list_local_skills,
@@ -17,14 +18,14 @@ from crew.agent.skills import (
 )
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
 from crew.gateway.context import complete_path, save_upload
+from crew.gateway.health_server import build_health_components
 from crew.gateway.instance_auth import (
     GATEWAY_INSTANCE_CHALLENGE_HEADER,
-    GATEWAY_INSTANCE_PROOF_FIELD,
-    create_gateway_instance_proof,
-    is_valid_gateway_instance_challenge,
+    build_gateway_health_payload,
 )
 from crew.state.logging import get_logger
-from crew.wiki.capture import capture_upload_to_wiki
+from crew.wiki.config import WikiConfig
+from crew.wiki.service import KNOWLEDGE_SERVICE_KEY, KnowledgeService
 
 log = get_logger("gateway.routers.misc")
 
@@ -43,14 +44,22 @@ def create_misc_router(crew) -> APIRouter:
         if exc is not None:
             log.warning("聊天附件自动收入 Wiki 任务异常: %s", exc)
 
-    def _resolve_capture_kb_id(owner: str, session_id: str, kb_id: str) -> str:
+    def _resolve_capture_kb_id(
+        service: KnowledgeService | None,
+        owner: str,
+        session_id: str,
+        kb_id: str,
+    ) -> str:
         """解析上传附件应落入的知识库：显式 kb_id（校验存在）> session 绑定 > default。"""
         if kb_id:
             if kb_id == "default":
                 return "default"
-            store = getattr(crew, "_wiki_store", None)
             try:
-                existing = {kb.id for kb in store.list_kbs(owner)} if store is not None else set()
+                existing = (
+                    {kb.id for kb in service.list_knowledge_bases(owner)}
+                    if service is not None
+                    else set()
+                )
             except Exception:  # noqa: BLE001
                 existing = set()
             if kb_id in existing:
@@ -58,13 +67,21 @@ def create_misc_router(crew) -> APIRouter:
             log.warning("上传附件指定的知识库不存在，回落 default: %s", kb_id)
             return "default"
         if session_id:
-            manager = getattr(crew, "wiki_manager", None)
-            if manager is not None:
+            if service is not None:
                 try:
-                    return str(manager.get_kb_id(session_id, owner_account_id=owner) or "default")
+                    return service.session_kb_id(session_id, owner_account_id=owner)
                 except Exception:  # noqa: BLE001
                     log.warning("查询会话知识库绑定失败，回落 default: %s", session_id)
         return "default"
+
+    def _knowledge_service() -> KnowledgeService | None:
+        plugins = getattr(crew, "plugins", None)
+        resolver = getattr(plugins, "resolve_service", None)
+        if callable(resolver):
+            resolved = resolver(KNOWLEDGE_SERVICE_KEY, default=None)
+            if resolved is not None:
+                return resolved
+        return getattr(crew, "knowledge_service", None)
 
     def _schedule_wiki_capture(
         request: Request,
@@ -74,25 +91,57 @@ def create_misc_router(crew) -> APIRouter:
         kb_id: str = "",
     ) -> None:
         """上传成功后把附件后台收入对应 wiki 知识库（wiki.capture_attachments 控制）。"""
-        store = getattr(crew, "_wiki_store", None)
-        wiki_cfg = getattr(getattr(crew, "config", None), "wiki", None)
-        if store is None or wiki_cfg is None:
+        wiki_raw = getattr(getattr(crew, "config", None), "wiki_config", None)
+        if wiki_raw is None:
             return
+        wiki_cfg = WikiConfig.from_raw(wiki_raw)
         if not wiki_cfg.enabled or not wiki_cfg.capture_attachments:
             return
         owner = account_from_request(request).owner_account_id
-        task = asyncio.create_task(
-            capture_upload_to_wiki(
-                store,
-                getattr(crew, "_wiki_compiler", None),
-                wiki_cfg,
-                filename,
-                content,
-                owner_account_id=owner,
-                kb_id=_resolve_capture_kb_id(owner, session_id, kb_id),
-                provider=getattr(crew, "provider", None),
-            )
-        )
+
+        async def _capture() -> None:
+            current_raw = getattr(getattr(crew, "config", None), "wiki_config", None)
+            if current_raw is None:
+                return
+            current_cfg = WikiConfig.from_raw(current_raw)
+            if not current_cfg.enabled or not current_cfg.capture_attachments:
+                return
+            plugins = getattr(crew, "plugins", None)
+            acquire = getattr(plugins, "acquire_service_lease", None)
+            if callable(acquire):
+                try:
+                    acquired = acquire(KNOWLEDGE_SERVICE_KEY, label="gateway:wiki-attachment")
+                except FeatureLeaseUnavailableError:
+                    acquired = None
+                if acquired is None:
+                    service = _knowledge_service()
+                    if service is not None:
+                        await service.capture_attachment(
+                            filename,
+                            content,
+                            owner_account_id=owner,
+                            kb_id=_resolve_capture_kb_id(service, owner, session_id, kb_id),
+                        )
+                    return
+                service, lease = acquired
+                async with lease:
+                    await service.capture_attachment(
+                        filename,
+                        content,
+                        owner_account_id=owner,
+                        kb_id=_resolve_capture_kb_id(service, owner, session_id, kb_id),
+                    )
+                return
+            service = _knowledge_service()
+            if service is not None:
+                await service.capture_attachment(
+                    filename,
+                    content,
+                    owner_account_id=owner,
+                    kb_id=_resolve_capture_kb_id(service, owner, session_id, kb_id),
+                )
+
+        task = asyncio.create_task(_capture())
         _wiki_capture_tasks.add(task)
         task.add_done_callback(_on_wiki_capture_done)
 
@@ -100,22 +149,7 @@ def create_misc_router(crew) -> APIRouter:
         startup_status = str(
             getattr(request.app.state, "deferred_startup_status", "starting") or "starting"
         )
-        startup = {"status": startup_status}
-        if startup_status == "failed":
-            startup["message"] = "运行环境组件初始化失败，请查看 Gateway 日志"
-        cron = getattr(crew, "cron_service", None)
-        if cron is None:
-            cron_status = {"status": "disabled"}
-        elif bool(getattr(cron, "is_running", False)):
-            cron_status = {"status": "ready"}
-        elif str(getattr(cron, "start_error", "") or ""):
-            cron_status = {
-                "status": "failed",
-                "message": "定时任务启动失败，请查看 Gateway 日志",
-            }
-        else:
-            cron_status = {"status": "starting"}
-        return {"startup": startup, "cron": cron_status}
+        return build_health_components(startup_status, getattr(crew, "cron_service", None))
 
     @router.get("/api/health")
     async def health(request: Request) -> JSONResponse:
@@ -127,29 +161,10 @@ def create_misc_router(crew) -> APIRouter:
         """
 
         challenge = request.headers.get(GATEWAY_INSTANCE_CHALLENGE_HEADER)
-        if challenge is None:
-            return JSONResponse({
-                "ok": True,
-                "service": "crew-gateway",
-                "components": _components(request),
-            })
-        if not is_valid_gateway_instance_challenge(challenge):
-            return JSONResponse(
-                {"ok": False, "error": "invalid gateway instance challenge"},
-                status_code=400,
-            )
-        proof = create_gateway_instance_proof(challenge)
-        if proof is None:
-            return JSONResponse(
-                {"ok": False, "error": "gateway instance identity unavailable"},
-                status_code=503,
-            )
-        return JSONResponse({
-            "ok": True,
-            "service": "crew-gateway",
-            GATEWAY_INSTANCE_PROOF_FIELD: proof,
-            "components": _components(request),
-        })
+        payload, status = build_gateway_health_payload(challenge)
+        if status == 200:
+            payload["components"] = _components(request)
+        return JSONResponse(payload, status_code=status)
 
     # ---- 技能 ----
     @router.get("/api/skills")
@@ -182,21 +197,20 @@ def create_misc_router(crew) -> APIRouter:
             require_admin(account_from_request(request), cfg)
         except AuthenticationError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
-        changed = False
+        changed: dict[str, bool] = {}
         if "auto_trigger" in payload:
-            cfg.evolution_auto_trigger = bool(payload["auto_trigger"])
-            changed = True
+            changed["auto_trigger"] = bool(payload["auto_trigger"])
         if "auto_full_cycle" in payload:
-            cfg.evolution_auto_full_cycle = bool(payload["auto_full_cycle"])
-            changed = True
+            changed["auto_full_cycle"] = bool(payload["auto_full_cycle"])
         if "visible" in payload:
-            cfg.evolution_visible = bool(payload["visible"])
-            changed = True
+            changed["visible"] = bool(payload["visible"])
         if changed:
+            # 统一配置事务（Config.set_evolution_config）：候选值 → 持久化 →
+            # 发布。持久化失败时内存与磁盘一致保留旧值，直接报错返回。
             try:
-                cfg.persist_evolution_config()
-            except RuntimeError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+                cfg.set_evolution_config(**changed)
+            except Exception as exc:  # noqa: BLE001
+                return JSONResponse({"ok": False, "error": f"持久化失败: {exc}"}, status_code=500)
         return JSONResponse({
             "ok": True,
             "evolution": {

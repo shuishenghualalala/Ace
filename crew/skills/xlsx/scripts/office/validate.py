@@ -20,6 +20,7 @@ import zipfile
 from pathlib import Path
 
 from validators import DOCXSchemaValidator, PPTXSchemaValidator, RedliningValidator
+from helpers.zip_utils import safe_extract_all
 
 
 def main():
@@ -71,7 +72,7 @@ def main():
     if path.is_file() and path.suffix.lower() in [".docx", ".pptx", ".xlsx"]:
         temp_dir = tempfile.mkdtemp()
         with zipfile.ZipFile(path, "r") as zf:
-            zf.extractall(temp_dir)
+            safe_extract_all(zf, Path(temp_dir))
         unpacked_dir = Path(temp_dir)
     else:
         assert path.is_dir(), f"Error: {path} is not a directory or Office file"

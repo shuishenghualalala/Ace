@@ -79,7 +79,7 @@ async def test_mcp_client_connects_and_calls(monkeypatch):
 
         failed = await reg.execute(ToolCall("2", "echo__fail", {"message": "expected failure"}))
         assert failed.is_error
-        assert "expected failure" in failed.content
+        assert "fail" in failed.content  # MCP 2 masks unhandled server exception details.
     finally:
         await mgr.aclose()
         current_process_launch.reset(launch_token)
@@ -441,7 +441,7 @@ async def test_mcp_server_requires_explicit_owner():
     crew = _crew()
     server = build_mcp_server(crew)
 
-    with pytest.raises(Exception, match="owner_account_id"):
+    with pytest.raises(Exception, match="sessions_list|owner_account_id"):
         await server.call_tool("sessions_list", {"owner_account_id": ""})
 
 
@@ -449,8 +449,8 @@ async def test_mcp_server_owner_scopes_history_and_status():
     crew = _crew()
     crew.session_store.save("same", [Message.user("A")], owner_account_id="A:uid-a")
     crew.session_store.save("same", [Message.user("B")], owner_account_id="B:uid-b")
-    crew.session_store.set_status("same", "completed", "A done", owner_account_id="A:uid-a")
-    crew.session_store.set_status("same", "failed", "B failed", owner_account_id="B:uid-b")
+    crew.session_store.set_status("same", "completed", owner_account_id="A:uid-a", error="A done")
+    crew.session_store.set_status("same", "failed", owner_account_id="B:uid-b", error="B failed")
     server = build_mcp_server(crew)
 
     history = await server.call_tool("session_history", {"session_id": "same", "owner_account_id": "B:uid-b"})

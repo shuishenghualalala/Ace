@@ -25,6 +25,7 @@ HELP = """[bold]命令[/bold]
   /team    切换到 Team 多智能体模式
   /agent   切换到单 Agent 模式
   /plan    进入 Plan 模式（只读探索→写计划→审批后执行）
+  /compact 立即压缩当前会话上下文（idle 维护窗口；历史原文保留在会话库）
   /todo    查看当前任务清单
   /quit    退出
 """
@@ -110,6 +111,8 @@ async def _repl(app: Any, ctx: CliContext) -> None:
                     )
             elif cmd == "/todo":
                 _print_todos(app, session_id, ctx.owner)
+            elif cmd == "/compact":
+                await _compact_context(app, session_id, ctx.owner)
             else:
                 result = await app.plugins.run_plugin_command(
                     text,
@@ -137,6 +140,27 @@ async def _repl(app: Any, ctx: CliContext) -> None:
             and app.plan_manager.is_awaiting_approval(session_id, owner_account_id=ctx.owner)
         ):
             await _handle_plan_approval(app, session, session_id, mode, ctx.owner)
+
+
+async def _compact_context(app: Any, session_id: str, owner_account_id: str) -> None:
+    """手动 /compact：idle 维护窗口内立即压缩（REPL 只在回合间接受输入，天然空闲）。"""
+    agent = app.agents.peek(session_id, owner_account_id)
+    compactor = getattr(agent, "compactor", None)
+    if compactor is None:
+        console.print("[yellow]当前会话尚无压缩器：先开始一段对话再 /compact。[/yellow]")
+        return
+    from crew.agent.compact.tokens import estimate_tokens
+
+    history = await app.session_store.load_async(session_id, owner_account_id=owner_account_id)
+    before = estimate_tokens(history)
+    _view, changed = await compactor.compact_now(history, session_id, owner_account_id=owner_account_id)
+    if changed:
+        console.print(
+            f"[green]已压缩上下文：{before} → {estimate_tokens(_view)} tokens；"
+            "历史原文保留在会话库中，可回溯查询。[/green]"
+        )
+    else:
+        console.print("[dim]暂无可压缩的历史区间（历史太短或已在低位）。[/dim]")
 
 
 def _print_todos(app: Any, session_id: str, owner_account_id: str) -> None:

@@ -10,6 +10,7 @@ import zipfile
 import defusedxml.minidom
 import lxml.etree
 
+from helpers.zip_utils import safe_extract_all
 from .base import BaseSchemaValidator
 
 
@@ -186,7 +187,7 @@ class DOCXSchemaValidator(BaseSchemaValidator):
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 with zipfile.ZipFile(original, "r") as zip_ref:
-                    zip_ref.extractall(temp_dir)
+                    safe_extract_all(zip_ref, Path(temp_dir))
 
                 doc_xml_path = temp_dir + "/word/document.xml"
                 root = lxml.etree.parse(doc_xml_path).getroot()

@@ -1,0 +1,1507 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="author" content="Ace Product">
+  <meta name="description" content="Ace 同伴功能完整 PRD：同伴页管理关系与 Agent 名片，主对话承载人与人私聊及有主人在场的人机群聊。">
+  <meta name="keywords" content="Ace,同伴,Nearby,人机协同,群聊,Agent,PRD,UI设计">
+  <meta name="generator" content="Kami">
+  <title>Ace 同伴：附近的人机协同空间 · PRD</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      color-scheme: light;
+      --white: #fff;
+      --black: #000;
+      --gray-25: #fafafa;
+      --gray-50: #f7f7f7;
+      --gray-100: #f0f0f0;
+      --gray-150: #e8e8e8;
+      --gray-200: #d9d9d9;
+      --gray-300: #b8b8b8;
+      --gray-400: #8a8a8a;
+      --gray-500: #6b6b6b;
+      --gray-650: #4f4f4f;
+      --gray-700: #404040;
+      --gray-800: #303030;
+      --gray-900: #171717;
+      --brand: #607d90;
+      --brand-soft: #e5eef3;
+      --success: #476a55;
+      --success-soft: #e7f0e9;
+      --warning: #775b23;
+      --warning-soft: #f5eedb;
+      --danger: #8e4a4a;
+      --danger-soft: #f7e8e8;
+      --symbol-shell: #c7d9e6;
+      --symbol-face: #f7f5ee;
+      --symbol-accent: #b8c6af;
+      --symbol-accent-alt: #e7d29b;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --radius-1: 4px;
+      --radius-2: 6px;
+      --radius-3: 8px;
+      --radius-4: 12px;
+      --shadow-float: 0 10px 28px rgb(46 51 54 / 12%);
+    }
+    html { scroll-behavior: smooth; background: var(--gray-50); }
+    body {
+      margin: 0;
+      background: var(--gray-50);
+      color: var(--gray-900);
+      font: 14px/1.65 var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    a { color: inherit; text-underline-offset: 3px; }
+    :focus-visible { outline: 2px solid var(--black); outline-offset: 2px; }
+    svg { display: block; }
+    .doc-shell {
+      display: grid;
+      width: min(1540px, calc(100% - 48px));
+      margin: 24px auto 64px;
+      grid-template-columns: 244px minmax(0, 1fr);
+      gap: 24px;
+      align-items: start;
+    }
+    .doc-nav {
+      position: sticky;
+      top: 24px;
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+      padding: 20px 16px;
+      border: 1px solid var(--gray-150);
+      border-radius: var(--radius-3);
+      background: var(--white);
+    }
+    .doc-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 8px 18px;
+      border-bottom: 1px solid var(--gray-150);
+    }
+    .doc-brand img { width: 34px; height: 34px; object-fit: contain; }
+    .doc-brand strong { display: block; font-size: 14px; line-height: 1.3; }
+    .doc-brand span { display: block; color: var(--gray-500); font-size: 12px; }
+    .doc-nav ol { margin: 16px 0 0; padding: 0; list-style: none; }
+    .doc-nav li + li { margin-top: 2px; }
+    .doc-nav a {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 4px;
+      padding: 7px 8px;
+      border-radius: var(--radius-2);
+      color: var(--gray-650);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .doc-nav a:hover { background: var(--gray-50); color: var(--black); }
+    .doc-nav b { color: var(--gray-400); font: 11px/22px var(--mono); }
+    .doc-main { min-width: 0; }
+    .doc-hero,
+    .doc-section {
+      border: 1px solid var(--gray-150);
+      border-radius: var(--radius-3);
+      background: var(--white);
+    }
+    .doc-hero {
+      min-height: 560px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(300px, .6fr);
+      overflow: hidden;
+    }
+    .hero-copy { padding: clamp(48px, 7vw, 92px); }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--gray-650);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { width: 12px; height: 2px; border-radius: 1px; background: var(--brand); content: ""; }
+    .hero-copy h1 {
+      max-width: 760px;
+      margin: 28px 0 18px;
+      font-size: clamp(40px, 5vw, 68px);
+      line-height: 1.06;
+      letter-spacing: -.045em;
+    }
+    .hero-copy .lead {
+      max-width: 720px;
+      margin: 0;
+      color: var(--gray-650);
+      font-size: 19px;
+      line-height: 1.65;
+    }
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 38px;
+    }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 3px 9px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-1);
+      background: var(--white);
+      color: var(--gray-650);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .hero-visual {
+      position: relative;
+      display: grid;
+      min-height: 360px;
+      place-items: center;
+      border-left: 1px solid var(--gray-150);
+      background: var(--gray-25);
+      overflow: hidden;
+    }
+    .duo-poster { position: relative; width: 240px; height: 280px; }
+    .person-orbit {
+      position: absolute;
+      inset: 18px 8px 38px 8px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--gray-200);
+      border-radius: 50%;
+      background: var(--white);
+    }
+    .person-orbit::before,
+    .person-orbit::after {
+      position: absolute;
+      border: 1px solid var(--gray-200);
+      border-radius: 50%;
+      content: "";
+    }
+    .person-orbit::before { inset: 26px; }
+    .person-orbit::after { inset: 58px; border-style: dashed; }
+    .human-avatar,
+    .agent-avatar {
+      display: grid;
+      place-items: center;
+      border: 2px solid var(--white);
+      border-radius: 50%;
+      color: var(--white);
+      font-weight: 700;
+    }
+    .human-avatar {
+      position: relative;
+      z-index: 2;
+      width: 92px;
+      height: 92px;
+      background: var(--gray-800);
+      font-size: 28px;
+    }
+    .agent-avatar {
+      position: absolute;
+      z-index: 3;
+      right: 24px;
+      bottom: 36px;
+      width: 62px;
+      height: 62px;
+      border-color: var(--gray-25);
+      background: var(--symbol-accent-alt);
+      color: var(--gray-900);
+      font-size: 17px;
+      box-shadow: 0 0 0 1px var(--gray-200);
+    }
+    .duo-label {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      text-align: center;
+    }
+    .duo-label strong { display: block; font-size: 16px; }
+    .duo-label span { color: var(--gray-500); font-size: 12px; }
+    .doc-section { margin-top: 24px; padding: clamp(32px, 5vw, 64px); }
+    .section-kicker {
+      margin: 0 0 8px;
+      color: var(--brand);
+      font: 600 12px/1.4 var(--mono);
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .doc-section h2 {
+      max-width: 920px;
+      margin: 0;
+      font-size: clamp(28px, 3.4vw, 42px);
+      line-height: 1.15;
+      letter-spacing: -.035em;
+    }
+    .section-lead {
+      max-width: 900px;
+      margin: 16px 0 0;
+      color: var(--gray-650);
+      font-size: 17px;
+      line-height: 1.7;
+    }
+    .summary-grid {
+      display: grid;
+      margin-top: 32px;
+      grid-template-columns: minmax(0, 1.3fr) minmax(280px, .7fr);
+      gap: 28px;
+    }
+    .summary-claim {
+      padding: 24px 0 24px 22px;
+      border-left: 3px solid var(--black);
+      font-size: 22px;
+      line-height: 1.55;
+    }
+    .takeaways { margin: 0; padding: 0; list-style: none; counter-reset: takeaway; }
+    .takeaways li {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      gap: 10px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--gray-150);
+      counter-increment: takeaway;
+    }
+    .takeaways li::before {
+      color: var(--gray-400);
+      content: "0" counter(takeaway);
+      font: 11px/23px var(--mono);
+    }
+    .problem-flow {
+      display: grid;
+      margin-top: 34px;
+      grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid var(--gray-200);
+      border-bottom: 1px solid var(--gray-200);
+    }
+    .flow-step { position: relative; min-height: 154px; padding: 22px 24px; }
+    .flow-step + .flow-step { border-left: 1px solid var(--gray-200); }
+    .flow-step small { color: var(--gray-400); font: 11px var(--mono); }
+    .flow-step strong { display: block; margin-top: 22px; font-size: 17px; }
+    .flow-step p { margin: 6px 0 0; color: var(--gray-500); font-size: 13px; }
+    .flow-step.is-target { background: var(--gray-900); color: var(--white); }
+    .flow-step.is-target p,
+    .flow-step.is-target small { color: var(--gray-300); }
+    .principles {
+      display: grid;
+      margin-top: 32px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 36px;
+    }
+    .principle {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 12px;
+      padding: 22px 0;
+      border-top: 1px solid var(--gray-150);
+    }
+    .principle__num { color: var(--gray-400); font: 12px/26px var(--mono); }
+    .principle h3 { margin: 0 0 6px; font-size: 17px; }
+    .principle p { margin: 0; color: var(--gray-650); }
+    .model-board {
+      margin-top: 34px;
+      padding: 28px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-3);
+      background: var(--gray-25);
+    }
+    .model-board svg { width: 100%; height: auto; }
+    .model-caption {
+      margin: 14px 0 0;
+      color: var(--gray-500);
+      font-size: 13px;
+      text-align: center;
+    }
+    .entity-table,
+    .spec-table {
+      width: 100%;
+      margin-top: 30px;
+      border-collapse: collapse;
+      text-align: left;
+    }
+    .entity-table th,
+    .entity-table td,
+    .spec-table th,
+    .spec-table td {
+      padding: 13px 12px;
+      border-bottom: 1px solid var(--gray-150);
+      vertical-align: top;
+    }
+    .entity-table th,
+    .spec-table th { color: var(--gray-500); font-size: 12px; font-weight: 600; }
+    .entity-table td:first-child,
+    .spec-table td:first-child { font-weight: 650; }
+    .state-track {
+      display: grid;
+      margin-top: 32px;
+      grid-template-columns: repeat(4, 1fr);
+    }
+    .state {
+      position: relative;
+      min-height: 164px;
+      padding: 22px;
+      border: 1px solid var(--gray-200);
+      background: var(--white);
+    }
+    .state + .state { border-left: 0; }
+    .state:first-child { border-radius: var(--radius-3) 0 0 var(--radius-3); }
+    .state:last-child { border-radius: 0 var(--radius-3) var(--radius-3) 0; }
+    .state::after {
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      right: -8px;
+      width: 14px;
+      height: 14px;
+      border-top: 1px solid var(--gray-300);
+      border-right: 1px solid var(--gray-300);
+      background: var(--white);
+      transform: translateY(-50%) rotate(45deg);
+      content: "";
+    }
+    .state:last-child::after { display: none; }
+    .state small { color: var(--gray-400); font: 11px var(--mono); }
+    .state strong { display: block; margin-top: 26px; font-size: 17px; }
+    .state p { margin: 6px 0 0; color: var(--gray-500); font-size: 13px; }
+    .logic-grid {
+      display: grid;
+      margin-top: 30px;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .logic-card {
+      min-height: 220px;
+      padding: 22px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-3);
+    }
+    .logic-card__input {
+      display: inline-flex;
+      min-height: 26px;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: var(--radius-1);
+      background: var(--gray-100);
+      font: 12px var(--mono);
+    }
+    .logic-card h3 { margin: 34px 0 6px; font-size: 18px; }
+    .logic-card p { margin: 0; color: var(--gray-650); }
+    .logic-card footer {
+      margin-top: 24px;
+      padding-top: 12px;
+      border-top: 1px solid var(--gray-150);
+      color: var(--gray-500);
+      font-size: 12px;
+    }
+    .ia {
+      display: grid;
+      margin-top: 34px;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 360px;
+      overflow: hidden;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-3);
+    }
+    .ia-rail { padding: 22px; border-right: 1px solid var(--gray-200); background: var(--gray-25); }
+    .ia-rail strong { display: block; margin-bottom: 18px; font-size: 18px; }
+    .ia-row { padding: 10px 0; border-top: 1px solid var(--gray-200); }
+    .ia-row span { display: block; color: var(--gray-500); font-size: 12px; }
+    .ia-main { display: grid; place-items: center; padding: 42px; }
+    .ia-main__core { text-align: center; }
+    .ia-main__core strong { font-size: 24px; }
+    .ia-main__core p { max-width: 520px; margin: 8px auto 0; color: var(--gray-500); }
+    .ia-actions { display: flex; justify-content: center; gap: 8px; margin-top: 24px; }
+    .btn {
+      display: inline-flex;
+      min-height: 34px;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 0 13px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-2);
+      background: var(--white);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:hover { background: var(--gray-50); }
+    .btn:active { transform: translateY(1px); }
+    .btn--primary { border-color: var(--black); background: var(--black); color: var(--white); }
+    .btn--primary:hover { background: var(--gray-800); }
+    .btn--ghost { border-color: transparent; background: transparent; color: var(--gray-650); }
+    .btn--icon { width: 34px; padding: 0; }
+    .prototype-intro {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+    }
+    .prototype-note { max-width: 520px; color: var(--gray-500); font-size: 13px; }
+    .prototype-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 30px 0 14px;
+      padding: 6px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-3);
+      background: var(--gray-25);
+    }
+    .prototype-tab {
+      min-height: 34px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: var(--radius-2);
+      background: transparent;
+      color: var(--gray-650);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .prototype-tab[aria-selected="true"] { background: var(--white); color: var(--black); box-shadow: 0 0 0 1px var(--gray-200); }
+    .prototype-stage {
+      min-width: 1000px;
+      overflow: hidden;
+      border: 1px solid var(--gray-300);
+      border-radius: var(--radius-3);
+      background: var(--white);
+    }
+    .prototype-scroll { overflow-x: auto; }
+    .prototype-screen[hidden] { display: none; }
+    .ace-window {
+      display: grid;
+      min-height: 720px;
+      grid-template-columns: 74px 300px minmax(0, 1fr);
+      background: var(--white);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .ace-nav {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px 8px;
+      border-right: 1px solid var(--gray-150);
+      background: var(--white);
+    }
+    .ace-logo { width: 42px; height: 42px; object-fit: contain; margin-bottom: 22px; }
+    .ace-nav__items { display: grid; width: 100%; gap: 4px; }
+    .ace-nav__item {
+      display: grid;
+      min-height: 48px;
+      place-items: center;
+      gap: 2px;
+      border: 0;
+      border-radius: var(--radius-2);
+      background: transparent;
+      color: var(--gray-500);
+      font-size: 10px;
+    }
+    .ace-nav__item.is-active { background: var(--gray-100); color: var(--black); }
+    .ui-icon { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    .ace-nav__bottom { display: grid; width: 100%; gap: 4px; margin-top: auto; }
+    .companion-rail {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      border-right: 1px solid var(--gray-150);
+      background: var(--white);
+    }
+    .rail-header {
+      display: flex;
+      min-height: 66px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--gray-150);
+    }
+    .rail-header h3 { margin: 0; font-size: 18px; }
+    .rail-actions { display: flex; gap: 5px; }
+    .icon-button {
+      display: grid;
+      width: 32px;
+      height: 32px;
+      place-items: center;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-2);
+      background: var(--white);
+    }
+    .rail-search { position: relative; margin: 14px 14px 10px; }
+    .rail-search input {
+      width: 100%;
+      height: 34px;
+      padding: 0 10px 0 32px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-2);
+      background: var(--white);
+      color: var(--gray-900);
+    }
+    .rail-search .ui-icon { position: absolute; top: 9px; left: 10px; color: var(--gray-400); }
+    .nearby-strip { padding: 6px 14px 14px; border-bottom: 1px solid var(--gray-150); }
+    .rail-section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 0 0 8px;
+      color: var(--gray-500);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .nearby-faces { display: flex; gap: 10px; }
+    .nearby-face { position: relative; width: 46px; text-align: center; }
+    .mini-avatar {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      margin: 0 auto;
+      border-radius: 50%;
+      background: var(--gray-800);
+      color: var(--white);
+      font-weight: 700;
+    }
+    .mini-avatar.is-agent { border-radius: 10px; background: var(--symbol-accent-alt); color: var(--gray-900); }
+    .presence-dot {
+      position: absolute;
+      top: 25px;
+      right: 5px;
+      width: 9px;
+      height: 9px;
+      border: 2px solid var(--white);
+      border-radius: 50%;
+      background: var(--success);
+    }
+    .nearby-face small { display: block; overflow: hidden; margin-top: 4px; text-overflow: ellipsis; white-space: nowrap; color: var(--gray-500); font-size: 10px; }
+    .conversation-list { min-height: 0; flex: 1; overflow: auto; padding: 10px 8px; }
+    .conversation-label { margin: 6px 8px; color: var(--gray-500); font-size: 11px; font-weight: 650; }
+    .conversation-row {
+      display: grid;
+      width: 100%;
+      grid-template-columns: 40px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 8px;
+      border: 0;
+      border-radius: var(--radius-2);
+      background: transparent;
+      text-align: left;
+    }
+    .conversation-row.is-active { background: var(--gray-100); }
+    .conversation-row__avatar {
+      position: relative;
+      display: grid;
+      width: 38px;
+      height: 38px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--gray-800);
+      color: var(--white);
+      font-weight: 700;
+    }
+    .conversation-row__avatar.is-group { border-radius: var(--radius-3); background: var(--gray-700); }
+    .conversation-row__copy { min-width: 0; }
+    .conversation-row__copy strong,
+    .conversation-row__copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conversation-row__copy span { color: var(--gray-500); font-size: 11px; }
+    .conversation-row__meta { color: var(--gray-400); font-size: 10px; }
+    .unread { display: grid; min-width: 17px; height: 17px; place-items: center; border-radius: 9px; background: var(--black); color: var(--white); font-size: 9px; }
+    .companion-main { position: relative; display: flex; min-width: 0; flex-direction: column; background: var(--white); }
+    .main-header {
+      display: flex;
+      min-height: 66px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--gray-150);
+    }
+    .main-header__identity { display: flex; min-width: 0; align-items: center; gap: 10px; }
+    .double-avatar { position: relative; width: 42px; height: 38px; flex: 0 0 42px; }
+    .double-avatar .mini-avatar { position: absolute; width: 34px; height: 34px; margin: 0; }
+    .double-avatar .mini-avatar:last-child { right: 0; bottom: 0; width: 22px; height: 22px; border: 2px solid var(--white); border-radius: 7px; font-size: 9px; }
+    .main-header__copy { min-width: 0; }
+    .main-header__copy strong,
+    .main-header__copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .main-header__copy strong { font-size: 14px; }
+    .main-header__copy span { color: var(--gray-500); font-size: 11px; }
+    .main-actions { display: flex; gap: 6px; }
+    .discovery-canvas {
+      display: grid;
+      min-height: 654px;
+      grid-template-rows: auto 1fr;
+      padding: 26px 30px 34px;
+      background: var(--gray-25);
+    }
+    .discovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+    .discovery-heading h2 { margin: 0; font-size: 24px; letter-spacing: -.02em; }
+    .discovery-heading p { margin: 6px 0 0; color: var(--gray-500); }
+    .visibility {
+      display: inline-flex;
+      min-height: 30px;
+      align-items: center;
+      gap: 7px;
+      padding: 0 9px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-2);
+      background: var(--white);
+      color: var(--gray-650);
+      font-size: 11px;
+    }
+    .visibility::before { width: 7px; height: 7px; border-radius: 50%; background: var(--success); content: ""; }
+    .meet-card {
+      display: grid;
+      width: min(680px, 92%);
+      min-height: 430px;
+      align-self: center;
+      justify-self: center;
+      grid-template-columns: minmax(0, 1fr) 220px;
+      overflow: hidden;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-4);
+      background: var(--white);
+    }
+    .meet-card__main { display: flex; flex-direction: column; padding: 34px; }
+    .meet-card__visual { display: grid; min-height: 210px; place-items: center; border-bottom: 1px solid var(--gray-150); background: var(--gray-50); }
+    .meet-person {
+      position: relative;
+      display: grid;
+      width: 126px;
+      height: 126px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--gray-800);
+      color: var(--white);
+      font-size: 34px;
+      font-weight: 700;
+    }
+    .meet-person__agent {
+      position: absolute;
+      right: -12px;
+      bottom: 2px;
+      display: grid;
+      width: 54px;
+      height: 54px;
+      place-items: center;
+      border: 4px solid var(--gray-50);
+      border-radius: 16px;
+      background: var(--symbol-accent-alt);
+      color: var(--gray-900);
+      font-size: 15px;
+    }
+    .meet-card h3 { margin: 24px 0 4px; font-size: 22px; }
+    .meet-card__status { color: var(--gray-500); }
+    .meet-card__chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+    .meet-card__actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 22px; }
+    .meet-card__side { display: flex; flex-direction: column; padding: 28px 24px; border-left: 1px solid var(--gray-150); background: var(--gray-25); }
+    .meet-card__side small { color: var(--gray-500); font-size: 11px; }
+    .meet-card__side h4 { margin: 10px 0 4px; font-size: 17px; }
+    .meet-card__side p { margin: 0; color: var(--gray-500); }
+    .agent-skill-list { display: grid; gap: 9px; margin-top: 24px; }
+    .agent-skill { padding-top: 9px; border-top: 1px solid var(--gray-200); }
+    .agent-skill strong { display: block; font-size: 12px; }
+    .agent-skill span { color: var(--gray-500); font-size: 11px; }
+    .invite-canvas { display: grid; min-height: 654px; place-items: center; padding: 42px; background: var(--gray-25); }
+    .invite-sheet {
+      width: min(560px, 90%);
+      padding: 26px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-4);
+      background: var(--white);
+      box-shadow: var(--shadow-float);
+    }
+    .invite-sheet__top { display: flex; align-items: center; gap: 14px; }
+    .invite-sheet__top .double-avatar { width: 58px; height: 52px; flex-basis: 58px; }
+    .invite-sheet__top .double-avatar .mini-avatar { width: 48px; height: 48px; font-size: 16px; }
+    .invite-sheet__top .double-avatar .mini-avatar:last-child { width: 28px; height: 28px; font-size: 10px; }
+    .invite-sheet h3 { margin: 0; font-size: 20px; }
+    .invite-sheet__subtitle { margin: 4px 0 0; color: var(--gray-500); }
+    .invite-preview { margin: 22px 0; padding: 14px; border-left: 2px solid var(--gray-900); background: var(--gray-50); }
+    .invite-preview p { margin: 0; }
+    .invite-preview span { display: block; margin-top: 6px; color: var(--gray-500); font-size: 11px; }
+    .invite-sheet__notice { color: var(--gray-500); font-size: 12px; }
+    .invite-sheet__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+    .chat-stream { display: flex; min-height: 0; flex: 1; flex-direction: column; background: var(--white); }
+    .messages { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 18px; overflow: auto; padding: 30px clamp(32px, 6vw, 86px); }
+    .message { display: grid; max-width: 650px; grid-template-columns: 32px minmax(0, 1fr); gap: 10px; align-self: flex-start; }
+    .message.is-own { grid-template-columns: minmax(0, 1fr) 32px; align-self: flex-end; }
+    .message.is-own .message__avatar { grid-column: 2; grid-row: 1; }
+    .message.is-own .message__body { grid-column: 1; grid-row: 1; align-items: flex-end; }
+    .message__avatar {
+      display: grid;
+      width: 32px;
+      height: 32px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--gray-800);
+      color: var(--white);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .message.is-agent .message__avatar { border-radius: 9px; background: var(--symbol-accent-alt); color: var(--gray-900); }
+    .message__body { display: flex; flex-direction: column; align-items: flex-start; }
+    .message__meta { margin-bottom: 5px; color: var(--gray-500); font-size: 10px; }
+    .agent-badge { display: inline-flex; margin-left: 5px; padding: 1px 4px; border: 1px solid var(--gray-300); border-radius: var(--radius-1); color: var(--gray-650); font-size: 9px; font-weight: 650; }
+    .message__bubble {
+      max-width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--gray-200);
+      border-radius: 3px var(--radius-3) var(--radius-3) var(--radius-3);
+      background: var(--white);
+    }
+    .message.is-own .message__bubble { border-color: var(--gray-900); border-radius: var(--radius-3) 3px var(--radius-3) var(--radius-3); background: var(--gray-900); color: var(--white); }
+    .message.is-agent .message__bubble { border-left: 3px solid var(--symbol-accent-alt); background: var(--gray-25); }
+    .composer-wrap { position: relative; padding: 12px 22px 20px; border-top: 1px solid var(--gray-150); }
+    .mention-popup {
+      position: absolute;
+      bottom: 94px;
+      left: 34px;
+      width: 310px;
+      padding: 8px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-3);
+      background: var(--white);
+      box-shadow: var(--shadow-float);
+    }
+    .mention-popup__label { padding: 4px 7px; color: var(--gray-500); font-size: 10px; font-weight: 650; }
+    .mention-option { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: var(--radius-2); }
+    .mention-option.is-active { background: var(--gray-100); }
+    .mention-option .mini-avatar { width: 28px; height: 28px; margin: 0; font-size: 10px; }
+    .mention-option strong,
+    .mention-option span { display: block; }
+    .mention-option span { color: var(--gray-500); font-size: 10px; }
+    .composer {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 8px;
+      min-height: 58px;
+      padding: 10px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-4);
+      background: var(--white);
+    }
+    .composer__text { min-height: 34px; padding: 7px 4px; color: var(--gray-650); }
+    .composer__target { display: inline-flex; align-items: center; gap: 4px; margin-right: 4px; padding: 2px 6px; border-radius: var(--radius-1); background: var(--gray-100); color: var(--gray-900); font-weight: 650; }
+    .create-group-canvas { position: relative; min-height: 654px; background: var(--gray-50); }
+    .create-group-canvas::before { position: absolute; inset: 0; background: rgb(0 0 0 / 22%); content: ""; }
+    .group-dialog {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      display: grid;
+      width: 640px;
+      max-height: 570px;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      overflow: hidden;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-4);
+      background: var(--white);
+      box-shadow: 0 18px 48px rgb(46 51 54 / 18%);
+      transform: translate(-50%, -50%);
+    }
+    .group-dialog__header { padding: 22px 24px 16px; border-bottom: 1px solid var(--gray-150); }
+    .group-dialog__header h3 { margin: 0; font-size: 20px; }
+    .group-dialog__header p { margin: 4px 0 0; color: var(--gray-500); }
+    .group-name { padding: 16px 24px 10px; }
+    .field-label { display: block; margin-bottom: 6px; color: var(--gray-650); font-size: 11px; font-weight: 650; }
+    .text-field { width: 100%; height: 36px; padding: 0 10px; border: 1px solid var(--gray-200); border-radius: var(--radius-2); background: var(--white); }
+    .group-members { overflow: auto; padding: 8px 24px 16px; }
+    .group-member {
+      display: grid;
+      grid-template-columns: 20px 38px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 4px;
+      border-bottom: 1px solid var(--gray-150);
+    }
+    .group-member input { width: 15px; height: 15px; accent-color: var(--black); }
+    .group-member .mini-avatar { width: 34px; height: 34px; margin: 0; }
+    .group-member strong,
+    .group-member span { display: block; }
+    .group-member span { color: var(--gray-500); font-size: 11px; }
+    .sidekick { color: var(--gray-500); font-size: 10px; }
+    .group-dialog__footer { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-top: 1px solid var(--gray-150); }
+    .selected-count { color: var(--gray-500); font-size: 11px; }
+    .collab-card {
+      width: min(660px, 100%);
+      align-self: center;
+      border: 1px solid var(--gray-300);
+      border-radius: var(--radius-3);
+      background: var(--white);
+    }
+    .collab-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 15px 16px; border-bottom: 1px solid var(--gray-150); }
+    .collab-card__head small { color: var(--gray-500); }
+    .collab-card__head h4 { margin: 3px 0 0; font-size: 14px; }
+    .collab-status { display: inline-flex; align-items: center; gap: 5px; color: var(--success); font-size: 10px; font-weight: 650; }
+    .collab-status::before { width: 7px; height: 7px; border-radius: 50%; background: var(--success); content: ""; }
+    .collab-card__agents { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--gray-150); }
+    .agent-stack { display: flex; }
+    .agent-stack .mini-avatar { width: 28px; height: 28px; margin: 0; border: 2px solid var(--white); font-size: 9px; }
+    .agent-stack .mini-avatar + .mini-avatar { margin-left: -7px; }
+    .collab-card__agents span { color: var(--gray-500); font-size: 11px; }
+    .collab-steps { padding: 10px 16px; }
+    .collab-step { display: grid; grid-template-columns: 20px 1fr auto; gap: 8px; padding: 7px 0; color: var(--gray-650); font-size: 11px; }
+    .collab-step i { display: grid; width: 17px; height: 17px; place-items: center; border-radius: 50%; background: var(--gray-100); color: var(--gray-650); font-style: normal; font-size: 9px; }
+    .collab-step.is-done i { background: var(--success-soft); color: var(--success); }
+    .collab-step em { color: var(--gray-400); font-style: normal; }
+    .collab-card__footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-top: 1px solid var(--gray-150); }
+    .collab-card__footer span { color: var(--gray-500); font-size: 10px; }
+    .prototype-annotation {
+      display: grid;
+      margin-top: 14px;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    .annotation {
+      padding: 14px;
+      border-top: 2px solid var(--gray-900);
+      background: var(--gray-25);
+    }
+    .annotation strong { display: block; font-size: 12px; }
+    .annotation span { display: block; margin-top: 4px; color: var(--gray-500); font-size: 11px; }
+    .page-specs {
+      display: grid;
+      margin-top: 30px;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+    .page-spec {
+      padding: 22px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-3);
+    }
+    .page-spec h3 { margin: 0 0 8px; font-size: 17px; }
+    .page-spec ul { margin: 0; padding-left: 18px; color: var(--gray-650); }
+    .page-spec li + li { margin-top: 7px; }
+    .permission-layers { margin-top: 32px; border: 1px solid var(--gray-200); border-radius: var(--radius-3); overflow: hidden; }
+    .permission-layer { display: grid; grid-template-columns: 180px 1fr 210px; gap: 20px; padding: 18px 20px; align-items: center; }
+    .permission-layer + .permission-layer { border-top: 1px solid var(--gray-200); }
+    .permission-layer strong { font-size: 15px; }
+    .permission-layer p { margin: 0; color: var(--gray-650); }
+    .permission-layer span { color: var(--gray-500); font-size: 11px; }
+    .risk-note { margin-top: 24px; padding: 18px 20px; border-left: 3px solid var(--danger); background: var(--danger-soft); color: var(--danger); }
+    .policy-lock {
+      display: grid;
+      margin-top: 26px;
+      grid-template-columns: repeat(3, 1fr);
+      overflow: hidden;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--radius-3);
+    }
+    .policy-lock > div { min-height: 132px; padding: 18px; }
+    .policy-lock > div + div { border-left: 1px solid var(--gray-200); }
+    .policy-lock strong { display: block; font-size: 15px; }
+    .policy-lock span { display: inline-flex; margin-top: 13px; padding: 2px 7px; border-radius: var(--radius-1); background: var(--danger-soft); color: var(--danger); font-size: 11px; font-weight: 650; }
+    .policy-lock p { margin: 8px 0 0; color: var(--gray-500); font-size: 12px; }
+    .rail-nav { display: grid; gap: 4px; padding: 10px 8px; border-bottom: 1px solid var(--gray-150); }
+    .rail-nav .conversation-row { grid-template-columns: 32px minmax(0, 1fr) auto; }
+    .rail-nav .conversation-row__avatar { width: 30px; height: 30px; border-radius: var(--radius-2); background: var(--gray-100); color: var(--gray-700); font-size: 11px; }
+    .management-canvas { min-height: 654px; padding: 28px 30px; background: var(--gray-25); }
+    .management-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+    .management-heading h2 { margin: 0; font-size: 24px; letter-spacing: -.02em; }
+    .management-heading p { margin: 5px 0 0; color: var(--gray-500); }
+    .management-grid { display: grid; margin-top: 24px; grid-template-columns: minmax(0, 1.15fr) minmax(280px, .85fr); gap: 14px; }
+    .management-panel { padding: 20px; border: 1px solid var(--gray-200); border-radius: var(--radius-3); background: var(--white); }
+    .management-panel h3 { margin: 0; font-size: 16px; }
+    .management-panel > p { margin: 4px 0 16px; color: var(--gray-500); font-size: 12px; }
+    .profile-card { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-top: 1px solid var(--gray-150); }
+    .profile-card:first-of-type { border-top: 0; }
+    .profile-card .mini-avatar { width: 38px; height: 38px; margin: 0; flex: 0 0 38px; }
+    .profile-card__copy { min-width: 0; flex: 1; }
+    .profile-card__copy strong, .profile-card__copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .profile-card__copy span { color: var(--gray-500); font-size: 11px; }
+    .agent-card { padding: 18px; border: 1px solid var(--gray-200); border-radius: var(--radius-3); background: var(--gray-25); }
+    .agent-card__head { display: flex; align-items: center; gap: 11px; }
+    .agent-card__head .mini-avatar { width: 42px; height: 42px; margin: 0; }
+    .agent-card__head strong, .agent-card__head span { display: block; }
+    .agent-card__head span { color: var(--gray-500); font-size: 11px; }
+    .agent-card__rule { margin: 16px 0; padding: 11px 12px; border-left: 2px solid var(--gray-900); background: var(--white); color: var(--gray-650); font-size: 11px; }
+    .agent-card__actions { display: flex; justify-content: flex-end; gap: 7px; }
+    .source-chip { display: inline-flex; min-height: 22px; align-items: center; gap: 5px; padding: 1px 7px; border: 1px solid var(--gray-200); border-radius: var(--radius-1); background: var(--gray-50); color: var(--gray-650); font-size: 10px; font-weight: 650; }
+    .source-chip::before { width: 6px; height: 6px; border-radius: 50%; background: var(--success); content: ""; }
+    .restriction-banner { margin: 16px 24px 0; padding: 9px 12px; border: 1px solid #e4d5b0; border-radius: var(--radius-2); background: var(--warning-soft); color: var(--warning); font-size: 11px; }
+    .roadmap { display: grid; margin-top: 32px; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--gray-200); border-radius: var(--radius-3); overflow: hidden; }
+    .roadmap-phase { min-height: 290px; padding: 22px; }
+    .roadmap-phase + .roadmap-phase { border-left: 1px solid var(--gray-200); }
+    .roadmap-phase.is-focus { background: var(--gray-900); color: var(--white); }
+    .roadmap-phase small { color: var(--gray-400); font: 11px var(--mono); }
+    .roadmap-phase h3 { margin: 22px 0 8px; font-size: 19px; }
+    .roadmap-phase p { margin: 0; color: var(--gray-500); }
+    .roadmap-phase.is-focus p { color: var(--gray-300); }
+    .roadmap-phase ul { margin: 20px 0 0; padding-left: 18px; }
+    .roadmap-phase li + li { margin-top: 8px; }
+    .acceptance { display: grid; margin-top: 30px; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .acceptance-item { display: grid; grid-template-columns: 26px 1fr; gap: 10px; padding: 16px; border: 1px solid var(--gray-200); border-radius: var(--radius-3); }
+    .acceptance-item i { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: var(--success-soft); color: var(--success); font-style: normal; font-size: 11px; }
+    .acceptance-item strong { display: block; }
+    .acceptance-item span { display: block; color: var(--gray-500); font-size: 12px; }
+    .source-list { margin: 24px 0 0; padding-left: 18px; color: var(--gray-650); }
+    .source-list code { font-family: var(--mono); font-size: 12px; }
+    .doc-footer { padding: 32px; color: var(--gray-500); font-size: 12px; text-align: center; }
+    @media (max-width: 1180px) {
+      .doc-shell { display: block; width: calc(100% - 32px); }
+      .doc-nav { display: none; }
+      .hero-copy { padding: 50px; }
+      .doc-section { padding: 38px; }
+      .problem-flow { grid-template-columns: repeat(2, 1fr); }
+      .flow-step:nth-child(3) { border-left: 0; }
+      .flow-step:nth-child(n+3) { border-top: 1px solid var(--gray-200); }
+      .prototype-scroll { margin-right: -38px; padding-right: 38px; }
+      .policy-lock { grid-template-columns: 1fr; }
+      .policy-lock > div + div { border-top: 1px solid var(--gray-200); border-left: 0; }
+    }
+    @media print {
+      .doc-shell { display: block; width: 100%; margin: 0; }
+      .doc-nav, .prototype-tabs { display: none; }
+      .doc-hero, .doc-section { break-inside: avoid; border-color: var(--gray-200); }
+      .prototype-screen[hidden] { display: block; margin-top: 20px; }
+      .prototype-stage { min-width: 0; transform-origin: top left; }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5.5h16v10H9l-5 4z"/></symbol>
+    <symbol id="i-team" viewBox="0 0 24 24"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="9" r="2.5"/><path d="M3 19c.5-4 2.5-6 5-6s4.5 2 5 6M13 14c3-.7 5.5 1.2 6 4"/></symbol>
+    <symbol id="i-agent" viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="13" rx="5"/><path d="M9 11v2m6-2v2M12 6V3m-2 0h4"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></symbol>
+    <symbol id="i-wiki" viewBox="0 0 24 24"><path d="M4 5.5c3-1 5-.6 8 1v13c-3-1.6-5-2-8-1zm16 0c-3-1-5-.6-8 1v13c3-1.6 5-2 8-1z"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m4 5 16 7-16 7 3-7z"/></symbol>
+    <symbol id="i-attach" viewBox="0 0 24 24"><path d="m8 12 6-6a4 4 0 0 1 6 6l-8 8a6 6 0 0 1-8-8l8-8"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="8" cy="9" r="3"/><circle cx="17" cy="9" r="3"/><path d="M2 20c.5-4 2.5-6 6-6s5.5 2 6 6m0-5c4-1 7 1 8 5"/></symbol>
+  </svg>
+
+  <div class="doc-shell">
+    <aside class="doc-nav" aria-label="PRD 目录">
+      <div class="doc-brand">
+        <img src="../../design/reference-assets/crew-logo-trans.png" alt="">
+        <div><strong>Ace 同伴 PRD</strong><span>Product · UI · Logic</span></div>
+      </div>
+      <ol>
+        <li><a href="#summary"><b>01</b><span>执行摘要</span></a></li>
+        <li><a href="#judgement"><b>02</b><span>产品判断</span></a></li>
+        <li><a href="#principles"><b>03</b><span>设计原则</span></a></li>
+        <li><a href="#model"><b>04</b><span>身份与关系模型</span></a></li>
+        <li><a href="#logic"><b>05</b><span>消息与协作逻辑</span></a></li>
+        <li><a href="#ia"><b>06</b><span>信息架构</span></a></li>
+        <li><a href="#ui"><b>07</b><span>UI 设计稿</span></a></li>
+        <li><a href="#pages"><b>08</b><span>页面功能说明</span></a></li>
+        <li><a href="#safety"><b>09</b><span>权限与安全</span></a></li>
+        <li><a href="#delivery"><b>10</b><span>技术映射与版本</span></a></li>
+        <li><a href="#acceptance"><b>11</b><span>指标与验收</span></a></li>
+      </ol>
+    </aside>
+
+    <main class="doc-main">
+      <header class="doc-hero">
+        <div class="hero-copy">
+          <div class="eyebrow">Ace Product Requirement · V1.0</div>
+          <h1>关系在同伴页，对话在主对话</h1>
+          <p class="lead">同伴页负责发现附近的人、管理好友与 Agent 名片、创建和维护群聊；真正开口时统一回到 Ace 主对话。私聊只属于人，Agent 只能在主人所在的群里协作。</p>
+          <div class="hero-meta">
+            <span class="tag">桌面端</span>
+            <span class="tag">Nearby BLE</span>
+            <span class="tag">主人在群</span>
+            <span class="tag">2026.08.27</span>
+          </div>
+        </div>
+        <div class="hero-visual" aria-label="人和随行 Agent 双生身份示意">
+          <div class="duo-poster">
+            <div class="person-orbit"><div class="human-avatar">林</div></div>
+            <div class="agent-avatar">M</div>
+            <div class="duo-label"><strong>林墨 + Mori</strong><span>一位同伴，一个受控的群内 Agent</span></div>
+          </div>
+        </div>
+      </header>
+
+      <section class="doc-section" id="summary">
+        <p class="section-kicker">01 · Executive Summary</p>
+        <h2>同伴管理关系，主对话承载所有交流</h2>
+        <p class="section-lead">现有 Nearby 能力已经走通，不需要再造一套消息列表和输入框。同伴页面应成为发现与关系管理中心，所有私聊和群聊通过 Session 跳转到主对话页面。</p>
+        <p class="section-lead"><strong>三条硬规则：</strong>私聊只允许人和人；Agent 只能在主人仍为成员的群聊中参与；同伴页负责管理，主对话页负责交流。</p>
+        <div class="summary-grid">
+          <div class="summary-claim">产品的安全原语是<span style="color:var(--brand)">“主人在群”</span>：人可以私聊人；任何 Agent 只能在主人仍是成员的群聊中出现。Agent 没有私信入口，也不能在群外互相调用。</div>
+          <ol class="takeaways">
+            <li>同伴页只做发现、同伴、Agent 名片和群管理</li>
+            <li>发消息与进入群聊统一跳转主对话</li>
+            <li>私聊只显示人，不出现 Agent @ 候选</li>
+            <li>Agent 入群必须同时满足主人在群和主人授权</li>
+            <li>UI、会话路由和后端共同执行安全边界</li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="doc-section" id="judgement">
+        <p class="section-kicker">02 · Product Judgement</p>
+        <h2>用户只需要决定“找人聊”还是“拉到群里一起做”</h2>
+        <p class="section-lead">当前页面把 6 类底层概念放在第一层：扫描、雷达、可发现、连接、Agent 模式和工具白名单。用户尚未发出第一句话，就要先理解实现方式。</p>
+        <div class="problem-flow" aria-label="现状到目标的产品路径">
+          <div class="flow-step"><small>CURRENT 01</small><strong>打开蓝牙</strong><p>先处理权限与可发现状态</p></div>
+          <div class="flow-step"><small>CURRENT 02</small><strong>扫描设备</strong><p>面对 Peer、连接和离线状态</p></div>
+          <div class="flow-step"><small>CURRENT 03</small><strong>另学一套聊天</strong><p>Nearby 页面重复消息和输入组件</p></div>
+          <div class="flow-step is-target"><small>TARGET</small><strong>遇见 → 管理 → 回主对话</strong><p>同一套会话体验，底层按来源路由</p></div>
+        </div>
+        <table class="entity-table">
+          <thead><tr><th>现有表达</th><th>用户问题</th><th>目标表达</th></tr></thead>
+          <tbody>
+            <tr><td>附近的 Ace / 连接</td><td>这是谁，为什么值得聊</td><td>同伴名片 / 打个招呼</td></tr>
+            <tr><td>Agent Mode</td><td>怎样让 Agent 安全参与</td><td>先进入主人所在的群，再由群内 @ 明确触发</td></tr>
+            <tr><td>允许被发现</td><td>别人能否找到我</td><td>我的状态菜单，默认“附近可见”</td></tr>
+            <tr><td>工具白名单</td><td>对方能否让我的 Agent 做事</td><td>Agent 名片中的三级授权，不出现在首屏</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="doc-section" id="principles">
+        <p class="section-kicker">03 · Design Principles</p>
+        <h2>年轻感来自关系与语言，不来自蓝色、渐变和动画堆叠</h2>
+        <div class="principles">
+          <article class="principle"><span class="principle__num">01</span><div><h3>人先于技术</h3><p>页面展示名字、状态和 Agent，Peer ID、信号值和协议版本只进诊断信息。</p></div></article>
+          <article class="principle"><span class="principle__num">02</span><div><h3>一屏一个主动作</h3><p>发现页是“打个招呼”，邀请页是“接受”，建群页是“建群”，不并列三个强调按钮。</p></div></article>
+          <article class="principle"><span class="principle__num">03</span><div><h3>Agent 只在有主人的群里</h3><p>人不能私聊 Agent，Agent 不能私聊人或 Agent；主人离群时 Agent 同步退出。</p></div></article>
+          <article class="principle"><span class="principle__num">04</span><div><h3>管理与对话分层</h3><p>同伴页管理对象与权限，主对话页承载消息；用户不需要学习第二套聊天系统。</p></div></article>
+          <article class="principle"><span class="principle__num">05</span><div><h3>设置退到上下文</h3><p>群成员、Agent 权限和工具白名单从头像、成员抽屉或 Agent 名片进入。</p></div></article>
+          <article class="principle"><span class="principle__num">06</span><div><h3>桌面系统保持一致</h3><p>白色画布、6–8px 常规圆角、中性选中态、黑色主按钮与细边框优先。</p></div></article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="model">
+        <p class="section-kicker">04 · Identity &amp; Relationship</p>
+        <h2>人拥有关系，Agent 只拥有群内席位</h2>
+        <p class="section-lead">技术上仍由 Peer 维护连接，产品上把人设为唯一关系主体。Agent 有独立名片和群内气泡，但没有好友、私聊或脱离主人的独立连接。</p>
+        <figure class="model-board">
+          <svg viewBox="0 0 1040 390" role="img" aria-labelledby="model-title model-desc">
+            <title id="model-title">同伴身份与群组关系</title>
+            <desc id="model-desc">本地用户和远端用户通过 BLE 建立人与人的同伴关系；各自 Agent 只有在主人所在群聊中才能参与。</desc>
+            <rect x="40" y="72" width="280" height="230" rx="8" fill="#fff" stroke="#b8b8b8"/>
+            <text x="70" y="108" font-size="14" fill="#6b6b6b">本机 PEER</text>
+            <circle cx="118" cy="178" r="42" fill="#303030"/>
+            <text x="118" y="186" text-anchor="middle" font-size="22" fill="#fff">我</text>
+            <rect x="184" y="142" width="92" height="72" rx="8" fill="#e7d29b" stroke="#b8b8b8"/>
+            <text x="230" y="184" text-anchor="middle" font-size="18" fill="#171717">Ace</text>
+            <text x="70" y="258" font-size="16" fill="#171717">主人负责信任与授权</text>
+            <text x="70" y="282" font-size="13" fill="#6b6b6b">Agent 负责响应与执行</text>
+            <path d="M320 186H438" fill="none" stroke="#607d90" stroke-width="2"/>
+            <path d="m428 178 10 8-10 8" fill="none" stroke="#607d90" stroke-width="2"/>
+            <rect x="438" y="128" width="164" height="116" rx="8" fill="#171717"/>
+            <text x="520" y="174" text-anchor="middle" font-size="13" fill="#b8b8b8">同伴关系</text>
+            <text x="520" y="202" text-anchor="middle" font-size="19" fill="#fff">BLE + 确认</text>
+            <path d="M602 186H720" fill="none" stroke="#607d90" stroke-width="2"/>
+            <path d="m710 178 10 8-10 8" fill="none" stroke="#607d90" stroke-width="2"/>
+            <rect x="720" y="72" width="280" height="230" rx="8" fill="#fff" stroke="#b8b8b8"/>
+            <text x="750" y="108" font-size="14" fill="#6b6b6b">远端 PEER</text>
+            <circle cx="798" cy="178" r="42" fill="#303030"/>
+            <text x="798" y="186" text-anchor="middle" font-size="22" fill="#fff">林</text>
+            <rect x="864" y="142" width="92" height="72" rx="8" fill="#e7d29b" stroke="#b8b8b8"/>
+            <text x="910" y="184" text-anchor="middle" font-size="18" fill="#171717">Mori</text>
+            <text x="750" y="258" font-size="16" fill="#171717">人可私聊，也可被邀请进群</text>
+            <text x="750" y="282" font-size="13" fill="#6b6b6b">Agent 经主人授权后成为群内席位</text>
+            <path d="M330 340H710" fill="none" stroke="#b8b8b8" stroke-width="1"/>
+            <path d="m700 332 10 8-10 8" fill="none" stroke="#b8b8b8" stroke-width="1.5"/>
+            <text x="520" y="366" text-anchor="middle" font-size="14" fill="#4f4f4f">私聊仅限人 ↔ 人；Agent 协作必须进入双方主人所在的群</text>
+          </svg>
+          <figcaption class="model-caption">图 1：连接对象是 Peer，交互对象是人和 Agent，授权主体始终是人。</figcaption>
+        </figure>
+        <table class="entity-table">
+          <thead><tr><th>对象</th><th>用户能做什么</th><th>产品边界</th><th>技术映射</th></tr></thead>
+          <tbody>
+            <tr><td>人</td><td>打招呼、私聊、邀请进群、移除同伴</td><td>关系和授权主体</td><td>PeerInfo / peer_id</td></tr>
+            <tr><td>Agent</td><td>查看名片、加入主人所在群、群内被 @、暂停</td><td>没有好友和私聊；不能脱离主人入群</td><td>agent_name / room agent seat</td></tr>
+            <tr><td>私聊</td><td>只允许两个人交换消息和文件</td><td>不显示 Agent，不接受 agent.request</td><td>nearby_dm / peer.message</td></tr>
+            <tr><td>群聊</td><td>拉人、授权 Agent 席位、@Agent、文件、协作任务</td><td>每个 Agent 的主人必须仍是群成员</td><td>nearby_room / Room</td></tr>
+          </tbody>
+        </table>
+        <h3 style="margin-top:32px">关系状态只保留 4 个</h3>
+        <div class="state-track">
+          <div class="state"><small>01</small><strong>附近</strong><p>刚发现，只能看名片与打招呼</p></div>
+          <div class="state"><small>02</small><strong>待确认</strong><p>邀请已送达，双方尚未建立关系</p></div>
+          <div class="state"><small>03</small><strong>同伴</strong><p>可以人与人私聊、拉群和查看 Agent 名片</p></div>
+          <div class="state"><small>04</small><strong>暂时离线</strong><p>历史保留，下次靠近时自动重连</p></div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="logic">
+        <p class="section-kicker">05 · Message Routing</p>
+        <h2>先由会话类型划边界，再由群内 @ 决定谁接球</h2>
+        <p class="section-lead">私聊与群聊不是同一权限面。私聊 Composer 永远只发给另一个人；只有群聊 Composer 才展示 Agent 候选，并在发送前验证每个 Agent 的主人仍在群中。</p>
+        <div class="logic-grid">
+          <article class="logic-card"><span class="logic-card__input">私聊 · 明天几点碰一下？</span><h3>人 ↔ 人</h3><p>只发送给当前同伴。输入 @ 时只出现人类联系人，不展示任何 Agent。</p><footer>nearby_dm · peer.message</footer></article>
+          <article class="logic-card"><span class="logic-card__input">群聊 · @Mori 帮我归纳一下</span><h3>人 ↔ Agent</h3><p>仅当 Mori 的主人林墨仍在本群且已授权时创建 Agent 请求。</p><footer>nearby_room · agent.request(room_id)</footer></article>
+          <article class="logic-card"><span class="logic-card__input">群聊 · @Mori @Ace 一起评审</span><h3>Agent ↔ Agent</h3><p>两位主人都在群后才建立有界协作，默认 3 轮、最多 8 次发言。</p><footer>room collaboration task · P1</footer></article>
+        </div>
+        <div class="policy-lock" aria-label="不可绕过的通信边界">
+          <div><strong>人不能私聊 Agent</strong><span>DM BLOCKED</span><p>Agent 名片不提供私信按钮；私聊路由拒绝 agent.request。</p></div>
+          <div><strong>Agent 不能私聊任何身份</strong><span>DM BLOCKED</span><p>Agent 不能主动私信人，也不能在群外互相调用。</p></div>
+          <div><strong>Agent 必须有主人在群</strong><span>OWNER REQUIRED</span><p>主人退出、被移除或撤权，Agent 立即离群并暂停任务。</p></div>
+        </div>
+        <table class="spec-table">
+          <thead><tr><th>触发源</th><th>会不会唤醒 Agent</th><th>原因</th></tr></thead>
+          <tbody>
+            <tr><td>私聊中的任何 @Agent</td><td>否，并阻止发送</td><td>Agent 不允许参与私聊</td></tr>
+            <tr><td>群聊中人的显式 @</td><td>条件触发</td><td>Agent 主人在群且已授权</td></tr>
+            <tr><td>群聊协作任务的结构化交接</td><td>条件触发</td><td>双方主人在群，并受轮次和次数约束</td></tr>
+            <tr><td>Agent 回复里的文本 @</td><td>否</td><td>防止普通文本造成无限互唤</td></tr>
+            <tr><td>“全员响应”永久设置</td><td>不再提供</td><td>噪声、Token 与循环风险都不可控</td></tr>
+          </tbody>
+        </table>
+        <h3 style="margin-top:34px">主对话的来源能力矩阵</h3>
+        <table class="spec-table">
+          <thead><tr><th>会话来源</th><th>传输</th><th>复用组件</th><th>来源专属能力</th></tr></thead>
+          <tbody>
+            <tr><td>普通 Ace Session</td><td>GatewayTransport</td><td>消息流、Composer、附件、历史、任务卡</td><td>模型、Plan、工作区、停止生成</td></tr>
+            <tr><td>nearby_dm</td><td>NearbyTransport(peer_id)</td><td>消息流、Composer、附件、历史、草稿</td><td>只允许人类发送者；隐藏 Agent 与模型控制</td></tr>
+            <tr><td>nearby_room</td><td>NearbyTransport(room_id)</td><td>消息流、Composer、附件、历史、任务卡</td><td>成员、Agent 席位、主人在群校验、蓝牙状态</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="doc-section" id="room-composer-presence">
+        <p class="section-kicker">06 · Room Composer Presence</p>
+        <h2>群成员和 Agent 应该随时可见，@ 不应该依赖手打名字</h2>
+        <p class="section-lead">Desktop 同伴群聊在 Composer 上方提供可折叠状态栏。收起时只保留在线人数、可用 Agent 数、触发模式和快捷 Agent；展开后按主人归组展示人类成员与其 Agent，让用户在发送前知道“谁在、谁能接活、这次会叫醒谁”。</p>
+        <div class="logic-grid">
+          <article class="logic-card"><span class="logic-card__input">收起态 · 3 人在线 · 2 Agent 可用</span><h3>稳定摘要</h3><p>默认不抢占消息区，只呈现本次决策需要的状态；展开状态按会话记忆。</p><footer>honest presence · per session</footer></article>
+          <article class="logic-card"><span class="logic-card__input">点击 Mori → @Mori</span><h3>点选提及</h3><p>快捷按钮和输入 <code>@</code> 都打开群内 Agent 候选，选择后保留稳定 Agent ID，用户无需手打全名。</p><footer>public_agent_id · owner scoped</footer></article>
+          <article class="logic-card"><span class="logic-card__input">Mori · 林墨 · 正在工作</span><h3>诚实状态</h3><p>区分在线、连接中、离线，以及 Agent 可用、工作中、不可用；未知状态不伪装成在线。</p><footer>available / working / unavailable</footer></article>
+        </div>
+        <table class="spec-table">
+          <thead><tr><th>规则</th><th>产品行为</th><th>失败保护</th></tr></thead>
+          <tbody>
+            <tr><td>同名 Agent</td><td>候选与 Chip 显示 <code>@Agent·主人</code></td><td>按 <code>peer_id + public_agent_id</code> 精确路由</td></tr>
+            <tr><td>旧版同伴节点</td><td>默认 Agent 仍可按主人 Peer 触发</td><td>额外 Agent 标为不可用，不假装支持精准路由</td></tr>
+            <tr><td>Agent 回复</td><td>显示 Agent 名称和头像，并进入群聊上下文</td><td>Agent 消息不会再次触发 Agent，阻断自动往返循环</td></tr>
+            <tr><td>非同伴会话</td><td>不展示这条状态栏</td><td>普通会话和 External Team 保持原交互</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="doc-section" id="ia">
+        <p class="section-kicker">07 · Information Architecture</p>
+        <h2>同伴是管理 Hub，对话是统一工作台</h2>
+        <p class="section-lead">同伴页不再出现完整消息流。一级入口压缩为发现、同伴、群聊；Agent 名片作为人物详情和“我的名片”中的二级对象。所有实际交流通过 Session 进入主对话。</p>
+        <div class="ia">
+          <div class="ia-rail">
+            <strong>同伴</strong>
+            <div class="ia-row">发现<span>附近的人、邀约与蓝牙状态</span></div>
+            <div class="ia-row">同伴<span>好友、人物名片、随行 Agent 名片</span></div>
+            <div class="ia-row">群聊<span>建群、成员、Agent 席位与权限</span></div>
+            <div class="ia-row">我的名片<span>我的状态与 Agent 授权设置</span></div>
+          </div>
+          <div class="ia-main">
+            <div class="ia-main__core"><strong>管理对象，不在这里说话</strong><p>用户在这里建立关系、了解 Agent、配置授权和维护群。点击“发消息”或“进入群聊”后，创建或解析 Nearby Session 并切换到主对话。</p><div class="ia-actions"><button class="btn btn--primary" type="button">发消息 → 主对话</button><button class="btn" type="button">管理资料</button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="ui">
+        <div class="prototype-intro">
+          <div>
+            <p class="section-kicker">08 · Desktop UI Design</p>
+            <h2>六个核心桌面界面</h2>
+          </div>
+          <p class="prototype-note">前三个状态展示同伴管理，第四个展示群与 Agent 席位管理，后两个展示跳转后的主对话。仅设计桌面端，全部沿用 Ace 设计令牌。</p>
+        </div>
+        <div class="prototype-tabs" role="tablist" aria-label="同伴 UI 设计稿">
+          <button class="prototype-tab" role="tab" aria-selected="true" aria-controls="screen-discovery" id="tab-discovery" data-screen="discovery">01 发现同伴</button>
+          <button class="prototype-tab" role="tab" aria-selected="false" aria-controls="screen-invite" id="tab-invite" data-screen="invite">02 同伴管理</button>
+          <button class="prototype-tab" role="tab" aria-selected="false" aria-controls="screen-agent" id="tab-agent" data-screen="agent">03 Agent 名片</button>
+          <button class="prototype-tab" role="tab" aria-selected="false" aria-controls="screen-create" id="tab-create" data-screen="create">04 群聊管理</button>
+          <button class="prototype-tab" role="tab" aria-selected="false" aria-controls="screen-dm" id="tab-dm" data-screen="dm">05 人与人私聊</button>
+          <button class="prototype-tab" role="tab" aria-selected="false" aria-controls="screen-group" id="tab-group" data-screen="group">06 人机群聊</button>
+        </div>
+        <div class="prototype-scroll">
+          <div class="prototype-stage">
+            <section class="prototype-screen" role="tabpanel" id="screen-discovery" aria-labelledby="tab-discovery" data-prototype="discovery">
+              <div class="ace-window">
+                <nav class="ace-nav" aria-label="Ace 主导航">
+                  <img class="ace-logo" src="../../design/reference-assets/crew-logo-trans.png" alt="Ace">
+                  <div class="ace-nav__items">
+                    <button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-chat"/></svg><span>对话</span></button>
+                    <button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-agent"/></svg><span>外援</span></button>
+                    <button class="ace-nav__item is-active" type="button"><svg class="ui-icon"><use href="#i-team"/></svg><span>同伴</span></button>
+                    <button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-star"/></svg><span>技能</span></button>
+                    <button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-wiki"/></svg><span>Wiki</span></button>
+                  </div>
+                  <div class="ace-nav__bottom"><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-settings"/></svg><span>设置</span></button></div>
+                </nav>
+                <aside class="companion-rail">
+                  <div class="rail-header"><h3>同伴</h3><div class="rail-actions"><button class="icon-button" aria-label="创建群聊"><svg class="ui-icon"><use href="#i-plus"/></svg></button><button class="icon-button" aria-label="同伴菜单"><svg class="ui-icon"><use href="#i-more"/></svg></button></div></div>
+                  <label class="rail-search"><svg class="ui-icon"><use href="#i-search"/></svg><input value="" placeholder="搜索人、Agent 或群" aria-label="搜索人、Agent 或群"></label>
+                  <div class="nearby-strip"><p class="rail-section-title"><span>就在附近 · 3</span><span>查看全部</span></p><div class="nearby-faces"><div class="nearby-face"><span class="mini-avatar">林</span><i class="presence-dot"></i><small>林墨</small></div><div class="nearby-face"><span class="mini-avatar">乔</span><i class="presence-dot"></i><small>乔安</small></div><div class="nearby-face"><span class="mini-avatar">夏</span><i class="presence-dot"></i><small>夏遥</small></div></div></div>
+                  <div class="conversation-list">
+                    <p class="conversation-label">管理</p>
+                    <button class="conversation-row is-active" type="button"><span class="conversation-row__avatar">遇</span><span class="conversation-row__copy"><strong>发现</strong><span>3 位就在附近</span></span></button>
+                    <button class="conversation-row" type="button"><span class="conversation-row__avatar">伴</span><span class="conversation-row__copy"><strong>同伴</strong><span>12 位联系人</span></span></button>
+                    <button class="conversation-row" type="button"><span class="conversation-row__avatar is-group">群</span><span class="conversation-row__copy"><strong>群聊</strong><span>4 个协作群</span></span></button>
+                  </div>
+                </aside>
+                <main class="companion-main">
+                  <div class="main-header"><div class="main-header__identity"><div class="main-header__copy"><strong>遇见附近的 Ace</strong><span>先认识人，再决定要不要一起做事</span></div></div><span class="visibility">附近可见</span></div>
+                  <div class="discovery-canvas">
+                    <div class="discovery-heading"><div><h2>现在，隔壁有 3 位同伴</h2><p>卡片只展示大致距离，不公开设备信息</p></div><button class="btn btn--ghost" type="button">刷新</button></div>
+                    <article class="meet-card">
+                      <div class="meet-card__main">
+                        <div class="meet-card__visual"><div class="meet-person">林<span class="meet-person__agent">M</span></div></div>
+                        <h3>林墨</h3><span class="meet-card__status">正在隔壁开脑暴 · 信号很好</span>
+                        <div class="meet-card__chips"><span class="tag">产品策略</span><span class="tag">写作</span><span class="tag">咖啡搭子</span></div>
+                        <div class="meet-card__actions"><button class="btn btn--primary" type="button">打个招呼</button><button class="btn btn--ghost" type="button">暂时略过</button></div>
+                      </div>
+                      <aside class="meet-card__side"><small>随行 Agent · 仅作预览</small><h4>Mori</h4><p>擅长把散乱讨论整理成决策稿</p><div class="agent-skill-list"><div class="agent-skill"><strong>能帮什么</strong><span>调研归纳、PRD、会议总结</span></div><div class="agent-skill"><strong>参与方式</strong><span>只能加入林墨所在的群聊</span></div><div class="agent-skill"><strong>安全边界</strong><span>不可私聊，不随好友关系自动授权</span></div></div></aside>
+                    </article>
+                  </div>
+                </main>
+              </div>
+            </section>
+
+            <section class="prototype-screen" role="tabpanel" id="screen-invite" aria-labelledby="tab-invite" data-prototype="invite" hidden>
+              <div class="ace-window">
+                <nav class="ace-nav" aria-label="Ace 主导航"><img class="ace-logo" src="../../design/reference-assets/crew-logo-trans.png" alt="Ace"><div class="ace-nav__items"><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-chat"/></svg><span>对话</span></button><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-agent"/></svg><span>外援</span></button><button class="ace-nav__item is-active" type="button"><svg class="ui-icon"><use href="#i-team"/></svg><span>同伴</span></button></div></nav>
+                <aside class="companion-rail">
+                  <div class="rail-header"><h3>同伴</h3><div class="rail-actions"><button class="icon-button" aria-label="创建群聊"><svg class="ui-icon"><use href="#i-plus"/></svg></button></div></div>
+                  <label class="rail-search"><svg class="ui-icon"><use href="#i-search"/></svg><input placeholder="搜索同伴" aria-label="搜索同伴"></label>
+                  <div class="conversation-list"><p class="conversation-label">同伴 · 12</p><button class="conversation-row is-active" type="button"><span class="conversation-row__avatar">林</span><span class="conversation-row__copy"><strong>林墨</strong><span>就在附近 · 带着 Mori</span></span></button><button class="conversation-row" type="button"><span class="conversation-row__avatar">乔</span><span class="conversation-row__copy"><strong>乔安</strong><span>附近 · 带着 Pixel</span></span></button><button class="conversation-row" type="button"><span class="conversation-row__avatar">夏</span><span class="conversation-row__copy"><strong>夏遥</strong><span>暂时离线</span></span></button></div>
+                </aside>
+                <main class="companion-main">
+                  <div class="main-header"><div class="main-header__copy"><strong>同伴资料</strong><span>管理关系与可一起加入的群</span></div><div class="main-actions"><button class="btn btn--primary" type="button">发消息</button><button class="icon-button" aria-label="更多"><svg class="ui-icon"><use href="#i-more"/></svg></button></div></div>
+                  <div class="management-canvas">
+                    <div class="management-heading"><div><h2>林墨</h2><p>就在附近 · 已连接 · 上次协作 2 天前</p></div><span class="source-chip">Nearby</span></div>
+                    <div class="management-grid">
+                      <section class="management-panel"><h3>人物名片</h3><p>人与人的关系和私聊入口都在这里管理。</p><div class="profile-card"><span class="mini-avatar">林</span><div class="profile-card__copy"><strong>林墨</strong><span>产品策略 / 写作 / 正在隔壁开脑暴</span></div><button class="btn" type="button">邀请进群</button></div><div class="agent-skill-list"><div class="agent-skill"><strong>共同群聊</strong><span>同伴产品小队、产品夜谈</span></div><div class="agent-skill"><strong>关系权限</strong><span>可私聊、可查看在线状态、可互相拉群</span></div><div class="agent-skill"><strong>移除</strong><span>进入右上角更多菜单，不占主界面</span></div></div></section>
+                      <aside class="management-panel"><h3>随行 Agent</h3><p>Agent 是林墨的群内能力，不是联系人。</p><div class="agent-card"><div class="agent-card__head"><span class="mini-avatar is-agent">M</span><div><strong>Mori</strong><span>归属于林墨 · 2 个共同群可用</span></div></div><div class="agent-card__rule">不能私聊。只有林墨仍在群里时，Mori 才能加入并被 @。</div><div class="agent-card__actions"><button class="btn" type="button">查看名片</button><button class="btn btn--primary" type="button">加入共同群</button></div></div></aside>
+                    </div>
+                  </div>
+                </main>
+              </div>
+            </section>
+
+            <section class="prototype-screen" role="tabpanel" id="screen-agent" aria-labelledby="tab-agent" data-prototype="agent" hidden>
+              <div class="ace-window">
+                <nav class="ace-nav" aria-label="Ace 主导航"><img class="ace-logo" src="../../design/reference-assets/crew-logo-trans.png" alt="Ace"><div class="ace-nav__items"><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-chat"/></svg><span>对话</span></button><button class="ace-nav__item is-active" type="button"><svg class="ui-icon"><use href="#i-team"/></svg><span>同伴</span></button></div></nav>
+                <aside class="companion-rail"><div class="rail-header"><h3>我的名片</h3></div><div class="conversation-list"><p class="conversation-label">身份</p><button class="conversation-row" type="button"><span class="conversation-row__avatar">我</span><span class="conversation-row__copy"><strong>我的资料</strong><span>附近可见</span></span></button><button class="conversation-row is-active" type="button"><span class="conversation-row__avatar is-group">A</span><span class="conversation-row__copy"><strong>Ace Agent</strong><span>群内可用 · 工具受控</span></span></button></div></aside>
+                <main class="companion-main">
+                  <div class="main-header"><div class="main-header__copy"><strong>我的 Agent 名片</strong><span>决定别人在哪些群里能用 Ace</span></div><div class="main-actions"><button class="btn btn--primary" type="button">保存</button></div></div>
+                  <div class="management-canvas">
+                    <div class="management-heading"><div><h2>Ace</h2><p>我的群内协作 Agent · 不接受任何私聊</p></div><span class="visibility">已启用</span></div>
+                    <div class="management-grid">
+                      <section class="management-panel"><h3>公开名片</h3><p>他人只能看到能力和权限结果。</p><div class="agent-card"><div class="agent-card__head"><span class="mini-avatar is-agent">A</span><div><strong>Ace</strong><span>归属于 AHUAMAO</span></div></div><div class="agent-skill-list"><div class="agent-skill"><strong>擅长</strong><span>代码分析、任务规划、协作执行</span></div><div class="agent-skill"><strong>参与方式</strong><span>仅在我仍为成员的群聊中</span></div><div class="agent-skill"><strong>私聊</strong><span>永久关闭，不能被任何人开启</span></div></div></div></section>
+                      <aside class="management-panel"><h3>群聊授权</h3><p>用群做权限容器，默认全部关闭。</p><div class="profile-card"><span class="mini-avatar is-agent">产</span><div class="profile-card__copy"><strong>同伴产品小队</strong><span>纯文本回复 · 工具需要我审批</span></div><button class="btn" type="button">已允许</button></div><div class="profile-card"><span class="mini-avatar is-agent">夜</span><div class="profile-card__copy"><strong>产品夜谈</strong><span>仅被 @ 时回复</span></div><button class="btn" type="button">已允许</button></div><div class="profile-card"><span class="mini-avatar is-agent">研</span><div class="profile-card__copy"><strong>调研碰头会</strong><span>当前不可加入</span></div><button class="btn" type="button">关闭</button></div></aside>
+                    </div>
+                  </div>
+                </main>
+              </div>
+            </section>
+
+            <section class="prototype-screen" role="tabpanel" id="screen-dm" aria-labelledby="tab-dm" data-prototype="dm" hidden>
+              <div class="ace-window">
+                <nav class="ace-nav" aria-label="Ace 主导航"><img class="ace-logo" src="../../design/reference-assets/crew-logo-trans.png" alt="Ace"><div class="ace-nav__items"><button class="ace-nav__item is-active" type="button"><svg class="ui-icon"><use href="#i-chat"/></svg><span>对话</span></button><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-team"/></svg><span>同伴</span></button><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-star"/></svg><span>技能</span></button></div></nav>
+                <aside class="companion-rail">
+                  <div class="rail-header"><h3>对话</h3><div class="rail-actions"><button class="icon-button" aria-label="新对话"><svg class="ui-icon"><use href="#i-plus"/></svg></button></div></div>
+                  <label class="rail-search"><svg class="ui-icon"><use href="#i-search"/></svg><input placeholder="搜索会话" aria-label="搜索会话"></label>
+                  <div class="conversation-list"><p class="conversation-label">同伴</p><button class="conversation-row is-active" type="button"><span class="conversation-row__avatar">林</span><span class="conversation-row__copy"><strong>林墨</strong><span>我们把方案再收一下？</span></span><span class="unread">1</span></button><button class="conversation-row" type="button"><span class="conversation-row__avatar is-group">产</span><span class="conversation-row__copy"><strong>同伴产品小队</strong><span>Mori：已整理 3 个方向</span></span></button><p class="conversation-label">Ace</p><button class="conversation-row" type="button"><span class="conversation-row__avatar is-group">A</span><span class="conversation-row__copy"><strong>重构主对话</strong><span>本地 Agent 会话</span></span></button></div>
+                </aside>
+                <main class="companion-main">
+                  <div class="main-header"><div class="main-header__identity"><span class="mini-avatar">林</span><div class="main-header__copy"><strong>林墨</strong><span>人与人私聊 · 已连接</span></div><span class="source-chip">同伴</span></div><div class="main-actions"><button class="btn" type="button">一起建群</button><button class="icon-button" aria-label="会话菜单"><svg class="ui-icon"><use href="#i-more"/></svg></button></div></div>
+                  <div class="restriction-banner">私聊只允许人与人。若需要 Mori 或 Ace 参与，请把双方主人拉进群后再添加 Agent。</div>
+                  <div class="chat-stream">
+                    <div class="messages">
+                      <article class="message"><span class="message__avatar">林</span><div class="message__body"><span class="message__meta">林墨 · 14:26</span><div class="message__bubble">我们把刚才聊的同伴产品再收一下？</div></div></article>
+                      <article class="message is-own"><span class="message__avatar">我</span><div class="message__body"><span class="message__meta">我 · 14:27</span><div class="message__bubble">可以。如果需要两个 Agent 评审，我们一起建个群。</div></div></article>
+                    </div>
+                    <div class="composer-wrap">
+                      <div class="composer"><button class="btn btn--icon btn--ghost" aria-label="添加附件"><svg class="ui-icon"><use href="#i-attach"/></svg></button><div class="composer__text">回复林墨…</div><button class="btn btn--icon btn--primary" aria-label="发送"><svg class="ui-icon"><use href="#i-send"/></svg></button></div>
+                    </div>
+                  </div>
+                </main>
+              </div>
+            </section>
+
+            <section class="prototype-screen" role="tabpanel" id="screen-create" aria-labelledby="tab-create" data-prototype="create" hidden>
+              <div class="ace-window">
+                <nav class="ace-nav" aria-label="Ace 主导航"><img class="ace-logo" src="../../design/reference-assets/crew-logo-trans.png" alt="Ace"><div class="ace-nav__items"><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-chat"/></svg><span>对话</span></button><button class="ace-nav__item is-active" type="button"><svg class="ui-icon"><use href="#i-team"/></svg><span>同伴</span></button></div></nav>
+                <aside class="companion-rail"><div class="rail-header"><h3>群聊</h3><div class="rail-actions"><button class="icon-button" aria-label="创建群聊"><svg class="ui-icon"><use href="#i-plus"/></svg></button></div></div><div class="conversation-list"><p class="conversation-label">我的群聊 · 4</p><button class="conversation-row is-active" type="button"><span class="conversation-row__avatar is-group">产</span><span class="conversation-row__copy"><strong>同伴产品小队</strong><span>3 人 · 2 个 Agent</span></span></button><button class="conversation-row" type="button"><span class="conversation-row__avatar is-group">策</span><span class="conversation-row__copy"><strong>产品夜谈</strong><span>4 人 · 1 个 Agent</span></span></button></div></aside>
+                <main class="companion-main">
+                  <div class="main-header"><div class="main-header__copy"><strong>同伴产品小队</strong><span>管理成员、Agent 席位和群权限</span></div><div class="main-actions"><button class="btn btn--primary" type="button">进入群聊</button><button class="icon-button" aria-label="更多"><svg class="ui-icon"><use href="#i-more"/></svg></button></div></div>
+                  <div class="management-canvas">
+                    <div class="management-heading"><div><h2>3 位成员，2 个 Agent</h2><p>Agent 只在主人仍是本群成员时可用</p></div><span class="source-chip">Nearby Group</span></div>
+                    <div class="management-grid">
+                      <section class="management-panel"><h3>人类成员</h3><p>先管理人，再管理各自的 Agent。</p><div class="profile-card"><span class="mini-avatar">我</span><div class="profile-card__copy"><strong>AHUAMAO</strong><span>群主 · 已连接</span></div><span class="tag">带着 Ace</span></div><div class="profile-card"><span class="mini-avatar">林</span><div class="profile-card__copy"><strong>林墨</strong><span>成员 · 已连接</span></div><span class="tag">带着 Mori</span></div><div class="profile-card"><span class="mini-avatar">乔</span><div class="profile-card__copy"><strong>乔安</strong><span>成员 · 暂时离线</span></div><span class="tag">未带 Agent</span></div><button class="btn" type="button" style="margin-top:14px">邀请同伴</button></section>
+                      <aside class="management-panel"><h3>Agent 席位</h3><p>每个 Agent 都有对应主人和独立开关。</p><div class="profile-card"><span class="mini-avatar is-agent">A</span><div class="profile-card__copy"><strong>Ace</strong><span>主人：AHUAMAO · 可被 @</span></div><button class="btn" type="button">暂停</button></div><div class="profile-card"><span class="mini-avatar is-agent">M</span><div class="profile-card__copy"><strong>Mori</strong><span>主人：林墨 · 可被 @</span></div><button class="btn" type="button">移出</button></div><div class="agent-card__rule">如果林墨退出本群，Mori 会自动离群；正在进行的任务暂停，历史消息保留。</div><button class="btn" type="button">添加 Agent</button></aside>
+                    </div>
+                  </div>
+                </main>
+              </div>
+            </section>
+
+            <section class="prototype-screen" role="tabpanel" id="screen-group" aria-labelledby="tab-group" data-prototype="group" hidden>
+              <div class="ace-window">
+                <nav class="ace-nav" aria-label="Ace 主导航"><img class="ace-logo" src="../../design/reference-assets/crew-logo-trans.png" alt="Ace"><div class="ace-nav__items"><button class="ace-nav__item is-active" type="button"><svg class="ui-icon"><use href="#i-chat"/></svg><span>对话</span></button><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-team"/></svg><span>同伴</span></button><button class="ace-nav__item" type="button"><svg class="ui-icon"><use href="#i-wiki"/></svg><span>Wiki</span></button></div></nav>
+                <aside class="companion-rail">
+                  <div class="rail-header"><h3>对话</h3><div class="rail-actions"><button class="icon-button" aria-label="新对话"><svg class="ui-icon"><use href="#i-plus"/></svg></button></div></div>
+                  <div class="conversation-list"><p class="conversation-label">同伴</p><button class="conversation-row is-active" type="button"><span class="conversation-row__avatar is-group">产</span><span class="conversation-row__copy"><strong>同伴产品小队</strong><span>2 个 Agent 正在协作</span></span><span class="unread">3</span></button><button class="conversation-row" type="button"><span class="conversation-row__avatar">林</span><span class="conversation-row__copy"><strong>林墨</strong><span>明天几点碰一下？</span></span></button><p class="conversation-label">Ace</p><button class="conversation-row" type="button"><span class="conversation-row__avatar is-group">A</span><span class="conversation-row__copy"><strong>重构主对话</strong><span>本地 Agent 会话</span></span></button></div>
+                </aside>
+                <main class="companion-main">
+                  <div class="main-header"><div class="main-header__identity"><span class="conversation-row__avatar is-group">产</span><div class="main-header__copy"><strong>同伴产品小队</strong><span>3 位成员 · 2 个 Agent · 主人均在群</span></div><span class="source-chip">同伴群聊</span></div><div class="main-actions"><button class="btn" type="button"><svg class="ui-icon"><use href="#i-users"/></svg>群资料</button><button class="icon-button" aria-label="群聊菜单"><svg class="ui-icon"><use href="#i-more"/></svg></button></div></div>
+                  <div class="chat-stream">
+                    <div class="messages">
+                      <article class="message"><span class="message__avatar">林</span><div class="message__body"><span class="message__meta">林墨 · 15:02</span><div class="message__bubble">核心就是别让用户先学蓝牙。@Mori @Ace 请一起把首页路径压到 3 步。</div></div></article>
+                      <article class="collab-card">
+                        <header class="collab-card__head"><div><small>多 Agent 协作</small><h4>把同伴首页路径压到 3 步</h4></div><span class="collab-status">进行中</span></header>
+                        <div class="collab-card__agents"><div class="agent-stack"><span class="mini-avatar is-agent">M</span><span class="mini-avatar is-agent">A</span></div><span>Mori（主人：林墨）负责产品逻辑，Ace（主人：AHUAMAO）负责技术可行性</span></div>
+                        <div class="collab-steps"><div class="collab-step is-done"><i>✓</i><span>Mori 已给出 3 步用户路径</span><em>完成</em></div><div class="collab-step"><i>2</i><span>Ace 正在核对现有协议映射</span><em>执行中</em></div><div class="collab-step"><i>3</i><span>汇总差异并等待人确认</span><em>待开始</em></div></div>
+                        <footer class="collab-card__footer"><span>第 1 / 3 轮 · 已用 2 / 8 次 Agent 发言</span><button class="btn btn--ghost" type="button">停止协作</button></footer>
+                      </article>
+                      <article class="message is-agent"><span class="message__avatar">M</span><div class="message__body"><span class="message__meta">Mori · 主人林墨在群 <span class="agent-badge">Agent</span></span><div class="message__bubble">建议路径：同伴页发现与管理 → 人类私聊回主对话 → 需要 Agent 时创建有主人的群。</div></div></article>
+                    </div>
+                    <div class="composer-wrap"><div class="composer"><button class="btn btn--icon btn--ghost" aria-label="添加附件"><svg class="ui-icon"><use href="#i-attach"/></svg></button><div class="composer__text">回复群聊，输入 @ 可呼叫主人在群且已授权的 Agent</div><button class="btn btn--icon btn--primary" aria-label="发送"><svg class="ui-icon"><use href="#i-send"/></svg></button></div></div>
+                  </div>
+                </main>
+              </div>
+            </section>
+          </div>
+        </div>
+        <div class="prototype-annotation" aria-label="UI 稿关键说明">
+          <div class="annotation"><strong>清晰分工</strong><span>同伴页只管理对象；“发消息”和“进入群聊”均跳转主对话。</span></div>
+          <div class="annotation"><strong>安全可见</strong><span>私聊只显示人物；群聊中的每个 Agent 都展示主人及在群状态。</span></div>
+          <div class="annotation"><strong>低交互密度</strong><span>每个管理状态只保留一个黑色主动作，其余操作进入详情或更多菜单。</span></div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="pages">
+        <p class="section-kicker">09 · Page Specification</p>
+        <h2>页面功能和交互规则</h2>
+        <div class="page-specs">
+          <article class="page-spec"><h3>发现同伴</h3><ul><li>进入同伴页自动扫描，无需单独“开始扫描”</li><li>主区一次聚焦 1 张同伴双生名片</li><li>主动作“打个招呼”，次动作只有“暂时略过”</li><li>只显示大致距离：就在旁边、附近、信号较弱</li><li>权限失败才展示平台专属修复横幅</li></ul></article>
+          <article class="page-spec"><h3>同伴与邀约</h3><ul><li>同伴关系只建立在人与人之间</li><li>邀请允许附 1 句开场白，接受后创建人类私聊 Session</li><li>人物主动作“发消息”跳转主对话并恢复同一私聊</li><li>随行 Agent 只作能力预览，不随接受关系自动授权</li><li>移除同伴进入人物名片的更多菜单</li></ul></article>
+          <article class="page-spec"><h3>人与人私聊</h3><ul><li>在主对话页打开，标题只展示两个人类身份</li><li>输入 @ 不展示 Agent 候选，路由也拒绝 agent.request</li><li>需要 Agent 时提供“一起建群”，不提供临时私聊例外</li><li>对方离线时历史只读可见，草稿保留且不伪装发送</li><li>从标题“同伴”来源标识可返回人物资料</li></ul></article>
+          <article class="page-spec"><h3>创建与管理群聊</h3><ul><li>第一步只选人和群名，不自动携带任何 Agent</li><li>人加入后，各主人分别决定是否携带自己的 Agent</li><li>添加他人 Agent 时，系统先验证其主人已是群成员</li><li>主人离群，所属 Agent 自动离群并暂停任务</li><li>“进入群聊”跳转主对话，不在同伴页展开消息流</li></ul></article>
+          <article class="page-spec"><h3>人机群聊</h3><ul><li>主对话页沿用消息流、输入框、附件和历史列表</li><li>@候选按人和 Agent 分组；Agent 行必须显示主人</li><li>单 Agent 回复显示“主人在群”，多 Agent 使用有界任务卡</li><li>Agent 文本中的 @ 不自动唤醒另一个 Agent</li><li>群资料返回同伴页的群管理详情</li></ul></article>
+          <article class="page-spec"><h3>Agent 名片</h3><ul><li>展示名称、主人、擅长事项、可加入群和工具授权结果</li><li>不存在“私聊”“问问 Agent”或复制私聊链接</li><li>他人主动作是“加入共同群”；没有合格群时是“与主人一起建群”</li><li>主人按群设置是否可被 @、是否纯文本回复和工具白名单</li><li>模型密钥与审批细节永远不向其他成员公开</li></ul></article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="safety">
+        <p class="section-kicker">10 · Permission &amp; Safety</p>
+        <h2>好友、同群、Agent 授权必须逐层成立</h2>
+        <p class="section-lead">成为同伴只开放人与人通信。Agent 参与还必须满足“主人在群”和“本群已授权”；工具执行继续经过更细的白名单与本机审批。</p>
+        <div class="permission-layers">
+          <div class="permission-layer"><strong>关系层 · 同伴</strong><p>允许人与人私聊、看见在线状态、互相邀请进群</p><span>不包含任何 Agent 权限</span></div>
+          <div class="permission-layer"><strong>群席位 · 可呼叫</strong><p>主人是群成员，且主人明确允许 Agent 加入本群</p><span>离开本群即自动失效</span></div>
+          <div class="permission-layer"><strong>工具层 · 可执行</strong><p>按工具集白名单开放能力，继续经过 Ace 安全审批</p><span>默认空，不因同伴关系继承</span></div>
+        </div>
+        <div class="risk-note"><strong>正式发布阻断项：</strong>当前 peer_token 不能替代完整的链路加密与身份校验。如果同伴承载真实工作内容，应先完成端到端加密；否则界面必须明确标注“仅适合可信近距离环境”，不得暗示通信天然安全。</div>
+        <table class="spec-table">
+          <thead><tr><th>异常</th><th>界面处理</th><th>用户下一步</th></tr></thead>
+          <tbody>
+            <tr><td>蓝牙权限缺失</td><td>页面顶部平台专属横幅，不占用会话主区</td><td>打开系统设置</td></tr>
+            <tr><td>对方离开范围</td><td>会话保留并标注“暂时离线”</td><td>等待靠近后重连</td></tr>
+            <tr><td>私聊尝试调用 Agent</td><td>不发送，并解释“请创建有主人的群聊”</td><td>邀请双方主人一起建群</td></tr>
+            <tr><td>Agent 主人离群</td><td>Agent 立即变为已离群，任务暂停</td><td>重新邀请主人后由主人再次授权</td></tr>
+            <tr><td>工具未授权</td><td>Agent 回复说明“需要主人批准”</td><td>主人本机审批</td></tr>
+            <tr><td>协作达到上限</td><td>任务卡暂停并给出当前结论</td><td>人选择继续一轮或结束</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="doc-section" id="delivery">
+        <p class="section-kicker">11 · Architecture Mapping</p>
+        <h2>复用主对话的界面，按会话来源切换传输</h2>
+        <div class="roadmap">
+          <article class="roadmap-phase is-focus"><small>P0 · SHELL</small><h3>管理与对话分层</h3><p>同伴页收敛为 Hub，主对话接入 Nearby Session。</p><ul><li>发现 / 同伴 / 群聊管理</li><li>openSessionInChat 跳转</li><li>nearby_dm / nearby_room 绑定</li><li>NearbyTransport</li><li>私聊 Agent 后端硬拦截</li></ul></article>
+          <article class="roadmap-phase"><small>P1 · IDENTITY</small><h3>关系与 Agent 席位</h3><p>补齐可持久化的人类关系和群内 Agent 生命周期。</p><ul><li>connect.request / accept</li><li>同伴持久化与屏蔽</li><li>Agent room membership</li><li>主人离群级联退出</li><li>群级授权与审批</li></ul></article>
+          <article class="roadmap-phase"><small>P2 · COLLAB</small><h3>有界多 Agent 协作</h3><p>在主人在群校验之上增加结构化编排。</p><ul><li>collaboration task</li><li>双方主人校验</li><li>轮次、次数和暂停恢复</li><li>结果转入 Ace 任务</li><li>端到端加密</li></ul></article>
+        </div>
+        <table class="spec-table">
+          <thead><tr><th>目标能力</th><th>现有实现</th><th>判断</th></tr></thead>
+          <tbody>
+            <tr><td>发现双生名片</td><td>PeerInfo 已有 display_name、agent_name、capabilities</td><td>P0 可直接映射</td></tr>
+            <tr><td>人 ↔ 人私聊</td><td>peer.message + DM history</td><td>P0 已具备</td></tr>
+            <tr><td>同伴点击后打开主对话</td><td>已有 openSessionInChat 与 setTab('chat') 模式</td><td>P0 复用既有跳转</td></tr>
+            <tr><td>Nearby 会话进入主对话</td><td>现有 Session 无通用 Nearby binding；发送仍直连 Gateway</td><td>P0 新增 ConversationBinding 与 Transport</td></tr>
+            <tr><td>人 ↔ Agent 私聊</td><td>现有 agent.request / response 技术上可直连</td><td>产品禁止；P0 改为仅接受 room_id</td></tr>
+            <tr><td>人群聊与文件</td><td>Room、mentions、file chunks、owner</td><td>P0 已具备</td></tr>
+            <tr><td>打招呼确认</td><td>当前 connect_peer 直接建立连接</td><td>P1 新增关系协议</td></tr>
+            <tr><td>Agent 群内席位</td><td>当前 Agent 作为 Peer 的隐含子身份</td><td>P1 新增 owner_id + room_id 成员模型</td></tr>
+            <tr><td>多 Agent 有界协作</td><td>当前 auto 模式为房间级广播响应</td><td>P1 用任务协调器替换</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="doc-section" id="acceptance">
+        <p class="section-kicker">12 · Metrics &amp; Acceptance</p>
+        <h2>成功终点是安全地完成协作，不是扫描到一台设备</h2>
+        <div class="acceptance">
+          <div class="acceptance-item"><i>✓</i><div><strong>首聊速度</strong><span>首次用户从打开同伴页到发出第一条消息 ≤ 60 秒</span></div></div>
+          <div class="acceptance-item"><i>✓</i><div><strong>操作密度</strong><span>任意页面同时出现的强调按钮 ≤ 1 个</span></div></div>
+          <div class="acceptance-item"><i>✓</i><div><strong>主对话复用</strong><span>发消息或进入群聊后只切换页面，不出现第二套聊天组件</span></div></div>
+          <div class="acceptance-item"><i>✓</i><div><strong>身份辨认</strong><span>盲测用户能区分人、Agent 及 Agent 的主人</span></div></div>
+          <div class="acceptance-item"><i>✓</i><div><strong>私聊硬边界</strong><span>UI 与后端都无法在 DM 中创建任何 Agent 请求</span></div></div>
+          <div class="acceptance-item"><i>✓</i><div><strong>主人在群</strong><span>主人离群后 Agent 在 1 个状态周期内退出候选与任务队列</span></div></div>
+          <div class="acceptance-item"><i>✓</i><div><strong>桌面窗口</strong><span>1440px 与 1024px 宽度下无功能遮挡或按钮换行</span></div></div>
+        </div>
+        <h3 style="margin-top:34px">核心埋点漏斗</h3>
+        <table class="spec-table">
+          <thead><tr><th>阶段</th><th>事件</th><th>重点拆分</th></tr></thead>
+          <tbody>
+            <tr><td>发现</td><td>nearby_open → peer_visible → profile_view</td><td>平台、权限、扫描失败</td></tr>
+            <tr><td>关系</td><td>wave_sent → wave_accepted → dm_created</td><td>接受率、忽略率、耗时</td></tr>
+            <tr><td>沟通</td><td>dm_human_sent / room_agent_mentioned</td><td>私聊与群聊严格分开统计</td></tr>
+            <tr><td>群组</td><td>room_created → invite_accepted → first_group_message</td><td>邀请人数、成功率</td></tr>
+            <tr><td>协作</td><td>collab_started → human_intervention → collab_completed</td><td>轮次、停止原因、结果采纳</td></tr>
+          </tbody>
+        </table>
+        <h3 style="margin-top:34px">设计与技术依据</h3>
+        <ul class="source-list">
+          <li><code>design/desktop-design-system.md</code> 与 <code>design/ace-ui-design-system.html</code></li>
+          <li><code>nearby/src/protocol.rs</code>、<code>nearby/src/ipc.rs</code> 与 Nearby Desktop Bridge</li>
+          <li><code>desktop/src/ui/features/nearby-*.ts</code>、<code>chat-controller.ts</code> 与 <code>history-mapping.ts</code></li>
+          <li><code>desktop/src/ui/state.ts</code>、Session Store 与 Channel Session 分组实现</li>
+          <li>本地 Buzz 的 Channel、Members、Agent Picker 与群聊交互结构</li>
+        </ul>
+      </section>
+
+      <footer class="doc-footer">Ace 同伴 Product Requirement Document · V1.0 · 2026.08.27</footer>
+    </main>
+  </div>
+
+  <script>
+    const tabs = [...document.querySelectorAll(".prototype-tab")];
+    const screens = [...document.querySelectorAll(".prototype-screen")];
+    function selectPrototype(name, focus = false) {
+      tabs.forEach((tab) => {
+        const selected = tab.dataset.screen === name;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        if (selected && focus) tab.focus();
+      });
+      screens.forEach((screen) => {
+        screen.hidden = screen.dataset.prototype !== name;
+      });
+    }
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => selectPrototype(tab.dataset.screen));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        let next = index;
+        if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+        if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+        if (event.key === "Home") next = 0;
+        if (event.key === "End") next = tabs.length - 1;
+        selectPrototype(tabs[next].dataset.screen, true);
+      });
+    });
+    selectPrototype("discovery");
+  </script>
+</body>
+</html>

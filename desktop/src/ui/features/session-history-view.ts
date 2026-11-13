@@ -12,7 +12,11 @@ import {
 import { sessionStore } from '../stores/session-store';
 import { workspaceStore } from '../stores/workspace-store';
 import { isChannelSessionId } from './channel-sessions';
-import { isSessionVisibleWithExternalAgentsFlag } from './external-agents-feature';
+import {
+  isExternalAgentSession,
+  isExternalTeamSession,
+  isSessionVisibleWithExternalAgentsFlag,
+} from './external-agents-feature';
 import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 import { openSessionActionsMenu, togglePin } from './session-actions';
 
@@ -88,10 +92,9 @@ function visibleWorkspaces(): Workspace[] {
 
 function sessionIdentity(session: SessionRow, workspace?: Workspace): string {
   if (session.channelPlatform) return `渠道 · ${session.badge || session.channelPlatform}`;
-  const provider = String(session.agentLabel?.provider || '').toLocaleLowerCase();
   const name = session.agentLabel?.name?.trim();
-  if (provider === 'team') return `Team${name ? ` · ${name}` : ''}`;
-  if (provider && !['crew', 'builtin', 'client'].includes(provider)) {
+  if (isExternalTeamSession(session.agentBinding)) return `Team${name ? ` · ${name}` : ''}`;
+  if (isExternalAgentSession(session.agentBinding)) {
     return name ? `${name} · Agent` : 'Agent';
   }
   if (workspace) return workspace.name;
@@ -102,15 +105,21 @@ function sessionIcon(session: SessionRow): IconId | null {
   if (session.channelPlatform) return 'icon-task';
   const provider = String(session.agentLabel?.provider || '').toLocaleLowerCase();
   if (provider === 'sites') return 'icon-inspiration';
-  if (provider === 'team') return 'icon-team';
-  if (provider && !['crew', 'builtin', 'client'].includes(provider)) return null;
+  if (isExternalTeamSession(session.agentBinding) || isExternalAgentSession(session.agentBinding)) return null;
   return 'icon-task';
+}
+
+function createTeamLogo(): HTMLElement {
+  const logo = document.createElement('span');
+  logo.className = 'session__team-logo';
+  logo.setAttribute('aria-hidden', 'true');
+  logo.append(document.createElement('i'), document.createElement('i'));
+  return logo;
 }
 
 function hasVisibleIdentity(session: SessionRow): boolean {
   if (session.channelPlatform) return true;
-  const provider = String(session.agentLabel?.provider || '').toLocaleLowerCase();
-  return provider === 'team' || Boolean(provider && !['crew', 'builtin', 'client'].includes(provider));
+  return isExternalTeamSession(session.agentBinding) || isExternalAgentSession(session.agentBinding);
 }
 
 function createButton(
@@ -312,14 +321,19 @@ export function createSessionHistoryView(
     const identityIcon = open.querySelector<HTMLElement>('[data-session-identity-icon]')!;
     const desiredIcon = sessionIcon(session);
     const provider = String(session.agentLabel?.provider || '').trim();
+    const isTeamSession = isExternalTeamSession(session.agentBinding);
     const providerInitial = externalAgentInitial(provider, session.agentLabel?.display_badge);
-    const desiredIdentity = desiredIcon
+    const desiredIdentity = isTeamSession
+      ? 'team-logo'
+      : desiredIcon
       ? `icon:${desiredIcon}`
       : `provider:${provider.toLocaleLowerCase()}:${providerInitial}`;
     if (identityIcon.dataset.icon !== desiredIdentity) {
       identityIcon.dataset.icon = desiredIdentity;
       identityIcon.className = 'mw-session-history__identity-icon';
-      if (desiredIcon) {
+      if (isTeamSession) {
+        identityIcon.replaceChildren(createTeamLogo());
+      } else if (desiredIcon) {
         identityIcon.replaceChildren(createIcon(desiredIcon, { size: 16 }));
       } else {
         identityIcon.classList.add(

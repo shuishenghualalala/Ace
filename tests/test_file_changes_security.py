@@ -75,3 +75,20 @@ def test_sensitive_files_are_not_exposed_as_text_diffs(tmp_path):
     assert state.binary is True
     assert change["binary"] is True
     assert change["diff"] == []
+
+
+def test_delete_oversized_file_yields_metadata_only(tmp_path):
+    target = tmp_path / "big.bundle"
+    target.write_bytes(b"x" * (FILE_CHANGE_MAX_BYTES + 1))
+
+    before = read_file_state(target)
+    assert before == FileState(True, binary=True)
+
+    target.unlink()
+    change = file_change_from_states(target, before, FileState(False))
+
+    assert change["status"] == "deleted"
+    assert change["binary"] is True
+    assert change["diff"] == []
+    assert change["added"] == 0
+    assert change["removed"] == 0

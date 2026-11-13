@@ -11,7 +11,7 @@ from crew.core.runctx import current_owner_account_id
 def register_task_tools(registry: Any, runtime: Any) -> None:
     async def _get(args: dict[str, Any]) -> str:
         owner = current_owner_account_id.get()
-        return json.dumps(runtime.get(str(args.get("task_id") or ""), owner_account_id=owner), ensure_ascii=False)
+        return json.dumps(await runtime.get_async(str(args.get("task_id") or ""), owner_account_id=owner), ensure_ascii=False)
 
     async def _wait(args: dict[str, Any]) -> str:
         owner = current_owner_account_id.get()
@@ -34,7 +34,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
     async def _list(args: dict[str, Any]) -> str:
         return json.dumps(
             {
-                "tasks": runtime.list_tasks(
+                "tasks": await runtime.list_tasks_async(
                     session_id=str(args.get("session_id") or "") or None,
                     status=str(args.get("status") or "") or None,
                     limit=int(args.get("limit") or 100),
@@ -62,6 +62,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="查询任务 {task_id}",
         should_defer=True,
         search_hint="task get status result background runtime",
+        result_retention="important",
     )
     registry.register(
         name="task_wait",
@@ -84,6 +85,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="等待任务 {task_id}",
         should_defer=True,
         search_hint="task wait background runtime completion timeout",
+        result_retention="important",
     )
     registry.register(
         name="task_cancel",
@@ -106,6 +108,7 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="取消任务 {task_id}",
         should_defer=True,
         search_hint="task cancel stop background runtime",
+        result_retention="important",
     )
     registry.register(
         name="task_list",
@@ -128,4 +131,5 @@ def register_task_tools(registry: Any, runtime: Any) -> None:
         ui_label_template="列出任务",
         should_defer=True,
         search_hint="task list background runtime status session",
+        result_retention="temporary",
     )

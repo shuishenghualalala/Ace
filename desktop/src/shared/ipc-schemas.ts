@@ -830,6 +830,21 @@ export const DialogSaveLocalExportArgs = {
   },
 };
 
+/** tracing:save-export accepts only a server-issued opaque export id. */
+export interface TracingSaveExportArgs {
+  exportId: string;
+}
+
+export const TracingSaveExportArgs = {
+  parse(raw: unknown): ParseResult<TracingSaveExportArgs> {
+    if (!isPlainObject(raw)) return fail('args', 'expected object');
+    const exportId = StringSchema.parse(raw['exportId'], 'exportId');
+    if (!exportId.ok) return exportId;
+    if (!/^[0-9a-f]{32}$/i.test(exportId.value)) return fail('exportId', 'must be a server-issued id');
+    return { ok: true, value: { exportId: exportId.value } };
+  },
+};
+
 export interface InspirationWindowArgs {
   inspirationId: string;
   title?: string;

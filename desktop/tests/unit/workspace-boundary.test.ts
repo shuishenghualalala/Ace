@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __resetAllStoresForTest, configStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, configStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
 import { setActiveSessionId, setCurrentWorkspaceId } from '../../src/ui/state';
 import {
   canSwitchComposerWorkspace,
@@ -38,6 +38,8 @@ beforeEach(() => {
   __resetAllStoresForTest();
   __resetSessionModelBindingsForTest();
   vi.clearAllMocks();
+  // auth-gate 为真实登录判定：local 桌面会话由 initAuthFlow 置为已登录，测试模拟该态。
+  authStore.set({ isLoggedIn: true });
 });
 
 describe('workspace/session boundary', () => {
@@ -47,10 +49,12 @@ describe('workspace/session boundary', () => {
       id,
       { name: 'Kimi', provider: 'kimi', model: 'kimi' },
       'kimi',
+      { kind: 'external_agent', id: 'agent-kimi' },
     );
 
     expect(getSessionAgentDisplay(id)).toEqual({
       agentLabel: { name: 'Kimi', provider: 'kimi', model: 'kimi' },
+      agentBinding: { kind: 'external_agent', id: 'agent-kimi' },
       modelLabel: 'kimi',
     });
     applySessionModelBinding(id, {
@@ -62,13 +66,19 @@ describe('workspace/session boundary', () => {
     commitDraftSession(id, '你好', '你好', vi.fn());
     expect(sessionStore.get().sessions.find((session) => session.id === id)).toMatchObject({
       agentLabel: { name: 'Kimi', provider: 'kimi', model: 'kimi' },
+      agentBinding: { kind: 'external_agent', id: 'agent-kimi' },
       modelLabel: 'kimi',
     });
   });
 
   it('first-send title replaces an early hydrated placeholder session', () => {
     const id = createSessionInWorkspace('default', vi.fn());
-    assignSessionAgentDisplay(id, { name: '小游戏团队', provider: 'team' });
+    assignSessionAgentDisplay(
+      id,
+      { name: '小游戏团队', provider: 'team' },
+      '',
+      { kind: 'external_team', id: 'team-game' },
+    );
     sessionStore.set({
       sessions: [{
         id,
@@ -77,6 +87,7 @@ describe('workspace/session boundary', () => {
         preview: '',
         badge: '主智能体',
         workspaceId: 'default',
+        agentBinding: { kind: 'external_team', id: 'team-game' },
       }],
     });
 

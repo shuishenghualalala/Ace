@@ -34,6 +34,15 @@ type FormationUiStatus =
   | "ready_unchanged"
   | "ready_partial";
 
+function TeamLogo({ className = "" }: { className?: string }) {
+  return (
+    <span className={`session__team-logo${className ? ` ${className}` : ""}`} aria-hidden="true">
+      <i />
+      <i />
+    </span>
+  );
+}
+
 const TEAM_DRAFT_DEBOUNCE_MS = 600;
 export const TEAM_REQUIRED_CAPABILITIES = [
   { key: "information_retrieval", label: "检索", prompt: "必须包含信息检索能力。" },
@@ -427,7 +436,7 @@ const runtimeStatusLabel = {
   unavailable: "暂时不可用",
 };
 
-export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderChat }: Props) {
+export default function AgentsHub({ onAssignAgent, onAssignTeam }: Props) {
   const [tab, setTab] = useState<TabKey>("mine");
   const [runtimes, setRuntimes] = useState<ExternalRuntime[]>([]);
   const [runtimeScanning, setRuntimeScanning] = useState(false);
@@ -457,6 +466,9 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
   const [teamWorkflow, setTeamWorkflow] = useState("");
   const [teamSpec, setTeamSpec] = useState<Record<string, unknown> | null>(null);
   const [formationPlan, setFormationPlan] = useState<FormationPlan | null>(null);
+  const [allowSystemFill, setAllowSystemFill] = useState(true);
+  const [runtimeAllowSuggestions, setRuntimeAllowSuggestions] = useState(true);
+  const [runtimeAllowAutoReassign, setRuntimeAllowAutoReassign] = useState(true);
   const [formationStatus, setFormationStatus] = useState<FormationUiStatus>("idle");
   const [formationStartedAt, setFormationStartedAt] = useState<number | null>(null);
   const [formationElapsedMs, setFormationElapsedMs] = useState(0);
@@ -483,6 +495,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
   const [teamConstraintDecision, setTeamConstraintDecision] = useState<RequiredAgentConflict[] | null>(null);
   const [selectedMembers, setSelectedMembers] = useState<Record<string, boolean>>({});
   const [memberRoles, setMemberRoles] = useState<Record<string, string>>({});
+  const [userEditedResponsibilities, setUserEditedResponsibilities] = useState<Record<string, boolean>>({});
   const [memberRoleKeys, setMemberRoleKeys] = useState<Record<string, string>>({});
   const [memberRoleMeta, setMemberRoleMeta] = useState<Record<string, ExternalTeamRole>>({});
   const [teamRolesLocked, setTeamRolesLocked] = useState(false);
@@ -847,14 +860,12 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                 controller.signal.aborted
                 || descriptionDraftSeq.current !== requestId
               ) return;
-              setTeamDescription(text);
               setGeneratedTeamDescription(text);
               lastDescriptionDraftName.current = name;
             },
             onDraft: (draft, phase, meta) => {
               if (controller.signal.aborted || descriptionDraftSeq.current !== requestId) return;
               if (draft.description) {
-                setTeamDescription(draft.description);
                 setGeneratedTeamDescription(draft.description);
                 lastDescriptionDraftName.current = name;
               }
@@ -936,7 +947,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
   const openRoleEditor = (agent: ExternalAgent) => {
     setEditingAgent(agent);
     setEditingRole(memberRoles[agent.id] || (agent.id === teamLeaderId ? defaultLeaderRole : ""));
-    setEditingRoleKey(memberRoleKeys[agent.id] || (agent.id === teamLeaderId ? "project_manager" : "fullstack_developer"));
+    setEditingRoleKey(memberRoleKeys[agent.id] || (agent.id === teamLeaderId ? "project_manager" : "unclassified"));
     setRoleError("");
   };
 
@@ -944,7 +955,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
     rolePresets.find((role) => role.key === roleKey);
 
   const generateRoleForAgent = async (agent: ExternalAgent, roleKey: string) => {
-    const key = roleKey || "fullstack_developer";
+    const key = roleKey || "unclassified";
     setRoleGenerating((prev) => ({ ...prev, [agent.id]: true }));
     setRoleError("");
     try {
@@ -991,9 +1002,12 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
     }
     setSelectedMembers((prev) => ({ ...prev, [editingAgent.id]: true }));
     setMemberRoles((prev) => ({ ...prev, [editingAgent.id]: role }));
-    setMemberRoleKeys((prev) => ({ ...prev, [editingAgent.id]: editingRoleKey || "fullstack_developer" }));
+    setUserEditedResponsibilities((prev) => ({ ...prev, [editingAgent.id]: true }));
+    setMemberRoleKeys((prev) => ({ ...prev, [editingAgent.id]: editingRoleKey || "unclassified" }));
     const preset = roleMetaForKey(editingRoleKey);
-    if (preset) setMemberRoleMeta((prev) => ({ ...prev, [editingAgent.id]: preset }));
+    if (preset && !(teamRolesLocked && selectedMembers[editingAgent.id])) {
+      setMemberRoleMeta((prev) => ({ ...prev, [editingAgent.id]: preset }));
+    }
     const keepRoleLocked = teamRolesLocked && (selectedMembers[editingAgent.id] || editingAgent.id === teamLeaderId);
     if (!keepRoleLocked) invalidateFormationDecision();
     setEditingAgent(null);
@@ -1005,6 +1019,11 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
   const removeMember = (agentId: string) => {
     if (agentId === teamLeaderId) return;
     setSelectedMembers((prev) => ({ ...prev, [agentId]: false }));
+    setUserEditedResponsibilities((prev) => {
+      const next = { ...prev };
+      delete next[agentId];
+      return next;
+    });
     setMemberRoles((prev) => {
       const next = { ...prev };
       delete next[agentId];
@@ -1060,17 +1079,24 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
     const roleMeta: Record<string, ExternalTeamRole> = {};
     suggestion.members.forEach((member) => {
       selected[member.agent_id] = true;
-      roles[member.agent_id] = member.role;
-      if (member.role_key) roleKeys[member.agent_id] = member.role_key;
+      roles[member.agent_id] = userEditedResponsibilities[member.agent_id] ? (memberRoles[member.agent_id] || member.role) : member.role;
+      if (member.role_key) roleKeys[member.agent_id] = userEditedResponsibilities[member.agent_id] ? (memberRoleKeys[member.agent_id] || member.role_key) : member.role_key;
       if (member.role_key) {
         roleMeta[member.agent_id] = {
-          key: member.role_key,
-          label: member.role_label || member.role_key,
+          key: roleKeys[member.agent_id],
+          label: userEditedResponsibilities[member.agent_id] ? (memberRoleMeta[member.agent_id]?.label || member.role_label || member.role_key) : (member.role_label || member.role_key),
           description: rolePresets.find((role) => role.key === member.role_key)?.description || "",
-          capabilities: member.capabilities || [],
-          workflow_lane: member.workflow_lane || "build",
+          capabilities: userEditedResponsibilities[member.agent_id] ? (memberRoleMeta[member.agent_id]?.capabilities || []) : (member.capabilities || []),
+          workflow_lane: userEditedResponsibilities[member.agent_id] ? (memberRoleMeta[member.agent_id]?.workflow_lane || "other") : (member.workflow_lane || "other"),
         };
       }
+    });
+    Object.keys(userEditedResponsibilities).forEach((id) => {
+      if (!userEditedResponsibilities[id] || !selectedMembers[id] || selected[id]) return;
+      selected[id] = true;
+      roles[id] = memberRoles[id] || "";
+      if (memberRoleKeys[id]) roleKeys[id] = memberRoleKeys[id];
+      if (memberRoleMeta[id]) roleMeta[id] = memberRoleMeta[id];
     });
     if (suggestion.leader_agent_id) {
       selected[suggestion.leader_agent_id] = true;
@@ -1122,11 +1148,14 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
         name: teamName.trim(),
         description: [teamDescription.trim(), constraints && `组队约束：\n${constraints}`].filter(Boolean).join("\n\n"),
         leader_agent_id: teamLeaderId,
-        required_agent_ids: requiredAgentIds,
+        required_agent_ids: [...new Set([...requiredAgentIds, ...Object.keys(userEditedResponsibilities).filter((id) => selectedMembers[id])])],
         excluded_agent_ids: excludedAgentIds,
         force_required_agent_ids: forceRequiredAgentIds,
         required_capabilities: requiredTeamCapabilities,
         custom_capabilities: customTeamCapabilities,
+        allow_system_fill: allowSystemFill,
+        member_assignments: Object.keys(userEditedResponsibilities).filter((id) => selectedMembers[id] && userEditedResponsibilities[id])
+          .map((id) => ({ agent_id: id, responsibility: memberRoles[id], role_key: memberRoleKeys[id] })),
       };
       const suggestion = await api.suggestExternalTeamAuto(requestPayload, {
         signal: controller.signal,
@@ -1178,7 +1207,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
       setFormationStatus(fastApplied ? "ready_partial" : "idle");
       setMessage({
         tab: "create-team",
-        text: fastApplied ? "初步团队方案已保留，智能检查暂未完成" : "智能组队失败，请补充团队描述或稍后再试",
+        text: fastApplied ? "初步团队方案已保留，智能检查暂未完成" : `智能组队失败：${(error as Error).message || "请稍后重试"}`,
       });
     } finally {
       if (requestSeq === formationRequestSeq.current) {
@@ -1193,7 +1222,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
 
   const suggestTeam = () => requestTeamSuggestion(requiredTeamAgentIds);
 
-  const createTeam = async () => {
+  const createTeam = async (allowSingleLeader = false) => {
     if (!teamLeaderId) {
       setMessage({ tab: "create-team", text: "请选择 Leader" });
       return;
@@ -1214,31 +1243,43 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
       setMessage({ tab: "create-team", text: "Leader 需要填写职责后加入团队" });
       return;
     }
-    if (members.length === 1) {
+    if (members.length === 1 && !allowSingleLeader) {
       setSingleLeaderConfirm(true);
       return;
     }
     setBusy(true);
     setMessage(null);
     try {
-      const confirmedFormationPlan = formationPlan ? {
-        ...formationPlan,
+      const plan: FormationPlan = formationPlan || {
+        version: 1, leader_agent_id: teamLeaderId, members: [],
+        coverage: { required: [], covered: [], uncovered: [] },
+        confidence: { requirement: 1, capability_evidence: 0, coverage: 1, overall: 1 },
+        staffing_mode: "user_confirmed", excluded_agent_ids: [], reasons: [], warnings: [],
+      };
+      const confirmedFormationPlan = {
+        ...plan,
+        formation_allow_system_fill: allowSystemFill,
+        runtime_allow_suggestions: runtimeAllowSuggestions,
+        runtime_allow_auto_reassign: runtimeAllowAutoReassign,
         leader_agent_id: teamLeaderId,
         members: members.map((member) => {
-          const planned = formationPlan.members.find((item) => item.agent_id === member.agent_id);
+          const planned = plan.members.find((item) => item.agent_id === member.agent_id);
           return {
             agent_id: member.agent_id,
             role_key: member.role_key || planned?.role_key || "",
             role_label: member.role_label || planned?.role_label || "",
             assigned_capabilities: member.assigned_capabilities || planned?.assigned_capabilities || [],
-            responsibility: planned?.responsibility || {},
+            responsibility: userEditedResponsibilities[member.agent_id]
+              ? { ...(planned?.responsibility || {}), mission: member.role }
+              : planned?.responsibility || {},
             responsibility_markdown: member.role,
+            responsibility_source: userEditedResponsibilities[member.agent_id] ? "user" : planned?.responsibility_source || "system",
             selection_source: planned?.selection_source || "user",
             locked: planned?.locked ?? true,
             selection_reason: planned?.selection_reason || "用户确认的团队成员。",
           };
         }),
-      } : undefined;
+      };
       const created = await api.createExternalTeam({
         name: teamName.trim() || "我的团队",
         description: teamDescription.trim(),
@@ -1268,6 +1309,9 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
       setTeamWorkflow("");
       setTeamSpec(null);
       setFormationPlan(null);
+      setAllowSystemFill(true);
+      setRuntimeAllowSuggestions(true);
+      setRuntimeAllowAutoReassign(true);
       setStaffingDecision(null);
       setStaffingSelections([]);
       setPendingTemporaryMembers([]);
@@ -1281,6 +1325,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
       setTeamConstraintDecision(null);
       setSelectedMembers({});
       setMemberRoles({});
+      setUserEditedResponsibilities({});
       setMemberRoleKeys({});
       setMemberRoleMeta({});
       setTeamRolesLocked(false);
@@ -1540,16 +1585,17 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                   cancelDescriptionDraftRequest();
                   setDescriptionDraftMeta(null);
                   setTeamName(event.target.value);
+                  setGeneratedTeamDescription("");
                   invalidateFormationDecision();
                 }}
                 placeholder="例如：产品研发小队"
                 autoFocus
               />
-              <small>先起个名字，团队目标参考会自动补上。</small>
+              <small>先起个名字，其他信息均可稍后填写。</small>
             </label>
 
             <label>
-              <span>团队目标 <em>系统生成参考</em></span>
+              <span>团队目标 <em>选填</em></span>
               <textarea
                 className={descriptionDrafting ? "is-generating" : ""}
                 value={teamDescription}
@@ -1571,9 +1617,20 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                   ? `正在生成参考（${formatTeamDraftElapsed(descriptionDraftElapsedMs)}），无需等待也可以继续。`
                   : descriptionDraftMeta
                     ? `参考已生成 · ${descriptionDraftMeta.cacheHit ? "缓存" : formatLlmElapsed(descriptionDraftMeta.llmElapsedMs || 0)}`
-                    : "系统会按四个要点生成，你只需按需修改。"}
+                    : "可以留空，系统会根据实际任务安排工作。"}
               </small>
             </label>
+            {generatedTeamDescription && !teamDescription.trim() && !descriptionDrafting && (
+              <div className="team-create__goal-suggestion">
+                <small>AI 根据团队名称生成的参考</small>
+                <p style={{ whiteSpace: "pre-line" }}>{generatedTeamDescription}</p>
+                <button type="button" className="team-create__text-action" onClick={() => {
+                  setTeamDescription(generatedTeamDescription);
+                  setGeneratedTeamDescription("");
+                  invalidateFormationDecision();
+                }}>采用此参考</button>
+              </div>
+            )}
 
             <div className="agents-form__field team-create__leader">
               <span>Leader <em>已默认推荐</em></span>
@@ -1719,6 +1776,9 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                       <small className="team-capability-note">你填写的能力会一起提交，系统会从现有外援中尽量匹配。</small>
                     )}
                   </div>
+                  <label><input type="checkbox" checked={allowSystemFill} onChange={(event) => setAllowSystemFill(event.target.checked)} /> 组队时允许系统推荐其他成员</label>
+                  <label><input type="checkbox" checked={runtimeAllowSuggestions} onChange={(event) => setRuntimeAllowSuggestions(event.target.checked)} /> 执行遇到能力缺口时推荐临时成员（需确认）</label>
+                  <label><input type="checkbox" checked={runtimeAllowAutoReassign} onChange={(event) => setRuntimeAllowAutoReassign(event.target.checked)} /> 能力不足时允许自动改派给已有成员</label>
                 </div>
               )}
             </div>
@@ -1791,7 +1851,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
               <div className="team-review-section__head">
                 <div>
                   <strong>成员与职责</strong>
-                  <span>点击成员卡片可查看或修改完整职责。</span>
+                  <span>点击成员卡片可修改职责；能力标签是组队建议，执行前会再次检查。</span>
                 </div>
                 <em>{reviewAgents.length} 人</em>
               </div>
@@ -1876,7 +1936,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
             <div className="team-create__review-actions">
               <button className="agent-btn" type="button" disabled={formationRunning} onClick={() => invalidateFormationDecision()}>返回修改</button>
               <button className="agent-btn" type="button" disabled={busy} onClick={suggestTeam}>重新组队</button>
-              <button className="agent-btn agent-btn--dark" disabled={busy || !teamLeaderId} onClick={createTeam}>确认组队</button>
+              <button className="agent-btn agent-btn--dark" disabled={busy || !teamLeaderId} onClick={() => void createTeam()}>确认组队</button>
             </div>
           </div>
         )}
@@ -1953,7 +2013,6 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
       ) : (
         <div className="team-tile-grid">
           {teams.map((team) => {
-            const leader = agentById.get(team.leader_agent_id);
             return (
               <article
                 key={team.id}
@@ -1992,9 +2051,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                   </button>
                 </div>
                 <div className="team-tile__top">
-                  <div className="pixel-avatar pixel-avatar--leader" aria-hidden="true">
-                    <span>{leader?.display_badge || "?"}</span>
-                  </div>
+                  <TeamLogo />
                   <div>
                     <strong>{team.name}</strong>
                     <p>Leader: {leaderName(team)}</p>
@@ -2020,7 +2077,6 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
     </div>
   );
 
-  const leaderInActiveTeam = activeTeam ? agentById.get(activeTeam.leader_agent_id) : null;
   const agentsGuidePortal = typeof document === "undefined" || guideMode === "hidden"
     ? null
     : createPortal(
@@ -2145,13 +2201,11 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
           <div className="team-modal" onClick={(event) => event.stopPropagation()}>
             <div className="team-modal__head">
               <div className="team-modal__title">
-                <div className="pixel-avatar pixel-avatar--leader" aria-hidden="true">
-                  <span>{leaderInActiveTeam?.display_badge || "?"}</span>
-                </div>
+                <TeamLogo className="team-modal__team-logo" />
                 <div>
                   <span>团队</span>
                   <strong>{activeTeam.name}</strong>
-                  <p>Leader: {leaderInActiveTeam?.name || leaderName(activeTeam)}</p>
+                  <p>Leader: {agentById.get(activeTeam.leader_agent_id)?.name || leaderName(activeTeam)}</p>
                 </div>
               </div>
               <button
@@ -2170,6 +2224,22 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                 <p className="team-modal__plain">{activeTeam.description}</p>
               </section>
             )}
+            <section className="team-modal__section">
+              <h3>成员调配设置</h3>
+              <p className="team-modal__plain">创建时允许推荐其他成员：{activeTeam.formation_plan?.formation_allow_system_fill === false ? "否" : "是"}。</p>
+              {([
+                ["runtime_allow_suggestions", "执行时推荐临时成员（需确认）"],
+                ["runtime_allow_auto_reassign", "允许自动改派已有成员"],
+              ] as const).map(([key, label]) => (
+                <label key={key}><input type="checkbox" disabled={busy} checked={activeTeam.formation_plan?.[key] !== false} onChange={async (event) => {
+                  setBusy(true);
+                  try { await api.updateTeamStaffingPolicy(activeTeam.id, { [key]: event.target.checked }); await refresh(); }
+                  catch { setMessage({ tab: "mine", text: "调配设置保存失败，请重试。" }); }
+                  finally { setBusy(false); }
+                }} /> {label}</label>
+              ))}
+              <p className="team-modal__plain">设置用于之后新开始的任务，正在执行的任务保持原设置。</p>
+            </section>
             {activeTeam.instructions && (
               <section className="team-modal__section">
                 <h3>团队工作流</h3>
@@ -2268,55 +2338,25 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
       })()}
 
       {teamConstraintDecision && (
-        <div className="role-popover-backdrop" onClick={() => setTeamConstraintDecision(null)}>
+        <div className="role-popover-backdrop" onClick={() => { setTeamConstraintDecision(null); setTeamRolesLocked(false); }}>
           <div className="team-constraint-confirm" role="dialog" aria-modal="true" aria-labelledby="team-constraint-confirm-title" onClick={(event) => event.stopPropagation()}>
             <div className="team-constraint-confirm__head">
               <div>
-                <strong id="team-constraint-confirm-title">指定成员存在明确的能力差距</strong>
-                <p>系统只在能力画像证据充分时提示，不会把“能力未知”当成“不具备”。请选择按能力筛选，或遵循你的原始指定继续保留。</p>
+                <strong id="team-constraint-confirm-title">指定成员暂时无法加入</strong>
+                <p>请返回检查成员状态和组队要求，再重新组队。</p>
               </div>
-              <button className="agent-icon-btn" type="button" aria-label="关闭" onClick={() => setTeamConstraintDecision(null)}>×</button>
+              <button className="agent-icon-btn" type="button" aria-label="关闭" onClick={() => { setTeamConstraintDecision(null); setTeamRolesLocked(false); }}>×</button>
             </div>
             <div className="team-constraint-confirm__members">
               {teamConstraintDecision.map((conflict) => (
                 <div key={conflict.agent_id}>
                   <strong>{conflict.agent_name}</strong>
                   <span>{conflict.reason}</span>
-                  <small>
-                    判断能力：{conflict.required_capabilities.map((capability) => TEAM_CAPABILITY_LABELS[capability] || capability).join("、")}
-                    {` · 最高评分 ${Math.round(conflict.best_score * 100)}% · 采用阈值 50%`}
-                  </small>
                 </div>
               ))}
             </div>
             <div className="team-constraint-confirm__actions">
-              <button className="agent-icon-btn" type="button" onClick={() => setTeamConstraintDecision(null)}>返回修改</button>
-              <button
-                className="agent-btn"
-                type="button"
-                onClick={() => {
-                  const conflictIds = new Set(teamConstraintDecision.map((item) => item.agent_id));
-                  const nextRequiredIds = requiredTeamAgentIds.filter((agentId) => !conflictIds.has(agentId));
-                  const nextExcludedIds = Array.from(new Set([...excludedTeamAgentIds, ...conflictIds]));
-                  setRequiredTeamAgentIds(nextRequiredIds);
-                  setExcludedTeamAgentIds(nextExcludedIds);
-                  setTeamConstraintDecision(null);
-                  void requestTeamSuggestion(nextRequiredIds, [], nextExcludedIds);
-                }}
-              >
-                按能力筛选
-              </button>
-              <button
-                className="agent-btn agent-btn--dark"
-                type="button"
-                onClick={() => {
-                  const forcedIds = teamConstraintDecision.map((item) => item.agent_id);
-                  setTeamConstraintDecision(null);
-                  void requestTeamSuggestion(requiredTeamAgentIds, forcedIds);
-                }}
-              >
-                仍然加入团队
-              </button>
+              <button className="agent-icon-btn" type="button" onClick={() => { setTeamConstraintDecision(null); setTeamRolesLocked(false); }}>返回修改</button>
             </div>
           </div>
         </div>
@@ -2409,8 +2449,7 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
         <div className="role-popover-backdrop" onClick={() => setSingleLeaderConfirm(false)}>
           <div className="single-leader-confirm" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
             <strong>
-              当前只有 {agentById.get(teamLeaderId)?.name || "Leader"} 一名成员，已改为直接与{" "}
-              {agentById.get(teamLeaderId)?.name || "Leader"} 对话。
+              当前只有 {agentById.get(teamLeaderId)?.name || "Leader"} 一名成员。创建后可先由 Leader 处理任务。
             </strong>
             <div>
               <button className="agent-icon-btn" type="button" onClick={() => setSingleLeaderConfirm(false)}>
@@ -2420,13 +2459,11 @@ export default function AgentsHub({ onAssignAgent, onAssignTeam, onStartLeaderCh
                 className="agent-btn agent-btn--dark"
                 type="button"
                 onClick={() => {
-                  const leader = agentById.get(teamLeaderId);
-                  if (!leader) return;
                   setSingleLeaderConfirm(false);
-                  onStartLeaderChat(leader);
+                  void createTeam(true);
                 }}
               >
-                确认
+                仍然创建团队
               </button>
             </div>
           </div>

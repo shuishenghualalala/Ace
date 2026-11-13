@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0021 · Wiki Gateway Knowledge Service Consumer</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0021 · Wiki Gateway Knowledge Service Consumer</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-05 · 阶段：插件架构 3B</div>
+
+  <h2>背景</h2>
+  <p>Wiki Foundation 已把本地实现交给 <code>product.wiki</code> Generation，但 Gateway REST 与聊天附件捕获仍读取 <code>CrewApp._wiki_store</code>、Compiler、Querier 和 Session Manager。这样会把本地文件布局、上传解析和生命周期对象泄漏到 Host，也会让请求在 Feature 停用或重启后继续持有旧 Provider。</p>
+
+  <h2>决策</h2>
+  <div class="decision">Gateway Wiki API 只消费动态解析的 <code>KnowledgeService</code>；Service Registry 在同一次解析中返回当前 Provider 与其 Generation Lease，使请求可见性、drain 和资源关闭属于同一生命周期边界。</div>
+  <ul>
+    <li><code>KnowledgeService</code> 增加类型化的 KB、页面、来源、图谱、编译、上传、捕获和会话操作；页面列表搜索使用 <code>search_pages()</code>，与面向问答的 <code>search()</code> payload 分离。</li>
+    <li><code>ServiceRegistry.acquire_lease()</code> 原子选择当前可见实现并取得所属 Generation Lease，<code>PluginManager.acquire_service_lease()</code> 作为 Host Facade；Gateway 不穿透 Feature Runtime。</li>
+    <li>全部 <code>/api/wiki/*</code> 入口在请求时重新解析 Service。能力不存在或正在 draining 时统一返回 503；进行中的请求持有 Lease，释放后 Provider 才能关闭。</li>
+    <li>上传落盘、文档解析、安全启动上下文、旧布局迁移、原始文件定位与下载内容读取归 <code>LocalWikiProvider</code>；Gateway 不导入 Store、Parser 或本地目录 API。</li>
+    <li>聊天附件任务在真正执行时取得 Service 和 Lease，并用同一实例完成 KB 解析与捕获；停用后不新建捕获，drain 中不会把合法 KB 回落到 default。</li>
+    <li>无 <code>product.wiki</code> 记录的嵌入宿主仍可注入外部 <code>knowledge_service</code>；已停用的产品 Feature 不会通过兼容出口重新暴露旧实现。</li>
+  </ul>
+
+  <h2>结果与后续</h2>
+  <p>Gateway Wiki API 已成为 Provider-neutral Consumer，替换 Generation 不需要重建 Router 或修改端点业务。Router 的启动期 Route Contribution、CLI Consumer、Agent Preset、Event 和 UI Contribution 仍按 Stage 3B 后续切片迁移；Work 的可选依赖归 Stage 3C。</p>
+
+  <h2>跨平台</h2>
+  <p>Gateway 契约只传递领域对象、字节内容和标准 MIME/文件名信息；本地路径处理留在使用 <code>pathlib</code> 的 Provider 内部，不新增 shell 命令、POSIX 信号或固定目录分隔符，可用于 macOS、Linux 与 Windows。</p>
+
+  <div class="nav"><a href="0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../modules/wiki.html">Wiki 模块</a> · <a href="../modules/gateway.html">Gateway 模块</a> · <a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-gateway-consumer.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

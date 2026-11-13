@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -167,7 +169,7 @@ async def _register_ready_runtime(client: AsyncClient) -> None:
             "type": "codex",
             "provider": "codex",
             "protocol": "cli",
-            "executable_path": "/bin/sh",
+            "executable_path": sys.executable,
             "metadata": {
                 "availability_status": "ready",
                 "models": [

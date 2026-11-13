@@ -1,9 +1,10 @@
 /**
  * @vitest-environment happy-dom
  *
- * 阶段 0：状态隔离 + 局部 patch 治本 spinner 抽搐。
+ * 阶段 0：状态隔离 + 局部 patch 治本状态图标抽搐。
  * 覆盖 setBusy/setSessionStatus 的短路返回、patchSessionRowStatus 的局部更新、
- * 以及「同值二次写入不重建 spinner 元素」这一治本契约。
+ * 以及「同值二次写入不重建状态图标节点」这一治本契约。
+ * DOM 契约：SessionHistoryView（mw-session-history__*，见 src/ui/features/session-history-view.ts）。
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { __resetAllStoresForTest, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
@@ -14,6 +15,10 @@ import { mountHistoryList } from './helpers/history-list';
 
 function makeSession(id: string, workspaceId = 'default'): SessionRow {
   return { id, title: id, workspaceId, updatedAt: 1000, preview: '', badge: '' };
+}
+
+function statusOf(list: HTMLElement, sessionId: string): HTMLElement {
+  return list.querySelector(`[data-session-id="${sessionId}"] [data-session-status]`) as HTMLElement;
 }
 
 beforeEach(() => __resetAllStoresForTest());
@@ -49,38 +54,42 @@ describe('setBusy / setSessionStatus 状态隔离短路', () => {
 });
 
 describe('patchSessionRowStatus 局部更新', () => {
-  it('只改目标行 class/leading，不触碰其它行 DOM 身份', () => {
+  it('只改目标行状态区，不触碰其它行 DOM 身份', () => {
     sessionStore.set({ sessions: [makeSession('s1'), makeSession('s2')] });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
     const row1 = list.querySelector('[data-session-id="s1"]') as HTMLElement;
     const row2 = list.querySelector('[data-session-id="s2"]') as HTMLElement;
-    const row1Title = row1.querySelector('.history-item-title');
-    expect(row1.querySelector('.history-item-trailing .history-item-status-spinner')).toBeNull();
+    const row1Title = row1.querySelector('[data-session-title]');
+    const status1 = statusOf(list, 's1');
+    expect(status1.dataset.status).toBe('idle');
+    expect(status1.querySelector('svg')).toBeNull();
 
     patchSessionRowStatus('s1', 'running');
 
-    expect(row1.classList.contains('history-item--running')).toBe(true);
-    expect(row1.querySelector('.history-item-trailing .history-item-status-spinner')).not.toBeNull();
+    expect(status1.dataset.status).toBe('running');
+    expect(status1.classList.contains('mw-session-history__status--running')).toBe(true);
+    expect(status1.querySelector('svg')).not.toBeNull();
     // row1 节点身份不变，title 子节点身份不变（未整树重建）
     expect(list.querySelector('[data-session-id="s1"]')).toBe(row1);
-    expect(row1.querySelector('.history-item-title')).toBe(row1Title);
+    expect(row1.querySelector('[data-session-title]')).toBe(row1Title);
     // row2 完全未受影响
-    expect(row2.classList.contains('history-item--running')).toBe(false);
+    expect(statusOf(list, 's2').dataset.status).toBe('idle');
     expect(list.querySelector('[data-session-id="s2"]')).toBe(row2);
   });
 
-  it('running → idle 移除 spinner 与 status class', () => {
+  it('running → idle 移除状态图标与 running 标记', () => {
     sessionStore.set({ sessions: [makeSession('s1')] });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
     patchSessionRowStatus('s1', 'running');
-    const row = list.querySelector('[data-session-id="s1"]') as HTMLElement;
-    expect(row.querySelector('.history-item-trailing .history-item-status-spinner')).not.toBeNull();
-    expect(row.querySelector('.history-item-time')).toBeNull();
+    const status = statusOf(list, 's1');
+    expect(status.dataset.status).toBe('running');
+    expect(status.querySelector('svg')).not.toBeNull();
     patchSessionRowStatus('s1', 'idle');
-    expect(row.querySelector('.history-item-trailing .history-item-status-spinner')).toBeNull();
-    expect(row.classList.contains('history-item--running')).toBe(false);
+    expect(status.dataset.status).toBe('idle');
+    expect(status.querySelector('svg')).toBeNull();
+    expect(status.classList.contains('mw-session-history__status--running')).toBe(false);
   });
 
   it('未渲染的行 patch 为 no-op，不抛错', () => {
@@ -89,20 +98,19 @@ describe('patchSessionRowStatus 局部更新', () => {
   });
 });
 
-describe('spinner 元素在流式期间保持稳定（治本契约）', () => {
-  it('同值二次 setSessionStatus 不重建 spinner 节点', () => {
+describe('状态图标在流式期间保持稳定（治本契约）', () => {
+  it('同值二次 setSessionStatus 不重建状态图标节点', () => {
     sessionStore.set({ sessions: [makeSession('s1')] });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    // 首次 running：通过 sessionStatuses 订阅 patch 出 spinner
+    // 首次 running：通过 sessionStatuses 订阅 patch 出状态图标
     setSessionStatus('s1', 'running');
-    const spinnerBefore = list.querySelector('[data-session-id="s1"] .history-item-status-spinner');
-    expect(spinnerBefore).not.toBeNull();
-    // 流式期间反复 running → running：短路，订阅不触发，spinner 节点身份不变
+    const iconBefore = statusOf(list, 's1').querySelector('svg');
+    expect(iconBefore).not.toBeNull();
+    // 流式期间反复 running → running：短路，订阅不触发，图标节点身份不变
     setSessionStatus('s1', 'running');
     setSessionStatus('s1', 'running');
-    const spinnerAfter = list.querySelector('[data-session-id="s1"] .history-item-status-spinner');
-    expect(spinnerAfter).toBe(spinnerBefore);
+    expect(statusOf(list, 's1').querySelector('svg')).toBe(iconBefore);
   });
 });
 
@@ -133,7 +141,7 @@ describe('行级 reconciler：key 复用 + 重排 + 跨整树存活', () => {
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
     // 初始顺序：s2（2000）在前，s1（1000）在后
-    const rows = list.querySelectorAll('.conversations-list [data-session-id]');
+    const rows = list.querySelectorAll('[data-session-id]');
     expect(rows[0].getAttribute('data-session-id')).toBe('s2');
     expect(rows[1].getAttribute('data-session-id')).toBe('s1');
     const row1Before = list.querySelector('[data-session-id="s1"]');
@@ -146,15 +154,15 @@ describe('行级 reconciler：key 复用 + 重排 + 跨整树存活', () => {
       ],
     });
     renderWorkspaceHistory(() => {});
-    const rowsAfter = list.querySelectorAll('.conversations-list [data-session-id]');
+    const rowsAfter = list.querySelectorAll('[data-session-id]');
     expect(rowsAfter[0].getAttribute('data-session-id')).toBe('s1');
     expect(rowsAfter[1].getAttribute('data-session-id')).toBe('s2');
-    // 节点身份不变（只是被 insertBefore 移动）
+    // 节点身份不变（只是被重新 append 移动）
     expect(list.querySelector('[data-session-id="s1"]')).toBe(row1Before);
     expect(list.querySelector('[data-session-id="s2"]')).toBe(row2Before);
   });
 
-  it('后台 running 行在另一会话触发整树重渲后 spinner 元素身份保持（治本核心）', () => {
+  it('后台 running 行在另一会话触发整树重渲后状态图标身份保持（治本核心）', () => {
     sessionStore.set({
       sessions: [
         { id: 'active', title: 'active', workspaceId: 'default', updatedAt: 1000, preview: '', badge: '' },
@@ -163,11 +171,11 @@ describe('行级 reconciler：key 复用 + 重排 + 跨整树存活', () => {
     });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    // 后台会话 bg 进入 running，spinner 出现
+    // 后台会话 bg 进入 running，状态图标出现
     setSessionStatus('bg', 'running');
-    const spinnerBefore = list.querySelector('[data-session-id="bg"] .history-item-status-spinner');
-    expect(spinnerBefore).not.toBeNull();
-    // active 会话回合结束触发整树 renderWorkspaceHistory（模拟 chat-controller:1030 路径）
+    const iconBefore = statusOf(list, 'bg').querySelector('svg');
+    expect(iconBefore).not.toBeNull();
+    // active 会话回合结束触发整树 renderWorkspaceHistory（模拟 chat-controller 路径）
     sessionStore.set({
       sessions: [
         { id: 'active', title: 'active-renamed', workspaceId: 'default', updatedAt: 3000, preview: '', badge: '' },
@@ -175,11 +183,10 @@ describe('行级 reconciler：key 复用 + 重排 + 跨整树存活', () => {
       ],
     });
     renderWorkspaceHistory(() => {});
-    // bg 的行节点与 spinner 元素身份都必须保持，CSS 动画不重启
-    const bgRowAfter = list.querySelector('[data-session-id="bg"]');
-    const spinnerAfter = list.querySelector('[data-session-id="bg"] .history-item-status-spinner');
-    expect(spinnerAfter).toBe(spinnerBefore);
-    expect(bgRowAfter?.classList.contains('history-item--running')).toBe(true);
+    // bg 的行节点与状态图标元素身份都必须保持，CSS 动画不重启
+    const bgRowAfter = list.querySelector('[data-session-id="bg"]') as HTMLElement;
+    expect(statusOf(list, 'bg').querySelector('svg')).toBe(iconBefore);
+    expect(bgRowAfter.querySelector<HTMLElement>('[data-session-status]')!.dataset.status).toBe('running');
   });
 
   it('项目块复用：折叠项目 A 不影响项目 B 的行身份', () => {
@@ -203,18 +210,18 @@ describe('行级 reconciler：key 复用 + 重排 + 跨整树存活', () => {
 
   it('事件委托：点击行触发 openSession', () => {
     sessionStore.set({ sessions: [makeSession('s1')] });
-    const list = mountHistoryList();
     let opened: string | null = null;
-    renderWorkspaceHistory((id) => { opened = id; });
-    const row = list.querySelector<HTMLElement>('[data-session-id="s1"]');
-    expect(row).not.toBeNull();
-    row!.click();
+    const list = mountHistoryList({ openSession: (id) => { opened = id; } });
+    renderWorkspaceHistory(() => {});
+    const openBtn = list.querySelector<HTMLElement>('[data-session-open="s1"]');
+    expect(openBtn).not.toBeNull();
+    openBtn!.click();
     expect(opened).toBe('s1');
   });
 });
 
-describe('行尾未读绿点', () => {
-  it('后台 running → idle 显示绿点；打开会话后恢复时间', () => {
+describe('行尾未读 pill', () => {
+  it('后台 running → idle 显示未读 pill；打开会话后恢复时间', () => {
     sessionStore.set({
       sessions: [
         { id: 'active', title: 'active', workspaceId: 'default', updatedAt: 2000, preview: '', badge: '' },
@@ -222,22 +229,18 @@ describe('行尾未读绿点', () => {
       ],
       activeSessionId: 'active',
     });
-    const list = mountHistoryList();
+    const list = mountHistoryList({ openSession: (id) => setActiveSessionId(id) });
     renderWorkspaceHistory(() => {});
     setSessionStatus('bg', 'running');
     setSessionStatus('bg', 'idle');
-    const bgRow = list.querySelector('[data-session-id="bg"]') as HTMLElement;
-    expect(bgRow.querySelector('.history-item-status-dot--unread')).not.toBeNull();
-    expect(bgRow.querySelector('.history-item-time')).toBeNull();
+    const bgStatus = statusOf(list, 'bg');
+    expect(bgStatus.dataset.status).toBe('unread');
+    expect(bgStatus.classList.contains('mw-session-history__status--unread')).toBe(true);
 
-    renderWorkspaceHistory((id) => {
-      setActiveSessionId(id);
-    });
-    list.querySelector<HTMLElement>('[data-session-id="bg"] .history-item-main')?.click();
-    renderWorkspaceHistory(() => {});
-    const bgRowAfter = list.querySelector('[data-session-id="bg"]') as HTMLElement;
-    expect(bgRowAfter.querySelector('.history-item-status-dot--unread')).toBeNull();
-    expect(bgRowAfter.querySelector('.history-item-time')).not.toBeNull();
+    list.querySelector<HTMLElement>('[data-session-open="bg"]')!.click();
+    const bgStatusAfter = statusOf(list, 'bg');
+    expect(bgStatusAfter.dataset.status).toBe('idle');
+    expect(bgStatusAfter.classList.contains('mw-session-history__status--unread')).toBe(false);
   });
 });
 
@@ -253,36 +256,38 @@ describe('对话分区封顶 + 展开显示', () => {
     }));
   }
 
-  it('超过 CONVERSATIONS_LIMIT 只渲染上限条 + 出现「展开显示」', () => {
+  it('超过 CONVERSATIONS_LIMIT 只渲染上限条 + 出现「再显示 N 个会话」', () => {
     // 断言跟着常量走：这里曾硬编码旧上限 50，上限调成 10 后就静默失配。
     // 用 LIMIT+1 而非大倍数：这是「超过上限」的最紧边界，off-by-one 会立刻变红。
     sessionStore.set({ sessions: makeConversations(CONVERSATIONS_LIMIT + 1) });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    const rows = list.querySelectorAll('.conversations-list [data-session-id]');
+    const rows = list.querySelectorAll('[data-session-id]');
     expect(rows.length).toBe(CONVERSATIONS_LIMIT);
-    expect(list.querySelector('.conversations-list [data-ws-show-all="default"]')).not.toBeNull();
+    const expandBtn = list.querySelector('[data-show-all="default"]');
+    expect(expandBtn).not.toBeNull();
+    expect(expandBtn!.textContent).toBe('再显示 1 个会话');
   });
 
-  it('点击「展开显示」后渲染全部，且展开链接消失', () => {
+  it('点击「再显示 N 个会话」后渲染全部，按钮变为「收起」', () => {
     sessionStore.set({ sessions: makeConversations(CONVERSATIONS_LIMIT + 1) });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    const expandBtn = list.querySelector<HTMLElement>('.conversations-list [data-ws-show-all="default"]');
+    const expandBtn = list.querySelector<HTMLElement>('[data-show-all="default"]');
     expect(expandBtn).not.toBeNull();
     expandBtn!.click(); // 委托：setWsShowAll('default', true) + 重渲
-    const rows = list.querySelectorAll('.conversations-list [data-session-id]');
+    const rows = list.querySelectorAll('[data-session-id]');
     expect(rows.length).toBe(CONVERSATIONS_LIMIT + 1);
-    expect(list.querySelector('.conversations-list [data-ws-show-all="default"]')).toBeNull();
+    expect(list.querySelector('[data-show-all="default"]')!.textContent).toBe('收起');
   });
 
-  it('未超限时不显示展开链接，全量渲染', () => {
-    // 恰好等于上限：代码用的是 `>`，此时不应出现展开链接。
+  it('未超限时不显示展开按钮，全量渲染', () => {
+    // 恰好等于上限：代码用的是 `>`，此时不应出现展开按钮。
     sessionStore.set({ sessions: makeConversations(CONVERSATIONS_LIMIT) });
     const list = mountHistoryList();
     renderWorkspaceHistory(() => {});
-    const rows = list.querySelectorAll('.conversations-list [data-session-id]');
+    const rows = list.querySelectorAll('[data-session-id]');
     expect(rows.length).toBe(CONVERSATIONS_LIMIT);
-    expect(list.querySelector('.conversations-list [data-ws-show-all="default"]')).toBeNull();
+    expect(list.querySelector('[data-show-all="default"]')).toBeNull();
   });
 });

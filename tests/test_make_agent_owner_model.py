@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from crew.app import build_app
-from crew.core.runctx import current_owner_account_id
+from crew.core.runctx import current_owner_account_id, LOCAL_OWNER_ACCOUNT_ID
 from crew.state.config import load_config
 from crew.state.home import get_owner_runtime_home, owner_path_segment
 
@@ -116,7 +116,7 @@ def owner_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     (owner_home / ".env").write_text("CREW_API_KEY=sk-minimax-owner\n", encoding="utf-8")
 
     # 断言：ContextVar 默认空（模拟 handle → agents.get 时机）
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     return app, owner
 
 
@@ -142,7 +142,7 @@ def test_agents_get_uses_owner_private_model_without_contextvar(owner_app):
 def test_make_agent_explicit_owner_overrides_empty_contextvar(owner_app):
     """直接调用 _make_agent 时，显式 owner_account_id 优先于空 ContextVar。"""
     app, owner = owner_app
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
 
     agent = app._make_agent(
         {"model_profile_id": "MiniMax-M3"},
@@ -231,6 +231,36 @@ def test_first_ready_owner_model_replaces_and_persists_placeholder_default(
     assert cfg.owner_default_model_id(owner) == "deepseek"
 
 
+def test_owner_can_override_builtin_default_profile_without_mutating_global_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """默认占位 profile 支持 owner copy-on-write 配置。"""
+    crew_home = tmp_path / ".Crew"
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    cfg = load_config(config_path=str(_write_placeholder_config(tmp_path, crew_home)))
+    app = build_app(config=cfg, enable_team=False)
+    owner = "remote:owner"
+
+    updated = app.update_model(
+        "default",
+        {
+            "base_url": "https://owner.example.com/v1",
+            "model": "owner-model",
+            "api_key_env": "OWNER_DEFAULT_API_KEY",
+            "api_key": "sk-owner-default",
+        },
+        owner_account_id=owner,
+    )
+
+    assert updated.builtin is False
+    assert updated.model == "owner-model"
+    assert cfg.model_profiles["default"].model == "your-model-name"
+    owner_profile = cfg.owner_model_profiles(owner)["default"]
+    assert owner_profile.builtin is False
+    assert owner_profile.api_key == "sk-owner-default"
+
+
 @pytest.mark.asyncio
 async def test_make_agent_without_api_key_borrows_fake_provider(tmp_path, monkeypatch):
     """无 Key 的 owner profile 必须继续使用 App 的 FakeProvider，不能构造真实客户端。"""
@@ -279,7 +309,7 @@ async def test_make_agent_without_api_key_borrows_fake_provider(tmp_path, monkey
 
 
 def test_make_agent_acp_accepts_top_level_external_agent_id(owner_app):
-    """前端 session agent-config 会把 external_agent_id 存在顶层，ACP executor 必须能读到。"""
+    """ACP executor 继续读取 ACP 时代的顶层 external_agent_id。"""
     app, owner = owner_app
     agent = app._make_agent(
         {"executor": "acp", "external_agent_id": "agent_e2e"},
@@ -302,7 +332,7 @@ async def test_make_agent_builds_only_final_dynamic_provider_and_declares_owners
     real_build = app_module.build_provider_for_profile
     built = []
 
-    def tracking_build(profile, stream_read_timeout=None):
+    def tracking_build(profile, stream_read_timeout=None, **_kw):
         provider = real_build(profile, stream_read_timeout)
         built.append(provider)
         return provider
@@ -321,7 +351,9 @@ async def test_make_agent_builds_only_final_dynamic_provider_and_declares_owners
 @pytest.mark.asyncio
 async def test_make_agent_does_not_own_borrowed_app_provider(owner_app):
     app, _owner = owner_app
-    agent = app._make_agent({"model_profile_id": "inherit"}, owner_account_id="")
+    # owner 统一后不存在"空 owner 借用"路径：借用发生在 owner 名下无任何可用
+    # key 的静默降级场景（全新 owner 无 overlay、进程 env 对其不可见）。
+    agent = app._make_agent({"model_profile_id": "inherit"}, owner_account_id="email:nobody")
 
     assert agent.provider is app.provider
     assert app.provider not in agent._owned_providers
@@ -377,7 +409,157 @@ def test_team_mode_reads_session_config_with_owner(owner_app, tmp_path):
         owner_account_id=owner,
     )
     # 漏传 owner → 读不到该账号下的 team 配置
-    without_owner = app._session_agent_config(sid)
+    without_owner = app._session_agent_config(sid, owner_account_id="")
     assert without_owner.get("team", {}).get("external_team_id") != "ext-team-1"
     with_owner = app._session_agent_config(sid, owner_account_id=owner)
     assert with_owner.get("team", {}).get("external_team_id") == "ext-team-1"
+
+
+# ---------------------------------------------------------------------------
+# demo_mode：GET/PUT /api/session/{id}/model 下发的「生效 Provider = FakeProvider」
+# 服务端判定，必须与 _make_agent 装配走同一条回退链。
+# ---------------------------------------------------------------------------
+
+
+def _build_no_key_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """全局唯一内置模型且无 Key 的 App（provider = FakeProvider）。"""
+    from crew.state.config import Config, ModelProfile
+
+    # 同进程其他测试的 load_config 会把仓库 config/.env 的真实 Key 写进 os.environ
+    # 且不清理；这里清掉，保证解析不到任何 Key。
+    monkeypatch.delenv("CREW_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("CREW_API_KEY", raising=False)
+
+    crew_home = tmp_path / ".crew"
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    profile = ModelProfile(
+        id="default",
+        name="Default",
+        api_key="",
+        api_key_env="CREW_MODEL_API_KEY",
+        base_url="https://api.example.com/v1",
+        model="your-model-name",
+        builtin=True,
+    )
+    return build_app(
+        config=Config(
+            api_key="",
+            active_model_id="default",
+            model_profiles={"default": profile},
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            log_level="WARNING",
+        ),
+        enable_team=False,
+    )
+
+
+def _write_owner_overlay(owner: str, model_id: str, api_key: str) -> None:
+    """给 owner 写私有 overlay：一个有 Key 的模型并设为默认。"""
+    owner_home = get_owner_runtime_home(owner)
+    owner_home.mkdir(parents=True, exist_ok=True)
+    (owner_home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "llm": {
+                    "active": model_id,
+                    "models": {
+                        model_id: {
+                            "name": model_id,
+                            "api_key_env": "OWNER_OVERLAY_KEY",
+                            "provider": "openai",
+                            "base_url": "https://overlay.example.com/v1",
+                            "model": model_id,
+                            "loaded": True,
+                        }
+                    },
+                }
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    (owner_home / ".env").write_text(f"OWNER_OVERLAY_KEY={api_key}\n", encoding="utf-8")
+
+
+def test_demo_mode_true_when_effective_provider_is_fake(tmp_path, monkeypatch):
+    """全局与会话绑定都无 Key → demo_mode=True（绑定与未绑定会话都成立）。"""
+    app = _build_no_key_app(tmp_path, monkeypatch)
+    owner = "local"
+    app.session_store.ensure_session("s-bound", owner_account_id=owner)
+    app.session_store.set_agent_config(
+        "s-bound", {"model_profile_id": "default"}, owner_account_id=owner,
+    )
+
+    bound = app.read_session_model_binding("s-bound", owner_account_id=owner)
+    unbound = app.read_session_model_binding("s-never-created", owner_account_id=owner)
+
+    assert bound["demo_mode"] is True
+    assert unbound["demo_mode"] is True
+
+
+def test_demo_mode_false_when_owner_overlay_saves_session(tmp_path, monkeypatch):
+    """全局无 Key 但 owner overlay 默认模型有 Key → demo_mode=False。
+
+    前端只能看到全局 config 的 has_key，看不到 per-owner overlay——这正是把判定
+    挪到后端要消除的假阳性。
+    """
+    app = _build_no_key_app(tmp_path, monkeypatch)
+    owner = "dev:overlay"
+    _write_owner_overlay(owner, "overlay-model", "sk-overlay")
+
+    unbound = app.read_session_model_binding("s-inherit", owner_account_id=owner)
+    app.session_store.ensure_session("s-overlay", owner_account_id=owner)
+    app.session_store.set_agent_config(
+        "s-overlay", {"model_profile_id": "overlay-model"}, owner_account_id=owner,
+    )
+    bound = app.read_session_model_binding("s-overlay", owner_account_id=owner)
+
+    assert unbound["demo_mode"] is False
+    assert bound["demo_mode"] is False
+
+
+def test_demo_mode_false_when_falling_back_to_real_global_provider(owner_app):
+    """会话绑定不存在但全局 active 有 Key：有 fallback 提示，却不是演示模式。"""
+    app, owner = owner_app
+    app.session_store.ensure_session("s-missing", owner_account_id=owner)
+    app.session_store.set_agent_config(
+        "s-missing", {"model_profile_id": "DoesNotExist"}, owner_account_id=owner,
+    )
+
+    binding = app.read_session_model_binding("s-missing", owner_account_id=owner)
+
+    assert binding["demo_mode"] is False
+
+
+def test_demo_mode_false_for_external_executor_sessions(tmp_path, monkeypatch):
+    """外部 Agent/Team 会话不走 builtin provider 链，恒为非演示模式。"""
+    app = _build_no_key_app(tmp_path, monkeypatch)
+    owner = "local"
+    app.session_store.ensure_session("s-ext", owner_account_id=owner)
+    app.session_store.set_agent_config(
+        "s-ext",
+        {
+            "executor": "external",
+            "external": {"external_agent_id": "agent-x"},
+            "model_profile_id": "ext-model",
+        },
+        owner_account_id=owner,
+    )
+
+    binding = app.read_session_model_binding("s-ext", owner_account_id=owner)
+
+    assert binding["demo_mode"] is False
+
+
+def test_set_session_model_binding_includes_demo_mode(owner_app):
+    """PUT 路径同样下发 demo_mode，前端切换模型后横幅可即时刷新。"""
+    app, owner = owner_app
+    app.session_store.ensure_session("s-put", owner_account_id=owner)
+
+    binding = app.set_session_model_binding(
+        "s-put", "MiniMax-M3", owner_account_id=owner, busy=False,
+    )
+
+    assert binding["model_profile_id"] == "MiniMax-M3"
+    assert binding["demo_mode"] is False

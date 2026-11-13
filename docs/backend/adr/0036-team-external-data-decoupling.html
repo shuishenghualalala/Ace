@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0036 · team→external 跨 Feature 数据解耦</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0036 · team→external 跨 Feature 数据解耦</h1>
+<p>状态：已实施并验证（继承残留见已知边界） · 日期：2026-09-11 · 阶段：6G。</p>
+<h2>背景与候选方案</h2>
+<p>命名空间审计 P1-2：Team 的兼容门面 <code>TeamExternalAgentStore</code>（ADR-0027）对 external-agents 的表存在四类耦合——两处跨 Feature 外键（leader_agent_id / member.agent_id → external_agent(id)）、两处 LEFT JOIN 他人表、存在性检查直查外表、删除路径直删三张外表。这违反"跨 Feature 不建外键、不 JOIN、只写自己表"的约定，是拆库（P1-1）与 workspace 多包化的硬阻塞。</p>
+<p>候选方案：A. 保留门面直连，仅靠约定约束——违反命名空间约定，物理拆分即断；B. Team 改为完全经 Catalog Service 读取全部数据（含 team 自己的 external_team 表）——门面自己的表归 Team 所有，绕经 Service 反而增加一层无意义间接；C. 表归属划清 + 快照列 + 窄生命周期协议：team 表去外键、展示信息冗余快照、跨 Feature 读写全部经注入的 <code>ExternalAgentLifecycle</code>（get_agent + delete_agent）。</p>
+<h2>决定</h2>
+<p>采用方案 C。DDL 模板化去掉跨 Feature 外键（存量库经 PRAGMA foreign_key_list 检测后 create→copy→drop→rename 幂等重建）；<code>external_team_member</code> 新增 <code>agent_name</code>/<code>agent_provider</code> 快照列（建表/rebuild/ensure_column 三路覆盖 + 按 owner 作用域一次性回填），读取不再 JOIN；存在性检查与三张外表的删除统一经 <code>ExternalAgentLifecycle</code> 窄协议（catalog.py 新增，外援侧既有实现即该协议），删除顺序 observations→bindings→agent 原样保留；注入点在 build_app 的 catalog_factory（4C-3 动态 provider 风格），external 未激活时 RuntimeError fail-closed，不静默、不回退裸 SQL。快照以 catalog 写入时解析为准，客户端伪造的 agent_name 不被信任。</p>
+<h2>兼容、验证与回退</h2>
+<p>对外 API/CLI/REST 零变化（KeyError/ValueError 语义、JSON 键序、删除顺序保持）。新增 <code>tests/test_team_external_store.py</code> 9 例：新库无跨 Feature 外键、旧 FK 库重建+数据保留+快照回填+幂等、读路径不依赖外表、快照覆盖伪造值、builtin 成员回填、删除守卫与三表清理、注入路由与 fail-closed。组合回归 team/external/owner/kanban 413 passed；gateway 失败经 HEAD worktree 对照确认为存量失败零新增；Ruff、compileall、Import Linter（7 kept）通过。回退：revert 本切片，外键重建由 IF NOT EXISTS 幂等性自然跳过（快照列保留不影响旧读取路径）。</p>
+<p>已知边界与后续：① 类继承 <code>TeamExternalAgentStore(ExternalAgentStore)</code> 仍保留为"未注入构造时的回退视图"（<code>_InheritedLifecycle</code> 显式分派基类方法）——workspace 评估已把该继承列为必修项，后续小切片改为完全组合；② 注入 provider 后跨 Feature 操作跟随当前激活 Generation，停用间隙 fail-closed；③ 历史悬空成员行的读输出由 null 变 ""（现库不再产生）。</p>
+<p><a href="../modules/naming-audit.html">命名空间审计（P1-2）</a> · <a href="0027-external-agent-catalog.html">ADR-0027</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3B · Wiki Agent Preset 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{border-left:3px solid #999;padding:8px 16px;background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3B · Wiki Agent Preset</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-05 · 编码与测试：相互独立的 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>Preset 数据、冲突、最新 Generation、Token 所有权、rollback、drain、cancel 与 unavailable gate 形成稳定契约。</li>
+    <li>Wiki prompt 与固定安全策略归属 Bundle；通用文件目录不静态泄漏 Wiki，用户覆盖可跨重复 claim 保持。</li>
+    <li>普通 Agent 不获得 Wiki Toolset 或 curator Skill；匹配预设受父权限封顶，只能追加声明的专属能力。</li>
+    <li>主 Agent、preview、前台与后台子 Agent 在完整执行期持有 preset Lease；缓存按 Generation 退休旧实例。</li>
+    <li><code>run_agent</code> 动态 schema 与执行校验同步，停用 Wiki 后只撤销对应目录项，不影响通用预设。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>新增 <code>tests/test_feature_presets.py</code></td><td class="ok">15 passed</td></tr>
+      <tr><td>Preset / Subagent / Wiki Feature / Prompt / Gateway</td><td>125 passed，1 个既有 Browser 未加载失败</td></tr>
+      <tr><td>Feature Runtime / Manager / Context / Event / Route / Service / Driver / Core</td><td>105 passed，2 个既有环境失败</td></tr>
+      <tr><td>Agent / Tools / Subagent Contract / Wiki Tools / Gateway</td><td class="ok">237 passed</td></tr>
+      <tr><td>Sites / Cron / Browser / Gateway 邻接回归</td><td class="ok">310 passed</td></tr>
+      <tr><td>Ruff、compileall、git diff check</td><td class="ok">全部通过</td></tr>
+      <tr><td>Import Linter</td><td class="ok">311 files，1359 dependencies，6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>测试组存在重叠，不将数量相加作为全量总数。除新增契约外，更新了 <code>tests/test_subagent.py</code>、<code>tests/wiki/test_feature.py</code>、<code>tests/wiki/test_prompts.py</code> 与 <code>tests/gateway/test_wiki_router.py</code> 的新目录口径。</p>
+
+  <h2>基线说明</h2>
+  <div class="note">A 组失败为现有验证预设测试要求 <code>browser_use</code>，但当前测试环境未加载 Browser；B 组两项分别来自 Browser 未在 build 阶段装配，以及受限环境不能写默认 <code>/Users/ahuamao/.Crew</code> SQLite。相关生产路径不在本切片变更范围，测试未用 skip 隐藏。</div>
+
+  <h2>关键场景</h2>
+  <p>覆盖字段归一与非法披露模式、跨 Feature 冲突、同 Feature 新代选择、旧 Token 精确撤销、drain/cancel、Wiki restart 与停用、动态 enum、禁用后手工调用、前后台阻塞执行、用户覆盖、主 Agent 与 preview Lease、缓存安全退休、父工具快照、禁止嵌套，以及 Agent 装配源码边界。</p>
+
+  <div class="nav"><a href="../backend/adr/0024-agent-preset-contribution-registry.html">ADR-0024</a> · <a href="../backend/modules/agent.html">Agent 模块</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../backend/modules/wiki.html">Wiki 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

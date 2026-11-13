@@ -4,7 +4,7 @@
  * cron-page 单测。
  * 覆盖 formatDuration / formatTimestamp / filteredJobs，以及任务页点击任务行后的滚动保持。
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   formatDuration,
   formatTimestamp,
@@ -18,15 +18,14 @@ import {
   formatDateInputValue,
   formatTimeInputValue,
   __setCronViewForTest,
-  __resetCronListEventsForTest,
-  bindCronTab,
   isRecurringJob,
   isRecurringSchedule,
+  createCronPageContribution,
   type FilterKey,
 } from '../../src/ui/features/cron-page';
-import { backendApi, type CronJob } from '../../src/ui/backend-client';
+import { backendApi } from '../../src/ui/backend-client';
+import type { CronJob } from '../../src/ui/backend-client';
 import { state } from '../../src/ui/state';
-import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
 
 vi.mock('../../src/ui/backend-client', () => ({
   backendApi: {
@@ -35,12 +34,6 @@ vi.mock('../../src/ui/backend-client', () => ({
     cronDeliveryTargets: vi.fn(async () => ({ targets: [] })),
   },
 }));
-
-const api = backendApi as unknown as {
-  cronJobs: ReturnType<typeof vi.fn>;
-  cronJobDetail: ReturnType<typeof vi.fn>;
-  cronDeliveryTargets: ReturnType<typeof vi.fn>;
-};
 
 function makeJob(partial: Partial<CronJob>): CronJob {
   return {
@@ -235,41 +228,56 @@ describe('isRecurringSchedule', () => {
   });
 });
 
-describe('任务页滚动保持', () => {
-  const flush = () => new Promise((r) => setTimeout(r, 0));
+const api = backendApi as unknown as {
+  cronJobs: ReturnType<typeof vi.fn>;
+};
 
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe('Cron 页面生命周期', () => {
   beforeEach(() => {
-    document.body.innerHTML = '';
-    __resetAllStoresForTest();
-    __resetCronListEventsForTest();
-    // 清掉 filteredJobs 用例遗留的 view 状态，避免列表被过滤为空。
-    __setCronViewForTest({ jobs: [], filter: 'all', search: '' });
-    vi.clearAllMocks();
-    api.cronJobs.mockResolvedValue({ jobs: [] });
-    api.cronJobDetail.mockResolvedValue({ runs: [] });
+    document.body.innerHTML = `
+      <button class="nav-item" data-tab="cron">Cron</button>
+      <section id="cron-tab" class="tab-pane"><div id="cron-page-root"></div></section>
+    `;
+    state.backendConnected = true;
   });
 
-  it('点击任务行后列表滚动位置保持，切换筛选后归零', async () => {
-    state.backendConnected = true;
-    api.cronJobs.mockResolvedValue({ jobs: [makeJob({ id: 'j1', name: '任务一' })] });
-    document.body.innerHTML = '<button data-tab="cron"></button><div id="cron-page-root"></div>';
-    const disposeCronTab = bindCronTab();
-    document.querySelector('[data-tab="cron"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    await flush();
+  it('activate 渲染 cron 页面并触发加载', async () => {
+    const contribution = createCronPageContribution();
+    contribution.activate({ signal: new AbortController().signal });
     await flush();
 
-    const scrollEl = () => document.querySelector<HTMLElement>('.cron-list__scroll');
-    const list = scrollEl();
-    expect(list).not.toBeNull();
-    if (list) list.scrollTop = 321;
+    const root = document.querySelector('#cron-page-root');
+    expect(root).not.toBeNull();
+    expect(api.cronJobs).toHaveBeenCalled();
+  });
 
-    document.querySelector('.cron-row')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  it('deactivate 停止轮询并释放页面 DOM', async () => {
+    const contribution = createCronPageContribution();
+    contribution.activate({ signal: new AbortController().signal });
     await flush();
-    await flush();
-    expect(scrollEl()?.scrollTop).toBe(321);
 
-    document.querySelector('[data-filter="enabled"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    expect(scrollEl()?.scrollTop).toBe(0);
-    disposeCronTab();
+    await contribution.deactivate();
+
+    expect(document.querySelector('#cron-page-root')?.children.length).toBe(0);
+  });
+
+  it('离页后旧加载响应不回写页面', async () => {
+    let resolveJobs!: (value: unknown) => void;
+    api.cronJobs.mockReturnValue(new Promise((resolve) => { resolveJobs = resolve; }));
+
+    const contribution = createCronPageContribution();
+    const controller = new AbortController();
+    contribution.activate({ signal: controller.signal });
+    await flush();
+
+    controller.abort();
+    await contribution.deactivate();
+    resolveJobs({ jobs: [{ id: 'late', name: 'Late Job', kind: 'once', enabled: true }] });
+    await flush();
+
+    expect(document.querySelector('#cron-page-root')?.textContent).not.toContain('Late Job');
   });
 });
+

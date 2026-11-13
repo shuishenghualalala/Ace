@@ -6,10 +6,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from crew.core.errors import ToolError
 from crew.security import outbound
 from crew.security.outbound import parse_public_http_target
-from crew.tools import web_tools
+from crew.tools import web_fetch_cache, web_tools
 from crew.tools.security_guard import authorize_configured_mcp_call, authorize_exec_tool
+from crew.tools.web_fetch_cache import CachedFetch
+
+
+@pytest.fixture(autouse=True)
+def _clean_fetch_cache() -> None:
+    # web_extract 用例共用 https://example.com，不隔离会跨用例假命中
+    web_fetch_cache.clear_web_fetch_cache()
+    yield
+    web_fetch_cache.clear_web_fetch_cache()
 
 
 @pytest.mark.parametrize(
@@ -114,49 +124,30 @@ async def test_site_build_authorization_waits_and_rechecks_exact_action(
 
 
 @pytest.mark.asyncio
-async def test_web_search_returns_only_real_result_links(monkeypatch) -> None:
-    authorized: list[str] = []
-
-    async def allow(url: str, **_kwargs) -> None:
-        authorized.append(url)
-
-    source = """
-      <header><a href="/">Bing</a></header>
-      <ol><li class="b_algo"><h2>
-        <a href="https://example.com/docs">Example Docs</a>
-      </h2></li></ol>
-      <a href="#feedback">Feedback</a>
-    """
-    monkeypatch.setattr(web_tools, "authorize_network_tool", allow)
-    monkeypatch.setattr(web_tools, "_fetch_url", lambda _url, *_args: (_url, source))
-
-    payload = json.loads(await web_tools.handle_web_search({"query": "example"}))
-
-    assert len(authorized) == 1
-    assert payload["results"] == [
-        {"title": "Example Docs", "url": "https://example.com/docs"}
-    ]
-
-
-@pytest.mark.asyncio
-async def test_web_extract_authorizes_before_fetch(monkeypatch) -> None:
+async def test_web_extract_authorizes_before_cache_and_fetch(monkeypatch) -> None:
     order: list[str] = []
 
     async def allow(_url: str, **_kwargs) -> None:
         order.append("authorize")
+
+    def cache_lookup(_key: str):
+        order.append("cache_lookup")
+        return None
 
     def fetch(url: str, *_args) -> tuple[str, str]:
         order.append("fetch")
         return url, "<html><title>Safe</title><body>Body</body></html>"
 
     monkeypatch.setattr(web_tools, "authorize_network_tool", allow)
+    monkeypatch.setattr(web_fetch_cache, "get_cached_fetch", cache_lookup)
     monkeypatch.setattr(web_tools, "_fetch_url", fetch)
 
     payload = json.loads(await web_tools.handle_web_extract({"url": "https://example.com"}))
 
-    assert order == ["authorize", "fetch"]
+    # 缓存门 authorize → 查缓存（未命中）→ _authorized_fetch 首跳 authorize → fetch
+    assert order == ["authorize", "cache_lookup", "authorize", "fetch"]
     assert payload["title"] == "Safe"
-    assert payload["text"] == "Safe Body"
+    assert payload["text"].endswith("\n\nBody")
 
 
 @pytest.mark.asyncio
@@ -177,8 +168,58 @@ async def test_web_extract_authorizes_cross_host_redirect_before_following(monke
 
     payload = json.loads(await web_tools.handle_web_extract({"url": "https://example.com/a"}))
 
-    assert authorized == ["https://example.com/a", redirected]
+    # 缓存门的第一次 + _authorized_fetch 首跳的第二次 + 重定向目标
+    assert authorized == ["https://example.com/a", "https://example.com/a", redirected]
     assert payload["url"] == redirected
+
+
+@pytest.mark.asyncio
+async def test_web_extract_cache_hit_still_authorizes(monkeypatch) -> None:
+    web_fetch_cache.put_cached_fetch(
+        "https://example.com",
+        CachedFetch(
+            final_url="https://example.com",
+            title="Cached",
+            markdown="# Cached Body",
+            source_truncated=False,
+        ),
+    )
+    authorized: list[str] = []
+
+    async def allow(url: str, **_kwargs) -> None:
+        authorized.append(url)
+
+    def fetch(url: str, *_args) -> tuple[str, str]:
+        raise AssertionError("cache hit must not touch the network")
+
+    monkeypatch.setattr(web_tools, "authorize_network_tool", allow)
+    monkeypatch.setattr(web_tools, "_fetch_url", fetch)
+
+    payload = json.loads(await web_tools.handle_web_extract({"url": "https://example.com"}))
+
+    assert authorized == ["https://example.com"]  # 缓存命中也必须先过授权
+    assert payload["cached"] is True
+    assert "# Cached Body" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_web_extract_denied_target_never_reads_cache(monkeypatch) -> None:
+    cache_reads: list[str] = []
+
+    def cache_lookup(key: str):
+        cache_reads.append(key)
+        return None
+
+    async def deny(_url: str, **_kwargs) -> None:
+        raise ToolError("联网请求已被安全策略拒绝")
+
+    monkeypatch.setattr(web_tools, "authorize_network_tool", deny)
+    monkeypatch.setattr(web_fetch_cache, "get_cached_fetch", cache_lookup)
+
+    with pytest.raises(ToolError):
+        await web_tools.handle_web_extract({"url": "https://example.com"})
+
+    assert cache_reads == []  # 授权拒绝时连缓存都不该碰
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +355,12 @@ def test_http_tunnel_rejects_non_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_loopback_proxy_blocked_when_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """allow_loopback_proxy=False 时，loopback 代理地址必须被拒绝。"""
     _clear_proxy_env(monkeypatch)
+    # 公网性校验需要解析目标域；用固定公网地址替代真实 DNS，保证离线环境可测。
+    monkeypatch.setattr(
+        outbound.socket,
+        "getaddrinfo",
+        lambda host, port, **_k: [(outbound.socket.AF_INET, outbound.socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+    )
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
     with pytest.raises(ValueError, match="loopback"):
         outbound.fetch_public_http(

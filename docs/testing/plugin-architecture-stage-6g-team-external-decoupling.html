@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6G · team→external 数据解耦</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6G · team→external 数据解耦</h1>
+<p>2026-09-11。命名空间审计 P1-2：Team 兼容门面对 external-agents 表的外键/JOIN/直删全部解除，跨 Feature 读写收敛到 <code>ExternalAgentLifecycle</code> 窄协议。决策记录：<a href="../backend/adr/0036-team-external-data-decoupling.html">ADR-0036</a>。基线提交 c304c2e；已验收通过并随本记录提交。</p>
+<h2>验收契约</h2>
+<table><tr><th>审计耦合点</th><th>解除方式</th><th>证据</th><th>状态</th></tr>
+<tr><td>跨 Feature 外键 ×2</td><td>DDL 模板去 FK；存量库 PRAGMA 检测 + create→copy→drop→rename 幂等重建</td><td>新测试「新库无跨 Feature 外键」「旧 FK 库重建数据保留」</td><td>✅</td></tr>
+<tr><td>LEFT JOIN ×2</td><td>agent_name/agent_provider 快照列（三路 DDL 覆盖 + owner 作用域一次性回填），SELECT 不再触外表</td><td>「读路径走快照不 JOIN（改 agent 表名不影响输出）」</td><td>✅</td></tr>
+<tr><td>存在性检查直查外表</td><td>经注入 lifecycle 的 get_agent</td><td>「注入 lifecycle 的存在性路由」</td><td>✅</td></tr>
+<tr><td>删除直删三张外表</td><td>全部交 ExternalAgentLifecycle.delete_agent（外援侧零行为改动），门面只留 team 表守卫</td><td>「删除守卫/三表清理验证」</td><td>✅</td></tr>
+<tr><td>fail-closed</td><td>external 未激活注入解析为 None 时 RuntimeError，不回退裸 SQL</td><td>「external 未激活 fail-closed」</td><td>✅</td></tr>
+<tr><td>对外行为</td><td>API/CLI/REST 输出零变化（JSON 键序、异常语义、删除顺序）</td><td>组合回归 413 passed</td><td>✅</td></tr>
+</table>
+<h2>验证记录（子 agent 执行后主 agent 复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>pytest tests/test_team_external_store.py tests/test_external_catalog_contract.py tests/test_external_agents.py tests/test_active_owner.py tests/test_team_tasks.py -q</code></td><td>413 passed, 1 skipped</td></tr>
+<tr><td>引用套件（feature_lifecycle/route_consumer/owner_model/execution_drivers/feature_flag 等 8 个）</td><td>192 passed</td></tr>
+<tr><td>test_team_tasks + test_mcp</td><td>267 passed, 1 skipped</td></tr>
+<tr><td>gateway 失败对照（HEAD worktree 逐条比对）</td><td>均为存量失败，零新增回归</td></tr>
+<tr><td><code>ruff check crew tests</code> / <code>compileall</code> / <code>lint-imports</code></td><td>通过 / 通过 / 7 kept 0 broken</td></tr>
+<tr><td>grep 审计 external_store.py</td><td>无跨 Feature 外键/JOIN/DELETE；唯二外表 SELECT 为一次性回填（:177,:182）</td></tr>
+</table>
+<h2>已知边界</h2>
+<ul>
+<li><code>TeamExternalAgentStore(ExternalAgentStore)</code> 继承保留为未注入构造的回退视图（<code>_InheritedLifecycle</code> 显式分派基类方法，team 文件无外表 SQL）——workspace 评估必修项，后续小切片改完全组合。</li>
+<li>注入 provider 后跨 Feature 操作跟随当前激活 Generation；停用间隙 fail-closed。</li>
+<li>历史悬空成员行读输出 null → ""（现库不再产生）。</li>
+</ul>
+<p><a href="../backend/adr/0036-team-external-data-decoupling.html">ADR-0036</a> · <a href="../backend/modules/naming-audit.html">命名空间审计</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

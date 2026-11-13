@@ -549,6 +549,15 @@ class PlanModeManager:
 
         return TODO_REMINDER
 
+    def peek_todo_reminder(self, session_id: str, owner_account_id: str | None = None) -> str | None:
+        """只读查看待注入 reminder，供 request preview 使用，不消费瞬时状态。"""
+        key = self._key(session_id, owner_account_id)
+        if key not in self._todo_reminder_pending:
+            return None
+        from .prompts import TODO_REMINDER
+
+        return TODO_REMINDER
+
     def todo_store(self, session_id: str, owner_account_id: str | None = None) -> TodoStore:
         """取（或惰性创建）某会话的 TodoStore。
 

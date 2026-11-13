@@ -1,4 +1,4 @@
-"""Wiki 知识库摘要生成与缓存测试。"""
+"""Wiki Home.md 导读生成与缓存测试。"""
 
 from __future__ import annotations
 
@@ -6,14 +6,12 @@ import pytest
 
 from crew.core.mocks import FakeProvider
 from crew.core.types import ChatResponse, Message
-from crew.wiki import HomeIntro, KBSummary, KnowledgeBase, WikiPage
+from crew.wiki import HomeIntro, KnowledgeBase, WikiPage
 from crew.wiki.store import FileSystemWikiStore
 from crew.wiki.summary import (
     WikiSummarizer,
-    _EMPTY_SUMMARY_TEXT,
     _HOME_INTRO_PROMPT,
     _HOME_QUESTIONS_MARKER,
-    _SUMMARY_PROMPT,
     _split_home_intro,
 )
 
@@ -39,7 +37,7 @@ class _FailingProvider(FakeProvider):
 
 
 def _save_topic_page(store, title, content, page_id="topic_1"):
-    """往 default KB 写入一个 topic 页面（summary/intro 用例的公共前置数据）。"""
+    """往 default KB 写入一个 topic 页面（intro 用例的公共前置数据）。"""
     store.save_page(
         WikiPage(
             id=page_id,
@@ -53,124 +51,25 @@ def _save_topic_page(store, title, content, page_id="topic_1"):
     )
 
 
-def test_kb_summary_schema_roundtrip():
-    s = KBSummary(
-        summary="hello",
-        page_count=3,
-        source_count=1,
-        content_hash="abc",
-        generated_at=123.0,
-        status="ready",
-    )
-    data = s.to_dict()
-    restored = KBSummary.from_dict(data)
-    assert restored.summary == "hello"
-    assert restored.page_count == 3
-    assert restored.status == "ready"
-
-
 def test_knowledge_base_schema_roundtrip():
     kb = KnowledgeBase(
         id="default",
         name="默认",
         created_at=1.0,
         updated_at=2.0,
-        summary=KBSummary(summary="s", page_count=1, status="ready"),
     )
     data = kb.to_dict()
     restored = KnowledgeBase.from_dict(data)
-    assert restored.summary.summary == "s"
-    assert restored.summary.page_count == 1
+    assert restored.id == "default"
+    assert restored.name == "默认"
+    assert restored.created_at == 1.0
 
 
-def test_summary_prompts_focus_on_content_instead_of_follow_up_suggestions():
-    for prompt in (_SUMMARY_PROMPT, _HOME_INTRO_PROMPT):
-        assert "不要建议用户继续问什么" in prompt or "不要提供建议追问" in prompt
-        assert "不要说明引用" in prompt or "不要说明引用了哪些页面" in prompt
-        assert "示例问题或后续操作建议" in prompt or "示例问题或操作建议" in prompt
-
-
-@pytest.mark.asyncio
-async def test_empty_kb_returns_empty_summary(summarizer, store):
-    summary = await summarizer.generate_kb_summary("", "default")
-    assert summary.status == "empty"
-    assert summary.summary == _EMPTY_SUMMARY_TEXT
-    # 元数据已写入
-    cached = store.get_kb_summary("", "default")
-    assert cached.status == "empty"
-
-
-@pytest.mark.asyncio
-async def test_summary_generation_caches_result(summarizer, store, provider):
-    _save_topic_page(store, "测试主题", "这是测试主题的内容，用来验证摘要生成。")
-    summary = await summarizer.generate_kb_summary("", "default")
-    assert summary.status == "ready"
-    assert summary.page_count == 1
-    assert summary.summary.startswith("[fake]")
-    assert summary.content_hash
-
-    # 再次调用应直接返回缓存，不增加 provider 调用次数
-    calls_before = len(provider.calls)
-    cached = await summarizer.generate_kb_summary("", "default")
-    assert cached.status == "ready"
-    assert len(provider.calls) == calls_before
-
-
-@pytest.mark.asyncio
-async def test_page_change_triggers_refresh(summarizer, store, provider):
-    _save_topic_page(store, "旧主题", "旧内容。")
-    await summarizer.generate_kb_summary("", "default")
-    calls_after_first = len(provider.calls)
-
-    # 新增页面，应触发重新生成
-    _save_topic_page(store, "新主题", "新内容。", page_id="topic_2")
-    second = await summarizer.generate_kb_summary("", "default")
-    assert second.page_count == 2
-    assert len(provider.calls) == calls_after_first + 1
-
-
-@pytest.mark.asyncio
-async def test_force_regenerates_even_when_unchanged(summarizer, store, provider):
-    _save_topic_page(store, "主题", "内容。")
-    await summarizer.generate_kb_summary("", "default")
-    calls_after_first = len(provider.calls)
-    await summarizer.generate_kb_summary("", "default", force=True)
-    assert len(provider.calls) == calls_after_first + 1
-
-
-@pytest.mark.asyncio
-async def test_source_count_excludes_unparsed_raws(summarizer, store, provider):
-    """pending/failed 的 raw 不会编译成页面，source_count 只统计 parsed。"""
-    from crew.wiki.schemas import RawSource
-
-    _save_topic_page(store, "主题", "内容。")
-    store.save_raw(
-        RawSource(id="s1", title="已解析.pdf", source_type="upload", parsed_path="x", parse_status="parsed"),
-        "",
-        "default",
-    )
-    store.save_raw(
-        RawSource(id="s2", title="待解析.pdf", source_type="upload", parsed_path="", parse_status="pending"),
-        "",
-        "default",
-    )
-    store.save_raw(
-        RawSource(id="s3", title="解析失败.pdf", source_type="upload", parsed_path="", parse_status="failed"),
-        "",
-        "default",
-    )
-    summary = await summarizer.generate_kb_summary("", "default")
-    assert summary.source_count == 1
-
-
-@pytest.mark.asyncio
-async def test_generate_kb_summary_is_safe_when_provider_fails(store):
-    summarizer = WikiSummarizer(store, _FailingProvider())
-    _save_topic_page(store, "主题", "内容。")
-    summary = await summarizer.generate_kb_summary("", "default")
-    assert summary.status == "stale"
-    cached = store.get_kb_summary("", "default")
-    assert cached.status == "stale"
+def test_home_intro_prompt_focuses_on_content_instead_of_follow_up_suggestions():
+    prompt = _HOME_INTRO_PROMPT
+    assert "不要建议用户继续问什么" in prompt or "不要提供建议追问" in prompt
+    assert "不要说明引用" in prompt or "不要说明引用了哪些页面" in prompt
+    assert "示例问题或后续操作建议" in prompt or "示例问题或操作建议" in prompt
 
 
 # --------------------------------------------------------------------------- #

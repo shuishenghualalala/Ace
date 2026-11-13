@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ADR-0045 · 子智能体 Capability Seam</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}</style></head>
+<body><main>
+<h1>ADR-0045 · 子智能体 Capability Seam 与单一发布边界</h1>
+<p>状态：<strong>已批准，阶段 A / A2 已实施</strong> · 日期：2026-09-16 · 分支：<code>codex/subagent-multiagent-upgrade</code>。</p>
+<h2>背景</h2>
+<p>旧实现把参数适配、Agent 创建、执行循环、双超时、并发、任务兼容和 JSON 输出集中在工具模块中。它能工作，但进程外 Provider、持久身份或续聊一旦接入，就必须复制或侵入这条循环；同时 Provider 能否满足结构化输出、工具收窄等请求没有统一的 fail-loud 边界。</p>
+<p>源码调研显示：dsh 的能力 seam 与运行句柄适合承载语义骨架；Codex 的预留/回滚和“权限只减不增”适合安全边界；Kimi 的批量隔离和子级结果回传适合产品兼容。Ace 保留现有工具名与返回 JSON，不把任何参考项目名称写入产品代码或注释。</p>
+<h2>决定</h2>
+<ol>
+  <li>建立传输无关的 <code>StartRequest</code>、五位能力矩阵、immutable descriptor、稳定结局和幂等运行句柄。</li>
+  <li><code>SubagentRuntime</code> 是能力预检、深度检查和发布的唯一边界；未知 Provider、能力不支持和发布失败在越界前抛出，已运行子级的业务失败折叠为数据。</li>
+  <li>执行细节放进 Provider。首个 <code>inprocess-spawn</code> Provider 持有 Envelope/chunk 循环、idle/absolute 双超时、部分输出、interrupt 与资源关闭。</li>
+  <li>子级构造通过 <code>core.agent-factory</code> Feature 暴露 typed <code>ChildAgentRequest</code>，Provider 不再依赖 <code>CrewApp</code> 私有 dict 工厂。</li>
+  <li>工具授权拆成纯策略函数；preset 的专用工具只能从父级授权上限加回。</li>
+  <li>工具层保留参数 schema、旧 JSON、后台任务兼容和三种工具名，其 handler 不再持有信号量或超时循环。</li>
+  <li>主 Agent 默认采用显式委派纪律；配置键为 <code>features.subagent.delegation_mode</code>，值为 <code>explicit</code> 或 <code>proactive</code>。</li>
+  <li><code>core.subagent</code> 通过 Feature Service Registry 发布 <code>SubagentService</code>；进程外传输由 <code>product.external-agents</code> 以可选依赖单向贡献，Core Runtime 与工具层不出现外援分支。</li>
+  <li>外援注册采用 Feature Scope 持有的动态 Provider family，而非启动时枚举单一 owner。解析 <code>external:&lt;agent_id&gt;</code> 时按当前 owner 查询 Catalog；Scope 停用即撤销 family。</li>
+  <li>Preset 声明绑定 Provider，但模型 schema 不暴露 Provider。Roster、<code>model</code> 参数和自包含简报提示按当前 Provider 的可用性、能力与上下文继承属性生成。</li>
+</ol>
+<h2>关键不变量</h2>
+<table><thead><tr><th>不变量</th><th>保证方式</th></tr></thead><tbody>
+  <tr><td>Provider 不虚报能力</td><td>Runtime 在 <code>start()</code> 前逐位校验，缺能力即拒绝。</td></tr>
+  <tr><td>权限不能扩张</td><td>父授权快照先交集，黑名单与 reserved 后扣减；preset addition 受 ceiling 约束。</td></tr>
+  <tr><td>发布前失败零残留</td><td>Provider 成功构造运行句柄才进入 Runtime 活跃表；失败不会留下 active 记录。</td></tr>
+  <tr><td>结局不被清理覆盖</td><td>先确定 <code>SubagentResult</code>，清理异常只记录；<code>dispose()</code> 幂等。</td></tr>
+  <tr><td>批量失败隔离</td><td>每项独立折叠，按输入顺序返回；一个发布失败不会取消兄弟项。</td></tr>
+  <tr><td>旧消费者不破坏</td><td>工具 schema 和六字段结果形态由回归测试锁定。</td></tr>
+  <tr><td>插件停用即收缩</td><td>外援 resolver 的 disposer 归当前 Feature Scope；停用后 roster 缩小，新委派 fail-closed，不回退传输。</td></tr>
+  <tr><td>Owner 不串线</td><td>Provider family 在解析时读取当前 owner 并查 Catalog；启动阶段不缓存全局 owner roster。</td></tr>
+  <tr><td>外援不获得父权限</td><td><code>inherits_parent_context=false</code>，五项能力全 false，外部 permission handler 固定 deny。</td></tr>
+</tbody></table>
+<h2>阶段 A2 验证</h2>
+<p>第二个 Provider 使用 Catalog、DelegationService 与进程外事件流完成执行。它与进程内 Provider 共享同一个 Runtime 预检/发布边界，但对模型覆盖、工具过滤、结构化输出、父上下文继承和续聊给出相反能力声明。这个差异验证了 seam 表达的是委派语义，而不是进程内实现细节。</p>
+<p>外援事件折叠采用“失败是数据”：提交前 Catalog/Delegation 失败不发布 Run；发布后的 stream/error/cancel 形成稳定 <code>SubagentResult</code>。Usage 事件视为累计快照，以最后值覆盖；完成后的 dispose 只回收资源，不改写已完成结局。</p>
+<h2>后果</h2>
+<p>新增 Provider 只需实现命名、能力声明、上下文继承声明和 <code>start()</code>，并由所属 Feature 注册/撤销；调用方无需理解传输。动态 family 会在 schema 与启动前查询 Catalog，这是换取 owner 隔离和即时 roster 的有意识成本。后台任务持久化尚未迁入 Feature 生命周期；该剩余边界由阶段 B/C 处理。</p>
+<h2>未选择的方案</h2>
+<ul>
+  <li>继续在工具 handler 内增加分支：短期改动少，但每种传输都会复制生命周期。</li>
+  <li>把外援、Team 与 Subagent 统一为一个巨型接口：它们的身份、生命周期与权限语义不同，会迫使接口说谎。</li>
+  <li>先做持久化和 UI：在结局与发布边界尚未稳定时固化表结构，会放大迁移成本。</li>
+</ul>
+<h2>回退</h2>
+<p>阶段 A 未改变数据库。可按文件回退 Runtime/Provider/Factory，并让三个旧工具重新使用原执行循环；配置默认值为 <code>explicit</code>，删除该提示词注入即可恢复旧模型行为。</p>
+<p><a href="../modules/subagent.html">Subagent 模块文档</a> · <a href="../../testing/subagent-stage-a-semantic-runtime.html">Stage A 测试</a> · <a href="../../testing/subagent-stage-a2-external-provider.html">Stage A2 测试</a></p>
+</main></body></html>

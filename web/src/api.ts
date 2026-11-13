@@ -17,6 +17,7 @@ import type {
   Session,
   Skill,
   SkillStore,
+  SubagentListResponse,
   Task,
   TodoItem,
   WikiGraph,
@@ -29,7 +30,6 @@ import type {
   WikiSourceFiles,
   WikiSourceTitles,
   WikiUploadResult,
-  WikiSummary,
   Workspace,
 } from "./types";
 
@@ -176,6 +176,8 @@ async function streamExternalTeamSuggestion(
     force_required_agent_ids?: string[];
     required_capabilities?: string[];
     custom_capabilities?: string[];
+    allow_system_fill?: boolean;
+    member_assignments?: Array<{ agent_id: string; responsibility?: string; role_key?: string }>;
   },
   options?: ExternalTeamSuggestionStreamOptions,
 ): Promise<ExternalTeamSuggestion> {
@@ -184,7 +186,14 @@ async function streamExternalTeamSuggestion(
     ...jsonBody({ ...payload, formation_mode: "auto" }),
     signal: options?.signal,
   });
-  if (!response.ok) throw new Error(`${response.status} /api/external-teams/suggest`);
+  if (!response.ok) {
+    let message = `智能组队失败：${response.status}`;
+    try {
+      const body = await response.json() as { error?: string; detail?: string };
+      message = body.error || body.detail || message;
+    } catch { /* Keep the status when the error body is not JSON. */ }
+    throw new Error(message);
+  }
   let latest: ExternalTeamSuggestion | null = null;
   await readNDJSON(response, (value) => {
     const event = value as {
@@ -275,12 +284,48 @@ export const api = {
     }),
   deleteSession: (id: string) => getJSON(`/api/session/${id}`, { method: "DELETE" }),
   tasks: (id: string) => getJSON<Task[]>(`/api/tasks?session_id=${encodeURIComponent(id)}`),
+  subagents: (id?: string) =>
+    getJSON<SubagentListResponse>(`/api/subagents${id ? `?session_id=${encodeURIComponent(id)}` : ""}`),
+  sendSubagentMessage: (subagentId: string, sessionId: string, message: string, triggerTurn = true) =>
+    getJSON<Record<string, unknown>>(
+      `/api/subagents/${encodeURIComponent(subagentId)}/message?session_id=${encodeURIComponent(sessionId)}`,
+      { method: "POST", ...jsonBody({ message, trigger_turn: triggerTurn }) },
+    ),
+  interruptSubagent: (subagentId: string, sessionId: string, message = "") =>
+    getJSON<Record<string, unknown>>(
+      `/api/subagents/${encodeURIComponent(subagentId)}/interrupt?session_id=${encodeURIComponent(sessionId)}`,
+      { method: "POST", ...jsonBody({ message }) },
+    ),
   task: (id: string) => getJSON<Task>(`/api/tasks/${encodeURIComponent(id)}`),
   cancelTask: (id: string, reason = "用户取消") =>
     getJSON<Task>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
       ...jsonBody({ reason }),
     }),
+  controlCollaboration: (taskId: string, action: string, unitId = '', confirmUnknown = false) =>
+    getJSON<{ ok: boolean; error?: string }>(`/api/collaboration/executions/${encodeURIComponent(taskId)}/control`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, unit_id: unitId, confirm_unknown: confirmUnknown }),
+    }),
+  recoverTeamNode: (
+    sessionId: string,
+    nodeId: string,
+    action: "reassign" | "retry" | "abandon" | "confirm_attempt",
+    replacementAssignee = "",
+    workflowId = "",
+  ) =>
+    getJSON<{ ok: boolean; node?: Task; error?: string }>(
+      `/api/session/${encodeURIComponent(sessionId)}/team/recover`,
+      {
+        method: "POST",
+        ...jsonBody({
+          node_id: nodeId,
+          action,
+          replacement_assignee: replacementAssignee,
+          workflow_id: workflowId,
+        }),
+      },
+    ),
   waitTask: (id: string, timeout = 30) =>
     getJSON<Task>(`/api/tasks/${encodeURIComponent(id)}/wait`, {
       method: "POST",
@@ -367,6 +412,8 @@ export const api = {
       force_required_agent_ids?: string[];
       required_capabilities?: string[];
       custom_capabilities?: string[];
+      allow_system_fill?: boolean;
+      member_assignments?: Array<{ agent_id: string; responsibility?: string; role_key?: string }>;
     },
     options?: ExternalTeamSuggestionStreamOptions,
   ) => streamExternalTeamSuggestion(payload, options),
@@ -384,6 +431,8 @@ export const api = {
       method: "POST",
       ...jsonBody(payload),
     }),
+  updateTeamStaffingPolicy: (id: string, policy: Record<string, boolean>) =>
+    getJSON<ExternalTeam>(`/api/external-teams/${encodeURIComponent(id)}/staffing-policy`, { method: "PATCH", ...jsonBody(policy) }),
   deleteExternalTeam: (id: string) =>
     getJSON<{ ok: boolean }>(`/api/external-teams/${encodeURIComponent(id)}`, { method: "DELETE" }),
   // 工作空间
@@ -509,10 +558,6 @@ export const api = {
       method: "POST",
       ...jsonBody({ source_id }),
     }),
-  wikiSummary: (kbId?: string, force?: boolean) =>
-    getJSON<{ ok: boolean } & WikiSummary>(
-      withKb(`/api/wiki/summary${force ? "?force=true" : ""}`, kbId),
-    ),
   wikiSourceFileUrl: (sourceId: string, kbId?: string) =>
     withKb(`/api/wiki/sources/${encodeURIComponent(sourceId)}/file`, kbId),
 };

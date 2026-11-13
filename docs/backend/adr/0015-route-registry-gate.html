@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0015 · Route Registry 与运行期能力闸门</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0015 · Route Registry 与运行期能力闸门</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / 统一贡献注册表（§6.4、§6.5）</div>
+
+  <h2>背景</h2>
+  <p>目录插件的 API Router 由 Gateway 在应用构造期从 <code>PluginManager._api_routers</code> 字典挂载。FastAPI 路由树构造后固化：插件卸载只删字典记录，已挂载路由仍可到达，「禁用功能」对 API 层不成立（§2.3.6 缺口 4）。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>新增第四类贡献注册表 <code>RouteRegistry</code>（<code>crew/features/routes.py</code>），与 Driver/Context 注册表共用 FeatureScope 所有权与 Generation 语义。路由可逆性不由「热卸载路由」实现，而由「启动期从注册表装配 + 运行期闸门」实现：Scope 释放时注册项摘除，挂载点上的闸门依赖按注册表可见性返回统一的 <code>capability_unavailable</code>（HTTP 503）。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>契约</th></tr></thead>
+    <tbody>
+      <tr><td>路由贡献注册</td><td><code>crew/features/routes.py</code></td><td><code>RouteContribution</code>（稳定 contribution_id + router + prefix）；冲突检测与新旧 Generation 原子替换同 Driver Registry。</td></tr>
+      <tr><td>Feature 安装入口</td><td><code>FeatureInstallContext.register_api_router</code></td><td>contribution_id 默认取 feature_id；Scope 释放自动摘除。</td></tr>
+      <tr><td>目录插件桥接</td><td><code>PluginContext.register_api_router</code></td><td>旧 API 不变；同一贡献双写 legacy 字典（兼容）与 Route Registry（闸门事实来源），id 为 <code>plugin:&lt;name&gt;</code>。</td></tr>
+      <tr><td>启动期装配</td><td><code>crew/gateway/app.py</code></td><td>从 <code>feature_runtime.routes.bindings()</code> 挂载，确定性排序，日志带 owner Generation。</td></tr>
+      <tr><td>运行期闸门</td><td><code>make_route_gate</code></td><td>每请求检查注册表可见性；不可用返回 503 + <code>capability_unavailable</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>行为兼容</h2>
+  <ul>
+    <li>插件启用且活跃时，路由路径、前缀（<code>/api/plugins/&lt;name&gt;</code>）与响应完全不变。</li>
+    <li>旧 <code>PluginManager.api_routers</code> 属性与卸载回滚语义保留，其他消费方不受影响。</li>
+    <li>内置路由器（sessions/wiki/work 等 23 个）本切片不迁——它们随各自 Feature Bundle 迁移（阶段 3 起）逐个进入注册表。</li>
+  </ul>
+
+  <h2>边界与后续</h2>
+  <p>插件重新加载产生新 Router 对象时，已挂载的旧路由树不会自动换新——这属于 §6.5 的 restart_required 边界，本切片不做伪装热替换。后续：Cron/Sites/Wiki 等内置路由随 Feature 化逐个迁入；控制面「禁用 Feature → API 同步不可用」的端到端验收（§13.4）随第一个完整 Bundle 切片落地。</p>
+
+  <h2>跨平台</h2>
+  <p>纯注册表与 FastAPI 依赖注入，无平台分支。</p>
+
+  <div class="nav"><a href="0014-feature-event-namespace.html">ADR-0014</a> · <a href="../modules/plugins.html">Plugins 模块</a> · <a href="../../testing/plugin-architecture-stage-2-route-gate.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

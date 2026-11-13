@@ -4,9 +4,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
-import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage } from '../../src/ui/features/chat-controller';
-import { enqueuePending, getPendingQueue } from '../../src/ui/state';
-import { __resetAllStoresForTest, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
+import { _resetQueueEditDraftForTests, dispatchWs, editQueueItem, sendMessage, sendNativeVisualMessage } from '../../src/ui/features/chat-controller';
+import { enqueuePending, getPendingQueue, state } from '../../src/ui/state';
+import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 
 vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/ui/features/session-model')>();
@@ -15,9 +15,15 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
     persistDraftSessionModel: vi.fn(async () => undefined),
   };
 });
+vi.mock('../../src/ui/features/native-visual-capability', () => ({ ensureNativeVisualCapability: vi.fn(async () => undefined) }));
 beforeEach(() => {
   __resetAllStoresForTest();
+  state.isLoggedIn = true;
+  state.userInfo = { uid: 'test-owner' };
   _resetQueueEditDraftForTests();
+  // auth-gate 已实现为真实登录判定（email/remote 登录墙）：local 桌面会话由
+  // initAuthFlow 置为已登录，测试模拟该态。
+  authStore.set({ isLoggedIn: true });
   const localStorageStub = {
     getItem: vi.fn(() => null),
     setItem: vi.fn(),
@@ -125,5 +131,21 @@ describe('sendMessage', () => {
       query: '按普通模式发送',
     });
     expect(socket.send.mock.calls.at(-1)?.[0]).not.toHaveProperty('plan_active');
+  });
+});
+
+
+describe('inline component submissions', () => {
+  it('queues a snapshot without consuming composer attachments or drafts', async () => {
+    sessionStore.set({ activeSessionId: 'inline-s', busySessions: { 'inline-s': true } });
+    state.attachments = [{ id: 'draft-file', name: 'draft.txt' }] as never;
+    const input = document.querySelector<HTMLTextAreaElement>('[data-composer-input]')!;
+    input.value = '尚未发送的草稿';
+    expect(await sendNativeVisualMessage('inline-s', '{"cost":100}')).toBe(true);
+    expect(getPendingQueue('inline-s')[0]).toMatchObject({ query: '{"cost":100}', attachments: [] });
+    expect(state.attachments[0].id).toBe('draft-file');
+    expect(input.value).toBe('尚未发送的草稿');
+    expect(await sendNativeVisualMessage('another-session', 'no')).toBe(false);
+    expect(getPendingQueue('inline-s')).toHaveLength(1);
   });
 });

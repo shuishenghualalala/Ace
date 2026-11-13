@@ -49,6 +49,31 @@ describe("MessageList followup origin", () => {
 });
 
 describe("MessageList agent bubble routing", () => {
+  it("renders team internal messages with the member bubble", () => {
+    const html = renderToStaticMarkup(
+      <MessageList
+        messages={[
+          { id: "team_1", role: "team_internal", text: "@kk 开始执行", agentId: "kk" },
+          { id: "team_2", role: "team_internal", text: "kk 已完成", agentId: "kk" },
+        ]}
+        busy={false}
+        currentAgentLabel={{ name: "Team", provider: "team" }}
+        teamMembers={[{
+          agentId: "kk",
+          name: "kk",
+          role: "developer",
+          isLeader: false,
+          tone: 1,
+        }]}
+      />,
+    );
+
+    expect(html).toContain("<strong>@kk</strong> 开始执行");
+    expect(html).toContain("kk 已完成");
+    expect(html).toContain("team-internal");
+    expect(html).not.toContain("Crew 正在处理");
+  });
+
   it("routes ACP sessions through the shared AgentTurnBubble", () => {
     const messages: UiMessage[] = [{
       id: "acp_1",

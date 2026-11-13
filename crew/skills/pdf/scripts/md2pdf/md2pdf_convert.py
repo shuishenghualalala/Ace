@@ -10,9 +10,12 @@ Pandoc / typst / headless browser / TeX required. Citations render as in-text
 superscript links into a consolidated "References" section at the document end.
 
 This is the normalization exit for swarm-assembled Markdown. For one-off PDFs the
-user asks you to write, author natively via the ReportLab route instead.
+user asks you to write, author natively via the ReportLab route instead. For
+converting an already-finished Markdown file outside the swarm/citation
+scenario, use the md-to-pdf skill (pandoc/xelatex stack) instead.
 """
 import logging
+import json
 import os
 import subprocess
 import sys
@@ -200,7 +203,12 @@ if __name__ == '__main__':
                                 references_heading=args.references_heading)
         print(f"\n{'='*60}\nConversion complete: {out}\n{'='*60}")
     except Exception as e:
-        logger.error(f"Conversion failed: {e}")
-        import traceback
-        traceback.print_exc()
+        print(
+            json.dumps(
+                {"status": "error", "error": "Md2PdfError",
+                 "message": f"Markdown → PDF conversion failed: {e}"},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
         sys.exit(1)

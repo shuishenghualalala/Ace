@@ -230,8 +230,9 @@ export function bindAttachments(): () => void {
   if (attachmentController) return () => {};
   attachmentController = new AbortController();
   const signal = attachmentController.signal;
+  // 「+」按钮 → file input 的触发由 composer-context-view 工厂内聚（主对话 / Wiki 实例各自接线），
+  // 这里只负责文件选择与落库。
   const input = $('#chat-file-input') as HTMLInputElement | null;
-  $('#chat-attach-btn')?.addEventListener('click', () => input?.click(), { signal });
   input?.addEventListener('change', () => {
     void handleFileSelect(input.files);
     input.value = '';

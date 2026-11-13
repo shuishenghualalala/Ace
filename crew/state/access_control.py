@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID
+
 from crew.security.settings import strict_security_enabled
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,9 +37,14 @@ class AccessControlConfig:
 
     def user_type_for_owner(self, owner: str, *, requested: str | None = None) -> str:
         """Resolve role from authenticated owner; requested session roles are compatibility-only."""
+        normalized_owner = str(owner or "").strip()
+        # 决策⑧：本机 owner 强制 internal。internal_accounts 白名单用于枚举远程
+        # 账号，本机用户（CLI/桌面回环/未绑定渠道）不应因不在名单内而被降权
+        # external——"强制"意味着优先级高于下方 requested 兼容路径。
+        if normalized_owner == LOCAL_OWNER_ACCOUNT_ID:
+            return "internal"
         if not strict_security_enabled() and requested in {"external", "internal"}:
             return requested
-        normalized_owner = str(owner or "").strip()
         internal_accounts = {str(item).strip() for item in self.internal_accounts if str(item).strip()}
         if internal_accounts:
             return "internal" if normalized_owner in internal_accounts else "external"

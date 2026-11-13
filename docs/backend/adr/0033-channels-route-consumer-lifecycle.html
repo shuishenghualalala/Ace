@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0033 · Channels Route/CLI/Adapter 收口</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0033 · Channels Route/CLI/Adapter 收口</h1>
+<p>状态：已实施并验证 · 日期：2026-09-10 · 阶段：4D-2。</p>
+<h2>背景与候选方案</h2>
+<p>4D-1 把渠道运行时收进 <code>product.channels</code> Generation 后，Router 工厂闭包仍持有候选 ChannelManager 引用（restart 后指向旧实例），CLI 的 <code>_channel_manager</code> 在 Feature 未激活时本地 new 一个 ChannelManager 塞回宿主，绕过生命周期所有权。CLI 还逆向 import Router 的 14 个私有 helper，并与 Router 平行维护两份热重启逻辑。平台 Adapter 方面，飞书 WS 守护线程无热停路径，微信存在未跟踪的 fire-and-forget 任务。</p>
+<h2>决定</h2>
+<p>14 个 Router 私有 helper 下沉到 <code>crew/channels/router_helpers.py</code>，Router 与 CLI 共同消费，消除 CLI→Router 逆向依赖。Router 工厂保留 <code>channel_manager=None</code> 参数（向后兼容），handler 内统一经 <code>crew.channel_manager</code> 动态属性解析当前代实例。CLI 删除本地 ChannelManager 兜底，Feature 未激活时抛 <code>CliError("渠道服务未就绪", exit_code=503)</code>，消费路径与 Channels Service 生命周期一致。CLI 与 Router 的热重启逻辑统一到 <code>router_helpers._restart_channel</code>。</p>
+<p>飞书 Adapter 增加可控热停：<code>stop()</code> 设置 <code>_ws_stop_event</code> 并尝试调用 <code>ws_client.stop()</code>；<code>_serve_ws</code> 线程等待 stop_event 触发后调用 stopper 并 join runner 线程（最多 5 秒）。WS 主线程仍为 daemon，不保证被 join，但 stop() 后连接会断开、event loop 会退出。微信 Adapter 新增 <code>_fire_and_forget_tasks</code> 集合，用 <code>_track_fire_and_forget(task)</code> 纳入跟踪并加 done callback 自动清理；<code>stop()</code> 中 cancel 并 await 集合中的任务。</p>
+<h2>兼容、验证与回退</h2>
+<p>Router 端点行为不变；CLI 的 <code>crew channel</code> 命令族在渠道 Feature 激活时正常工作，未激活时明确报错而非静默兜底。新增 <code>tests/test_channels_cli_consumer.py</code> 验证 CLI 消费路径、Router 工厂签名兼容、helper 导出正确性；更新飞书/微信平台测试覆盖热停与任务取消。回归 158 passed（5 项微信失败为缺少 aiohttp/cryptography 的既有环境问题，与基线一致），Ruff、compileall、Import Linter（6 contracts kept, 0 broken）全部通过。</p>
+<p>已知边界：Gateway WS router（<code>create_ws_router</code>）仍显式传入 channel_manager，未在本切片动态化；飞书 WS 线程在进程正常退出时仍依赖 daemon 回收。停用不删除渠道绑定与配置数据；回退本切片恢复本地兜底与逆向 import。</p>
+<p><a href="../modules/gateway.html">Gateway 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

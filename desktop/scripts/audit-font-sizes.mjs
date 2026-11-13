@@ -23,25 +23,24 @@ const FONT_SIZE_PATTERN = /font-size\s*:\s*(\d+(?:\.\d+)?)px/g;
 
 /**
  * Canonical mapping: integer px size → recommended token name.
- * Sourced from tokens.css `--mw-font-*` scale at base-font-size = 14.
+ * 不变式：每一项都必须与 tokens.css 的 `--mw-font-*` 实际取值一致，代表
+ * 「换成该 token 后像素不变」。标尺之外的整数（15/17/19/21/22/28/36/56…）
+ * 一律 shouldUseCalc——需要在 tokens.css 增加 calc() 语义档位，不允许就近取整
+ * （就近取整会改字号：15px 曾在此表里被指向 16px 的 --mw-font-lg）。
  */
 const COMMON_SIZES = {
+  9: '--mw-font-icon',
   10: '--mw-font-xxs',
   11: '--mw-font-xs',
   12: '--mw-font-sm',
   13: '--mw-font-md',
   14: '--mw-font-base',
-  15: '--mw-font-lg',
   16: '--mw-font-lg',
   18: '--mw-font-xl',
   20: '--mw-font-2xl',
-  21: '--mw-font-2xl',
   24: '--mw-font-3xl',
-  28: '--mw-font-3xl',
   30: '--mw-font-4xl',
-  36: '--mw-font-4xl',
   40: '--mw-font-5xl',
-  56: '--mw-font-5xl',
 };
 
 /**
@@ -126,6 +125,16 @@ function isCli() {
   }
 }
 
+/**
+ * strict 门禁只卡「可动作」档位。
+ *
+ * `mustKeepLiteral` 按本脚本文档的定义就是允许保留的（亚像素 / 图标专用字号），
+ * 把它也算进失败条件会让唯一通过态变成「0 个字面量」，与文档自相矛盾。
+ */
+export function hasActionableFontSizes(report) {
+  return report.summary.shouldUseVar > 0 || report.summary.shouldUseCalc > 0;
+}
+
 if (isCli()) {
   const args = process.argv.slice(2);
   const strict = args.includes('--strict');
@@ -144,7 +153,7 @@ if (isCli()) {
     process.stdout.write(`  … and ${report.byFile.length - 10} more files\n`);
   }
 
-  if (strict && report.summary.total > 0) {
+  if (strict && hasActionableFontSizes(report)) {
     process.exitCode = 1;
   }
 }

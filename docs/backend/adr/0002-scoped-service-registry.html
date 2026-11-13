@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0002 · 作用域化 Service Registry</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0002 · 作用域化 Service Registry</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-02 · 阶段：插件架构 Stage 1 / Commit 3</div>
+
+  <h2>背景</h2>
+  <p>现有 <code>PluginContext.services</code> 是一个全局字典，只能按字符串读取单实例。它无法表达同一能力在不同 Workspace、用户或 Session 下的实现，也没有 Generation 所有权、激活可见性和缺失依赖诊断。若直接以全局单例定义 Knowledge、Provider 等契约，后续多租户迁移会再次改写接口。</p>
+
+  <h2>候选方案</h2>
+  <table>
+    <thead><tr><th>方案</th><th>收益</th><th>问题</th></tr></thead>
+    <tbody>
+      <tr><td>扩展现有字典</td><td>改动最小</td><td>所有权、作用域和依赖仍靠调用方约定。</td></tr>
+      <tr><td>引入通用依赖注入框架</td><td>功能完整</td><td>引入重量级概念，难与现有 FeatureScope 和渐进迁移边界对齐。</td></tr>
+      <tr><td>建立小型作用域注册表</td><td>契约明确，可直接复用 Feature 生命周期</td><td>需要先定义 Ace 的租户层级和冲突语义。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>决定</h2>
+  <div class="decision"><p>建立类型化 <code>ServiceKey[T]</code> 与 <code>ServiceRegistry</code>。注册地址由 Service Key、作用域类型和规范化租户路径共同决定；解析从最窄的 Session 向 User、Workspace、Global 回退。</p></div>
+  <ul>
+    <li>四级作用域接口一次定义完整；首个调用方可以只使用 Global/Workspace。</li>
+    <li>同一精确地址只能有一个所有者，不同作用域允许提供同名能力。</li>
+    <li>激活中的注册保留在诊断表，但只有所属 Scope 进入 <code>ACTIVE</code> 后才可解析；进入 <code>STOPPING</code> 时立即停止新解析。</li>
+    <li>注册返回上一 ADR 定义的 Token，回滚或停用自动删除且只删除本代拥有的条目。</li>
+    <li><code>FeatureDependencyGraph</code> 记录 required/optional/provides，提供运行期解析、启动批次和循环/断路诊断。</li>
+    <li><code>FeatureConfigRevisions</code> 分开记录 desired/effective；过时 Generation 不能覆盖更新的配置意图。</li>
+  </ul>
+
+  <h2>跨平台影响</h2>
+  <p>实现是内存数据结构与纯 Python 状态转换，不依赖文件系统、进程、信号或线程模型；macOS、Linux、Windows 使用完全相同的路径。</p>
+
+  <h2>回退方式</h2>
+  <p>当前尚未替换 <code>PluginContext.services</code>。可以整体撤销 Service Registry 和配置版本类型，现有插件继续使用原字典；后续 Adapter 接入将另设提交边界。</p>
+
+  <div class="nav"><a href="0001-feature-lifecycle-primitives.html">ADR-0001</a> · <a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进总计划</a></div>
+</div>
+</body>
+</html>

@@ -14,6 +14,37 @@ function makeContainer(): HTMLElement {
 }
 
 describe('attachScrollAnchor', () => {
+  it('上滑后迟到的底部 scroll 不恢复跟随，主动滚回底部才恢复', () => {
+    const el = makeContainer();
+    el.scrollTop = 600;
+    const anchor = attachScrollAnchor(el);
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
+    el.dispatchEvent(new Event('scroll'));
+    expect(anchor.isStickyBottom()).toBe(false);
+    el.scrollTop = 300;
+    el.dispatchEvent(new Event('scroll'));
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: 1400 });
+    anchor.pinToBottomIfSticky();
+    expect(el.scrollTop).toBe(300);
+    el.scrollTop = 800;
+    el.dispatchEvent(new Event('scroll'));
+    expect(anchor.isStickyBottom()).toBe(true);
+    anchor.dispose();
+  });
+
+  it('程序滚动尚未回调时拖动滚动条向上，且内容增长，不吞掉上滑', () => {
+    const el = makeContainer();
+    const anchor = attachScrollAnchor(el);
+    anchor.pinToBottomIfSticky();
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, value: 1600 });
+    el.scrollTop = 200;
+    el.dispatchEvent(new Event('scroll'));
+    anchor.pinToBottomIfSticky();
+    expect(el.scrollTop).toBe(200);
+    expect(anchor.isStickyBottom()).toBe(false);
+    anchor.dispose();
+  });
+
   it('初始 stickyBottom=true，pinToBottomIfSticky 会滚到底', () => {
     const el = makeContainer();
     const anchor = attachScrollAnchor(el);

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ADR-0050 · Subagent Stage D6</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}a{color:#245a83}.ok{color:#176b2c}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;vertical-align:top}</style></head>
+<body><main>
+<h1>ADR-0050 · Subagent Stage D6：Continuable 收尾</h1>
+<p>状态：<strong>已实施</strong> · 日期：2026-09-18 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 前置：<a href="0048-subagent-stage-d-continuable.html">ADR-0048</a>。</p>
+
+<h2>背景</h2>
+<p>D1-D5 已提供持久身份、隐藏会话、Activation 锁、持久邮箱和控制面，但冷恢复仍需要更严格的身份证明；运行状态也没有对外投影，后台任务只能单向关联 task，Web 只能观察而不能控制。</p>
+
+<h2>决定</h2>
+<table><thead><tr><th>问题</th><th>决策</th></tr></thead><tbody>
+  <tr><td>冷恢复授权</td><td>恢复请求同时核对 run、descriptor 和当前请求中的 <code>owner_account_id</code>、直接 <code>parent_session_id</code>、<code>subagent_id</code>；descriptor 身份不一致时 fail-closed。</td></tr>
+  <tr><td>驻留状态</td><td>Activation 状态由 running 标志和持久 inbox 派生为 <code>running</code>、<code>ready</code>、<code>idle</code>，通过 <code>activation_running/ready/idle</code> lifecycle event 投影。</td></tr>
+  <tr><td>任务账本</td><td>后台任务创建时预分配 continuable <code>subagent_id</code>，写入 task progress；结算和 collect 结果保留 <code>task_id</code> 与 <code>subagent_id</code>。</td></tr>
+  <tr><td>Web 控制</td><td>新增 owner-scoped <code>POST /api/subagents/{id}/message</code> 与 <code>POST /api/subagents/{id}/interrupt</code>，复用 Runtime 控制面，不在路由层复制授权逻辑。</td></tr>
+</tbody></table>
+
+<h2>关键路径</h2>
+<pre><code>Web Activity Card
+  ├─ GET /api/subagents?session_id=parent
+  ├─ POST /api/subagents/{id}/message?session_id=parent
+  └─ POST /api/subagents/{id}/interrupt?session_id=parent
+          │ owner-scoped
+          ▼
+SubagentRuntime
+  ├─ persisted identity proof → resume / reject
+  ├─ Activation state → lifecycle event
+  └─ task_id ↔ subagent_id → progress / collect / settlement</code></pre>
+
+<h2>边界</h2>
+<ul>
+  <li>one-shot 子智能体不创建 Activation，也不产生 activation 状态事件。</li>
+  <li>HTTP 控制接口要求显式 parent session；错误身份返回拒绝或不存在，不泄露其他 owner 的运行信息。</li>
+  <li>脚本编排引擎仍不在本方案范围内。</li>
+</ul>
+
+<h2>验证</h2>
+<p class="ok">D6 专项覆盖冷恢复伪造 descriptor 拒绝、Activation 事件顺序、task/subagent 双 ID 账本、HTTP 控制入口和 Web 状态归并。</p>
+<p><a href="../modules/subagent.html">Subagent 模块文档</a> · <a href="../../testing/subagent-stage-d6-finish.html">测试记录</a></p>
+</main></body></html>

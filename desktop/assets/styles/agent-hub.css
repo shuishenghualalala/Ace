@@ -173,13 +173,9 @@
   width: 100%;
 }
 
-.mw-agent-hub__form > .mw-agent-hub__legacy-form > .agents-section {
+.mw-agent-hub__form > .agents-section {
   border-top: 0;
   padding-top: 0;
-}
-
-.mw-agent-hub__legacy-form {
-  display: contents;
 }
 
 @media (max-width: 720px) {

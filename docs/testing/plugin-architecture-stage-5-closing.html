@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>阶段 5-7 收尾切片测试记录与阶段 5 验收</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}code{background:#f4f4f4;padding:2px 5px}a{color:#245a83}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 10px}</style></head>
+<body><main>
+<h1>阶段 5-7 · 剩余 tab 迁移 + Web 分派层对齐，与阶段 5 整体验收</h1>
+<p>2026-09-11 · 提交 <code>28c848b</code>（5-7a Desktop）与 <code>e3a8fad</code>（5-7b Web）。Node.js 本机执行（macOS）；DOM/React 语义，无平台相关分支。</p>
+<h2>5-7a · Desktop 剩余 tab 分支迁移</h2>
+<p><code>skills</code> / <code>security</code> / <code>sites</code> / <code>cron</code> 四个页面各封装 <code>PageContribution</code>：signal/epoch 守卫拦截已停用后的晚到回写；deactivate 释放计时器、observer、view 与 DOM；security 补 <code>isAvailable</code> 门控。<code>app.ts</code> 注册四个 contribution 并接入 dispose 链；<code>activateTab()</code> 删除全部硬编码分支，收敛为 <code>return setTab(tab)</code> 纯 registry 分派。</p>
+<ul>
+<li>新增 <code>skills-page.test.ts</code>、<code>security-center.test.ts</code>，扩展 <code>cron-page.test.ts</code>、<code>sites-page.test.ts</code>（共 13 个新用例）：activate 行为、deactivate 释放、isAvailable 门控、晚到响应不回写。</li>
+<li><code>npx vitest run</code>（desktop/ 全量，主 agent 独立复跑）：162 文件 / 1867 测试通过（基线 160/1854）；<code>npx tsc --noEmit</code> 无错误。</li>
+</ul>
+<h2>5-7b · Web Feature Event 分派层对齐</h2>
+<p>新增 <code>web/src/lib/feature-event-dispatcher.ts</code>：与 Desktop 同语义的 (feature, event, version) 注册表，重复注册冲突失败、disposer 幂等、未命中 warn 安全忽略；旧帧 <code>wiki_cards</code> / <code>wiki_ingest_progress</code> / <code>wiki_changed</code> / <code>team_internal</code> / <code>workflow_progress</code> 经 compat 映射进同一分派，<code>feature_event</code> 新帧按 body 直接解析。handler 从 <code>useChat.ts</code> 分支逐句迁入 <code>WikiFeature</code> 与 <code>feature-events.ts</code>；<code>workflow_progress</code> 注册空 handler 保持原静默忽略语义。</p>
+<p>主审查出并修正一处对齐缺陷：web 初版注册 <code>team/internal</code> 与 <code>kanban/progress</code>，与后端/Desktop 的 <code>team/internal_message</code>、<code>kanban/workflow_progress</code> 不一致（会导致后端直发新帧时 web miss）；已修正为逐字一致并补断言。</p>
+<ul>
+<li>新增 <code>feature-event-dispatcher.test.ts</code> 与 <code>feature-events.test.ts</code>（23 用例）。<code>npm test</code> 32 文件 / 216 测试通过（基线 30/193）；<code>npm run typecheck</code> 与 <code>npm run build</code> 通过（主 agent 独立复跑）。</li>
+</ul>
+<h2>阶段 5 整体验收（对照演进计划 §阶段 5）</h2>
+<table>
+<tr><th>关键测试要求</th><th>达成情况</th></tr>
+<tr><td>禁用 Wiki 后不显示导航、不调用 Wiki API、不注册 Wiki reducer</td><td>导航隐藏与程序化切换拒绝 ✅（5-1）；页面 deactivate 且不再发起页面请求 ✅（5-2）。reducer 注册不随开关动态增删（init 期注册、禁用时后端不产生对应事件，空挂无副作用）——迁移期已知偏差，后续如引入运行期 UI 热卸载再接管</td></tr>
+<tr><td>启用功能后页面可 activate/dispose，多次切换无重复订阅</td><td>✅ PageRegistry 串行切换 + 清理链；wiki/agents/skills/security/sites/cron 六个页面均有生命周期用例覆盖</td></tr>
+<tr><td>未知 Feature Event 核心 UI 安全忽略并可诊断</td><td>✅ Desktop（5-4）与 Web（5-7b）均 warn + 忽略，版本不匹配同样忽略</td></tr>
+<tr><td>Desktop 与 Web 对同一事件版本行为一致</td><td>✅ 5-7b 命名空间逐字对齐（team/internal_message、kanban/workflow_progress、wiki/cards、wiki/ingest_progress；wiki/changed 为 web 独有旧帧）</td></tr>
+<tr><td>新增可信 UI Feature 不修改核心导航、activateTab()、全局 Stream Reducer</td><td>✅ 导航经 descriptor Registry（5-1）、activateTab 纯 PageRegistry 分派（5-7a）、流事件经 FeatureEventReducerRegistry / feature-event-dispatcher（5-4/5-7b）</td></tr>
+</table>
+<h2>阶段 5 提交清单</h2>
+<ul>
+<li>5-1 Wiki UI Navigation Registry（前批已收口）</li>
+<li>5-2 Wiki 页面生命周期 <code>1734eb4</code></li>
+<li>5-3 API Client 按 Feature 拆分 <code>eecc35c</code></li>
+<li>5-4 Feature Event Reducer Registry（Desktop）<code>3d4351a</code></li>
+<li>5-5 外援 UI Contribution <code>1abb89e</code></li>
+<li>5-6 Team/Kanban UI 生命周期化 <code>90a675a</code></li>
+<li>5-7a 剩余 tab 迁移 <code>28c848b</code> · 5-7b Web 分派层对齐 <code>e3a8fad</code></li>
+</ul>
+<h2>回退</h2>
+<p>各切片独立提交，按提交逐一切片撤销即可回退；无数据或协议变更。</p>
+<p><a href="plugin-architecture-stage-5-team-kanban-ui.html">阶段 5-6</a> · <a href="plugin-architecture-stage-5-external-agents-ui.html">阶段 5-5</a></p>
+</main></body></html>

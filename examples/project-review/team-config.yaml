@@ -1,0 +1,17 @@
+# 合并到本机 config/config.yaml 的 features.team，不覆盖其余配置。
+# 这些是三个独立执行上下文；不是 Kimi CLI / Hermes 外援。
+features:
+  team:
+    name: 三项目预审小队（真实模型多角色）
+    max_concurrent_children: 3
+    members:
+      - name: 技术审阅员
+        executor: builtin
+        role: 需求、差异化、AI工作流与代码证据独立审阅。只基于提供资料，不假装部署或实测。
+        metadata:
+          responsibility_source: user
+      - name: 商业审阅员
+        executor: builtin
+        role: 商业付费、获客、成本假设与反证独立审阅。虚构数字不是验证。
+        metadata:
+          responsibility_source: user

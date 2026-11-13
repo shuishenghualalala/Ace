@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0001 · Feature 生命周期所有权原语</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0001 · Feature 生命周期所有权原语</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-02 · 阶段：插件架构 Stage 1 / Commit 2</div>
+
+  <h2>背景</h2>
+  <p>现有目录插件把工具、Hook、Router 等贡献直接写入全局表，再分别记录名称；异步 disposer 在有事件循环时只被创建为后台任务。结果是安装中途失败无法统一回滚，卸载返回也不代表资源已经静止。第一方功能又由 <code>CrewApp</code> 单独管理，无法共享同一套所有权。</p>
+
+  <h2>候选方案</h2>
+  <ul>
+    <li>直接在 <code>PluginManager</code> 中逐项补充清理逻辑：改动较小，但会继续把生命周期绑定到目录插件，并让每种贡献维护不同撤销代码。</li>
+    <li>先建立中立 Feature 生命周期内核，再由旧管理器适配：多一个迁移步骤，但第一方与第三方能力可以收敛到同一模型。</li>
+    <li>一次性替换全部装配流程：目标结构直接，但变更面不可独立验证和回滚。</li>
+  </ul>
+
+  <h2>决定</h2>
+  <div class="decision">
+    <p>在 <code>crew/features</code> 建立与目录发现无关的所有权原语：<code>FeatureGeneration</code> 标识单次激活，<code>FeatureScope</code> 持有全部带标签的 <code>RegistrationToken</code>，<code>FeatureTransaction</code> 负责未提交安装的统一回滚。</p>
+  </div>
+  <ul>
+    <li>disposer 可以同步或异步；Scope 返回前必须等待异步清理完成。</li>
+    <li>Token 单次执行；并发和重复调用共同等待同一清理任务。</li>
+    <li>Scope 关闭后拒绝新注册，并按后进先出顺序尝试全部清理。</li>
+    <li>单项清理失败不阻断其余项，最终以标签和原始异常聚合报告。</li>
+    <li>本提交只建立生命周期所有权；贡献的事务可见性由下一步 Service/Contribution Registry 提供，旧 <code>PluginManager</code> 在再下一提交接入。</li>
+  </ul>
+
+  <h2>跨平台影响</h2>
+  <p>实现只依赖 Python 3.11 标准库的 <code>asyncio</code>、<code>dataclasses</code> 与时区时间，不依赖 POSIX 信号、文件锁或平台路径语义；macOS、Linux、Windows 使用同一代码路径。</p>
+
+  <h2>回退方式</h2>
+  <p>当前没有生产调用方，回退时可整体撤销 <code>crew/features</code>、对应测试与文档，不影响现有 <code>PluginManager</code> 行为。旧管理器接入后则通过 Legacy Adapter 提交边界单独回退。</p>
+
+  <div class="nav"><a href="../modules/plugins.html">Feature / Plugin 模块文档</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进总计划</a></div>
+</div>
+</body>
+</html>

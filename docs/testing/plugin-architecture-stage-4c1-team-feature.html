@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 4C-1 · Team Feature Foundation 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{font-weight:700;color:#8a6116}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 4C-1 · Team Feature Foundation</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-09 · 编码：Luna 子 Agent · 验证：独立测试 Agent + 主 Agent 收口</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li><code>product.team</code> Generation 统一拥有 <code>InProcessTeamManager</code>、<code>mode=team</code> Execution Driver 与 <code>ServiceKey("team")</code> 服务；<code>CrewApp</code> 不再手写构造 Manager/Driver。</li>
+    <li>Manager 增加 <code>shutdown()</code> 与 <code>_closed</code> 守卫；停用后新请求 fail-closed，在途 delegate/recovery 任务被取消。</li>
+    <li>App 级 owner Provider 缓存通过可调用对象注入 Manager，模型切换时同步失效；同时保留 <code>app.team</code> 兼容表面与 <code>set_team_manager()</code> 测试路径。</li>
+    <li><code>build_app(enable_team=True)</code> 正确激活 Feature，<code>enable_team=False</code> 时不注册 Team Driver；旧测试通过 <code>set_team_manager()</code> 继续工作。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Team 生命周期契约（tests/test_team_feature_lifecycle.py，7 项：激活发布 Service/Driver、Driver 回填 external_team_id、更新/停用关闭旧 Manager、停用后请求 fail-closed、deactivate 拒绝、app.team fail-closed、生产 build_app 装配、disabled 模式）</td><td class="ok">7 passed</td></tr>
+      <tr><td>Core Feature 声明化回归（tests/test_core_features.py）</td><td class="ok">7 passed</td></tr>
+      <tr><td>Team 任务回归（tests/test_team_tasks.py）</td><td class="ok">251 passed · 1 skipped</td></tr>
+      <tr><td>external / team / gateway / runtime 组合筛选回归（tests/test_external_agents*.py、tests/test_team_tasks.py、tests/test_team_feature_lifecycle.py、tests/gateway、tests/test_feature_runtime.py、tests/test_task_runtime.py）</td><td class="ok">869 passed · 30 failed · 2 skipped；失败项均为既有环境失败（gateway 401/upload/schema 等），无新增失败</td></tr>
+      <tr><td>Ruff、compileall、Import Linter</td><td class="ok">全部通过；6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>组合筛选回归的既有失败（401 鉴权、upload、browser schema、archive 423 等）在未改动基线上同样失败，属环境问题，与本切片无关。实际模型驱动的 Team 执行未在本机运行，以 FakeProvider 覆盖。</p>
+
+  <h2>生命周期核验要点</h2>
+  <ul>
+    <li>install 先注册 <code>manager.shutdown</code> disposer 再装配 Driver/Service，激活失败时 Runtime 正常回滚。</li>
+    <li><code>CrewApp</code> 通过 <code>build_team_feature(..., activate=enable_team)</code> 在 build 期激活；激活记录由 <code>declare_managed_feature()</code> 纳入 Runtime，后续 <code>startup()</code> 不再重复安装。</li>
+    <li>Owner Provider 缓存同时存在于 App 与 Manager：App 维护跨调用的长效缓存，Manager 在 Generation 内做同代缓存；切换模型时 App 先清空自身缓存再调用 <code>manager.invalidate_owner_provider()</code>。</li>
+    <li>Gateway 通过 <code>getattr(crew, "team", None)</code> 安全设置 <code>interaction_bridge</code>；Team 未启用时跳过。</li>
+    <li><code>set_team_manager()</code> 仅在测试路径使用：注册独立的 <code>product.team-driver-adapter</code> 桥接 Scope 以托管注入 Manager 的 Driver，避免污染 <code>product.team</code> 生产路径。</li>
+  </ul>
+
+  <div class="nav"><a href="../backend/adr/0031-team-feature-lifecycle.html">ADR-0031</a> · <a href="../backend/modules/team.html">Team 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body></html>
