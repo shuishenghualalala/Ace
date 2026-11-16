@@ -117,10 +117,11 @@ async def test_create_server_registers_tools_and_persists(api):
     srv = body["servers"][0]
     assert srv["name"] == "echo"
     # create 现为 fire-and-forget（后台连接），响应时可能尚未 connected。
-    # 轮询 status 等后台 worker.start() 完成（echo server 连接快，2s 内）。
+    # 轮询 status 等后台 worker.start() 完成；Windows 上拉起子进程 + stdio 握手
+    # 明显慢于 POSIX，窗口给到 10s 才能区分「慢」与「连不上」。
     import asyncio as _asyncio
     connected_srv = None
-    for _ in range(20):
+    for _ in range(100):
         await _asyncio.sleep(0.1)
         r = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
         for s in r.json()["servers"]:
@@ -129,7 +130,7 @@ async def test_create_server_registers_tools_and_persists(api):
                 break
         if connected_srv:
             break
-    assert connected_srv is not None, "echo server 未在 2s 内连上"
+    assert connected_srv is not None, "echo server 未在 10s 内连上"
     assert "echo" in connected_srv["tools"]
 
     # 内存配置已更新

@@ -6,7 +6,7 @@ import stat
 import sys
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -97,6 +97,63 @@ def _host_process_launch_for_external_adapter_tests():
         current_process_launch.reset(token)
 
 
+_FIXTURE_EXECUTABLE_SHEBANG = "#!/usr/bin/env python3"
+
+
+def _fake_executable(tmp_path: Path, name: str, source: str) -> Path:
+    """Write a fixture command the host platform can launch directly.
+
+    POSIX executes the shebang script. Windows CreateProcess cannot execute a
+    extensionless shebang script, so the same source is written as
+    ``<name>.py`` beside a ``.cmd`` launcher that forwards argv to the current
+    interpreter. Callers always launch the returned path.
+    """
+
+    script_source = textwrap.dedent(source)
+    if not script_source.startswith("#!"):
+        script_source = f"{_FIXTURE_EXECUTABLE_SHEBANG}\n{script_source}"
+    if os.name != "nt":
+        executable = tmp_path / name
+        executable.write_text(script_source, encoding="utf-8")
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        return executable
+
+    module = tmp_path / f"{name}.py"
+    module.write_text(script_source, encoding="utf-8")
+    launcher = tmp_path / f"{name}.cmd"
+    launcher.write_text(
+        "@echo off\r\n"
+        f'"{sys.executable}" -X utf8 "%~dp0{module.name}" %*\r\n',
+        encoding="utf-8",
+    )
+    return launcher
+
+
+def _process_is_running(pid: int) -> bool:
+    """Probe process liveness without the terminating Windows ``os.kill``."""
+
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    import psutil
+
+    try:
+        psutil.Process(pid).wait(timeout=0)
+        return False
+    except psutil.TimeoutExpired:
+        return True
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.AccessDenied:
+        return True
+
+
 def test_external_runtime_env_inherits_owner_settings_and_blocks_crew_credentials(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
     monkeypatch.setenv("HOME", "/Users/test")
@@ -129,6 +186,7 @@ def test_external_runtime_env_inherits_owner_settings_and_blocks_crew_credential
 
 def test_external_runtime_projects_only_declared_home_files(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     (tmp_path / ".kimi-code" / "oauth").mkdir(parents=True)
     (tmp_path / ".kimi-code" / "oauth" / "kimi-code").write_text("token", encoding="utf-8")
     (tmp_path / "unlisted-secret").write_text("must-not-project", encoding="utf-8")
@@ -438,11 +496,10 @@ async def test_managed_external_cli_passes_provider_env_but_not_runtime_control_
 
 @pytest.mark.asyncio
 async def test_external_cli_process_receives_sanitized_runtime_env(monkeypatch, tmp_path):
-    script = tmp_path / "capture-runtime-env"
-    capture_file = tmp_path / "runtime-env.json"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "capture-runtime-env",
+        """\
             #!/usr/bin/env python3
             import json
             import os
@@ -457,10 +514,8 @@ async def test_external_cli_process_receives_sanitized_runtime_env(monkeypatch, 
                 }, handle)
             print(json.dumps({"text": "done"}))
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    capture_file = tmp_path / "runtime-env.json"
     monkeypatch.setenv("JWT", "owner-jwt")
     monkeypatch.setenv("CREW_ENV_FILE", "/private/.env")
     monkeypatch.setenv("CREW_INTERNAL_SECRET", "secret-value")
@@ -711,11 +766,10 @@ def test_permission_question_names_read_and_write_operations(tmp_path):
 
 @pytest.mark.asyncio
 async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_path):
-    script = tmp_path / "slow_external_runtime"
-    pid_file = tmp_path / "runtime-pids.json"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "slow_external_runtime",
+        """\
             #!/usr/bin/env python3
             import json
             import os
@@ -728,10 +782,8 @@ async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_pat
                 json.dump({"parent": os.getpid(), "child": child.pid}, handle)
             time.sleep(60)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    pid_file = tmp_path / "runtime-pids.json"
     task = asyncio.create_task(run_external_cli(ExternalCliConfig(
         provider="test",
         executable_path=str(script),
@@ -759,27 +811,19 @@ async def test_external_cli_cancellation_terminates_runtime_process_tree(tmp_pat
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    def alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-
     for _ in range(100):
-        if not any(alive(int(pid)) for pid in pids.values()):
+        if not any(_process_is_running(int(pid)) for pid in pids.values()):
             break
         await asyncio.sleep(0.01)
-    assert not any(alive(int(pid)) for pid in pids.values())
+    assert not any(_process_is_running(int(pid)) for pid in pids.values())
 
 
 @pytest.mark.asyncio
 async def test_acp_cancellation_terminates_runtime_process(tmp_path):
-    script = tmp_path / "slow_acp_runtime"
-    pid_file = tmp_path / "acp-pid.txt"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "slow_acp_runtime",
+        """\
             #!/usr/bin/env python3
             import json
             import os
@@ -803,10 +847,8 @@ async def test_acp_cancellation_terminates_runtime_process(tmp_path):
                     result = {}
                 print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    pid_file = tmp_path / "acp-pid.txt"
     task = asyncio.create_task(run_acp_prompt("wait", AcpAdapterConfig(
         executable_path=str(script),
         provider="test",
@@ -826,15 +868,18 @@ async def test_acp_cancellation_terminates_runtime_process(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    for _ in range(100):
+        if not _process_is_running(pid):
+            break
+        await asyncio.sleep(0.01)
+    assert not _process_is_running(pid)
 
 
 def _fake_kimi(tmp_path):
-    script = tmp_path / "kimi"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "kimi",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -879,18 +924,15 @@ def _fake_kimi(tmp_path):
                 else:
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "nope"}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
 def _fake_acp_permission_runtime(tmp_path):
-    script = tmp_path / "acp_permission"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "acp_permission",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -936,10 +978,7 @@ def _fake_acp_permission_runtime(tmp_path):
                     }), flush=True)
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
@@ -966,10 +1005,10 @@ async def test_acp_permission_handler_returns_runtime_allow_once(tmp_path):
 
 
 def _fake_kimi_streamed_permission_runtime(tmp_path):
-    script = tmp_path / "acp_kimi_streamed_permission"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "acp_kimi_streamed_permission",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -1047,10 +1086,7 @@ def _fake_kimi_streamed_permission_runtime(tmp_path):
                     }), flush=True)
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"stopReason": "end_turn"}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
@@ -1077,10 +1113,10 @@ async def test_kimi_streamed_write_inputs_are_correlated_across_three_permission
 
 
 def _fake_acp_config_options(tmp_path):
-    script = tmp_path / "acp_config_options"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "acp_config_options",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -1122,18 +1158,15 @@ def _fake_acp_config_options(tmp_path):
                     continue
                 print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
 def _fake_kimi_with_cli_catalog(tmp_path):
-    script = tmp_path / "kimi_catalog"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "kimi_catalog",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -1175,18 +1208,15 @@ def _fake_kimi_with_cli_catalog(tmp_path):
                 else:
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
 def _fake_acp_with_tool_events(tmp_path):
-    script = tmp_path / "kimi_tools"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "kimi_tools",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -1227,18 +1257,15 @@ def _fake_acp_with_tool_events(tmp_path):
                 else:
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
 def _fake_cli(tmp_path, name: str, version: str, prefix: str = ""):
-    script = tmp_path / name
-    script.write_text(
-        textwrap.dedent(
-            f"""\
+    script = _fake_executable(
+        tmp_path,
+        name,
+        f"""\
             #!/usr/bin/env python3
             import json
             import sys
@@ -1258,10 +1285,7 @@ def _fake_cli(tmp_path, name: str, version: str, prefix: str = ""):
                 raise SystemExit(0)
             print("{name} fake cli")
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
@@ -1344,10 +1368,10 @@ async def test_acp_reader_translates_native_stream_timeout():
 
 
 def _fake_hermes(tmp_path):
-    script = tmp_path / "hermes"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "hermes",
+        """\
             #!/usr/bin/env python3
             import sys
 
@@ -1359,10 +1383,7 @@ def _fake_hermes(tmp_path):
                 raise SystemExit(0)
             print("hermes fake cli")
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
@@ -1442,10 +1463,14 @@ def test_windows_runtime_search_dirs_and_executable_rules(tmp_path, monkeypatch)
         str(command),
         platform_name="nt",
     ) == str(command.resolve())
-    assert detector._usable_executable(
-        str(command),
-        platform_name="posix",
-    ) is None
+    # Windows 的 os.access(X_OK) 对所有存在的文件都返回 True，真实文件系统无法
+    # 表达 POSIX execute bit；注入宿主原语结果以验证 POSIX 分支本身。
+    with monkeypatch.context() as posix:
+        posix.setattr(detector.os, "access", lambda _path, mode: mode != os.X_OK)
+        assert detector._usable_executable(
+            str(command),
+            platform_name="posix",
+        ) is None
 
 
 def test_process_launcher_uses_platform_specific_isolation(monkeypatch):
@@ -1719,16 +1744,24 @@ def test_runtime_display_badge_reconciles_old_rows_and_unknown_runtimes():
 
 def test_login_shell_resolution_is_lazy_safe_and_canonical(tmp_path, monkeypatch):
     executable = _fake_cli(tmp_path, "shell-agent", "shell-agent 1.0.0")
+    shell = tmp_path / "sh"
+    shell.write_text("#!/bin/sh\n", encoding="utf-8")
+    shell.chmod(shell.stat().st_mode | stat.S_IXUSR)
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
         return SimpleNamespace(stdout=f"shell-agent\t{executable}\n")
 
-    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("SHELL", str(shell).replace(os.sep, "/"))
     monkeypatch.setattr(detector.subprocess, "run", fake_run)
 
-    resolved = detector._login_shell_executables({"shell-agent", "bad command"})
+    # 登录 shell 解析是 POSIX 专属路径；在其它宿主上显式模拟该平台，
+    # 而不是用 skip 或平台分支绕开真实逻辑。
+    with monkeypatch.context() as platform:
+        platform.setattr(detector.os, "name", "posix")
+        platform.setattr(detector, "Path", PurePosixPath)
+        resolved = detector._login_shell_executables({"shell-agent", "bad command"})
 
     assert resolved == {"shell-agent": str(executable)}
     assert len(calls) == 1
@@ -3024,20 +3057,17 @@ async def test_delegate_to_external_agent_runs_kimi_via_acp(tmp_path):
 
 
 async def test_acp_prompt_reports_early_process_stderr(tmp_path):
-    script = tmp_path / "broken_acp"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "broken_acp",
+        """\
             #!/usr/bin/env python3
             import sys
             print("ACP dependencies not installed.", file=sys.stderr)
             print("Install them with: pip install -e '.[acp]'", file=sys.stderr)
             raise SystemExit(1)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     try:
         await run_acp_prompt(
@@ -3058,10 +3088,10 @@ async def test_acp_prompt_reports_early_process_stderr(tmp_path):
 
 
 async def test_acp_session_new_sends_mcp_servers_in_camel_and_snake_case(tmp_path):
-    script = tmp_path / "strict_acp"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "strict_acp",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -3099,10 +3129,7 @@ async def test_acp_session_new_sends_mcp_servers_in_camel_and_snake_case(tmp_pat
                 else:
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     result = await run_acp_prompt(
         "hello",
@@ -3279,10 +3306,10 @@ def test_external_store_scopes_acp_session_binding_by_owner(tmp_path):
 
 
 async def test_acp_resume_drops_replayed_history_before_current_prompt(tmp_path):
-    script = tmp_path / "resume_acp"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "resume_acp",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -3323,10 +3350,7 @@ async def test_acp_resume_drops_replayed_history_before_current_prompt(tmp_path)
                 else:
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     events = [
         event async for event in stream_acp_events(
@@ -3347,10 +3371,10 @@ async def test_acp_resume_drops_replayed_history_before_current_prompt(tmp_path)
 
 
 async def test_acp_adapter_uses_idle_timeout_for_active_stream(tmp_path):
-    script = tmp_path / "kimi_active"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "kimi_active",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -3382,10 +3406,7 @@ async def test_acp_adapter_uses_idle_timeout_for_active_stream(tmp_path):
                 else:
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     events = [
         event async for event in stream_acp_events(
@@ -3402,10 +3423,10 @@ async def test_acp_adapter_uses_idle_timeout_for_active_stream(tmp_path):
 
 
 async def test_acp_adapter_idle_timeout_names_provider_and_last_activity(tmp_path):
-    script = tmp_path / "kimi_hangs_after_tool"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "kimi_hangs_after_tool",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -3437,10 +3458,7 @@ async def test_acp_adapter_idle_timeout_names_provider_and_last_activity(tmp_pat
                 else:
                     print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"ok": True}}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     try:
         events = [
@@ -3714,10 +3732,10 @@ async def test_acp_prefers_standard_session_config_option_for_model(tmp_path):
 
 @pytest.mark.parametrize("resume_session_id", ["", "s-current"])
 async def test_acp_skips_redundant_model_update_for_any_runtime(tmp_path, resume_session_id):
-    executable = tmp_path / "acp_current_model"
-    executable.write_text(
-        textwrap.dedent(
-            """\
+    executable = _fake_executable(
+        tmp_path,
+        "acp_current_model",
+        """\
             #!/usr/bin/env python3
             import json
             import sys
@@ -3768,10 +3786,7 @@ async def test_acp_skips_redundant_model_update_for_any_runtime(tmp_path, resume
                     continue
                 print(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
     output = await run_acp_prompt(
         "hello",
@@ -4305,10 +4320,10 @@ async def test_acp_executor_streams_acp_tool_events(tmp_path):
 
 
 async def test_acp_executor_reports_hermes_missing_acp_dependencies(tmp_path):
-    hermes = tmp_path / "hermes"
-    hermes.write_text(
-        textwrap.dedent(
-            """\
+    hermes = _fake_executable(
+        tmp_path,
+        "hermes",
+        """\
             #!/usr/bin/env python3
             import sys
             if "--version" in sys.argv:
@@ -4318,10 +4333,7 @@ async def test_acp_executor_reports_hermes_missing_acp_dependencies(tmp_path):
             print("Install them with: pip install -e '.[acp]'", file=sys.stderr)
             raise SystemExit(1)
             """
-        ),
-        encoding="utf-8",
     )
-    hermes.chmod(hermes.stat().st_mode | stat.S_IXUSR)
     store = ExternalAgentStore(str(tmp_path / "crew.db"))
     runtime = store.upsert_runtime({
         "id": "hermes_test",
@@ -4506,10 +4518,10 @@ def test_external_prompt_uses_native_runtime_for_normal_skill():
 
 
 def _fake_claude_stream_runtime(tmp_path):
-    script = tmp_path / "claude-stream"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "claude-stream",
+        """\
             #!/usr/bin/env python3
             import json
             import os
@@ -4567,10 +4579,7 @@ def _fake_claude_stream_runtime(tmp_path):
             # waiting for process exit or the full idle timeout.
             assert sys.stdin.readline() == ""
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
@@ -4641,11 +4650,10 @@ async def test_claude_stream_json_emits_session_text_tools_usage_and_permission(
 
 @pytest.mark.asyncio
 async def test_claude_reports_resume_rejection_to_unified_executor(tmp_path):
-    script = tmp_path / "claude-resume"
-    calls_file = tmp_path / "claude-resume-calls.txt"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "claude-resume",
+        """\
             #!/usr/bin/env python3
             import json
             import os
@@ -4665,10 +4673,8 @@ async def test_claude_reports_resume_rejection_to_unified_executor(tmp_path):
             }), flush=True)
             print(json.dumps({"type": "result", "session_id": "fresh-s1"}), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    calls_file = tmp_path / "claude-resume-calls.txt"
 
     with pytest.raises(RuntimeResumeRejected):
         _ = [
@@ -4729,10 +4735,10 @@ async def test_unified_executor_restarts_once_after_safe_resume_rejection():
 
 
 def _fake_codex_app_server(tmp_path):
-    script = tmp_path / "codex-app"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "codex-app",
+        """\
             #!/usr/bin/env python3
             import json
             import os
@@ -4836,10 +4842,7 @@ def _fake_codex_app_server(tmp_path):
                         },
                     }), flush=True)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
 
 
@@ -4961,10 +4964,10 @@ async def test_codex_app_server_invokes_dynamic_control_tool(tmp_path):
 
 @pytest.mark.asyncio
 async def test_codex_falls_back_only_when_app_server_is_unsupported(tmp_path):
-    script = tmp_path / "codex-legacy"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "codex-legacy",
+        """\
             #!/usr/bin/env python3
             import sys
 
@@ -4973,10 +4976,7 @@ async def test_codex_falls_back_only_when_app_server_is_unsupported(tmp_path):
                 raise SystemExit(2)
             print("legacy result")
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
     events = [
         event
@@ -4994,11 +4994,10 @@ async def test_codex_falls_back_only_when_app_server_is_unsupported(tmp_path):
 
 @pytest.mark.asyncio
 async def test_codex_never_replays_with_legacy_exec_after_turn_started(tmp_path):
-    script = tmp_path / "codex-unsafe-fallback"
-    calls_file = tmp_path / "codex-calls.txt"
-    script.write_text(
-        textwrap.dedent(
-            """\
+    script = _fake_executable(
+        tmp_path,
+        "codex-unsafe-fallback",
+        """\
             #!/usr/bin/env python3
             import json
             import os
@@ -5018,10 +5017,8 @@ async def test_codex_never_replays_with_legacy_exec_after_turn_started(tmp_path)
                     print(json.dumps({"id": mid, "result": {"turn": {"id": "turn-1"}}}), flush=True)
                     raise SystemExit(3)
             """
-        ),
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    calls_file = tmp_path / "codex-calls.txt"
 
     with pytest.raises(Exception, match="Codex"):
         _ = [

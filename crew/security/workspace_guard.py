@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import re
 import shlex
 from typing import Any, Literal
@@ -72,6 +73,29 @@ ACP_TOOL_ALIASES = {
 # also matched the slash inside ``./scripts/foo.py`` as ``/scripts/foo.py`` and
 # treated a workspace-local command as a root-level read.
 ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./:\\-])(?P<path>/[^\s`'\"|;&)]+)")
+# Windows 绝对路径：盘符（C:\ / C:/）或 UNC（\\server\share）开头。反斜杠在
+# Windows 命令里是路径分隔符，POSIX 词法会把它当转义符吃掉。
+WIN_ABS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-])(?P<path>(?:[A-Za-z]:[\\/]|\\\\)[^\s`'\"|;&)]*)"
+)
+
+
+def _split_command(command: str) -> list[str]:
+    """按 shell 词法切分命令行，保留宿主 OS 的路径分隔符语义。
+
+    宿主是 Windows 时反斜杠是分隔符而不是转义符：POSIX 词法会把
+    ``C:\\tmp\\a.txt`` 吃成 ``C:tmpa.txt``，工作区外的绝对路径因此退化成
+    相对路径而被放行。关掉转义字符后引号分组与空白切分行为不变。
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        if os.name == "nt":
+            lexer.escape = ""
+        return list(lexer)
+    except ValueError:
+        return command.split()
 NETWORK_OR_SIDE_EFFECT_RE = re.compile(
     r"\b(?:curl|wget|ssh|scp|rsync|git\s+(?:push|fetch|pull)|npm\s+(?:install|publish)|"
     r"pnpm\s+(?:install|publish)|yarn\s+(?:install|publish)|pip\s+install|brew\s+install|"
@@ -537,10 +561,7 @@ def _classify_delete_command(
         decision = _classify_write_path(path, writable_roots, tool_name=tool_name)
         if decision.action != "allow":
             return decision
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+    tokens = _split_command(command)
     recursive = any(
         token == "--recursive"
         or (
@@ -581,10 +602,7 @@ def _is_protected_workspace_path(path: Path, roots: list[Path]) -> bool:
 
 
 def _is_delete_command(command: str) -> bool:
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+    tokens = _split_command(command)
     return any(Path(token).name in {"rm", "rmdir"} for token in tokens)
 
 
@@ -630,23 +648,21 @@ def _requires_write_confirmation(
 
 
 def _is_search_command(command: str) -> bool:
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+    tokens = _split_command(command)
     return any(Path(token).name in SEARCH_COMMANDS for token in tokens)
 
 
 def _terminal_read_paths(command: str, *, cwd: str = "") -> list[Path]:
     paths: list[Path] = []
-    for match in ABS_PATH_RE.finditer(command):
-        path = _resolve_path(match.group("path"), cwd=cwd)
-        if path is not None and str(path) not in TRUSTED_COMMAND_LAUNCHERS:
-            paths.append(path)
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+    patterns = [ABS_PATH_RE]
+    if os.name == "nt":
+        patterns.append(WIN_ABS_PATH_RE)
+    for pattern in patterns:
+        for match in pattern.finditer(command):
+            path = _resolve_path(match.group("path"), cwd=cwd)
+            if path is not None and str(path) not in TRUSTED_COMMAND_LAUNCHERS:
+                paths.append(path)
+    tokens = _split_command(command)
     for index, token in enumerate(tokens):
         name = Path(token).name
         if name not in READ_COMMANDS:
@@ -672,10 +688,7 @@ def _unwrap_trusted_shell_command(command: str) -> str:
 
 def _terminal_write_paths(command: str, *, cwd: str = "") -> list[Path]:
     paths: list[Path] = []
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = command.split()
+    tokens = _split_command(command)
     for index, token in enumerate(tokens):
         if token in {">", ">>"} and index + 1 < len(tokens):
             path = _write_token_path(tokens[index + 1], cwd=cwd)
@@ -740,7 +753,14 @@ def _token_path(token: str, *, cwd: str = "") -> Path | None:
     value = str(token or "").strip()
     if not value or value.startswith("-"):
         return None
-    if value in {".", ".."} or value.startswith("./") or value.startswith("../") or value.startswith("/") or "/" in value:
+    if value in {".", ".."} or value.startswith(("./", "../", ".\\", "..\\")):
+        return _resolve_path(value, cwd=cwd)
+    # 绝对路径与分隔符按宿主 OS 判断：POSIX 只有 "/"，Windows 还含盘符绝对路径
+    # （C:\…）、UNC（\\server\share）与 "\\" 分隔符。
+    if os.path.isabs(value):
+        return _resolve_path(value, cwd=cwd)
+    separators = {os.sep} | ({os.altsep} if os.altsep else set())
+    if any(separator in value for separator in separators):
         return _resolve_path(value, cwd=cwd)
     return None
 

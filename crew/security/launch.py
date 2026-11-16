@@ -11,7 +11,7 @@ import platform
 import shutil
 import sys
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -215,6 +215,7 @@ async def execute_captured(
     # Waiting for the handle before propagating cancellation lets us terminate the
     # process tree instead of losing ownership of a child that was already created.
     process: asyncio.subprocess.Process | None = None
+    output_task: asyncio.Task[tuple[bytes, bytes]] | None = None
     spawn_task = asyncio.create_task(
         spawn_tracked(
             *argv,
@@ -229,17 +230,22 @@ async def execute_captured(
     try:
         process, exit_future = await asyncio.shield(spawn_task)
         _safe_activity_callback(on_started, process.pid)
-        output_task = _collect_host_output(
-            process,
-            exit_future=exit_future,
-            stdin=stdin,
-            max_output_bytes=max_output_bytes,
-            on_output=on_output,
+        output_task = asyncio.create_task(
+            _collect_host_output(
+                process,
+                exit_future=exit_future,
+                stdin=stdin,
+                max_output_bytes=max_output_bytes,
+                on_output=on_output,
+            )
         )
+        # 收集器本身必须 shield：直接等待会让取消/超时先穿过收集器的 finally
+        # 关掉 transport，抢在整树终止之前杀掉直接子进程（见
+        # _terminate_before_closing_transport）。
         if timeout is None:
-            stdout, stderr = await output_task
+            stdout, stderr = await asyncio.shield(output_task)
         else:
-            stdout, stderr = await asyncio.wait_for(output_task, timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(asyncio.shield(output_task), timeout=timeout)
     except asyncio.CancelledError:
         if process is None:
             try:
@@ -250,7 +256,7 @@ async def execute_captured(
                 process = None
             exit_future = None
         if process is not None:
-            await terminate_process_tree(process)
+            await _terminate_before_closing_transport(process, output_task)
         audit_execution_result(
             launch,
             action,
@@ -262,7 +268,7 @@ async def execute_captured(
         raise
     except asyncio.TimeoutError:
         if process is not None:
-            await terminate_process_tree(process)
+            await _terminate_before_closing_transport(process, output_task)
         audit_execution_result(
             launch,
             action,
@@ -274,7 +280,7 @@ async def execute_captured(
         raise
     except Exception:
         if process is not None:
-            await terminate_process_tree(process)
+            await _terminate_before_closing_transport(process, output_task)
         audit_execution_result(
             launch,
             action,
@@ -479,6 +485,26 @@ async def _collect_host_output(
         return bytes(stdout), bytes(stderr)
     finally:
         _close_transport()
+
+
+async def _terminate_before_closing_transport(
+    process: asyncio.subprocess.Process,
+    output_task: asyncio.Task[tuple[bytes, bytes]] | None,
+) -> None:
+    """先整树终止，再让输出收集器收尾。
+
+    收集器的 finally 会关闭 transport，而 asyncio 的 ``transport.close()`` 只结束
+    直接子进程（Windows 上是 ``.cmd`` 包一层的 cmd.exe）。先关传输会让孙进程失去
+    可按 pid 归组的入口，随后 taskkill /T 面对的只是一个已死 pid，真实 runtime
+    进程树就被留下了。
+    """
+    try:
+        await terminate_process_tree(process)
+    finally:
+        if output_task is not None:
+            output_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await output_task
 
 
 def _safe_activity_callback(callback: Callable[[object], None] | None, value: object) -> None:
