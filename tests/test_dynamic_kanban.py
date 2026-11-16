@@ -2459,6 +2459,7 @@ async def test_manager_resume_stream_waits_for_previous_engine(
 ) -> None:
     """pause 落盘后旧 runtime 尚未退出时，resume_stream 应等待而不是并发新建 runtime。"""
     barrier = asyncio.Event()
+    phase_started = asyncio.Event()
     provider = FakeProvider()
     cfg = Config(db_path=db_path)
     store = SQLiteKanbanStore(db_path)
@@ -2466,6 +2467,7 @@ async def test_manager_resume_stream_waits_for_previous_engine(
     def slow_agent_factory(**kwargs):
         class _SlowAgent:
             async def run(self, env: Envelope):
+                phase_started.set()
                 yield ResponseChunk.status_event(env.request_id, "working", 1)
                 await barrier.wait()
                 yield ResponseChunk.final(env.request_id, "done", 2)
@@ -2489,6 +2491,9 @@ async def test_manager_resume_stream_waits_for_previous_engine(
         return [c async for c in gen]
 
     interact_task = asyncio.create_task(_consume(manager.interact(env)))
+    # 等到 phase 真正开始（agent 卡在 barrier）再 pause：只等 engine 注册会让
+    # pause 抢在 phase 启动之前生效，旧 runtime 立刻退出，断言前提就不成立了。
+    await asyncio.wait_for(phase_started.wait(), timeout=10)
     for _ in range(100):
         if manager._engines:
             break

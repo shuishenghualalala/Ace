@@ -792,8 +792,21 @@ class TraceStore:
             params.extend(kinds)
         if after_started_at_us is not None:
             if after_span_id:
-                clauses.append("(started_at_us > ? OR (started_at_us = ? AND span_id > ?))")
-                params.extend([int(after_started_at_us), int(after_started_at_us), str(after_span_id)])
+                # 同一微秒内开始的 span 不能靠随机 span_id 决定先后：rowid 是写入
+                # 顺序，父子 span 在嵌套创建时按 rowid 递增，排序才稳定可复现。
+                clauses.append(
+                    "(started_at_us > ? OR (started_at_us = ? AND rowid > "
+                    "(SELECT rowid FROM spans WHERE owner_scope = ? AND trace_id = ? AND span_id = ?)))"
+                )
+                params.extend(
+                    [
+                        int(after_started_at_us),
+                        int(after_started_at_us),
+                        _owner(owner_account_id),
+                        str(trace_id),
+                        str(after_span_id),
+                    ]
+                )
             else:
                 clauses.append("started_at_us > ?")
                 params.append(int(after_started_at_us))
@@ -801,7 +814,7 @@ class TraceStore:
             self._ensure_open()
             rows = self._db.execute(
                 f"SELECT * FROM spans WHERE {' AND '.join(clauses)} "
-                "ORDER BY started_at_us ASC, span_id ASC LIMIT ?",
+                "ORDER BY started_at_us ASC, rowid ASC LIMIT ?",
                 [*params, max(1, min(int(limit), MAX_PAGE_SIZE + 1))],
             ).fetchall()
         return [self._row(row) for row in rows]

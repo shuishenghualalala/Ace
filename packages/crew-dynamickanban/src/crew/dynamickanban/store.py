@@ -894,7 +894,9 @@ class SQLiteKanbanStore:
             """
             SELECT * FROM kanban_workflows
             WHERE session_id = ? AND owner_account_id = ? AND isolation_state = 'owned'
-            ORDER BY created_at DESC
+            -- created_at 的精度不足以区分同一批创建的工作流；rowid 是插入顺序，
+            -- 用它兜底才能稳定表达「最近创建」。
+            ORDER BY created_at DESC, rowid DESC
             """,
             (session_id, owner),
         ).fetchall()
@@ -942,7 +944,7 @@ class SQLiteKanbanStore:
             SELECT * FROM kanban_workflows
             WHERE session_id = ? AND owner_account_id = ? AND isolation_state = 'owned'
               AND status IN ({placeholders})
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, rowid DESC
             """,
             (session_id, owner, *statuses),
         ).fetchall()
@@ -1580,7 +1582,7 @@ class SQLiteKanbanStore:
             """
             SELECT * FROM kanban_workflows
             WHERE session_id = ? AND owner_account_id = ? AND isolation_state = 'owned'
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, rowid DESC
             """,
             (session_id, owner),
         ).fetchall()
