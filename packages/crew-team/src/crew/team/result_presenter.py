@@ -22,14 +22,23 @@ WORKFLOW_LANE_ORDER = {
     "other": 90,
 }
 
+# 结果里的产物路径可能来自任一平台：POSIX 用 "/"，Windows 用 "\" 或带盘符的
+# "C:\"。分隔符统一用 [\\/]，盘符用可选前缀，避免 Windows 绝对路径被截成文件名；
+# 前后边界防止把 out/report.html 这类相对路径再切出一个 "/report.html"。
+_RESULT_FILE_EXTS = r"(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf)"
+_RESULT_SEPARATOR = r"[\\/]"
+
 _RESULT_PATH_RE = re.compile(
-    r"(?P<path>(?:/[^\s`'\"，。；、)\]]+)+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))"
+    rf"(?<![\w.\-:\\])(?P<path>(?:[A-Za-z]:)?(?:{_RESULT_SEPARATOR}[^\s`'\"，。；、)\]]+)+"
+    rf"\.{_RESULT_FILE_EXTS})(?![\w.\-\\])"
 )
 _RESULT_RELATIVE_PATH_RE = re.compile(
-    r"(?<![\w/.-])(?P<path>(?:\.?/)?(?:[\w.-]+/)*[\w.-]+\.(?:html?|md|txt|json|csv|js|ts|tsx|py|png|jpe?g|gif|svg|pdf))(?![\w/.-])"
+    rf"(?<![\w/.\-\\])(?<![A-Za-z]:)(?P<path>(?:\.{{0,2}}{_RESULT_SEPARATOR})?"
+    rf"(?:[\w.-]+{_RESULT_SEPARATOR})*[\w.-]+\.{_RESULT_FILE_EXTS})(?![\w/.\-\\])"
 )
 _RESULT_BACKTICK_PATH_RE = re.compile(
-    r"`(?P<path>(?:/|\.{0,2}/)?[\w.-]+(?:/[\w.-]+)+/?)`"
+    rf"`(?P<path>(?:{_RESULT_SEPARATOR}|\.{{0,2}}{_RESULT_SEPARATOR})?"
+    rf"[\w.-]+(?:{_RESULT_SEPARATOR}[\w.-]+)+/?)`"
 )
 
 
