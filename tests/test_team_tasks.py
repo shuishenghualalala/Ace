@@ -6242,7 +6242,7 @@ async def test_empty_fallback_graph_requests_more_information_instead_of_running
         "member_id": "dev", "name": "dev", "role": "负责开发", "executor": "builtin",
         "capabilities": ["implementation"], "metadata": {"workflow_lane": "build"},
     }]}))
-    team = tm._build_team("empty-fallback")
+    team = tm._build_team("empty-fallback", owner_account_id="local")
     plan = await tm._ensure_runtime_plan_async("empty-fallback", team, "开发并测试登录接口", "", owner_account_id="local")
     assert plan is None
     assert "规划未生成执行任务" in tm._planning_missing_info[tm._key("empty-fallback", "local")][0]
@@ -6524,7 +6524,7 @@ def test_runtime_staffing_does_not_silently_reassign_user_responsibility():
         {"member_id": "kk", "name": "kk", "executor": "builtin", "capabilities": ["implementation"]},
         {"member_id": "hh", "name": "hh", "executor": "builtin", "capabilities": ["testing"]},
     ]}))
-    team = tm._build_team("runtime-user-responsibility")
+    team = tm._build_team("runtime-user-responsibility", owner_account_id="local")
     node = TeamPlanNode(node_id="verify", title="验证", assignee="kk", metadata={
         "required_capabilities": ["testing"], "preserve_assignee": True,
         "assignment_source": "user_responsibility",

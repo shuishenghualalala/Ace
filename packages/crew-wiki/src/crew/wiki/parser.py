@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import zipfile
+from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -309,26 +310,32 @@ def _parse_xlsx(path: Path) -> str:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    with TemporaryDirectory() as tmp:
+    with TemporaryDirectory() as tmp, ExitStack() as handles:
+        # 由调用方持有文件句柄：openpyxl 解析失败时不会关闭底层 zip，Windows 上
+        # 会锁住源文件直到 GC，临时目录清理因此报 WinError 32。
+        def _open(target: Path, *, read_only: bool):
+            stream = handles.enter_context(target.open("rb"))
+            return openpyxl.load_workbook(stream, data_only=True, read_only=read_only)
+
         # read_only 优先：流式读取，只占样式没有值的空单元格不会被物化。
         # 普通模式会把整列刷格式产生的海量空单元格全部建成对象，耗时和内存
         # 随单元格数线性爆炸（实测 50 万空样式单元格：4s vs 0.0s），是
         # 上传大 xlsx 卡死的主因。
         try:
-            wb = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+            wb = _open(path, read_only=True)
         except Exception:
             # 第一层兜底：修复已知的 Excel/WPS 样式 bug 后重试。
             repaired = Path(tmp) / "repaired.xlsx"
             if _try_repair_xlsx(path, repaired):
                 try:
-                    wb = openpyxl.load_workbook(str(repaired), data_only=True, read_only=True)
+                    wb = _open(repaired, read_only=True)
                 except Exception:
                     log.warning("xlsx 修复后 read_only 仍失败，尝试普通模式读取: %s", path)
-                    wb = openpyxl.load_workbook(str(repaired), data_only=True)
+                    wb = _open(repaired, read_only=False)
             else:
                 # 没有可修复的已知问题，用普通模式做最后兜底。
                 log.warning("xlsx read_only 解析失败，尝试普通模式读取: %s", path)
-                wb = openpyxl.load_workbook(str(path), data_only=True)
+                wb = _open(path, read_only=False)
 
         parts: list[str] = []
         remaining_chars = _XLSX_MAX_CHARS

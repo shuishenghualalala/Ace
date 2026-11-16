@@ -595,7 +595,8 @@ async def test_site_publish_authorizes_build_before_creating_records(
         )
 
     assert calls and calls[0][1:] == (source.resolve(), "npm run build")
-    assert Path(calls[0][0][0]).name == "node"
+    # Windows 上 node 解析为 node.exe，按可执行文件名主干比较。
+    assert Path(calls[0][0][0]).stem == "node"
     assert site_manager.store.list_sites("owner") == []
 
 

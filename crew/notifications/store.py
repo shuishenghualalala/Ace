@@ -157,7 +157,7 @@ class NotificationStore:
                 WHERE owner_account_id = ? AND source = ? AND id NOT IN (
                     SELECT id FROM notifications
                     WHERE owner_account_id = ? AND source = ?
-                    ORDER BY created_at DESC, id DESC
+                    ORDER BY created_at DESC, rowid DESC
                     LIMIT ?
                 )
                 """,
@@ -184,7 +184,10 @@ class NotificationStore:
         sql = (
             "SELECT * FROM notifications WHERE owner_account_id = ?"
             + (" AND read_at IS NULL" if unread_only else "")
-            + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+            # created_at 是浮点秒，同一批写入会完全相同；id 是随机 uuid，
+            # 拿它兜底会让顺序变成任意。rowid 随插入单调递增，才是稳定的
+            # 「后写入的在前」次排序键。
+            + " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
         )
         with self._lock:
             rows = self._conn.execute(

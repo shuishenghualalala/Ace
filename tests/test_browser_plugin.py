@@ -1059,8 +1059,10 @@ async def test_plugin_click_keeps_automatic_download_in_public_session_state(
             "source": "automatic",
         }
     ]
-    assert public_state["downloads"][0]["path"].endswith(
-        "/downloads/browser/export.xlsx"
+    assert Path(public_state["downloads"][0]["path"]).parts[-3:] == (
+        "downloads",
+        "browser",
+        "export.xlsx",
     )
 
 
@@ -1565,7 +1567,7 @@ async def test_screenshot_exports_png_to_task_downloads(plugin_tool, ctx_vars):
 
     path = await tool.handler({"action": "screenshot", "filename": "home"})
     assert path.endswith("home.png")
-    assert "downloads/browser" in path
+    assert Path(path).parts[-3:] == ("downloads", "browser", "home.png")
     assert "--settled" in next(
         args for command, args in reversed(driver.calls) if command == "screenshot"
     )
@@ -1574,7 +1576,7 @@ async def test_screenshot_exports_png_to_task_downloads(plugin_tool, ctx_vars):
     # 默认文件名自动生成且补 .png 后缀
     auto = await tool.handler({"action": "screenshot"})
     assert auto.content.endswith(".png")
-    assert "downloads/browser" in auto.content
+    assert Path(auto.content).parts[-3:-1] == ("downloads", "browser")
     assert auto.media[0].mime_type == "image/png"
     assert auto.media[0].path == auto.content
 
@@ -2053,7 +2055,8 @@ async def test_browser_restart_rebinds_crew_property_and_keeps_disposer_identity
             for binding in crew.context_contributors.bindings()
         ) == 1
         browser_skill_roots = [
-            root for root in crew.plugins.plugin_skill_roots() if "/browser/" in root
+            root for root in crew.plugins.plugin_skill_roots()
+            if "browser" in Path(root).parts
         ]
         assert len(browser_skill_roots) == 1
 

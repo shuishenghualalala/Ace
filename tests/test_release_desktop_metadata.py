@@ -26,8 +26,8 @@ SCRIPT = next(
         ("push", "v1.2.3", "", "", "1.2.3", "v1.2.3"),
     ],
 )
-def test_build_metadata(tmp_path, event, ref, tag, version, expected_version, expected_tag):
-    result, output = run_metadata(tmp_path, event, ref, tag, version)
+def test_build_metadata(tmp_path, posix_bash, event, ref, tag, version, expected_version, expected_tag):
+    result, output = run_metadata(tmp_path, posix_bash, event, ref, tag, version)
 
     assert result.returncode == 0, result.stderr
     assert output["version"] == (
@@ -52,17 +52,17 @@ def test_build_metadata(tmp_path, event, ref, tag, version, expected_version, ex
         ("", "1.2.3$(exit 0)"),
     ],
 )
-def test_invalid_metadata_fails_before_building(tmp_path, tag, version):
-    result, output = run_metadata(tmp_path, "workflow_dispatch", "dev", tag, version)
+def test_invalid_metadata_fails_before_building(tmp_path, posix_bash, tag, version):
+    result, output = run_metadata(tmp_path, posix_bash, "workflow_dispatch", "dev", tag, version)
 
     assert result.returncode != 0
     assert output == {}
 
 
-def run_metadata(tmp_path, event, ref, tag, version):
+def run_metadata(tmp_path, posix_bash, event, ref, tag, version):
     output_file = tmp_path / "github-output"
     result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", SCRIPT],
+        [posix_bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", SCRIPT],
         cwd=ROOT,
         env={
             **os.environ,

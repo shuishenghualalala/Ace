@@ -999,7 +999,8 @@ class ProcessRegistry:
             )
             owner.signal(signal.SIGTERM)
             session.exited = True
-            session.exit_code = -15  # SIGTERM
+            # Windows 没有信号：终止走 TerminateProcess，退出码固定为 1；POSIX 才是 -SIGTERM。
+            session.exit_code = 1 if os.name == "nt" else -int(signal.SIGTERM)
             self._move_to_finished(session)
             session._done_event.set()
             return {"status": "killed", "session_id": session.id}

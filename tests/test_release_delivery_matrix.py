@@ -59,11 +59,11 @@ def test_pack_scripts_exclude_web_frontend() -> None:
         assert "plugins" in source
 
 
-def test_mac_pack_script_logs_app_path_with_nounset() -> None:
+def test_mac_pack_script_logs_app_path_with_nounset(posix_bash: str) -> None:
     script = (ROOT / "deb-package" / "pack_mac.sh").read_text()
     log_line = next(line for line in script.splitlines() if "Electron 客户端:" in line)
     result = subprocess.run(
-        ["bash", "-u", "-c", log_line],
+        [posix_bash, "-u", "-c", log_line],
         env={"APP_PATH": "/tmp/crew-desktop.app"},
         capture_output=True,
         text=True,

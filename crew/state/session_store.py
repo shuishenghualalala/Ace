@@ -63,11 +63,20 @@ def _lease_holder_pid_alive(holder: str) -> bool:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.restype = ctypes.c_void_p
         kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         # PROCESS_QUERY_LIMITED_INFORMATION：仅查询存在性所需的最小权限
         handle = kernel32.OpenProcess(0x1000, False, pid)
         if handle:
-            kernel32.CloseHandle(handle)
-            return True
+            try:
+                # 句柄能打开只说明进程对象还在：已退出但未被回收的进程仍可打开，
+                # 所以真实存活要按退出码判断（STILL_ACTIVE = 259）。
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == 259
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
         # ERROR_ACCESS_DENIED：受保护进程存在但拒绝访问 → 仍算活着
         return ctypes.get_last_error() == 5
     try:

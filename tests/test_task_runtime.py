@@ -405,11 +405,19 @@ async def test_background_agent_turn_releases_foreground_via_sidechain(tmp_path)
         return [chunk async for chunk in dispatcher.run(envelope)]
 
     first = asyncio.create_task(drain(Envelope.of("first", session_id="s1", user_id="local")))
-    await asyncio.sleep(0.03)
+    # 等待首轮真的进入 inner：Windows 上事件循环起步比固定 sleep 慢，
+    # 固定时长会把「还没开始」误判成「没并发」。
+    for _ in range(300):
+        if started:
+            break
+        await asyncio.sleep(0.01)
     first_task_id = await dispatcher.background("s1", owner_account_id="local")
     assert first_task_id
     second = asyncio.create_task(drain(Envelope.of("second", session_id="s1", user_id="local")))
-    await asyncio.sleep(0.03)
+    for _ in range(300):
+        if len(started) >= 2:
+            break
+        await asyncio.sleep(0.01)
     assert len(started) == 2
     assert all(value.startswith("s1::turn::") for value in started)
     gate.set()
@@ -671,8 +679,10 @@ async def test_async_facade_does_not_block_event_loop(tmp_path):
         await holder
         done.set()
         await ticker
-        # 0.2s 锁窗口内 ticker 至少推进数十次；若同步写阻塞 loop，ticker 会整窗停滞
-        assert len(ticks) >= 30, f"ticker 推进不足（{len(ticks)} 次），事件循环疑似被阻塞"
+        # 判定标准是「loop 是否被整窗卡住」，用推进间隔衡量：Windows 默认计时器
+        # 精度约 15.6ms，asyncio.sleep(0.002) 实际会被放大，固定次数门槛会把
+        # 计时器精度误判成阻塞。若同步写落在 loop 上，间隔会出现接近整窗的大跳。
+        assert len(ticks) >= 3, f"ticker 几乎未推进（{len(ticks)} 次）"
         gaps = [b - a for a, b in zip(ticks, ticks[1:])]
         assert max(gaps) < 0.05, f"ticker 出现大间隔（{max(gaps):.3f}s），事件循环疑似被阻塞"
     finally:

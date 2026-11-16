@@ -3,8 +3,54 @@
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 
 import pytest
+
+# Windows 的 PATH 里常同时存在 WSL 转发桩（%SystemRoot%\System32\bash.exe）和
+# Git for Windows 的 bash；转发桩对 `bash -c` 直接失败，且输出是 UTF-16，
+# 混进 PATH 顺序就会让 shell 契约用例红。这里按固定优先级定位真实 POSIX shell。
+_WINDOWS_BASH_HINTS = (
+    (r"%ProgramFiles%\Git\bin\bash.exe",),
+    (r"%ProgramFiles(x86)%\Git\bin\bash.exe",),
+    (r"%LOCALAPPDATA%\Programs\Git\bin\bash.exe",),
+)
+
+
+def _find_posix_bash() -> str | None:
+    """返回可执行 POSIX shell 的绝对路径；Windows 上跳过 WSL 转发桩。"""
+
+    override = os.environ.get("ACE_POSIX_SHELL", "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        return str(candidate) if candidate.is_file() else None
+
+    if os.name != "nt":
+        return shutil.which("bash")
+
+    for (hint,) in _WINDOWS_BASH_HINTS:
+        expanded = os.path.expandvars(hint)
+        if "%" not in expanded and Path(expanded).is_file():
+            return expanded
+
+    for root in os.environ.get("PATH", "").split(os.pathsep):
+        if not root or Path(root).resolve() == Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32":
+            continue
+        candidate = Path(root) / "bash.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+@pytest.fixture(scope="session")
+def posix_bash() -> str:
+    """跑 shell 脚本契约用例的 bash；Windows 没装 Git Bash 时明确跳过。"""
+
+    shell = _find_posix_bash()
+    if shell is None:
+        pytest.skip("需要 POSIX bash 才能验证 shell 脚本契约（Windows 请安装 Git for Windows）")
+    return shell
 
 @pytest.fixture
 def auth_headers(monkeypatch) -> dict[str, str]:

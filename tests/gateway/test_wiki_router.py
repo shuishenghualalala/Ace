@@ -1335,7 +1335,7 @@ def test_wiki_kb_crud_supports_chinese_id(tmp_path, auth_headers):
     data = res.json()
     assert data["kb"]["id"] == "产品知识库"
     assert data["kb"]["name"] == "产品知识库"
-    assert data["kb"]["vault_path"].endswith("/wiki_lib/产品知识库")
+    assert Path(data["kb"]["vault_path"]).parts[-2:] == ("wiki_lib", "产品知识库")
 
     res = client.get("/api/wiki/kbs", headers=auth_headers)
     assert any(kb["id"] == "产品知识库" for kb in res.json()["kbs"])

@@ -239,7 +239,11 @@ def test_non_dict_feature_subsection_is_skipped_others_still_apply(tmp_path: Pat
     assert cfg.cron_enabled is False
 
 
-def test_unknown_feature_names_are_ignored(tmp_path: Path):
+def test_unknown_feature_names_are_ignored(tmp_path: Path, monkeypatch):
+    # 本机 .env 里的 CREW_LOG_LEVEL 会在 load_config 内重新注入并盖掉 yaml，
+    # 该用例只比较 features 命名空间是否干扰无关配置，故隔离环境变量来源。
+    monkeypatch.delenv("CREW_LOG_LEVEL", raising=False)
+    monkeypatch.setattr(config_module, "_load_env_files", lambda: None)
     base = {"runtime": {"log_level": "DEBUG"}}
     with_features = {
         **base,
