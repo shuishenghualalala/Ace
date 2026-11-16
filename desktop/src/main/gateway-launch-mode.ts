@@ -17,8 +17,25 @@ export function managedGatewayModeEnv(
   devHome: string,
 ): Record<string, string> {
   return mode === 'dev'
-    ? { CREW_GATEWAY_DEV: '1', CREW_HOME: devHome }
-    : {};
+    ? {
+        CREW_GATEWAY_DEV: '1',
+        CREW_HOME: devHome,
+        // These flags are injected by the trusted main process, never by the
+        // renderer or by a URL/localStorage value.  The Gateway reads them as
+        // an independent diagnostics capability; gateway_dev_mode remains an
+        // authentication concern.
+        CREW_OBSERVABILITY_ENABLED: '1',
+        CREW_OBSERVABILITY_DEVELOPER_ACCESS: '1',
+        CREW_OBSERVABILITY_CAPTURE_PROFILE: 'content_redacted',
+      }
+    : {
+        // A managed fallback in an ordinary launch must not inherit a
+        // developer-access setting from a shared config file.  External
+        // Gateways are never spawned with this environment and therefore are
+        // not modified by Desktop.
+        CREW_OBSERVABILITY_DEVELOPER_ACCESS: '0',
+        CREW_OBSERVABILITY_CAPTURE_PROFILE: 'metadata',
+      };
 }
 
 /**

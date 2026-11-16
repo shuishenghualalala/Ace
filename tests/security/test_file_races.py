@@ -73,6 +73,16 @@ def test_verified_read_enforces_byte_limit_on_the_checked_handle(tmp_path):
     assert file_utils.read_verified_bytes(target, max_bytes=4) == b"1234"
 
 
+def test_snapshot_rejects_oversized_file_before_read(tmp_path):
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"1234")
+
+    with pytest.raises(ValueError, match="读取上限"):
+        snapshot_file(target, max_bytes=3)
+
+    assert snapshot_file(target, max_bytes=4).data == b"1234"
+
+
 def test_structured_write_rejects_existing_hard_link(tmp_path):
     target = tmp_path / "target.txt"
     alias = tmp_path / "alias.txt"

@@ -29,7 +29,7 @@ const openSettings = (): void => {
   }
 };
 
-const openModelPane = (): void => {
+export const openModelPane = (): void => {
   openSettings();
   const modelNav = document.querySelector<HTMLElement>('[data-settings-pane="model"]');
   if (!modelNav?.classList.contains('is-active')) modelNav?.click();

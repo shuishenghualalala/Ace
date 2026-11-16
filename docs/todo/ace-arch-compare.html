@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Ace 架构对比：现状 vs 目标</title>
+<script src="./assets/mermaid.min.js"></script>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", sans-serif; margin: 0; background: #f7f8fa; color: #1b2631; }
+  header { padding: 28px 40px 8px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: #5d6d7e; font-size: 13px; }
+  section { background: #fff; margin: 20px 40px; border-radius: 10px; padding: 20px 24px 28px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  h2 { font-size: 17px; margin: 4px 0 4px; }
+  h2 .tag { font-size: 12px; font-weight: normal; padding: 2px 10px; border-radius: 10px; margin-left: 8px; vertical-align: middle; }
+  .tag.bad { background: #fdedec; color: #c0392b; }
+  .tag.good { background: #eafaf1; color: #1e8449; }
+  .note { font-size: 13px; color: #5d6d7e; margin: 6px 0 14px; line-height: 1.7; }
+  .note b.bad { color: #c0392b; } .note b.good { color: #1e8449; }
+  .mermaid { text-align: center; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 6px; }
+  th, td { border: 1px solid #d5dbdb; padding: 8px 12px; text-align: left; line-height: 1.55; }
+  th { background: #f2f4f4; }
+  code { background: #f2f4f4; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ace 架构对比：现状 vs 改造后</h1>
+  <div class="sub">2026-08-31 核查基线 · 配套文档：docs/todo/ace-plugin-architecture-evolution-plan.md</div>
+</header>
+
+<section>
+  <h2>图 1 · 现状架构<span class="tag bad">中心认识所有业务 · 核心反向依赖上层</span></h2>
+  <div class="note"><b class="bad">红色加粗箭头 = 全部病灶</b>：组合根认识所有业务、核心反向导入上层、协议含业务枚举、UI 硬编码功能。Team 的 7367 行不是 Team 的错，是被中心接线喂大的结果。</div>
+  <pre class="mermaid">
+flowchart TB
+    subgraph Hosts["入口与宿主"]
+        CLI["CLI"]
+        GW["Gateway<br/>FastAPI / WebSocket"]
+        DT["Desktop UI<br/>sidebar-nav 写死导航<br/>backend-client 3119 行"]
+        WEB["Web UI<br/>重复业务事件"]
+    end
+    subgraph Center["集中装配 —— 所有箭头在此交汇"]
+        APP["build_app() + CrewApp（3140 行）<br/>组合根 + 服务定位器 + 功能开关 + 业务接线<br/>handle() 硬编码：外援开关 · mode==team · mode==dynamic_kanban"]
+    end
+    subgraph Core["核心"]
+        ENV["Envelope / ResponseChunk<br/>Mode = agent | team | dynamic_kanban（封闭枚举）<br/>wiki_cards · team_internal —— 业务概念入股核心协议"]
+        RT["Core Agent Runtime（1578 行）<br/>默认 SingleAgent 循环（算法是资产，保留）"]
+    end
+    subgraph Feats["业务功能（各自实现良好，问题在接线）"]
+        WIKI["Wiki<br/>24 文件，领域自成一体"]
+        TEAM["Team<br/>team_manager 7367 行"]
+        DK["Dynamic Kanban"]
+        EXT["外援 External<br/>store / 适配器"]
+        OTH["Skills · Cron · Work<br/>Sites · Browser …"]
+    end
+    CLI --> APP
+    GW --> APP
+    DT --> APP
+    WEB --> APP
+    APP --> ENV
+    APP --> RT
+    APP ==>|"handle() 显式分支"| TEAM
+    APP ==>|"handle() 显式分支"| DK
+    RT -.->|"import wiki.attachments"| WIKI
+    RT -.->|"import gateway.context<br/>REFERENCE_INJECTORS / session_context"| GW
+    EXT -.->|"store.py 反向导入 Team 类型"| TEAM
+    DT -.->|"按 tab 名硬编码激活"| WIKI
+    style Center fill:#fde8e8,stroke:#c0392b,stroke-width:2px
+    linkStyle 6,7,8,9,10,11 stroke:#c0392b,stroke-width:2px
+  </pre>
+</section>
+
+<section>
+  <h2>图 2 · 目标架构<span class="tag good">功能向宿主声明能力 · 核心只依赖稳定契约</span></h2>
+  <div class="note"><b class="good">验收标志</b>：新增运行模式 / 上下文来源 / 同伴 Channel —— 不改 <code>runtime.py</code>、<code>handle()</code>、<code>envelope.py</code>、核心导航任何一行。</div>
+  <pre class="mermaid">
+flowchart TB
+    subgraph Hosts2["Host 层：产品外壳（只读 Feature Descriptor，不认识具体功能）"]
+        CLI2["CLI Host"]
+        GW2["Gateway Host<br/>按 Manifest 装配路由"]
+        DT2["Desktop Shell<br/>导航/页面/Reducer 全来自 Registry"]
+        WEB2["Web Shell<br/>共享 Feature 协议"]
+    end
+    subgraph Bundles["Feature Bundle 层：可拆业务（第一方与第三方同一契约，仅信任层级不同）"]
+        BW["Wiki Bundle<br/>KnowledgeService · Local / Remote Provider"]
+        BE["外援 Bundle<br/>Agent Runtime Provider · ExternalAgentCatalog"]
+        BT["Team Bundle<br/>mode=team Driver（编排插件）"]
+        BC["同伴 Bundle<br/>Channel Bundle（核心不知“同伴”）"]
+        BP["plugins/ 第三方<br/>同一 Manifest · 同一 Scope 生命周期"]
+    end
+    subgraph Regs["Contribution 层：开放扩展点（注册即归属 PluginScope，全部可逆）"]
+        RS["Service Registry<br/>global→workspace→user→session"]
+        RD["Driver Registry"]
+        RC["Context Registry"]
+        RT2["Tool Registry"]
+        RR["Route Registry"]
+        RE["Feature·Event Registry"]
+    end
+    subgraph Core2["核心运行时层"]
+        CR["Core Agent Runtime<br/>不导入任何业务模块，只遍历扩展点"]
+        PR["Scoped Plugin Runtime<br/>事务激活 · 失败回滚 · disposer 逆序<br/>诊断标签 · 启动审计 fail-loud"]
+        SEC["Security / Approval<br/>敏感能力只经核心 Provider<br/>审批 = 拦截器链（next）"]
+    end
+    subgraph Contracts["稳定契约层（唯一允许被核心依赖的东西）"]
+        CT["Envelope（开放 mode + feature_event）<br/>Service Protocols（KnowledgeService / ExternalAgentCatalog…）<br/>Lifecycle Contracts"]
+    end
+    Hosts2 -->|"按能力清单装配与门控"| Regs
+    BW -->|"注册贡献"| Regs
+    BE -->|"注册贡献"| Regs
+    BT -->|"注册贡献"| Regs
+    BC -->|"注册贡献"| Regs
+    BP -->|"注册贡献"| Regs
+    BT <-.->|"optional：经 Catalog 协作，禁止互相 import"| BE
+    Regs --> Core2
+    Core2 -->|"依赖方向唯一：向下"| Contracts
+    style Bundles fill:#e8f6ee,stroke:#1e8449,stroke-width:2px
+    style Regs fill:#e6f0fb,stroke:#2471a3
+    style Contracts fill:#f3e8fd,stroke:#7d3c98
+  </pre>
+</section>
+
+<section>
+  <h2>两张图的对照要点</h2>
+  <table>
+    <tr><th></th><th>现状</th><th>目标</th></tr>
+    <tr><td><b>功能怎么接入</b></td><td>改 <code>build_app()</code>、<code>handle()</code>、<code>sidebar-nav.ts</code> 四个中心</td><td>向 Registry 注册贡献，中心零改动</td></tr>
+    <tr><td><b>核心与业务的关系</b></td><td>互相 import（双向）</td><td>核心只依赖契约层（单向向下）</td></tr>
+    <tr><td><b>mode 是什么</b></td><td>核心枚举里的特权名单</td><td>Driver Registry 里的开放标识</td></tr>
+    <tr><td><b>功能间协作</b></td><td><code>external/store.py</code> 直接 import Team 类型</td><td>经 Service Definition（Catalog），无互相 import</td></tr>
+    <tr><td><b>拆 Wiki 出去</b></td><td>存储/Agent/API/UI 分散多处，等于重写</td><td>换 Remote Provider + 宿主接线，业务逻辑不动</td></tr>
+  </table>
+</section>
+
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: "default", flowchart: { curve: "basis", htmlLabels: true } });
+</script>
+</body>
+</html>

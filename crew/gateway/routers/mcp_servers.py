@@ -117,17 +117,20 @@ def create_mcp_servers_router(crew) -> APIRouter:
         if err is not None:
             return JSONResponse({"ok": False, "error": err}, status_code=400)
 
-        crew.config.set_mcp_server(name, cfg)
+        # 统一配置事务（Config.add_mcp_server）：候选值 → 持久化 → 发布。
+        # 持久化失败时内存与磁盘一致保留旧值，必须先于任何运行资源操作返回。
         try:
-            crew.config.persist_mcp_servers()
+            crew.config.add_mcp_server(name, cfg)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
         except Exception as exc:  # noqa: BLE001
-            crew.config.remove_mcp_server(name)
             return JSONResponse({"ok": False, "error": f"持久化失败: {exc}"}, status_code=500)
 
         # 增量启动单 server（后台连接，不阻塞响应）：worker.start() 最多等 30s
         # 启动超时，若同步等待会让前端 create 请求 hang 30s，弹层不关、列表不刷新。
         # 改为 fire-and-forget：配置已持久化，立即返回 201，连接在后台进行；前端刷新
         # 列表时该 server 会以 connected=false 出现，连上后下次 status() 轮询转为 true。
+        # 此时连接失败属于"已保存但连接失败"，status 的 error 字段如实反映。
         await _ensure_mgr_started()
         if crew.mcp_manager is not None:
             crew.mcp_manager.register_pending(name, cfg)
@@ -144,9 +147,12 @@ def create_mcp_servers_router(crew) -> APIRouter:
         if err is not None:
             return JSONResponse({"ok": False, "error": err}, status_code=400)
 
-        crew.config.set_mcp_server(name, cfg)
+        # 统一配置事务（Config.update_mcp_server）：候选值 → 持久化 → 发布，
+        # 持久化失败内存与磁盘保持旧 command，不会出现"内存已改、磁盘仍旧"。
         try:
-            crew.config.persist_mcp_servers()
+            crew.config.update_mcp_server(name, cfg)
+        except KeyError:
+            return JSONResponse({"ok": False, "error": f"MCP server 不存在: {name}"}, status_code=404)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": f"持久化失败: {exc}"}, status_code=500)
 
@@ -162,16 +168,27 @@ def create_mcp_servers_router(crew) -> APIRouter:
         if name not in (crew.config.mcp_servers or {}):
             return JSONResponse({"ok": False, "error": f"MCP server 不存在: {name}"}, status_code=404)
 
-        crew.config.remove_mcp_server(name)
+        # 统一配置事务（Config.delete_mcp_server）：候选值 → 持久化 → 发布。
+        # 持久化失败时内存与磁盘均保留该 server，运行中的实例原样不动，可直接重试。
         try:
-            crew.config.persist_mcp_servers()
+            crew.config.delete_mcp_server(name)
+        except KeyError:
+            return JSONResponse({"ok": False, "error": f"MCP server 不存在: {name}"}, status_code=404)
         except Exception as exc:  # noqa: BLE001
-            # 内存已移除但磁盘写失败：不回滚内存（用户本意即删除），报错提示磁盘可能不一致。
-            return JSONResponse({"ok": False, "error": f"持久化失败，磁盘配置可能未更新: {exc}"}, status_code=500)
+            return JSONResponse({"ok": False, "error": f"持久化失败: {exc}"}, status_code=500)
 
         await _ensure_mgr_started()
         if crew.mcp_manager is not None:
-            await crew.mcp_manager.remove_server(name)
+            try:
+                await crew.mcp_manager.remove_server(name)
+            except Exception as exc:  # noqa: BLE001
+                # 已保存但连接失败：配置（磁盘+内存）保持已删除的新值，如实上报运行
+                # 资源操作错误，不回滚伪装成保存失败。恢复策略：状态如实——运行实例
+                # 可能残留至进程重启或下一次 reload，配置侧重试 DELETE 幂等（404）。
+                return JSONResponse(
+                    {"ok": False, "error": f"配置已保存，但移除运行实例失败: {exc}"},
+                    status_code=500,
+                )
 
         return JSONResponse({"ok": True, "servers": _servers_view()})
 

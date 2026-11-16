@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6W · channels 表归属迁移 + 拆库（P1-1 收官）</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6W · channels 表归属迁移 + 拆库（P1-1 收官）</h1>
+<p>2026-09-14 · 提交 <code>3cf7b9b</code>（ADR-0038 末批 + P2-7 后半）。channel_bindings 整体迁移、channel_session_routes 从 session_store 拆出为 channels 侧 store（无转发壳），两表迁 <code>channels.db</code>。</p>
+<h2>处置</h2>
+<ul>
+<li>channel_bindings 整体迁移；channel_session_routes 从 session_store 拆出为 channels 侧 store（无转发壳）；两表迁 <code>channels.db</code>。</li>
+<li>state 契约增补 crew.channels。</li>
+<li><strong>至此 P1-1 六批拆库全部收官</strong>：主库回归纯 core 状态表，全部 Feature 数据边界独立可迁出；P1-1/P1-2/P1-3/P2-4/P2-7 全部解除。命名空间审计仅余渐进项（P2-1 配置节、P2-5 表前缀、P2-6 事件命名空间决策）与 wiki_learning 插件表归属决策。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>新增契约测试</td><td>8 个（两表迁移、无转发壳、state 契约增补等）</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4164 passed / 0 failed</td></tr>
+</table>
+<p>平台说明：纯 SQLite/路径语义，无平台分支；本轮实测为 macOS 本机。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

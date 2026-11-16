@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6R · 拆库试点 cron.db</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6R · 拆库试点 cron.db（ADR-0038 / P1-1 首切片）</h1>
+<p>2026-09-12。cron 两表（cron_jobs、cron_job_runs）迁入独立库 <code>crew_data/cron.db</code>，建立 copy-on-first-activate 迁移机制与跨库 claim-legacy。决策记录：<a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a>。</p>
+<h2>机制</h2>
+<ul>
+<li><code>copy_legacy_feature_rows(legacy_db_path, target_conn, tables)</code>（crew/state/schema_version.py）：旧库缺文件/缺表跳过、目标库已有行跳过（幂等）、整表复制在 SAVEPOINT 内原子（失败整体回滚，autocommit 与 BEGIN IMMEDIATE 两种上下文均验证）；旧表保留在 crew.db 作回退备份。</li>
+<li>顺序保证：ensure-schema → <code>stamp_baseline("cron", v1)</code> → copy gate（store 构造器内，<code>legacy_db_path</code> 参数显式传入）。</li>
+<li>配置：<code>cron_db_path</code> 顶层键（memory_db_path 先例），build_app 消费点 <code>_resolve_cron_db_path()</code> 归一——顺带根治了直接构造 Config 时 CWD 相对路径污染的一类隐性 flake。</li>
+<li>claim-legacy 跨库：<code>_migration.py</code> 表清单带库归属，<code>legacy_owner_scan_targets()</code> 产出路径→表映射，CLI 与 startup 巡检均映射驱动；cron 智能回填改双连接参数化（同库时同一连接，无 ATTACH）。</li>
+</ul>
+<h2>验收（ADR 试点清单逐项）</h2>
+<table><tr><th>项</th><th>证据</th></tr>
+<tr><td>新装分库</td><td>真实 build_app：cron 表只在 cron.db</td></tr>
+<tr><td>存量迁移</td><td>store 级 + 真实装配线：行数一致、旧行保留、重开幂等零重复、目标非空跳过、缺表/缺文件跳过</td></tr>
+<tr><td>事务边界</td><td>第二表约束冲突 → 第一表已复制行整体回滚</td></tr>
+<tr><td>cron 全周期</td><td>activate/update/deactivate/restart/rollback 零回归</td></tr>
+<tr><td>claim-legacy</td><td>跨库扫描 + dry-run + 跨库智能回填用例</td></tr>
+<tr><td>全量</td><td><b>4107 passed / 43 skipped / 0 failed</b>（子 agent 与主 agent 双跑一致；增量恰为 13 个新契约测试）</td></tr>
+<tr><td>静态</td><td>ruff / compileall / lint-imports（9 kept）全过</td></tr>
+</table>
+<h2>后续批次复用步骤</h2>
+<p>config 三处 → store（默认路径 + legacy 参数 + stamp + copy）→ _migration 归属登记 → app 装配与 startup 映射 → FEATURE_MIGRATIONS 注册 → 按 13 测模板补用例。批次顺序：work → kanban → external+team → sites/tasks/notifications → channels 表。</p>
+<p><a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

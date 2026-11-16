@@ -121,7 +121,7 @@ def set_session_model(
     profiles: dict[str, ModelProfile] | None,
     session_id: str,
     model_profile_id: str,
-    owner_account_id: str = "",
+    owner_account_id: str,
     *,
     busy: bool,
     fallback_model_id: str | None = None,
@@ -157,7 +157,7 @@ def promote_pending_session_model(
     cfg: Config,
     profiles: dict[str, ModelProfile] | None,
     session_id: str,
-    owner_account_id: str = "",
+    owner_account_id: str,
     *,
     fallback_model_id: str | None = None,
 ) -> bool:
@@ -183,7 +183,7 @@ def promote_pending_session_model(
 def sessions_using_model(
     store: Any,
     model_id: str,
-    owner_account_id: str = "",
+    owner_account_id: str,
 ) -> list[dict[str, str]]:
     """列出某账号下绑定 model_id 的会话。"""
     lister = getattr(store, "list_sessions", None)
@@ -208,7 +208,7 @@ def rebind_sessions_from_model(
     cfg: Config,
     profiles: dict[str, ModelProfile] | None,
     from_model_id: str,
-    owner_account_id: str = "",
+    owner_account_id: str,
     *,
     to_model_id: str | None = None,
     fallback_model_id: str | None = None,

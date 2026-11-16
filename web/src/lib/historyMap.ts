@@ -20,6 +20,11 @@ export interface BackendHistoryItem {
   mention_from?: string;
   mention_to?: string[];
   mention_intent?: string;
+  communication_kind?: string;
+  communication_status?: string;
+  request_id?: string;
+  reply_to?: string;
+  communication_request_text?: string;
   display_mode?: string;
   collapsed_title?: string;
   process_text?: string;
@@ -82,13 +87,16 @@ function mapToolCalls(
     result: tc.result ?? "",
     status: tc.status ?? "done",
     startedAt: backendSecondsToMs(tc.started_at) ?? 0,
-    duration: backendDurationToMs(tc.duration),
+    duration: tc.duration == null ? undefined : backendDurationToMs(tc.duration) || undefined,
   }));
 }
 
 /** 把网关历史条目映射为前端 UiMessage（含秒→毫秒换算）。 */
 export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
-  const role = item.role as MsgRole;
+  const role: MsgRole =
+    item.role === "assistant" || item.role === "user" || item.role === "team_internal"
+      ? item.role
+      : item.role === "error" ? "error" : "status";
   const base: UiMessage = {
     id: newId(),
     role,
@@ -108,6 +116,11 @@ export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
     mentionFrom: item.mention_from,
     mentionTo: item.mention_to,
     mentionIntent: item.mention_intent,
+    communicationKind: item.communication_kind,
+    communicationStatus: item.communication_status,
+    requestId: item.request_id,
+    replyTo: item.reply_to,
+    communicationRequestText: item.communication_request_text,
     displayMode: item.display_mode,
     collapsedTitle: item.collapsed_title,
     processText: item.process_text,

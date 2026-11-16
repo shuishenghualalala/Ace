@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 2 · Session Source Contributor 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 2 · Session Source Contributor</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-03 · 测试执行：gpt-5.6-luna 子 Agent</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>SessionContext 对象和字典都能归一成稳定 <code>session_source</code>。</li>
+    <li>来源上下文通过通用动态 fragment 进入 Agent reminder，不再修改静态 system prompt。</li>
+    <li>Browser、结构化路径与 Session Source 按稳定优先级共同执行。</li>
+    <li>Browser 卸载后 Gateway 与 Host Contributor 继续存在。</li>
+    <li>Agent Runtime→Gateway 的直接依赖与对应 import-linter 豁免归零。</li>
+  </ul>
+
+  <h2>2. 当前状态</h2>
+  <table>
+    <thead><tr><th>门禁</th><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Python 回归</td><td>Session Context、Context Registry、Agent、Gateway/Channel/Cron</td><td class="ok">149 passed · 18.87s</td></tr>
+      <tr><td>静态与架构</td><td>Ruff、lint-imports、compileall、diff check</td><td class="ok">通过 · 6 kept / 0 broken</td></tr>
+      <tr><td>文档</td><td>HTMLParser 与演进计划 Mermaid</td><td class="ok">HTML 全部解析 · 11 张 Mermaid 全部渲染</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 回归风险</h2>
+  <ul>
+    <li>渠道 Session 的来源身份、群组/线程说明和 Cron origin 投递信息不能丢失。</li>
+    <li>动态 context 不写入 canonical history，保持原有每轮重新计算语义。</li>
+    <li>普通 CLI/Web 请求缺少 SessionContext 时仍需为工具提供最小来源字典。</li>
+    <li>PluginManager 的平台装配仍会懒加载 Gateway Platform Registry，留待 Route Gate 切片消除；本次不把该间接路径计为完成。</li>
+  </ul>
+
+  <div class="nav"><a href="../backend/adr/0010-session-source-context-contributor.html">ADR-0010</a> · <a href="../backend/modules/gateway.html">Gateway 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

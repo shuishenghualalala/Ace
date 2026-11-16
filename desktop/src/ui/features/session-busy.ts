@@ -160,6 +160,19 @@ export function resumeSessionGeneration(sessionId: string, requestId: string | n
 }
 
 /**
+ * 「后端已 idle」回调：由 chat-controller 注册，用于兜底消费本地待发队列。
+ *
+ * 正常路径下本地队列在收到 final 帧时（finalizeTurn → consumePending）派出；
+ * 若 final 帧丢失（登出围栏吞帧、重连后 request_id 门拦丢弃），后端已空闲而
+ * 本地仍显示「正在排队…」。状态同步拉到 live=idle 是权威信号，借此触发兜底。
+ */
+let backendIdleHandler: ((sessionId: string) => void) | null = null;
+
+export function setBackendIdleHandler(fn: ((sessionId: string) => void) | null): void {
+  backendIdleHandler = fn;
+}
+
+/**
  * 用后端 session status API 的 live 字段对齐 busy + turnSealed。
  * 用于历史回填、重连，避免 status=running 但 busy=false 的假 idle。
  */
@@ -203,4 +216,5 @@ export function syncSessionLiveFromBackend(
   applyBusyUi(sessionId, false);
   const st: SessionStatus = lastStatus === 'failed' ? 'error' : 'idle';
   setSessionStatus(sessionId, st);
+  backendIdleHandler?.(sessionId);
 }

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Subagent Stage B 测试记录</title>
+<style>body{font:15px/1.7 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code,pre{background:#f5f5f5}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}.ok{color:#176b2c}a{color:#245a83}</style></head>
+<body><main>
+<h1>Subagent Stage B · run log / 深度账本 / 四态投递 / 批量调度 测试记录</h1>
+<p>日期：2026-09-16 · 分支：<code>codex/subagent-multiagent-upgrade</code> · 范围：B1–B7。</p>
+
+<h2>1. 测试目标与证据</h2>
+<table><thead><tr><th>测试面</th><th>覆盖内容</th><th>证据</th></tr></thead><tbody>
+  <tr><td>持久层</td><td>descriptor first-wins、版本/未知字段双侧拒绝、边软删除幂等、保留期清理、重启可读、域表登记</td><td><code>tests/test_subagent_store.py</code></td></tr>
+  <tr><td>结局折叠</td><td>六态映射表（含 max-tokens 连字符、不可名状、timed_out 不入折叠）、空日志回退、先失败后取消算失败</td><td><code>tests/test_subagent_stage_b.py</code></td></tr>
+  <tr><td>深度账本</td><td>持久父深度作下界、运行时低报不回退、超限拒绝、可见性真值表（allow_nested×深度×外援）</td><td><code>tests/test_subagent_stage_b.py</code>、<code>tests/test_subagent_policy.py</code></td></tr>
+  <tr><td>结算落库</td><td>execute 后 run 行 settled、边 closed、descriptor 可读、事件序列完整；日志与自报冲突以日志为准</td><td><code>tests/test_subagent_stage_b.py</code></td></tr>
+  <tr><td>四态投递</td><td>GONE 丢弃、DRAINING/IDLE 入队、BUSY steer 成功摘除副本（文案与 drain 逐字一致）、steer 失败回退队列；三条硬不变量回归</td><td><code>tests/test_subagent_stage_b.py</code>、<code>tests/test_subagent.py</code>、<code>tests/test_context_contributors.py</code></td></tr>
+  <tr><td>批量调度</td><td>假时钟爬坡时序（首发 2 后 1.0s/个）、指数退避重排、唯一未完成槽豁免、max_retries 上限、定序聚合、取消传播、限流启发式（含配额终态排除）</td><td><code>tests/test_subagent_batch.py</code></td></tr>
+  <tr><td>同构模板</td><td>占位符缺失/空数组/超上限/展开重复逐项拒绝；goal 互斥；e2e 展开执行</td><td><code>tests/test_subagent_batch.py</code></td></tr>
+  <tr><td>摘要兜底</td><td>短交卷追加一轮扩写（文案与轮数断言）、无策略不扩写、长文不扩写、max_tokens 不视为交卷</td><td><code>tests/test_subagent_stage_b.py</code></td></tr>
+  <tr><td>配置</td><td>13 个新扁平键默认值、features.subagent 段覆盖（含 launch_ramp/rate_limit 子结构）</td><td><code>tests/test_config_features_namespace.py</code></td></tr>
+  <tr><td>兼容</td><td>三工具 schema 快照更新（delegate_task 因模板模式、其余不变）、to_legacy_dict 新增 stop_reason/timeout_kind 的精确形状、_delegation_depth 下发</td><td><code>tests/test_subagent.py</code>、<code>tests/test_subagent_runtime_contract.py</code></td></tr>
+</tbody></table>
+
+<h2>2. 已执行命令</h2>
+<pre><code>uv run --frozen --extra dev python -m pytest -q \
+  tests/test_subagent.py tests/test_subagent_contract.py \
+  tests/test_subagent_stage_b.py tests/test_subagent_batch.py \
+  tests/test_subagent_store.py tests/test_subagent_policy.py \
+  tests/test_subagent_runtime_contract.py tests/test_agent_factory_feature.py \
+  tests/test_external_subagent_provider.py tests/test_external_feature_lifecycle.py \
+  tests/test_feature_presets.py tests/test_config_features_namespace.py \
+  tests/test_context_contributors.py tests/test_task_runtime.py tests/test_e2e_subagent.py
+# 242 passed, 6 deselected
+
+uv run --frozen --extra dev python -m pytest -q   # 全量（见第 3 节）
+.venv/bin/python -m ruff check &lt;全部改动文件&gt;      # All checks passed
+PYTHONPATH=.:packages/crew-external-agents/src \
+  /Users/ahuamao/Documents/Codes/Ace/.venv/bin/lint-imports</code></pre>
+
+<h2>3. 结果</h2>
+<ul>
+  <li class="ok">阶段 B 定向回归：242 项通过（含既有通知三条不变量、e2e、外援 provider 事件折叠回归）。</li>
+  <li class="ok">Ruff：全部改动文件通过；compileall 通过。</li>
+  <li class="ok">Import Linter：12 条契约全部保持——本阶段新增 <code>subagent-store-boundary</code>（store 为持久化叶子，不依赖 Feature 实现与兄弟模块）。</li>
+  <li class="ok">全量 pytest：4623 通过、47 跳过、20 deselected；8 个 error 均为 worktree venv 缺 <code>openpyxl</code> 的环境项（skills 转换测试），已用主仓 venv 复跑 22 项全过，非代码失败（与阶段 A 基线同口径）。</li>
+</ul>
+
+<h2>4. 时序确定性与跨平台检查</h2>
+<ul>
+  <li>批量爬坡/退避用可注入假时钟断言（launch 时刻序列 <code>[0, 0, 1, 2]</code>、重排间隔 ≥ backoff_base），不依赖真实墙钟。</li>
+  <li>实现只用 <code>sqlite3</code> / <code>asyncio</code> / <code>pathlib</code>；无信号、无 fork、无 Unix 权限位、无平台路径拼接。</li>
+  <li>四态路由对状态观测失败一律回退 IDLE（等同旧"只入队"行为），不会因观测面异常丢通知。</li>
+</ul>
+
+<h2>5. 结论</h2>
+<p class="ok">任一 run 的结局可只读日志复算（折叠函数为唯一推导入口并有冲突改写用例）；进程重启后 descriptor/edges/runs 可读；批量调度有确定性时序测试；深度记账单调且默认行为与旧版逐字一致；通知四态路由保住三条硬不变量。</p>
+<p><a href="../backend/modules/subagent.html">模块文档</a> · <a href="../backend/adr/0046-subagent-stage-b-runlog-depth-notify.html">ADR-0046</a> · <a href="subagent-stage-a-semantic-runtime.html">Stage A 测试</a></p>
+</main></body></html>

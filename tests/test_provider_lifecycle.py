@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from crew.agent.runtime import SingleAgent
 from crew.app import AgentManager, build_app
@@ -16,7 +16,7 @@ from crew.plugins.manager import PluginManager
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
 from crew.tools.registry import Registry
-from crew.state.config import Config
+from crew.state.config import Config, load_config
 
 
 class _AsyncCloseClient:
@@ -180,7 +180,7 @@ async def test_app_shutdown_closes_agent_owned_before_global_provider_and_is_ide
     app.mcp_manager = None
     app.provider = OrderedProvider()
     app.agents = AgentManager(OrderedAgent)
-    app.agents.get("s1")
+    app.agents.get("s1", owner_account_id="local")
 
     await app.shutdown()
     await app.shutdown()
@@ -224,7 +224,14 @@ async def test_app_shutdown_deadline_bounds_cancellation_resistant_provider_reti
         await app.shutdown(timeout=0.02)
         elapsed = asyncio.get_running_loop().time() - started_at
 
-        assert elapsed < 0.1
+        # 时序契约用事件断言而非墙钟：HangingProvider 只有在 release 置位后
+        # 才会从 aclose 返回并置 closed，而 release 在 finally 里才置位。因此
+        # shutdown 返回时 closed 仍未置位，即证明关停没有等待这个吞取消息的
+        # provider——0.02s 预算只约束 Provider 清理阶段，其余关停步骤（插件、
+        # 任务、后台进程排干）不受该 deadline 约束，总耗时断言 0.1s 是墙钟运气。
+        assert not hanging.closed.is_set()
+        # 宽松上限仅兜底真挂死（无界等待会永远阻塞在此），裕度为预算的数百倍。
+        assert elapsed < 5.0
         assert app._shutdown_complete is True
         with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
             app.active_owner.current()
@@ -317,23 +324,38 @@ async def test_use_model_installs_new_provider_before_retiring_old_one(tmp_path,
 
     old_provider = _ClosableProvider()
     new_provider = _ClosableProvider()
-    cfg = Config(
-        db_path=str(tmp_path / "crew.db"),
-        memory_db_path=str(tmp_path / "memory.db"),
-        crew_home=str(tmp_path / ".crew"),
+    # use_model 走 Config 候选值事务（候选值 → 持久化 → 发布），需要 yaml 落点
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "llm": {
+                    "active": "cur",
+                    "models": {
+                        "cur": {"model": "cur-model", "loaded": True},
+                        "next": {"model": "next-model", "loaded": True},
+                    },
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
     )
+    cfg = load_config(config_path=str(config_path))
+    cfg.db_path = str(tmp_path / "crew.db")
+    cfg.memory_db_path = str(tmp_path / "memory.db")
+    cfg.crew_home = str(tmp_path / ".crew")
     app = build_app(config=cfg, enable_team=False)
     app.cron_service = None
     app.mcp_manager = None
     app.provider = old_provider
-    profile = SimpleNamespace(id="next", model="next-model", base_url="")
-    monkeypatch.setattr(app.config, "activate_model", lambda _model_id: profile)
     monkeypatch.setattr(app_module, "build_provider", lambda _cfg: new_provider)
 
-    selected = app.use_model("next")
+    selected = app.use_model("next", owner_account_id="")
 
-    assert selected is profile
+    assert selected.id == "next"
     assert app.provider is new_provider
+    assert cfg.active_model_id == "next"
     await app._drain_provider_retirements()
     assert old_provider.close_calls == 1
     assert new_provider.close_calls == 0

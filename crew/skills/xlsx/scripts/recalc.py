@@ -17,6 +17,7 @@ from openpyxl import load_workbook
 MACRO_DIR_MACOS = "~/Library/Application Support/LibreOffice/4/user/basic/Standard"
 MACRO_DIR_LINUX = "~/.config/libreoffice/4/user/basic/Standard"
 MACRO_FILENAME = "Module1.xba"
+ERROR_OUTPUT_TAIL_CHARS = 2000
 
 RECALCULATE_MACRO = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "module.dtd">
@@ -29,14 +30,11 @@ RECALCULATE_MACRO = """<?xml version="1.0" encoding="UTF-8"?>
 </script:module>"""
 
 
-def has_gtimeout():
-    try:
-        subprocess.run(
-            ["gtimeout", "--version"], capture_output=True, timeout=1, check=False
-        )
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+def _tail(text: str, limit: int = ERROR_OUTPUT_TAIL_CHARS) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return f"…（前部省略 {len(text) - limit} 字符）…{text[-limit:]}"
 
 
 def setup_libreoffice_macro():
@@ -84,18 +82,22 @@ def recalc(filename, timeout=30):
         abs_path,
     ]
 
-    if platform.system() == "Linux":
-        cmd = ["timeout", str(timeout)] + cmd
-    elif platform.system() == "Darwin" and has_gtimeout():
-        cmd = ["gtimeout", str(timeout)] + cmd
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=get_soffice_env(),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"LibreOffice 重算超时（>{timeout}s）"}
+    except OSError as exc:
+        return {"error": f"无法启动 LibreOffice（soffice）：{exc}"}
 
-    result = subprocess.run(cmd, capture_output=True, text=True, env=get_soffice_env())
-
-    if result.returncode != 0 and result.returncode != 124:  
-        error_msg = result.stderr or "Unknown error during recalculation"
-        if "Module1" in error_msg or "RecalculateAndSave" not in error_msg:
-            return {"error": "LibreOffice macro not configured properly"}
-        return {"error": error_msg}
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return {"error": _tail(detail) or f"LibreOffice 退出码 {result.returncode}"}
 
     try:
         wb = load_workbook(filename, data_only=True)
@@ -158,7 +160,7 @@ def recalc(filename, timeout=30):
         return result
 
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _tail(str(e) or type(e).__name__)}
 
 
 def main():
@@ -178,6 +180,9 @@ def main():
 
     result = recalc(filename, timeout)
     print(json.dumps(result, indent=2))
+    if "error" in result:
+        print(json.dumps(result, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

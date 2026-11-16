@@ -306,7 +306,8 @@ async function runDownload(inf: Inflight): Promise<void> {
 }
 
 async function handleRunError(inf: Inflight, err: unknown): Promise<void> {
-  console.log('[Download] handleRunError reason:', inf.abortReason, 'error:', (err as Error)?.message, 'cause:', (err as any)?.cause, 'stack:', (err as Error)?.stack);
+  const cause = err && typeof err === 'object' && 'cause' in err ? err.cause : undefined;
+  console.log('[Download] handleRunError reason:', inf.abortReason, 'error:', (err as Error)?.message, 'cause:', cause, 'stack:', (err as Error)?.stack);
   clearNoProgressTimer(inf);
   const reason = inf.abortReason;
 

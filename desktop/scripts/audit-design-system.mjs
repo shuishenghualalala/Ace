@@ -47,11 +47,21 @@ const LENGTH_PATTERN = /\b-?\d+(?:\.\d+)?px\b/g;
 const DECLARATION_PATTERN = /([\w-]+)\s*:\s*([^;{}]+);/g;
 const INLINE_PROPERTY_PATTERN = /\.style\.([A-Za-z][\w]*)\s*=/g;
 const INLINE_VARIABLE_PATTERN = /\.style\.setProperty\(\s*['"]([^'"]+)['"]/g;
-const HTML_INLINE_PATTERN = /\bstyle\s*=\s*['"]/gi;
-const TS_HTML_INLINE_PATTERN = /\bstyle\s*=\s*\\?['"`]/gi;
+const STYLE_ATTR_PATTERN = /\bstyle\s*=\s*\\?(["'`])([\s\S]*?)\\?\1/g;
+const STYLE_ATTR_DECL_PATTERN = /(?:^|;)\s*([\w-]+)\s*:/g;
 const EMBEDDED_COLOR_PATTERN =
   /(?:\b(?:fill|stroke|color|stop-color|flood-color|lighting-color)\s*[:=]\s*["']?\s*(?:#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\s*\())|(?:var\(\s*--[A-Za-z0-9_-]+\s*,\s*(?:#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\s*\())/g;
 const BEHAVIORAL_INLINE_PROPERTIES = new Set(['display', 'visibility', 'colorScheme']);
+/** 整值就是一个 token 引用（效果/阴影允许通过 token 落到 tokens.css）。 */
+const MW_TOKEN_VALUE_PATTERN = /^var\(\s*--mw-[A-Za-z0-9_-]+\s*\)$/;
+/** transition 里的字面量时长与字面量缓动函数——token 化的正是这两样。 */
+const LITERAL_TIME_PATTERN = /(?:^|[\s,(])\d*\.?\d+(?:ms|s)\b/;
+const LITERAL_EASING_PATTERN = /\b(?:cubic-bezier|steps|linear)\s*\(/;
+/**
+ * 品牌资产豁免：多色插画自带调色板，且以图片方式加载、读不到应用 CSS 变量，
+ * 因此不能也不该跟随主题 token。新增品牌资产必须显式登记，避免成为硬编码颜色的后门。
+ */
+const BRAND_ASSET_ALLOWLIST = new Set(['icon-v2.svg']);
 const DESIGN_VIOLATION_KEYS = [
   'spacing',
   'radius',
@@ -69,6 +79,19 @@ function isDocumentedShapeGradient(property, value) {
   if (property === 'mask' || property === '-webkit-mask') return true;
   if (/linear-gradient\(\s*currentcolor\b/i.test(value)) return true;
   return /conic-gradient/.test(value) && /--(?:mw-)?(?:todo-progress|msg-fold-spinner-angle)/.test(value);
+}
+
+/**
+ * 内联 style 属性是否只发布 token（`style="--mw-x: ..."`）。
+ *
+ * JS/模板只能把运行时算出来的值通过 `--mw-*` 自定义属性交给 CSS，
+ * 真正的布局属性必须留在样式表里——所以属性里出现任何非 `--mw-*` 声明都算违规。
+ */
+function hasNonTokenInlineDeclaration(styleText) {
+  for (const match of styleText.matchAll(STYLE_ATTR_DECL_PATTERN)) {
+    if (!match[1].startsWith('--mw-')) return true;
+  }
+  return false;
 }
 
 function stripComments(text) {
@@ -162,17 +185,19 @@ function auditCss(cssDir) {
       if (
         property === 'transition' &&
         value !== 'none' &&
-        !/^var\(--mw-transition-(?:interactive|fast|slow)\)$/.test(value)
+        !MW_TOKEN_VALUE_PATTERN.test(value) &&
+        (LITERAL_TIME_PATTERN.test(value) || LITERAL_EASING_PATTERN.test(value))
       ) {
         addViolation(violations.motionLiterals, file, text, offset, 'motion-literal', value);
       }
       if (
         (property === 'backdrop-filter' || property === '-webkit-backdrop-filter' || property === 'filter') &&
-        value !== 'none'
+        value !== 'none' &&
+        !MW_TOKEN_VALUE_PATTERN.test(value)
       ) {
         addViolation(violations.effects, file, text, offset, 'forbidden-effect', `${property}: ${value}`);
       }
-      if (property === 'text-shadow' && value !== 'none') {
+      if (property === 'text-shadow' && value !== 'none' && !MW_TOKEN_VALUE_PATTERN.test(value)) {
         addViolation(violations.effects, file, text, offset, 'forbidden-effect', `${property}: ${value}`);
       }
       if (/!important\b/.test(value)) {
@@ -211,16 +236,23 @@ function auditInlineStyles(srcDir, assetsDir) {
     }
     for (const match of text.matchAll(INLINE_VARIABLE_PATTERN)) {
       const name = match[1];
-      addViolation(violations, file, text, match.index ?? 0, 'inline-style-property', name);
+      // 只有把值发布进 token 命名空间才算合法桥接；其它自定义属性仍属漂移。
+      if (!name.startsWith('--mw-')) {
+        addViolation(violations, file, text, match.index ?? 0, 'inline-style-property', name);
+      }
     }
-    for (const match of text.matchAll(TS_HTML_INLINE_PATTERN)) {
-      addViolation(violations, file, text, match.index ?? 0, 'ts-inline-style', 'style');
+    for (const match of text.matchAll(STYLE_ATTR_PATTERN)) {
+      if (hasNonTokenInlineDeclaration(match[2] ?? '')) {
+        addViolation(violations, file, text, match.index ?? 0, 'ts-inline-style', 'style');
+      }
     }
   }
   for (const file of walkFiles(assetsDir, new Set(['.html']))) {
     const text = readFileSync(file, 'utf8');
-    for (const match of text.matchAll(HTML_INLINE_PATTERN)) {
-      addViolation(violations, file, text, match.index ?? 0, 'html-inline-style', 'style');
+    for (const match of text.matchAll(STYLE_ATTR_PATTERN)) {
+      if (hasNonTokenInlineDeclaration(match[2] ?? '')) {
+        addViolation(violations, file, text, match.index ?? 0, 'html-inline-style', 'style');
+      }
     }
   }
   return violations;
@@ -229,6 +261,7 @@ function auditInlineStyles(srcDir, assetsDir) {
 function auditEmbeddedColors(assetsDir) {
   const violations = [];
   for (const file of walkFiles(assetsDir, new Set(['.svg']))) {
+    if (BRAND_ASSET_ALLOWLIST.has(basename(file))) continue;
     const text = readFileSync(file, 'utf8');
     const source = stripComments(text);
     for (const match of source.matchAll(EMBEDDED_COLOR_PATTERN)) {

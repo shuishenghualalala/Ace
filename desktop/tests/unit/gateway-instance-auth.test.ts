@@ -212,3 +212,81 @@ describe('verifyGatewayInstance', () => {
     expect(fakeFetch).not.toHaveBeenCalled();
   });
 });
+
+describe('probeGatewayInstance failure classification', () => {
+  it('classifies an abort-driven rejection as timeout', async () => {
+    const crewHome = tempCrewHome();
+    loadOrCreateGatewayInstanceKey(crewHome);
+    const fakeFetch = vi.fn(
+      (_input: URL | RequestInfo, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        }),
+    ) as unknown as typeof fetch;
+
+    const result = await probeGatewayInstance('http://127.0.0.1:8000', {
+      crewHome,
+      fetchImpl: fakeFetch,
+      timeoutMs: 100,
+    });
+
+    expect(result.verified).toBe(false);
+    expect(result.failureKind).toBe('timeout');
+  });
+
+  it('classifies connection refusal as unreachable', async () => {
+    const crewHome = tempCrewHome();
+    loadOrCreateGatewayInstanceKey(crewHome);
+    const fakeFetch = vi.fn(async () => {
+      throw Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8000'), {
+        code: 'ECONNREFUSED',
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await probeGatewayInstance('http://127.0.0.1:8000', {
+      crewHome,
+      fetchImpl: fakeFetch,
+    });
+
+    expect(result).toEqual({ verified: false, failureKind: 'unreachable' });
+  });
+
+  it('classifies a failed instance proof as auth_failed', async () => {
+    const crewHome = tempCrewHome();
+    const key = loadOrCreateGatewayInstanceKey(crewHome);
+    const staleChallenge = '12'.repeat(32);
+    const replayedProof = createHmac('sha256', key)
+      .update(PROOF_CONTEXT)
+      .update(staleChallenge, 'ascii')
+      .digest('hex');
+    const fakeFetch = vi.fn(async () => jsonResponse({
+      ok: true,
+      service: 'crew-gateway',
+      instance_proof: replayedProof,
+    })) as unknown as typeof fetch;
+
+    const result = await probeGatewayInstance('http://127.0.0.1:8000', {
+      crewHome,
+      fetchImpl: fakeFetch,
+      challenge: '34'.repeat(32),
+    });
+
+    expect(result).toEqual({ verified: false, failureKind: 'auth_failed' });
+  });
+
+  it('classifies local precondition failures as unknown without fetching', async () => {
+    const crewHome = tempCrewHome();
+    loadOrCreateGatewayInstanceKey(crewHome);
+    const fakeFetch = vi.fn(async () => jsonResponse({ ok: true })) as unknown as typeof fetch;
+
+    const result = await probeGatewayInstance('http://localhost:8000', {
+      crewHome,
+      fetchImpl: fakeFetch,
+    });
+
+    expect(result).toEqual({ verified: false, failureKind: 'unknown' });
+    expect(fakeFetch).not.toHaveBeenCalled();
+  });
+});

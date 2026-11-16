@@ -75,7 +75,7 @@ async def authorize_file_tool(
     当策略要求审批时，**阻塞等待 owner 决策**而非抛 ``SECURITY_APPROVAL_REQUIRED``
     错误：抛错会被模型复述进正文、且 turn 结束后 grant 无人消费（"对话停了"）。
     阻塞期间 agent 循环挂起在工具调用上，决策到达后自然恢复——批准则继续执行，
-    拒绝则回灌干净错误让模型自适应（对齐 codex/opencode 的 deny 语义）。
+    拒绝则回灌干净错误让模型自适应。
     """
     raw_path = str(args.get("path") or ".")
     if workspace_store is None or security_service is None:

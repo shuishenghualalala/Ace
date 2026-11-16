@@ -475,6 +475,27 @@
   font: var(--mw-type-code-weight) var(--mw-type-code-size) / var(--mw-type-code-line) var(--mw-font-mono);
 }
 
+.mw-inspector .chat-inspector__resize-handle {
+  position: absolute;
+  z-index: 10;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+body.inspector-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.mw-inspector .chat-inspector__resize-handle:focus-visible {
+  outline: 2px solid var(--mw-action-primary);
+  outline-offset: -2px;
+}
+
 .mw-inspector .chat-inspector__resize-handle:hover,
 .mw-inspector .chat-inspector__resize-handle.is-dragging {
   background: var(--mw-action-primary);

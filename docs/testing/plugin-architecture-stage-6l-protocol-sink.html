@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6L · gateway 协议设施下沉</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6L · gateway 协议设施下沉（workspace 必修项⑤）</h1>
+<p>2026-09-11。四个协议设施文件从宿主层迁入 Feature Runtime 层，六个 Feature 包对 <code>crew.gateway</code> 的反向导入清零并受第 8 条 import-linter 契约保护。子 agent 完成主体迁移与消费方改写（因机器断网中断于收尾前），主 agent 补完 dynamickanban router 归属、契约与验证。</p>
+<h2>改动</h2>
+<ul>
+<li><code>crew/gateway/{session_context,response_filters,outbound,hooks}.py</code>（共 738 行）整体迁入 <code>crew/features/</code>——channels/cron/work 本就依赖该层做注册，session_context 的 ContextContribution 基类同层，不引入新的层级违反；全仓 import 改写（gateway 内部、channels×6、cron、work、team/payloads、cli、plugins/platforms 两 adapter、9 个测试文件），不留 gateway 转发壳。</li>
+<li><strong>Dynamic Kanban router 归属 Feature</strong>（评估报告所指"feature→gateway 唯一成环方向"）：<code>crew/gateway/routers/dynamic_kanban.py</code>（112 行）迁为 <code>crew/dynamickanban/routes.py</code>，鉴权改读 wiki/routes 同款"宿主最小认证请求契约"（<code>request.state.account</code>，不再导入 gateway.auth）；gateway 侧留文档化兼容 re-export（wiki 先例）。</li>
+<li><code>.importlinter</code> 新增第 8 条契约 <code>feature-host-boundary</code>：channels/cron/work/wiki/team/dynamickanban 不得导入 crew.gateway。</li>
+</ul>
+<h2>验证记录</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>pytest tests/gateway/ + channels 3 文件 + context_contributors + dynamic_kanban 2 文件</code></td><td>606 passed</td></tr>
+<tr><td><code>pytest -k "cron or work or outbound or hooks or session_context or response_filters"</code></td><td>381 passed</td></tr>
+<tr><td><code>grep crew\.gateway</code> 六个 Feature 包</td><td>零命中</td></tr>
+<tr><td><code>ruff check crew tests</code> / <code>compileall</code> / <code>lint-imports</code></td><td>通过 / 通过 / 8 kept 0 broken</td></tr>
+</table>
+<p>已知排除：<code>tests/security/test_outbound_tools.py::test_loopback_proxy_blocked_when_disallowed</code> 在本次验证窗口失败，经 stash 干净基线复跑同样失败——系当日机器 DNS 故障（与子 agent 中断同源）的环境抖动，该测试所属的 <code>crew/security/outbound.py</code> 与本切片迁移的 <code>crew/features/outbound.py</code>（流式出口格式化）为不同模块，本切片未触碰。</p>
+<p><a href="../todo/ace-workspace-split-assessment.md">workspace 评估（必修⑤）</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

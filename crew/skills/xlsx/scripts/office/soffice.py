@@ -16,6 +16,7 @@ Usage:
 
 import os
 import socket
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
@@ -42,6 +43,9 @@ _SHIM_SO = Path(tempfile.gettempdir()) / "lo_socket_shim.so"
 
 
 def _needs_shim() -> bool:
+    # LD_PRELOAD and the socket shim are Linux-only facilities.
+    if not sys.platform.startswith("linux"):
+        return False
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.close()

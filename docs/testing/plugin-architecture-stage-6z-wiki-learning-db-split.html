@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6Z · wiki_learning 插件表拆库（P1-1 全清终态）</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6Z · wiki_learning 插件表拆库（P1-1 全清终态）</h1>
+<p>2026-09-14 · 提交 <code>94e6aaf</code>（ADR-0038 清单外补充批，用户决策插件自有表归插件库）。6 表迁 <code>crew_data/wiki_learning.db</code>，插件自管 <code>wiki_learning_schema</code> 与 6H 版本表不同名共存。</p>
+<h2>处置</h2>
+<ul>
+<li>6 表迁 <code>crew_data/wiki_learning.db</code>；插件自管 schema 与 6H 版本表不同名共存。</li>
+<li><strong>终态：主库只剩 core 状态表，全仓无任何 Feature/插件表残留——P1-1 全清，Feature 数据边界完全独立。</strong></li>
+</ul>
+<h2>验证记录（子 agent 实施后断网、主 agent 验证收口）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>新增契约测试</td><td>7 个</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4191 passed / 0 failed</td></tr>
+</table>
+<p>平台说明：纯 SQLite/路径语义，无平台分支；本轮实测为 macOS 本机。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

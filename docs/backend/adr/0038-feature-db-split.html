@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ADR-0038 · Feature 数据库拆分（db-per-feature）</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0038 · Feature 数据库拆分（db-per-feature，P1-1）</h1>
+<p>状态：<strong>收官</strong>（2026-09-13：cron→work→kanban→external+team→sites/tasks/notifications→channels 六批全部落地；主库回归纯 core 状态库） · 日期：2026-09-12/13 · 阶段：6。</p>
+<h2>背景与候选方案</h2>
+<p>命名空间审计 P1-1：全部关系型 Feature 共用单一 <code>crew_data/crew.db</code>（config.py:202 默认；app.py 把同一 <code>cfg.db_path</code> 注入全部 Store）。这是拆出仓库/独立部署的最后一块数据耦合。前置已就位：6G 消除了唯一跨 Feature 外键/JOIN/直写；6H 提供 per-feature schema 版本表；各 Store 本就自持连接（构造器收 db_path 字符串，无共享连接对象）；全仓无 ATTACH 跨库 SQL；<code>memory_db_path</code> 已是分库先例（"便于测试隔离"）。</p>
+<p>候选方案：A. 保持单库，仅靠表前缀约定——迁出仓库时需按前缀手工剥离，迁移脚本永远欠着；B. 一次性全量拆库——回退面大，claim-legacy 等跨表工具一次冲击；C. 螺旋式：建共享拆分机制 + 单 Feature 试点，验证后按批推进。</p>
+<h2>决定</h2>
+<p>采用方案 C。</p>
+<ul>
+<li><strong>路径方案</strong>：每个 Feature 一个库文件 <code>crew_data/&lt;feature&gt;.db</code>（与既有 crew.db、memory.db 同层；host 级多 owner 语义不变——owner 隔离仍由表内 owner_account_id 列承载，与现状一致）。配置沿用 memory_db_path 先例：过渡期顶层 <code>&lt;feature&gt;_db_path</code> 键覆盖（P2-1 配置节迁移后再归位 features.*）。</li>
+<li><strong>归属划分</strong>：crew.db 保留给 core 状态（sessions、session_agent_config、workspaces、owner_session_lease、owner_logout_intent、plugin_preferences、security_rules、security_audit_events）。Feature 表分批迁出：cron（cron_jobs/cron_job_runs，试点）→ work（work_* 13 表）→ dynamic-kanban（kanban_* 6）→ external-agents（external_* 4）+ team（external_team* 2，经组合实例与注入同批）→ sites/tasks/notifications → channels 表（channel_bindings/channel_session_routes，随 P2-7 归位一并）。</li>
+<li><strong>迁移语义：copy-on-first-activate</strong>。Feature Store 首次在目标库初始化 schema 后，若旧 crew.db 存在本 Feature 表且目标库为空，则单事务整表复制行（幂等：目标库已有行即跳过）。<strong>旧表保留在 crew.db 不删</strong>——天然回退与备份；稳定一个版本周期后由显式清理命令删除（disable/uninstall/delete-data 三动作分离原则）。gate 用 6H 的 <code>&lt;feature&gt;_schema_version</code>。</li>
+<li><strong>连接与并发</strong>：Store 连接拓扑不变（各自 connect_sqlite + WAL），分库后写锁互不阻塞（work 写入不再阻塞 team），是并发收益而非成本。</li>
+<li><strong>跨表工具适配</strong>：<code>crew migrate claim-legacy</code> 与启动期 <code>inspect_and_backfill_legacy_owners</code>（app.py startup）当前按 cfg.db_path 单库读全部 Feature 表——每批拆分时同步改为按 Feature 解析各自库路径。</li>
+</ul>
+<h2>试点验收（cron 批）</h2>
+<ol>
+<li>新装环境：cron 表只出现在 <code>crew_data/cron.db</code>，crew.db 无 cron 表；</li>
+<li>存量环境：带数据的 crew.db 启动后，cron.db 完整复制（行数一致）、cron 功能正常、crew.db 旧行保留；重复启动幂等零重复；</li>
+<li>cron Feature activate/update/deactivate 全周期正常（restart 策略）；</li>
+<li>claim-legacy 对 cron 表继续工作（读新库）；</li>
+<li>全量测试 0 failed。</li>
+</ol>
+<h2>实施订正与批次记录</h2>
+<p><strong>work 批次（2026-09-12）</strong>：work 域实际 15 张表（本 ADR 初稿低估为 13，以 CREATE TABLE grep 为准）；FK 复制顺序 items→events/links→references、sources→records，其余无域内外键。<strong>机制修正</strong>：copy-on-first-activate 的幂等 gate 由逐表改为<strong>域级</strong>——逐表跳过在域内存在外键时会复制出跨表孤儿（父表因已有行被跳过后，空子表仍复制引用行，实测触发外键约束失败）；域级 gate 下任一目标表有行即整体跳过，cron 单链场景语义不变。共用相对路径归一提炼为 <code>_resolve_crew_home_path()</code>（cron/work 共享）。</p>
+<p><strong>kanban 批次（2026-09-13）</strong>：6 表迁 kanban.db。两条语义护栏：① kanban 不接入通用 owner 巡检/回填——`legacy_owner_scan_targets` 对 kanban 采用<strong>显式传参才登记</strong>语义（缺省不并入任何条目，防止启动巡检改写 crew.db 备份中的歧义行）；② store 的 `_migrate_workflow_ownership` 无 sessions 分支加 `isolation_state='legacy_unclassified'` 守卫，防止拆库后每次重启把 `legacy_ambiguous` 歧义行洗成 local（歧义行留人工认领）。</p>
+<p><strong>external+team 批次（2026-09-13）</strong>：双库一次落地——external 4 表 → external.db、team 2 表 → team.db。门面单点改造：`TeamExternalAgentStore(external_db_path, *, team_db_path=None 回落兼容, legacy_db_path, provider)`，构造时两次域级 copy（FK 序 external_team 先于 member）。<strong>快照回填障碍处置</strong>（三选一中的方案 a）：`_backfill_member_agent_snapshots` 保持只填空快照行的幂等语义，执行点移到<strong>复制前的 legacy 连接</strong>（数据仍在同库时完成，与拆库前逐字一致）；旧库缺任一相关表或 team 域已复制则跳过。版本表 EXTERNAL/TEAM 各 stamp 到各自库。收尾批（sites/tasks/notifications）待做；channels 两表待 P2-7 归属迁移后随批处理。</p>
+<p><strong>收尾批 sites/tasks/notifications（2026-09-13）</strong>：sites 实际 10 表（store 半域 4 + blueprint 半域 6，域内零外键，两半独立域级 gate）→ sites.db；tasks（runtime_tasks）与 notifications（notifications）各 1 表随 app.py 直构点拆库，生命周期形态未动。OWNER 巡检语义分化：runtime_tasks/notifications 在 OWNER_TABLE_LABELS 内走 cron/work 语义（缺省并入主库、显式独立）；sites 不在清单内走 external/team 显式豁免语义。<strong>收口评估</strong>：ADR 批次清单仅剩 channels 两表（channel_bindings/channel_session_routes，待 P2-7 归属迁移）；清单外观察项——主库尚有 wiki_learning_* 6 表（目录插件自有 schema），其数据归属随插件数据规划另行决策。</p>
+<p><strong>channels 批（2026-09-13，收官）</strong>：P2-7 后半与本 ADR 最后一项合并——`channel_bindings.py` 整体 git mv 至 crew/channels，`channel_session_routes` 建表与读写从 session_store.py 拆出为 `ChannelSessionRouteStore`（无 state 转发壳），两表迁 channels.db；巡检语义分化（routes 在 OWNER_TABLE_LABELS 内走通用语义、bindings 显式豁免）；state 契约 forbidden 增补 `crew.channels` 锁死边界。<strong>最终主库清单</strong>：core 状态 9 表（sessions、session_agent_config、workspaces、owner_session_lease、owner_logout_intent、plugin_preferences、security_rules、security_audit_events、compaction_summaries）+ 清单外补充批 wiki_learning 插件表 6 张已迁 wiki_learning.db（2026-09-14，用户决策"插件自有表归插件独立库"；`wiki_learning_schema` 插件自管版本表与 6H 版本表不同名共存）。<strong>终态：主库只剩 core 状态 9 表，全仓无任何 Feature/插件表残留在 crew.db——P1-1 全清。</strong></p>
+<p><strong>W4 增补（2026-09-14，ADR-0044 用户已批准）</strong>：会话存储增量事件表批次把 <code>session_events</code>（core 会话状态表，同驻主库）、<code>writer_leases</code>（多进程写者租约）与 <code>sessions_schema_version</code>（sessions 域版本登记）纳入主库 core 状态表清单——三条均为 core 域状态而非 Feature/插件表，主库「无 Feature/插件表」红线不变。主库 core 状态表自此为 9 + 3。</p>
+<h2>回退方式</h2>
+<p>每批独立提交可 revert；数据层回退 = 把 Feature 的 db_path 配置指回 crew.db（旧表未删，原地可用）。</p>
+<p><a href="../modules/naming-audit.html">命名空间审计（P1-1）</a> · <a href="0036-team-external-data-decoupling.html">ADR-0036</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

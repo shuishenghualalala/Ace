@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0025 · Work Feature 生命周期与 API Consumer</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0025 · Work Feature 生命周期与 API Consumer</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-07 · 阶段：插件架构 3C</div>
+
+  <h2>背景</h2>
+  <p><code>build_app()</code> 原先直接构造 <code>WorkService</code> 和八个 SQLite Store，<code>CrewApp.startup()/shutdown()</code> 手写 Hook 启停与连接关闭；Work REST 和 CLI 又直接读取 <code>app.work_service</code>。个人知识长期持有 Wiki Store，使 Work 无法跟随 Wiki Generation 更新，也无法在 Wiki 停用时明确降级。</p>
+
+  <h2>决策</h2>
+  <div class="decision">建立 <code>product.work</code> Feature Bundle 和稳定的 <code>work</code> Service。每个 Generation 统一拥有 WorkService、八个 Store、agent:end Hook 与 REST Route Contribution；个人知识在每次调用期间动态租用可选的 <code>knowledge</code> Service。</div>
+  <ul>
+    <li>Work 声明 <code>optional=(knowledge,)</code> 与 <code>provides=(work,)</code>，使用 <code>DRAIN + RESTART</code>；请求入口持有 Route Lease，并只解析同一 Generation 的 Work Service。</li>
+    <li>同步 Store <code>close()</code> 登记在 Resource phase，异步 Service <code>stop()</code> 登记在 Contribution phase，确保先撤销 Hook 和服务能力，再关闭数据库连接。</li>
+    <li>FastAPI 在构建期挂载稳定 Route 表面；运行期 Gate 在停用、draining 或代际不匹配时返回 503，不修改 FastAPI 内部 route list。</li>
+    <li>禁用不删除业务数据，也不保留可绕过 Registry 的兼容绑定。宿主显式注入的外部 WorkService 不归 Feature stop/close，停用后仍保留原始绑定。</li>
+    <li><code>crew/gateway/routers/work.py</code> 仅保留兼容导入；真实路由归属 <code>crew/work/routes.py</code>。Work CLI 的动态 Service Consumer 作为后续独立切片，不混入本次迁移。</li>
+  </ul>
+
+  <h2>回退方式</h2>
+  <p>可恢复 Gateway 的固定 Work Router 和 <code>build_app()</code> 手工装配，同时保留领域 Store 数据。Feature 停用只撤销运行时注册，不执行表或文件删除，因此回退不需要数据迁移。</p>
+
+  <h2>跨平台</h2>
+  <p>本切片仅使用 Python asyncio、pathlib、SQLite 与现有 Feature Runtime，不引入 POSIX 信号、平台命令或固定分隔符；数据库路径和关闭语义在 macOS、Linux、Windows 保持一致。</p>
+
+  <div class="nav"><a href="../modules/work.html">Work 模块</a> · <a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../../testing/plugin-architecture-stage-3c-work-feature.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

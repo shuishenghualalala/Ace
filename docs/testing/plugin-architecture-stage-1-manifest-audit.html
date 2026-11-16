@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 1 · Manifest 服务与启动审计测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>插件架构阶段 1 · Manifest 服务与启动审计</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-02</div>
+
+  <h2>1. 验证目标</h2>
+  <ul>
+    <li>加载顺序由服务图而不是目录名或操作系统枚举顺序决定。</li>
+    <li>required 缺失进入 Waiting 且不执行插件；optional 缺失不阻止激活。</li>
+    <li>Manifest 承诺的 provided Service 必须由当前 Generation 实际注册。</li>
+    <li>后到 Host Service 可使 Waiting 插件重新激活。</li>
+    <li>启动审计和 CLI 输出包含缺失服务与注册所有权，阻塞时返回非零状态。</li>
+  </ul>
+
+  <h2>2. 测试矩阵</h2>
+  <table>
+    <thead><tr><th>层级</th><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Unit / integration</td><td>Feature Runtime、Service Registry、Plugin Adapter、Browser、Wiki Learning、Feishu、CLI、Provider 生命周期</td><td class="ok">354 通过，1 跳过</td></tr>
+      <tr><td>Architecture</td><td><code>lint-imports</code>：6 条契约，297 个模块，1260 条依赖</td><td class="ok">通过</td></tr>
+      <tr><td>Static</td><td>本切片文件 Ruff、<code>compileall</code>、<code>git diff --check</code></td><td class="ok">通过</td></tr>
+      <tr><td>Runtime smoke</td><td>隔离 CREW_HOME 执行 <code>crew --dump-features --json</code> 并完成 shutdown</td><td class="ok">通过</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 新增回归场景</h2>
+  <ul>
+    <li>字母序在前的 Consumer 等待字母序在后的 Provider，最终按 Provider → Consumer 激活。</li>
+    <li>未兑现 <code>provides</code> 的插件进入 Failed，已暂存服务被回滚。</li>
+    <li>未声明的 Service 发布或消费在插件边界失败。</li>
+    <li>Waiting 记录输出确切缺失 key；Active 记录输出 Contribution/Resource 标签。</li>
+    <li>CLI JSON 与人类可读输出共享同一审计模型，并确保退出时释放 App。</li>
+  </ul>
+
+  <h2>4. 跨平台说明</h2>
+  <p>激活批次使用排序后的稳定 key，不依赖 APFS、ext4 或 NTFS 的目录枚举顺序。Host Service 发布和重试均为进程内 Python 生命周期操作。</p>
+
+  <h2>5. 全仓观测</h2>
+  <p>完整 <code>pytest tests -q</code> 同时覆盖了当前工作区内尚未提交的其他开发内容，结果为 3653 通过、37 跳过、45 失败。失败集中在 Gateway 鉴权/上传、可选 Weixin 依赖、Browser 协议旧断言及新增 Vendor Profile 断言；这些文件不属于本提交，未混入修复。本切片以表中 354 项交叉回归为交付门槛。全仓 Ruff 另发现未修改的 <code>crew/state/logging.py</code> 有一个既存未使用导入，本切片范围 Ruff 为全绿。</p>
+
+  <div class="nav"><a href="../backend/adr/0004-manifest-service-startup-audit.html">ADR-0004</a> · <a href="../backend/modules/plugins.html">模块文档</a> · <a href="../index.html">文档总览</a></div>
+</div>
+</body>
+</html>

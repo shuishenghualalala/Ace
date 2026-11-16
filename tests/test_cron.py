@@ -13,14 +13,179 @@ from datetime import datetime
 import pytest
 
 from crew.core.types import ToolCall
-from crew.core.runctx import current_owner_account_id
-from crew.cron import CronJobStore, CronService, parse_schedule
+from crew.core.runctx import current_owner_account_id, current_session_source, LOCAL_OWNER_ACCOUNT_ID
+from crew.cron import (
+    CRON_FEATURE_ID,
+    CronJobStore,
+    CronService,
+    build_cron_feature,
+    parse_schedule,
+)
 from crew.cron.jobs import BJ_TZ, format_bj_timestamp, parse_duration
 from crew.cron.scheduler import IntervalScheduler
+from crew.features import FeatureState, FeatureUpdateStrategy
 from crew.tools.cron_tools import register_cron_tools
 from crew.tools.registry import Registry
 
 OWNER = "A:uid-a"
+
+
+async def test_cron_feature_owns_scheduler_tools_context_and_host_binding(
+    tmp_path,
+    monkeypatch,
+):
+    from crew.app import build_app
+    from crew.features import ContextPhase
+    from crew.state.config import Config
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_db_path=str(tmp_path / "cron.db"),
+            cron_enabled=True,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+    runtime = app.plugins.feature_runtime
+    record = runtime.get(CRON_FEATURE_ID)
+    assert record is not None
+    assert record.state is FeatureState.DISCOVERED
+    assert "cron_create" not in app.registry.names()
+
+    try:
+        activated = await runtime.activate(record.definition)
+
+        assert activated.state is FeatureState.ACTIVE
+        assert activated.definition.update_strategy is FeatureUpdateStrategy.RESTART
+        assert app.cron_service is not None and app.cron_service.is_running
+        assert {
+            "cron_create",
+            "cron_list",
+            "cron_get",
+            "cron_delete",
+            "cron_pause",
+            "cron_resume",
+        } <= set(app.registry.names())
+        assert "cron.trigger.reminder" in {
+            binding.contributor.contributor_id
+            for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+        }
+        labels = {token.label for token in activated.scope.registrations}
+        assert "resource:cron.scheduler" in labels
+        assert "resource:cron.lease-gate" in labels
+        assert "binding:cron.service" in labels
+        assert "tool:cron_create" in labels
+
+        assert await runtime.deactivate(CRON_FEATURE_ID) is True
+        assert runtime.get(CRON_FEATURE_ID).state is FeatureState.DISCOVERED
+        assert app.cron_service is None
+        assert "cron_create" not in app.registry.names()
+        assert "cron.trigger.reminder" not in {
+            binding.contributor.contributor_id
+            for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+        }
+        # 停用只撤销运行时装配，持久业务数据仍可由显式管理路径访问。
+        assert app.cron_store.list(owner_account_id=OWNER) == []
+    finally:
+        await app.shutdown()
+
+
+async def test_cron_feature_restart_update_replaces_generation_and_remounts_owner(
+    tmp_path,
+    monkeypatch,
+):
+    from crew.app import build_app
+    from crew.state.config import Config
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_enabled=True,
+            cron_max_parallel_jobs=1,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+    app.active_owner.claim(OWNER)
+    runtime = app.plugins.feature_runtime
+    record = runtime.get(CRON_FEATURE_ID)
+    assert record is not None
+
+    try:
+        await runtime.activate(record.definition)
+        old_service = app.cron_service
+        assert old_service is not None
+        assert old_service.mounted_owners == {OWNER}
+
+        replacement = build_cron_feature(
+            app,
+            app.registry,
+            app.cron_store,
+            enabled=True,
+            max_parallel_jobs=3,
+            desired_config_revision=2,
+        )
+        result = await app.update_managed_feature(replacement.definition)
+
+        assert result.updated is True
+        assert result.strategy is FeatureUpdateStrategy.RESTART
+        assert old_service.is_running is False
+        assert app.cron_service is replacement.service
+        assert replacement.service is not None and replacement.service.is_running
+        assert replacement.service.mounted_owners == {OWNER}
+        current = runtime.get(CRON_FEATURE_ID)
+        assert current.generation.key.endswith("@g2")
+        assert current.effective_config_revision == 2
+        assert app.registry.names().count("cron_create") == 1
+    finally:
+        await app.shutdown()
+
+
+async def test_cron_feature_start_failure_rolls_back_all_contributions(
+    tmp_path,
+    monkeypatch,
+):
+    from crew.app import build_app
+    from crew.features import ContextPhase
+    from crew.state.config import Config
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+
+    async def fail_start(_service):
+        raise RuntimeError("scheduler unavailable")
+
+    monkeypatch.setattr(CronService, "start", fail_start)
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_db_path=str(tmp_path / "cron.db"),
+            cron_enabled=True,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+    runtime = app.plugins.feature_runtime
+    record = runtime.get(CRON_FEATURE_ID)
+    assert record is not None
+
+    try:
+        failed = await runtime.activate(record.definition)
+        assert failed.state is FeatureState.FAILED
+        assert "scheduler unavailable" in str(failed.error)
+        assert app.cron_service is None
+        assert "cron_create" not in app.registry.names()
+        assert "cron.trigger.reminder" not in {
+            binding.contributor.contributor_id
+            for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
+        }
+    finally:
+        await app.shutdown()
 
 
 async def test_scheduler_fires_job():
@@ -55,11 +220,11 @@ async def test_cron_fire_scopes_owner_context_and_resets_after_run(tmp_path):
         owner_account_id=OWNER,
     )
 
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     await service.tick()
 
     assert seen == [OWNER]
-    assert current_owner_account_id.get() == ""
+    assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     await service.stop()
 
 
@@ -115,7 +280,7 @@ def test_parse_schedule_cron_expr_rejected():
 
 def test_store_create_interval_and_compute_next_run(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
-    job = store.create(name="t", schedule="every 30m", query="hi", session_id="s1")
+    job = store.create(name="t", schedule="every 30m", query="hi", session_id="s1", owner_account_id="local")
     assert job["kind"] == "interval"
     assert job["interval_seconds"] == 1800
     assert job["trigger_type"] == "interval"
@@ -125,7 +290,7 @@ def test_store_create_interval_and_compute_next_run(tmp_path):
 
 def test_store_supports_natural_language_schedule(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
-    job = store.create(name="daily", schedule="每天早上9点", query="go", session_id="s1")
+    job = store.create(name="daily", schedule="每天早上9点", query="go", session_id="s1", owner_account_id="local")
     assert job["kind"] == "cron"
     assert job["trigger_type"] == "cron"
     assert job["trigger_payload"] == {"hour": 9, "minute": 0}
@@ -139,13 +304,13 @@ def test_format_bj_timestamp():
 
 def test_store_list_and_delete(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
-    store.create(name="a", schedule="every 1m", query="x", session_id="s1")
-    store.create(name="b", schedule="every 1m", query="y", session_id="s2")
-    assert len(store.list()) == 2
-    assert len(store.list(session_id="s1")) == 1
-    jid = store.list(session_id="s2")[0]["id"]
-    assert store.delete(jid) is True
-    assert len(store.list()) == 1
+    store.create(name="a", schedule="every 1m", query="x", session_id="s1", owner_account_id="local")
+    store.create(name="b", schedule="every 1m", query="y", session_id="s2", owner_account_id="local")
+    assert len(store.list(owner_account_id="local")) == 2
+    assert len(store.list(session_id="s1", owner_account_id="local")) == 1
+    jid = store.list(session_id="s2", owner_account_id="local")[0]["id"]
+    assert store.delete(jid, owner_account_id="local") is True
+    assert len(store.list(owner_account_id="local")) == 1
 
 
 def test_scheduled_fire_claim_has_one_database_winner(tmp_path):
@@ -374,6 +539,7 @@ def test_late_interval_claim_advances_to_strictly_future_occurrence(tmp_path):
         schedule="every 1h",
         query="once",
         session_id="s1",
+        owner_account_id="",
     )
     claim_time = job["next_run_at"] + 5 * 3600 + 1
 
@@ -383,7 +549,7 @@ def test_late_interval_claim_advances_to_strictly_future_occurrence(tmp_path):
         now=claim_time,
     ) is not None
 
-    refreshed = store.get(job["id"])
+    refreshed = store.get(job["id"], owner_account_id="")
     assert refreshed["next_run_at"] > claim_time
 
 
@@ -700,6 +866,42 @@ async def test_cron_service_mounts_only_active_owner_jobs(tmp_path):
     await service.stop()
 
 
+async def test_cron_service_mounts_and_unmounts_multiple_owners_independently(tmp_path):
+    store = CronJobStore(str(tmp_path / "c.db"))
+
+    async def runner(_env):
+        return None
+
+    job_a = store.create(
+        name="A",
+        schedule="every 1h",
+        query="a",
+        session_id="same",
+        owner_account_id=OWNER,
+    )
+    owner_b = "B:uid-b"
+    job_b = store.create(
+        name="B",
+        schedule="every 1h",
+        query="b",
+        session_id="same",
+        owner_account_id=owner_b,
+    )
+    service = CronService(store, runner)
+    await service.start()
+    try:
+        service.mount_owner(OWNER)
+        service.mount_owner(owner_b)
+        assert service.mounted_owners == {OWNER, owner_b}
+        assert {job.id for job in service.scheduler.get_jobs()} == {job_a["id"], job_b["id"]}
+
+        await service.unmount_owner(OWNER)
+        assert service.mounted_owners == {owner_b}
+        assert [job.id for job in service.scheduler.get_jobs()] == [job_b["id"]]
+    finally:
+        await service.stop()
+
+
 async def test_mount_owner_reuses_prepared_rows_without_reading_each_job(tmp_path, monkeypatch):
     store = CronJobStore(str(tmp_path / "c.db"))
     for index in range(3):
@@ -851,7 +1053,7 @@ async def test_cron_tools_via_registry(tmp_path):
 
     del_res = await reg.execute(ToolCall("c3", "cron_delete", {"id": job_id}))
     assert json.loads(del_res.content)["deleted"] is True
-    assert store.list() == []
+    assert store.list(owner_account_id="local") == []
 
 
 async def test_cron_list_defaults_to_all_user_jobs(tmp_path):
@@ -956,9 +1158,6 @@ async def _cron_runner_app(reply_text="done", auto_start=True):
         cfg.gateway_admin_accounts = ["tester"]
         cfg.gateway_dev_mode = False
         app = build_app(cfg, enable_team=False)
-        if auto_start:
-            await app.cron_service.start()
-            app.cron_service.mount_owner("u1")
 
         dispatched_envs = []
         notified_payloads = []
@@ -975,6 +1174,12 @@ async def _cron_runner_app(reply_text="done", auto_start=True):
         # 替换 dispatch，避免真实调用 LLM；_cron_runner 内部会先创建新会话再 dispatch
         app.dispatch = _mock_dispatch
         app._notify_owner_fn = _mock_notify_owner
+
+        cron_record = app.plugins.feature_runtime.get("product.cron")
+        assert cron_record is not None
+        await app.plugins.feature_runtime.activate(cron_record.definition)
+        if auto_start:
+            app.cron_service.mount_owner("u1")
 
         try:
             yield app, dispatched_envs, notified_payloads
@@ -1108,6 +1313,60 @@ async def test_cron_service_run_now_returns_none_for_missing_job(tmp_path):
     svc.mount_owner(OWNER)
     assert await svc.run_now("not_exists", owner_account_id=OWNER) is None
     await svc.stop()
+
+
+async def test_cron_runner_reuses_delivery_session_across_fires():
+    """同一任务多次触发复用固定投递会话（<job_id>_feed），不再每次刷同名新会话。"""
+    async with _cron_runner_app(auto_start=False) as (app, dispatched_envs, notified_payloads):
+        job = app.cron_store.create(
+            name="测试提醒",
+            schedule="every 1h",
+            query="提醒我开会",
+            session_id="source_session_123",
+            workspace_id="default",
+            owner_account_id="u1",
+        )
+        await app.cron_service.start()
+        app.cron_service.mount_owner("u1")
+        await app.cron_service.run_now(job["id"], owner_account_id="u1")
+        await app.cron_service.run_now(job["id"], owner_account_id="u1")
+
+        assert len(dispatched_envs) == 2
+        assert dispatched_envs[0].session_id == f"{job['id']}_feed"
+        assert dispatched_envs[1].session_id == f"{job['id']}_feed"
+        kinds = [payload["kind"] for _, payload in notified_payloads]
+        assert kinds == ["cron_session_created", "cron_session_updated"]
+        # 侧栏只出现一个投递会话
+        sessions = app.session_store.list_sessions(owner_account_id="u1")
+        feed_sessions = [s for s in sessions if s["session_id"] == f"{job['id']}_feed"]
+        assert len(feed_sessions) == 1
+        assert feed_sessions[0]["title"] == "[定时] 测试提醒"
+
+
+async def test_cron_create_origin_on_local_source_rewritten_with_note(tmp_path):
+    """本地会话来源指定 deliver=origin 时，创建期就改写为 new_session 并附带说明。"""
+    store = CronJobStore(str(tmp_path / "c.db"))
+    reg = Registry()
+    register_cron_tools(reg, store)
+
+    token = current_session_source.set({"platform": "local", "chat_id": "s1", "chat_type": "private"})
+    try:
+        res = await reg.execute(
+            ToolCall(
+                "c1",
+                "cron_create",
+                {"name": "提醒", "schedule": "每天9点", "query": "总结", "session_id": "s1", "deliver": "origin"},
+            )
+        )
+    finally:
+        current_session_source.reset(token)
+
+    assert not res.is_error
+    payload = json.loads(res.content)
+    assert payload["deliver"] == "new_session"
+    assert "origin 不可用" in payload["note"]
+    # 工具无 owner 上下文时归一为本机 local，任务不再落无主层。
+    assert store.list(owner_account_id="local")[0]["deliver"] == "new_session"
 
 
 async def test_cron_service_run_now_creates_manual_fire_and_new_session():

@@ -1,0 +1,35 @@
+diff a/desktop/assets/styles/chat.css b/desktop/assets/styles/chat.css	(rejected hunks)
+@@ -3079,7 +3079,7 @@ button.chat-message-file:hover {
+ .followup-card--staffing .followup-card__option:has(input:checked) {
+   border-color: color-mix(in srgb, var(--mw-team-accent) 72%, var(--mw-border-subtle));
+   background: color-mix(in srgb, var(--mw-team-accent-soft) 12%, var(--mw-bg-app));
+-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--mw-team-accent) 80%, transparent);
++  box-shadow: none;
+ }
+ .staffing-dialog__actions {
+   display: flex;
+@@ -3276,9 +3276,9 @@ button.chat-message-file:hover {
+   transform: scale(var(--mw-press-scale));
+ }
+ .followup-card__option:has(input:checked) {
+-  border-color: color-mix(in srgb, var(--mw-action-primary) 72%, var(--mw-border-subtle));
+-  background: color-mix(in srgb, var(--mw-action-primary) 9%, var(--mw-bg-app));
+-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--mw-action-primary) 78%, transparent);
++  border-color: color-mix(in srgb, var(--mw-team-accent) 54%, var(--mw-border-default));
++  background: color-mix(in srgb, var(--mw-team-accent-soft) 20%, var(--mw-bg-app));
++  box-shadow: none;
+ }
+ .followup-card__option:has(input:disabled) {
+   cursor: default;
+@@ -3350,6 +3350,11 @@ button.chat-message-file:hover {
+ .followup-card__free-input:focus {
+   border-color: var(--mw-action-primary);
+ }
++.followup-card__free-input--text {
++  min-height: 88px;
++  resize: vertical;
++  line-height: 1.5;
++}
+ .followup-card__actions {
+   display: flex;
+   align-items: center;

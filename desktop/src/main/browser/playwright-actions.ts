@@ -1,5 +1,5 @@
 /**
- * Crew 动作面：snapshot/locate ref → exact strict Playwright Locator → dispatch。
+ * Crew 动作面：snapshot ref → exact strict Playwright Locator → dispatch。
  *
  * 普通可变更动作遵守 Playwright MCP 同一套 target-locator 语义：
  *
@@ -12,7 +12,6 @@
 import { locatorFromRef } from './playwright-compat';
 
 import type {
-  CDPSession,
   FileChooser,
   Locator,
   Page,
@@ -96,43 +95,6 @@ export interface MouseClickOptions {
   delayMs?: number;
 }
 
-export interface PointerGesturePoint {
-  x: number;
-  y: number;
-  elapsedMs: number;
-  pressure?: number;
-  tangentialPressure?: number;
-  tiltX?: number;
-  tiltY?: number;
-  twist?: number;
-  width?: number;
-  height?: number;
-}
-
-export type PointerDeviceType = 'mouse' | 'pen' | 'touch';
-
-export interface PointerGestureStart extends ClickPosition {
-  pressure?: number;
-  tangentialPressure?: number;
-  tiltX?: number;
-  tiltY?: number;
-  twist?: number;
-  width?: number;
-  height?: number;
-}
-
-export interface PointerGestureOptions {
-  /**
-   * Absent in legacy v11/replay.v3 artifacts and therefore defaults to mouse.
-   * New recordings always persist the browser PointerEvent.pointerType.
-   */
-  pointerType?: PointerDeviceType;
-  button: ClickButton;
-  modifiers: Exclude<ClickModifier, 'ControlOrMeta'>[];
-  start: PointerGestureStart;
-  /** Selector border-box-relative points, chronological and including the endpoint. */
-  points: PointerGesturePoint[];
-}
 
 export interface DropPayload {
   files?: string[];
@@ -597,17 +559,14 @@ async function resolve(ctx: ActionContext, nativeRef: string): Promise<ResolvedR
     throw new ActionError('元素 ref 不属于当前快照，请重新观察', 'stale_ref');
   }
   // Execute the original exact Locator. For snapshot refs this is
-  // `aria-ref=eN`, whose identity is stronger than normalize()'s generated
-  // semantic selector. Upstream Playwright MCP likewise normalizes only for
-  // generated code and executes the original locator.
+  // `aria-ref=eN`; execute it directly rather than reconstructing a selector.
   const locator = locatorForRecord(ctx.page, record);
   // Do not preflight with locator.count(). Every official Locator mutation is
   // already strict and auto-waits for the target. A separate instantaneous
   // count turns transient React/Vue rerenders (0 → 1 or 2 → 1) into false
   // stale_ref failures and adds a TOCTOU window before Playwright's own
   // actionability loop. Read operations below are strict Locator operations as
-  // well. Persisted selectors are still uniqueness-checked once when `locate`
-  // creates their @sN handle.
+  // well.
   return { locator, record };
 }
 
@@ -672,7 +631,7 @@ async function locatorForFormField(
   field: FillFormField,
 ): Promise<Locator> {
   if ('selector' in field && typeof field.selector === 'string') {
-    // Recorder selectors are Playwright's own normalized selector language.
+    // Stable selectors use Playwright's own selector language.
     // Construct the Locator immediately before this field's action, matching
     // upstream fill_form and allowing earlier fields to reveal/re-render it.
     return ctx.page.locator(field.selector);
@@ -1054,9 +1013,8 @@ export async function setChecked(
 /**
  * 注册一个意外遮挡的自动处理器。
  *
- * 内网系统最常见的回放杀手不是站点改版，是**随机出现的公告弹窗、满意度调查、
- * 版本更新提示**：录制那次没弹，回放这次弹了，于是每一个后续点击都被一个
- * 半透明遮罩吃掉，报出来的却是"元素不可点击"。
+ * 内网系统中常见的动作失败原因不是站点改版，而是**随机出现的公告弹窗、满意度调查、
+ * 版本更新提示**。半透明遮罩会拦截后续点击，最终报出来的却是"元素不可点击"。
  *
  * Playwright 的 `addLocatorHandler` 正为此设计：注册之后，它在**每次**
  * actionability 检查与自动等待断言之前检查这个 locator，可见就先跑处理器，
@@ -1065,8 +1023,8 @@ export async function setChecked(
  *
  * ## 三个刻意的选择
  *
- * 1. **用 selector 而不是 ref。** 处理器要跨越整场回放存活，而 ref 表每次快照
- *    整张替换。ref 在这里必然失效。
+ * 1. **用 selector 而不是 ref。** 处理器要跨越多次快照存活，而 ref 表每次快照
+ *    整张替换。ref 在这里可能失效。
  * 2. **`.first()`。** 遮挡层的关闭按钮在页面上可能有多个同名兄弟（多个弹窗
  *    排队）。strict 模式下多匹配会抛，而抛在处理器里会让**触发它的那个动作**
  *    失败——一个本该提高稳定性的机制反而成了新的失败源。
@@ -1385,432 +1343,7 @@ export async function mouseDrag(
   }
 }
 
-interface NormalizedPointerTelemetry {
-  pressure?: number;
-  tangentialPressure?: number;
-  tiltX?: number;
-  tiltY?: number;
-  twist?: number;
-  width?: number;
-  height?: number;
-}
 
-interface CdpPointerTelemetry {
-  force?: number;
-  tangentialPressure?: number;
-  tiltX?: number;
-  tiltY?: number;
-  twist?: number;
-}
-
-function pointerTelemetry(
-  value: PointerGestureStart | PointerGesturePoint,
-  label: string,
-): NormalizedPointerTelemetry {
-  const ranges = {
-    pressure: [0, 1],
-    tangentialPressure: [-1, 1],
-    tiltX: [-90, 90],
-    tiltY: [-90, 90],
-    twist: [0, 359],
-    width: [0, Number.POSITIVE_INFINITY],
-    height: [0, Number.POSITIVE_INFINITY],
-  } as const;
-  const normalized: NormalizedPointerTelemetry = {};
-  for (const name of Object.keys(ranges) as Array<keyof typeof ranges>) {
-    const raw = value[name];
-    if (raw === undefined) continue;
-    const number = finiteMouseNumber(raw, `${label}.${name}`);
-    const [minimum, maximum] = ranges[name];
-    if (number < minimum || number > maximum) {
-      throw new ActionError(`${label}.${name} 超出浏览器范围`, 'invalid_input');
-    }
-    normalized[name] = number;
-  }
-  return normalized;
-}
-
-function modifierMask(
-  modifiers: Array<Exclude<ClickModifier, 'ControlOrMeta'>>,
-): number {
-  let mask = 0;
-  if (modifiers.includes('Alt')) mask |= 1;
-  if (modifiers.includes('Control')) mask |= 2;
-  if (modifiers.includes('Meta')) mask |= 4;
-  if (modifiers.includes('Shift')) mask |= 8;
-  return mask;
-}
-
-function cdpPointerTelemetry(
-  telemetry: NormalizedPointerTelemetry,
-  defaultPressure: number,
-): CdpPointerTelemetry {
-  return {
-    force: telemetry.pressure ?? defaultPressure,
-    ...(telemetry.tangentialPressure === undefined
-      ? {}
-      : { tangentialPressure: telemetry.tangentialPressure }),
-    ...(telemetry.tiltX === undefined ? {} : { tiltX: telemetry.tiltX }),
-    ...(telemetry.tiltY === undefined ? {} : { tiltY: telemetry.tiltY }),
-    ...(telemetry.twist === undefined ? {} : { twist: telemetry.twist }),
-  };
-}
-
-function cdpButtonMask(button: ClickButton): number {
-  if (button === 'left') return 1;
-  if (button === 'right') return 2;
-  return 4;
-}
-
-/**
- * Replay a recorded canvas/map/custom-control pointer stream.
- *
- * Legacy/mouse artifacts stay on Playwright's public `page.mouse` surface.
- * Chromium exposes pen/touch fidelity through the public
- * `BrowserContext.newCDPSession()` API: pen is dispatched as pointerType=pen,
- * while touch uses one stable primary touch id. Coordinates remain relative to
- * the locator's current border box so responsive layout changes do not
- * invalidate the recording.
- *
- * Cleanup deliberately bypasses translating wrappers. Even when an
- * intermediate CDP command has an uncertain result, a pressed button/contact,
- * every held modifier, and the public CDPSession are released best-effort
- * before the original error escapes.
- */
-export async function pointerGesture(
-  ctx: ActionContext,
-  nativeRef: string,
-  options: PointerGestureOptions,
-): Promise<void> {
-  const pointerType = options.pointerType ?? 'mouse';
-  if (
-    pointerType !== 'mouse'
-    && pointerType !== 'pen'
-    && pointerType !== 'touch'
-  ) {
-    throw new ActionError('pointer gesture pointerType 无效', 'invalid_input');
-  }
-  const button = mouseButton(options.button);
-  if (pointerType === 'touch' && button !== 'left') {
-    throw new ActionError('touch pointer gesture 只支持主触点', 'invalid_input');
-  }
-  const modifiers = options.modifiers;
-  if (
-    !Array.isArray(modifiers)
-    || new Set(modifiers).size !== modifiers.length
-    || modifiers.some((modifier) => (
-      modifier !== 'Alt'
-      && modifier !== 'Control'
-      && modifier !== 'Meta'
-      && modifier !== 'Shift'
-    ))
-  ) {
-    throw new ActionError('pointer gesture modifiers 无效', 'invalid_input');
-  }
-  const start: PointerGestureStart = {
-    x: finiteMouseNumber(options.start.x, 'pointer gesture start.x'),
-    y: finiteMouseNumber(options.start.y, 'pointer gesture start.y'),
-    ...pointerTelemetry(options.start, 'pointer gesture start'),
-  };
-  if (!Array.isArray(options.points) || options.points.length === 0) {
-    throw new ActionError('pointer gesture points 不能为空', 'invalid_input');
-  }
-  let previousElapsed = 0;
-  const points = options.points.map((point, index) => {
-    const elapsedMs = finiteMouseNumber(
-      point.elapsedMs,
-      `pointer gesture points[${index}].elapsedMs`,
-    );
-    const normalized: PointerGesturePoint = {
-      x: finiteMouseNumber(point.x, `pointer gesture points[${index}].x`),
-      y: finiteMouseNumber(point.y, `pointer gesture points[${index}].y`),
-      elapsedMs,
-      ...pointerTelemetry(point, `pointer gesture points[${index}]`),
-    };
-    if (elapsedMs < previousElapsed || elapsedMs < 0) {
-      throw new ActionError(
-        'pointer gesture elapsedMs 必须单调非降',
-        'invalid_input',
-      );
-    }
-    previousElapsed = elapsedMs;
-    return normalized;
-  });
-  const pressedModifiers: Array<Exclude<ClickModifier, 'ControlOrMeta'>> = [];
-  let buttonMayBeDown = false;
-  let touchMayBeActive = false;
-  let cdp: CDPSession | null = null;
-  let lastX = 0;
-  let lastY = 0;
-  let actionOwnsCleanup = false;
-  const cleanupPointerState = async (): Promise<void> => {
-    if (buttonMayBeDown) {
-      if (pointerType === 'mouse') {
-        await ctx.page.mouse.up({ button }).catch(() => undefined);
-      } else if (cdp) {
-        await cdp.send('Input.dispatchMouseEvent', {
-          type: 'mouseReleased',
-          x: lastX,
-          y: lastY,
-          button,
-          buttons: 0,
-          clickCount: 1,
-          pointerType: 'pen',
-          force: 0,
-        }).catch(() => undefined);
-      }
-      buttonMayBeDown = false;
-    }
-    if (touchMayBeActive && cdp) {
-      await cdp.send('Input.dispatchTouchEvent', {
-        type: 'touchCancel',
-        touchPoints: [],
-      }).catch(() => undefined);
-      touchMayBeActive = false;
-    }
-    while (pressedModifiers.length) {
-      const modifier = pressedModifiers.pop();
-      if (modifier) {
-        await ctx.page.keyboard.up(modifier).catch(() => undefined);
-      }
-    }
-    if (cdp) {
-      await cdp.detach().catch(() => undefined);
-      cdp = null;
-    }
-  };
-  try {
-    const resolved = await resolveMutation(ctx, nativeRef);
-    // Raw mouse APIs do not auto-scroll like Locator.click/dragTo. Resolve the
-    // selector into the viewport before translating its border-box coordinates.
-    await resolved.locator.scrollIntoViewIfNeeded({
-      timeout: dispatchTimeout(ctx),
-    });
-    const box = await resolved.locator.boundingBox();
-    if (!box) {
-      throw new ActionError('pointer gesture 目标不可见', 'stale_ref');
-    }
-    lastX = box.x + start.x;
-    lastY = box.y + start.y;
-    if (pointerType !== 'mouse') {
-      cdp = await ctx.page.context().newCDPSession(ctx.page);
-    }
-    dispatchTimeout(ctx);
-    await withCompletion(ctx, async () => {
-      actionOwnsCleanup = true;
-      try {
-        for (const modifier of modifiers) {
-          // Key dispatch may reach Chromium and still reject locally. Register
-          // cleanup before awaiting so uncertain delivery cannot leave it held.
-          pressedModifiers.push(modifier);
-          await ctx.page.keyboard.down(modifier);
-        }
-        const modifiersBitfield = modifierMask(modifiers);
-        let lastTouchPressure = start.pressure ?? 1;
-        if (pointerType === 'mouse') {
-          await ctx.page.mouse.move(lastX, lastY);
-          buttonMayBeDown = true;
-          await ctx.page.mouse.down({ button });
-        } else if (pointerType === 'pen') {
-          const session = cdp;
-          if (!session) {
-            throw new ActionError('pen CDP session 不可用', 'browser_unavailable');
-          }
-          await session.send('Input.dispatchMouseEvent', {
-            type: 'mouseMoved',
-            x: lastX,
-            y: lastY,
-            modifiers: modifiersBitfield,
-            button: 'none',
-            buttons: 0,
-            pointerType: 'pen',
-            ...cdpPointerTelemetry(start, 0),
-          });
-          // Register cleanup before awaiting: a rejected command may still
-          // have reached Chromium and pressed the stylus button.
-          buttonMayBeDown = true;
-          await session.send('Input.dispatchMouseEvent', {
-            type: 'mousePressed',
-            x: lastX,
-            y: lastY,
-            modifiers: modifiersBitfield,
-            button,
-            buttons: cdpButtonMask(button),
-            clickCount: 1,
-            pointerType: 'pen',
-            ...cdpPointerTelemetry(start, 0.5),
-          });
-        } else {
-          const session = cdp;
-          if (!session) {
-            throw new ActionError('touch CDP session 不可用', 'browser_unavailable');
-          }
-          const startTelemetry = pointerTelemetry(start, 'pointer gesture start');
-          touchMayBeActive = true;
-          await session.send('Input.dispatchTouchEvent', {
-            type: 'touchStart',
-            modifiers: modifiersBitfield,
-            touchPoints: [{
-              x: lastX,
-              y: lastY,
-              id: 1,
-              force: startTelemetry.pressure ?? 1,
-              ...(startTelemetry.width === undefined
-                ? {}
-                : { radiusX: startTelemetry.width / 2 }),
-              ...(startTelemetry.height === undefined
-                ? {}
-                : { radiusY: startTelemetry.height / 2 }),
-              ...(startTelemetry.tangentialPressure === undefined
-                ? {}
-                : { tangentialPressure: startTelemetry.tangentialPressure }),
-              ...(startTelemetry.tiltX === undefined
-                ? {}
-                : { tiltX: startTelemetry.tiltX }),
-              ...(startTelemetry.tiltY === undefined
-                ? {}
-                : { tiltY: startTelemetry.tiltY }),
-              ...(startTelemetry.twist === undefined
-                ? {}
-                : { twist: startTelemetry.twist }),
-            }],
-          });
-        }
-        let elapsed = 0;
-        for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
-          const point = points[pointIndex];
-          const delay = point.elapsedMs - elapsed;
-          if (delay > 0) await ctx.page.waitForTimeout(delay);
-          dispatchTimeout(ctx);
-          lastX = box.x + point.x;
-          lastY = box.y + point.y;
-          if (pointerType === 'mouse') {
-            await ctx.page.mouse.move(lastX, lastY);
-          } else if (pointerType === 'pen') {
-            const session = cdp;
-            if (!session) {
-              throw new ActionError('pen CDP session 已关闭', 'browser_unavailable');
-            }
-            await session.send('Input.dispatchMouseEvent', {
-              type: 'mouseMoved',
-              x: lastX,
-              y: lastY,
-              modifiers: modifiersBitfield,
-              button: 'none',
-              buttons: cdpButtonMask(button),
-              pointerType: 'pen',
-              ...cdpPointerTelemetry(point, 0.5),
-            });
-          } else {
-            const session = cdp;
-            if (!session) {
-              throw new ActionError('touch CDP session 已关闭', 'browser_unavailable');
-            }
-            const telemetry = pointerTelemetry(
-              point,
-              'pointer gesture touch point',
-            );
-            const endpointReleaseSample = (
-              pointIndex === points.length - 1
-              && telemetry.pressure === 0
-            );
-            const activePressure = endpointReleaseSample
-              ? lastTouchPressure
-              : (telemetry.pressure ?? lastTouchPressure);
-            if (activePressure > 0) lastTouchPressure = activePressure;
-            await session.send('Input.dispatchTouchEvent', {
-              type: 'touchMove',
-              modifiers: modifiersBitfield,
-              touchPoints: [{
-                x: lastX,
-                y: lastY,
-                id: 1,
-                // Every recorder stream ends with its pointerup sample. Move
-                // the still-active contact to that endpoint using the last
-                // active pressure; touchEnd below emits pressure=0.
-                force: activePressure,
-                ...(telemetry.width === undefined
-                  ? {}
-                  : { radiusX: telemetry.width / 2 }),
-                ...(telemetry.height === undefined
-                  ? {}
-                  : { radiusY: telemetry.height / 2 }),
-                ...(telemetry.tangentialPressure === undefined
-                  ? {}
-                  : { tangentialPressure: telemetry.tangentialPressure }),
-                ...(telemetry.tiltX === undefined
-                  ? {}
-                  : { tiltX: telemetry.tiltX }),
-                ...(telemetry.tiltY === undefined
-                  ? {}
-                  : { tiltY: telemetry.tiltY }),
-                ...(telemetry.twist === undefined
-                  ? {}
-                  : { twist: telemetry.twist }),
-              }],
-            });
-          }
-          elapsed = point.elapsedMs;
-        }
-        if (pointerType === 'mouse') {
-          await ctx.page.mouse.up({ button });
-          buttonMayBeDown = false;
-        } else if (pointerType === 'pen') {
-          const session = cdp;
-          if (!session) {
-            throw new ActionError('pen CDP session 已关闭', 'browser_unavailable');
-          }
-          const endpoint = points[points.length - 1];
-          await session.send('Input.dispatchMouseEvent', {
-            type: 'mouseReleased',
-            x: lastX,
-            y: lastY,
-            modifiers: modifiersBitfield,
-            button,
-            buttons: 0,
-            clickCount: 1,
-            pointerType: 'pen',
-            ...cdpPointerTelemetry(endpoint, 0),
-            force: 0,
-          });
-          buttonMayBeDown = false;
-        } else {
-          const session = cdp;
-          if (!session) {
-            throw new ActionError('touch CDP session 已关闭', 'browser_unavailable');
-          }
-          await session.send('Input.dispatchTouchEvent', {
-            type: 'touchEnd',
-            modifiers: modifiersBitfield,
-            touchPoints: [],
-          });
-          touchMayBeActive = false;
-        }
-        // Release modifiers before withCompletion begins its post-action waits.
-        // A gesture may navigate; holding Ctrl/Shift throughout load completion
-        // would contaminate unrelated browser/page input during that wait.
-        for (let index = pressedModifiers.length - 1; index >= 0; index -= 1) {
-          const modifier = pressedModifiers[index];
-          await ctx.page.keyboard.up(modifier);
-          pressedModifiers.splice(index, 1);
-        }
-      } finally {
-        // `withCompletion` can surface a dialog while retaining this callback.
-        // Keep the CDP session/button/contact owned by that retained operation;
-        // detaching from the outer frame would race its still-pending command.
-        try {
-          await cleanupPointerState();
-        } finally {
-          actionOwnsCleanup = false;
-        }
-      }
-    });
-  } catch (error) {
-    translateAfterDispatch(error);
-  } finally {
-    if (!actionOwnsCleanup) await cleanupPointerState();
-  }
-}
 
 export async function resize(
   ctx: ActionContext,
@@ -1917,7 +1450,7 @@ export async function upload(
   files: string[],
 ): Promise<void> {
   // An empty list is Playwright's official "clear this file input" primitive and is required
-  // to replay recorder v5 uploadMode=clear.
+  // An empty list clears the exact file input.
   if (!Array.isArray(files) || files.some((file) => typeof file !== 'string')) {
     throw new ActionError('上传文件列表无效', 'invalid_upload');
   }
@@ -1978,11 +1511,11 @@ export async function uploadFileChooser(
 }
 
 /**
- * 把稳定 selector 解析成与 snapshot ref 同构的记录。
+ * 为内部文件上传流程解析一个唯一 selector。
  *
  * 0/多匹配拒绝；语义/指纹材料尽力采集，但它们不是普通动作的执行前置条件。
  */
-export async function locateBySelector(
+export async function resolveUniqueSelector(
   ctx: ActionContext,
   nativeRef: string,
   selector: string,
@@ -2008,10 +1541,9 @@ export async function locateBySelector(
     );
   }
 
-  // locate is an execution primitive, not a diagnostics/code-generation probe.
-  // Execute the persisted selector as-is; normalize/evaluate/AX reads stay off
-  // this hot path. The exact @sN handle is sufficient functional identity, so
-  // do not manufacture fingerprints or an auxiliary security key.
+  // Execute the supplied selector as-is; selector reconstruction/evaluate/AX
+  // reads stay off this hot path. The caller supplies the temporary ref used
+  // only for this operation, so no extra metadata is required.
   const role = 'generic';
   const name = '';
   const record: RefRecord = {

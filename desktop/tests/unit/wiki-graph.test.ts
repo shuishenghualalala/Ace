@@ -25,7 +25,6 @@ vi.mock('../../src/ui/backend-client', () => ({
     wikiInit: vi.fn(),
     wikiPages: vi.fn(),
     wikiPage: vi.fn(),
-    wikiSummary: vi.fn(),
     wikiGraph: vi.fn(),
     wikiUpload: vi.fn(),
     wikiIngest: vi.fn(),
@@ -44,7 +43,6 @@ const api = backendApi as unknown as {
   wikiInit: ReturnType<typeof vi.fn>;
   wikiPages: ReturnType<typeof vi.fn>;
   wikiPage: ReturnType<typeof vi.fn>;
-  wikiSummary: ReturnType<typeof vi.fn>;
   wikiGraph: ReturnType<typeof vi.fn>;
   wikiUpload: ReturnType<typeof vi.fn>;
   wikiIngest: ReturnType<typeof vi.fn>;
@@ -122,7 +120,6 @@ beforeEach(() => {
     source_titles: {},
     source_files: {},
   });
-  api.wikiSummary.mockResolvedValue({ ok: true, summary: '', kb_id: 'default', status: 'empty' });
   api.wikiGraph.mockResolvedValue({ ok: true, graph: makeGraph() });
 });
 

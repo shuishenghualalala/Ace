@@ -1,6 +1,6 @@
 /** @vitest-environment happy-dom */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { openTurnForRequest, resumeSessionGeneration, syncSessionLiveFromBackend } from '../../src/ui/features/session-busy';
+import { openTurnForRequest, resumeSessionGeneration, setBackendIdleHandler, syncSessionLiveFromBackend } from '../../src/ui/features/session-busy';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 import { patchBook, setActiveSessionId } from '../../src/ui/state';
 import { syncRunningIntroSlot } from '../../src/ui/features/running-intro';
@@ -156,6 +156,22 @@ describe('syncSessionLiveFromBackend', () => {
     expect(sessionStore.get().busySessions['sid-1']).toBeFalsy();
     expect(sessionStore.get().sessionStatuses['sid-1']).toBe('idle');
     expect(sessionStore.get().books['sid-1']?.turnSealed).toBe(true);
+  });
+
+  it('live=idle 时触发 backend idle 回调（final 丢帧的队列兜底入口）', () => {
+    const spy = vi.fn();
+    setBackendIdleHandler(spy);
+    syncSessionLiveFromBackend('sid-1', 'idle');
+    expect(spy).toHaveBeenCalledWith('sid-1');
+    setBackendIdleHandler(null);
+  });
+
+  it('live=running 时不触发 backend idle 回调', () => {
+    const spy = vi.fn();
+    setBackendIdleHandler(spy);
+    syncSessionLiveFromBackend('sid-1', 'running');
+    expect(spy).not.toHaveBeenCalled();
+    setBackendIdleHandler(null);
   });
 
   it('resumeSessionGeneration mounts optimistic process assistant when none is live', () => {

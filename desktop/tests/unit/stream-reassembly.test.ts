@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  parseDeltaRange,
   reconstruct,
   noteDelta,
   resetAssistant,
@@ -122,5 +123,54 @@ describe('stream-reassembly / lifecycle resets', () => {
     copy.set(99, 'mutated');
     // 原缓冲不受影响
     expect(peekFrags('s1', 'm-1').has(99)).toBe(false);
+  });
+});
+
+describe('stream-reassembly / live 合并帧 vs replay 单帧去重', () => {
+  beforeEach(() => {
+    resetSession('s1');
+  });
+
+  it('parseDeltaRange 解析合法区间并规范化 start/end', () => {
+    expect(parseDeltaRange({ delta_start: 3, delta_end: 1 })).toEqual({ start: 1, end: 3 });
+    expect(parseDeltaRange({ delta_start: '2', delta_end: '4' })).toEqual({ start: 2, end: 4 });
+  });
+
+  it('parseDeltaRange 对缺失/非法区间返回 null，缺省时回退 sequence', () => {
+    expect(parseDeltaRange({})).toBeNull();
+    expect(parseDeltaRange({}, 7)).toEqual({ start: 7, end: 7 });
+    expect(parseDeltaRange({ delta_start: 0, delta_end: 0 })).toBeNull();
+    expect(parseDeltaRange({ delta_start: 'x', delta_end: 2 })).toBeNull();
+  });
+
+  it('先收 live 合并帧、再回放被合并的单帧：重复前缀被剥离', () => {
+    // 复现排队派发后的残字：live 限流合并帧（gw21，区间 1..2），replay 回放未合并
+    // 单帧（gw20，区间 1..1）；被合并成员的 gw 未登记，精确序号去重拦不住。
+    // 旧逻辑拼出「你你好，」，新逻辑恒为「你好，」。
+    noteDelta('s1', 'm-1', 21, '你好，', { start: 1, end: 2 });
+    expect(noteDelta('s1', 'm-1', 20, '你', { start: 1, end: 1 })).toBe('你好，');
+  });
+
+  it('合并帧与多条 replay 单帧交错：已覆盖区间整段跳过', () => {
+    noteDelta('s1', 'm-1', 21, '你好', { start: 1, end: 2 }); // live 合并帧
+    noteDelta('s1', 'm-1', 20, '你', { start: 1, end: 1 }); // replay 单帧
+    expect(noteDelta('s1', 'm-1', 22, '好', { start: 2, end: 2 })).toBe('你好'); // replay 单帧
+  });
+
+  it('多段合并 + replay 单帧混合：全程无重复字', () => {
+    noteDelta('s1', 'm-1', 21, '你好', { start: 1, end: 2 }); // live 合并 [1,2]
+    noteDelta('s1', 'm-1', 23, '世界', { start: 3, end: 4 }); // live 合并 [3,4]
+    noteDelta('s1', 'm-1', 20, '你', { start: 1, end: 1 }); // replay 单帧
+    expect(noteDelta('s1', 'm-1', 22, '世', { start: 3, end: 3 })).toBe('你好世界'); // replay 单帧
+  });
+
+  it('区间不重叠的相邻片段文本巧合相同时不误伤（合法重复文本照常拼接）', () => {
+    noteDelta('s1', 'm-1', 1, 'ab', { start: 1, end: 2 });
+    expect(noteDelta('s1', 'm-1', 2, 'ab', { start: 3, end: 4 })).toBe('abab');
+  });
+
+  it('无区间的旧帧回退纯升序拼接（向后兼容）', () => {
+    noteDelta('s1', 'm-1', 1, 'a', { start: 1, end: 1 });
+    expect(noteDelta('s1', 'm-1', 2, 'b')).toBe('ab');
   });
 });

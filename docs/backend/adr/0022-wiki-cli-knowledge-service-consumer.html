@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0022 · Wiki CLI Knowledge Service Consumer</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0022 · Wiki CLI Knowledge Service Consumer</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-05 · 阶段：插件架构 3B</div>
+
+  <h2>背景</h2>
+  <p>Wiki Gateway 已只消费 <code>KnowledgeService</code>，但 <code>crew wiki</code> 仍直接读取 App 上的 Store、Compiler、Querier 和 Session Manager，并在 CLI 内部处理 Wiki 数据目录、文档解析与媒体文件。这会把 Local Provider 的实现细节固化到 Host，也无法保证一次长命令所使用的 Provider 在 Feature 重启期间保持存活。</p>
+
+  <h2>决策</h2>
+  <div class="decision">全部 Wiki CLI 叶子命令在执行时动态取得当前 <code>KnowledgeService</code> 与同一 Generation 的 Lease；命令只消费稳定服务操作，Provider 的存储、解析和媒体处理不再进入 CLI。</div>
+  <ul>
+    <li>注册 Wiki 命令时统一包裹 Service Gate。能力缺失或进入 draining 后，新命令统一抛出 <code>CliError("Wiki 未启用")</code>；Skill 命令保持独立。</li>
+    <li>同步 Handler 在返回或异常的 finally 中释放 Lease；异步 Handler 在完整 await 周期使用异步上下文持有 Lease。每次命令重新解析当前 Generation，不缓存 Service。</li>
+    <li>没有 <code>product.wiki</code> 记录的嵌入宿主可以注入外部 <code>knowledge_service</code>；产品 Feature 已存在但不可用时，不允许回退到旧外部对象。</li>
+    <li>KB、页面、来源、搜索、ingest、compile、graph、query、lint 与 confirmation 均通过类型化 Service 操作完成。</li>
+    <li>CLI 只用 <code>pathlib</code> 读取用户明确传入的上传文件；文档解析、媒体理解、原始文件和 Wiki 数据目录都由 Provider 负责。</li>
+    <li>Wiki Agent 会话继续使用 Host 拥有的 SessionStore，但对应命令同样先经过 Knowledge Service Gate。</li>
+  </ul>
+
+  <h2>结果与后续</h2>
+  <p>CLI 已成为 Provider-neutral Consumer，Feature 更新后新命令可直接选择新代，旧代等待在途异步命令结束后再关闭。Agent Preset、Event、Route 与 UI Contribution 仍是 Stage 3B 后续切片；Work 的可选 Knowledge Service 依赖归 Stage 3C。</p>
+
+  <h2>跨平台</h2>
+  <p>CLI 文件入口使用 <code>pathlib.Path</code> 和字节内容，不新增 shell 命令、平台固定目录分隔符或操作系统专属生命周期机制；Provider 接口在 macOS、Linux 与 Windows 使用同一参数和结果协议。</p>
+
+  <div class="nav"><a href="0021-wiki-gateway-knowledge-service-consumer.html">ADR-0021</a> · <a href="../modules/cli.html">CLI 模块</a> · <a href="../modules/wiki.html">Wiki 模块</a> · <a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-cli-consumer.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

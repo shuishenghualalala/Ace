@@ -1,0 +1,15 @@
+{
+  "pages": [
+    {"id": "fault", "title": "故障排查", "content": "排查并修复系统故障的标准流程。"},
+    {"id": "err", "title": "错误处理", "content": "处理运行时报错与异常。"},
+    {"id": "rollback", "title": "版本回退", "content": "把代码回退到上一个稳定版本。"},
+    {"id": "resource", "title": "资源不足", "content": "内存或磁盘资源不足时的处理与扩容。"},
+    {"id": "report", "title": "周报", "content": "每周工作汇报模板。"}
+  ],
+  "queries": [
+    {"query": "怎么修 bug", "relevant": ["fault"]},
+    {"query": "这报错咋整", "relevant": ["err"]},
+    {"query": "回滚改动", "relevant": ["rollback"]},
+    {"query": "内存不够了", "relevant": ["resource"]}
+  ]
+}

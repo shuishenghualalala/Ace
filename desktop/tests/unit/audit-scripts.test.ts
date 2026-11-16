@@ -26,11 +26,12 @@ import {
 } from '../../scripts/extract-theme-tokens.mjs';
 
 // 3. audit-font-sizes
-import { classifyFontSize, auditFontSizes } from '../../scripts/audit-font-sizes.mjs';
+import { classifyFontSize, auditFontSizes, hasActionableFontSizes } from '../../scripts/audit-font-sizes.mjs';
 
 // 4. audit-dead-css-vars
 import {
   parseDefinedVariables as parseDefinedVarsDead,
+  parseInlineStyleDefinitions,
   findVarReferences,
   auditDeadCssVars,
 } from '../../scripts/audit-dead-css-vars.mjs';
@@ -183,7 +184,8 @@ describe('audit-font-sizes / classifyFontSize', () => {
     [10, 'shouldUseVar'],
     [12, 'shouldUseVar'],
     [14, 'shouldUseVar'],
-    [15, 'shouldUseVar'],
+    [16, 'shouldUseVar'],
+    [24, 'shouldUseVar'],
     [40, 'shouldUseVar'],
   ])('classifies %dpx as %s', (px, classification) => {
     const c = classifyFontSize(px);
@@ -195,8 +197,30 @@ describe('audit-font-sizes / classifyFontSize', () => {
     expect(classifyFontSize(99)).toBe('shouldUseCalc');
   });
 
+  it('does not point scale-gap sizes at a different px token', () => {
+    // 15/21/28/36/56 在 tokens.css 里没有等值档位：必须走 calc，就近取整会改字号。
+    for (const px of [15, 21, 28, 36, 56]) {
+      expect(classifyFontSize(px)).toBe('shouldUseCalc');
+    }
+  });
+
   it('classifies sub-pixel sizes as mustKeepLiteral', () => {
     expect(classifyFontSize(12.5)).toBe('mustKeepLiteral');
+  });
+});
+
+describe('audit-font-sizes / hasActionableFontSizes', () => {
+  const summary = (over: Partial<Record<'shouldUseVar' | 'shouldUseCalc' | 'mustKeepLiteral', number>>) => ({
+    summary: { total: 0, shouldUseVar: 0, shouldUseCalc: 0, mustKeepLiteral: 0, ...over },
+  });
+
+  it('treats mappable and calc sizes as actionable', () => {
+    expect(hasActionableFontSizes(summary({ shouldUseVar: 1 }) as never)).toBe(true);
+    expect(hasActionableFontSizes(summary({ shouldUseCalc: 1 }) as never)).toBe(true);
+  });
+
+  it('does not treat documented must-keep literals as actionable', () => {
+    expect(hasActionableFontSizes(summary({ mustKeepLiteral: 2 }) as never)).toBe(false);
   });
 });
 
@@ -235,6 +259,25 @@ describe('audit-dead-css-vars / findVarReferences', () => {
   });
 });
 
+describe('audit-dead-css-vars / parseInlineStyleDefinitions', () => {
+  it('recognizes custom properties declared through inline style attributes', () => {
+    const text = [
+      'const a = `<li style="--tree-indent: ${px}px">`;',
+      'const b = "<i style=\'--ok-var: 1px\'>";',
+      'const c = `<i style="--other: 2px">`;',
+    ].join('\n');
+    const defined = parseInlineStyleDefinitions(text);
+    expect(defined.has('--tree-indent')).toBe(true);
+    expect(defined.has('--ok-var')).toBe(true);
+    expect(defined.has('--other')).toBe(true);
+  });
+
+  it('ignores non-custom-property inline styles', () => {
+    const defined = parseInlineStyleDefinitions('const a = `<i style="padding-left: 4px">`;');
+    expect(defined.size).toBe(0);
+  });
+});
+
 describe('audit-dead-css-vars / auditDeadCssVars (integrated)', () => {
   it('flags references whose var is not in variables.css', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dead-vars-'));
@@ -256,6 +299,30 @@ describe('audit-dead-css-vars / auditDeadCssVars (integrated)', () => {
     expect(out.summary.totalRefs).toBe(3);
     expect(out.summary.deadRefs).toBe(1);
     expect(out.refs[0].name).toBe('--unknown');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('accepts a var whose only definition is an inline style attribute', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dead-vars-inline-'));
+    mkdirSync(join(dir, 'styles'), { recursive: true });
+    writeFileSync(
+      join(dir, 'styles', 'main.css'),
+      '.item .menu { left: max(2px, calc(var(--tree-indent, 6px) - 22px)); }',
+    );
+    writeFileSync(join(dir, 'styles', 'variables.css'), ':root { --bg: #fff; }');
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(
+      join(dir, 'src', 'tree.ts'),
+      'export const html = `<li style="--tree-indent: ${depth * 16 + 6}px"><button style="padding-left: var(--tree-indent)"></button></li>`;',
+    );
+
+    const out = auditDeadCssVars({
+      stylesDir: join(dir, 'styles'),
+      srcDir: join(dir, 'src'),
+      variablesPath: join(dir, 'styles', 'variables.css'),
+    });
+
+    expect(out.summary.deadRefs).toBe(0);
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -310,22 +377,32 @@ describe('detect-duplicate-selectors / detectDuplicateSelectors', () => {
 /* ─── 6. audit-design-system ──────────────────────────────── */
 
 describe('audit-design-system', () => {
-  it('reports raw geometry, effects, important and visual inline styles', () => {
+  function auditFixture(files: Record<string, string>) {
     const dir = mkdtempSync(join(tmpdir(), 'design-system-audit-'));
     mkdirSync(join(dir, 'assets', 'styles'), { recursive: true });
     mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(
-      join(dir, 'assets', 'styles', 'feature.css'),
-      '.a { padding: 8px; border-radius: 16px; background: linear-gradient(red, blue); backdrop-filter: blur(2px); transition: all 160ms; color: red !important; --legacy-accent: red; }',
-    );
-    writeFileSync(join(dir, 'assets', 'sprite.svg'), '<svg><path fill="var(--mw-status-danger,#f00)" /></svg>');
-    writeFileSync(join(dir, 'src', 'feature.ts'), "el.style.width = '10px'; el.style.display = 'none'; el.style.setProperty('--mw-raw', 'x'); const html = `<div style=\"color: red\"></div>`;");
-    writeFileSync(join(dir, 'assets', 'index.html'), '<div style="color: red"></div>');
-
+    for (const [rel, content] of Object.entries(files)) {
+      const full = join(dir, rel);
+      mkdirSync(join(full, '..'), { recursive: true });
+      writeFileSync(full, content);
+    }
     const report = auditDesignSystem({
       stylesDir: join(dir, 'assets', 'styles'),
       srcDir: join(dir, 'src'),
       assetsDir: join(dir, 'assets'),
+    });
+    rmSync(dir, { recursive: true, force: true });
+    return report;
+  }
+
+  it('reports raw geometry, effects, important and visual inline styles', () => {
+    const report = auditFixture({
+      'assets/styles/feature.css':
+        '.a { padding: 8px; border-radius: 16px; background: linear-gradient(red, blue); backdrop-filter: blur(2px); transition: all 160ms; color: red !important; --legacy-accent: red; }',
+      'assets/sprite.svg': '<svg><path fill="var(--mw-status-danger,#f00)" /></svg>',
+      'src/feature.ts':
+        "el.style.width = '10px'; el.style.display = 'none'; el.style.setProperty('--mw-raw', 'x'); const html = `<div style=\"color: red\"></div>`;",
+      'assets/index.html': '<div style="color: red"></div>',
     });
 
     expect(report.summary.spacing).toBe(1);
@@ -337,9 +414,45 @@ describe('audit-design-system', () => {
     expect(report.summary.important).toBe(1);
     expect(report.summary.customProperties).toBe(1);
     expect(report.summary.embeddedColors).toBe(1);
-    expect(report.summary.inlineStyles).toBe(4);
+    // setProperty('--mw-*') 是合法的 JS→CSS 桥接，不再计入；其余三处视觉内联仍违规。
+    expect(report.summary.inlineStyles).toBe(3);
     expect(hasDesignViolations(report)).toBe(true);
-    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('accepts token-published effects, transitions and inline custom properties', () => {
+    const report = auditFixture({
+      'assets/styles/feature.css':
+        '.a { backdrop-filter: var(--mw-effect-backdrop-panel); filter: var(--mw-effect-hover-dim); transition: background var(--mw-duration-normal) ease, color var(--mw-duration-normal) ease; }',
+      'src/feature.ts':
+        "el.style.setProperty('--mw-panel-left', '1px'); const html = `<div style=\"--mw-panel-left: 2px\"></div>`;",
+    });
+
+    expect(report.summary.effects).toBe(0);
+    expect(report.summary.motionLiterals).toBe(0);
+    expect(report.summary.inlineStyles).toBe(0);
+    expect(hasDesignViolations(report)).toBe(false);
+  });
+
+  it('still flags literal effects, literal timings and non-token inline styles', () => {
+    const report = auditFixture({
+      'assets/styles/feature.css': '.a { backdrop-filter: blur(2px); transition: opacity 0.2s ease; }',
+      'src/feature.ts':
+        "el.style.setProperty('--legacy-left', '1px'); const html = `<div style=\"width: 4px\"></div>`;",
+    });
+
+    expect(report.summary.effects).toBe(1);
+    expect(report.summary.motionLiterals).toBe(1);
+    expect(report.summary.inlineStyles).toBe(2);
+  });
+
+  it('exempts allowlisted brand assets from the embedded-color rule', () => {
+    const report = auditFixture({
+      'assets/icon-v2.svg': '<svg><path fill="#4B4941" /></svg>',
+      'assets/other.svg': '<svg><path fill="#4B4941" /></svg>',
+    });
+
+    // 品牌插画自带调色板；未登记的新资产仍必须走 token。
+    expect(report.summary.embeddedColors).toBe(1);
   });
 });
 

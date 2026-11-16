@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Wiki 页面生命周期测试记录</title>
+<style>body{font:16px/1.75 system-ui,sans-serif;max-width:960px;margin:auto;padding:40px 24px;color:#222}h2{border-bottom:1px solid #ddd}code{background:#f4f4f4;padding:2px 5px}</style></head>
+<body><main>
+<h1>Wiki 页面生命周期测试记录</h1>
+<p>2026-09-10 · 独立测试草稿。Node.js v26.7.0，macOS 本机执行；Desktop 与 Web 的跨平台行为仍需在各目标平台复核。</p>
+<h2>基线</h2>
+<p>Desktop 在 <code>/Users/ahuamao/Documents/Codes/Ace/desktop</code> 执行 Wiki、导航、Agent、会话侧栏测试：4 个文件、117 个测试通过，3.82 秒。Web 在 <code>/Users/ahuamao/Documents/Codes/Ace/web</code> 执行 Wiki 导航、树、标签和 App 测试：4 个文件、22 个测试通过，1.29 秒。</p>
+<h2>新增行为测试</h2>
+<p>Desktop 测试覆盖页面切换时的 AbortSignal 与 deactivate、未知页面离开、失败激活回滚、旧 disposer、异步 disposer 幂等和并发 activate。Web 通过 happy-dom 与 ReactDOM 真实挂载 WikiFeature，覆盖卸载后的晚到会话响应、知识库切换、独立挂载实例、new/delete 会话响应晚于显式选择。</p>
+<p>Web 新增 <code>happy-dom</code> 测试依赖并同步 package-lock。验证命令为 <code>npm test</code>（29 个文件、190 个测试通过）、<code>npm run typecheck</code> 和 <code>npm run build</code>。</p>
+<h2>中断记录与当前复验</h2>
+<p>接续开发期间曾短暂出现 Desktop <code>page-registry.ts</code> 不在共享工作树的状态，导致一次导入失败；该结果仅作历史记录，不计入本轮验收。当前实现已恢复，page-registry 与 render coalescer 新增测试共 2 个文件、30 个测试通过。</p>
+<h2>最终验收（2026-09-10 收口）</h2>
+<p>收口时修复两处缺陷：Desktop <code>__resetWikiViewForTest()</code> 遗漏清理 <code>wikiLifecycleSignal</code> 与 <code>disposeWikiLifecycleEvents</code>，导致生命周期用例后的 63 个既有用例被生命周期门控跳过（真实用户路径不受影响）；Web <code>WikiHub.tsx</code> 的 <code>refreshHistory</code> 在 <code>active</code> 声明之前引用其值（TDZ），重排声明顺序解决。两处均为生产代码修复，未削弱任何测试断言。</p>
+<ul>
+<li>Desktop：<code>npx vitest run tests/unit/wiki-page.test.ts</code> 75 通过；<code>page-registry</code>、<code>render-chat-diff</code>、<code>wiki-graph</code>、<code>wiki-agent</code> 共 69 通过；<code>npx vitest run</code> 全量 156 个文件、1818 个测试通过，无新增失败；<code>npx tsc --noEmit</code> 无新增类型错误。</li>
+<li>Web：<code>npm test</code> 29 个文件、190 个测试通过；<code>npm run typecheck</code> 与 <code>npm run build</code> 通过。</li>
+</ul>
+<p>跨平台说明：本切片只涉及 DOM 生命周期与 React 挂载语义，无文件系统、进程或信号依赖，macOS、Linux、Windows 行为一致；Node 测试环境在 macOS 本机执行，其余平台由 CI 复核。</p>
+</main></body></html>

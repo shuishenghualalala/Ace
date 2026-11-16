@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -68,7 +69,7 @@ class _FullAccessService:
     "command",
     [
         "echo safe-looking",
-        "Remove-Item -Recurse -Force C:\\\\Users",
+        "Remove-Item -Recurse -Force '__TARGET__'",
         "a=rm; $a -rf /tmp/example",
     ],
 )
@@ -78,6 +79,7 @@ async def test_every_managed_terminal_command_crosses_host_authorization(
     command: str,
 ) -> None:
     """Unknown/PowerShell/indirect commands must not bypass approval by missing a regex."""
+    command = command.replace("__TARGET__", str(Path(tmp_path.anchor) / "ace-approval-test-target").replace("'", "''"))
     context = SecurityContext(
         os_user="os-a",
         owner_account_id="owner-a",
@@ -91,6 +93,14 @@ async def test_every_managed_terminal_command_crosses_host_authorization(
     service = _ApprovalOnlyService()
     monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
     monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+    if os.name == "nt" and command.startswith("Remove-Item"):
+        # A destructive command the native parser cannot bind is rejected before
+        # any approval can authorize an uncertain target.
+        with pytest.raises(ToolError, match="无法把删除命令静态绑定"):
+            await handle_terminal({"command": command}, workspace_store=object(),
+                                  security_service=service)
+        assert service.actions == []
+        return
 
     result = await handle_terminal(
         {"command": command},

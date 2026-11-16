@@ -39,11 +39,11 @@ class TrajectoryEntry:
 class TrajectoryLog:
     """从会话中提取的完整轨迹日志。"""
 
+    owner_account_id: str
     log_id: str = ""
     session_id: str = ""
     title: str = ""
     workspace_id: str | None = None
-    owner_account_id: str = ""
     created_at: str = ""
     updated_at: str = ""
     message_count: int = 0

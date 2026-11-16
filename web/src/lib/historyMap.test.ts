@@ -7,6 +7,7 @@ import {
   type BackendHistoryItem,
 } from "./historyMap";
 import { mergeTeamInternalMessage } from "./teamMessageMerge";
+import { backendDurationToMs } from "./backendTime";
 import type { UiMessage } from "../types";
 
 const teamItem = (overrides: Partial<BackendHistoryItem>): BackendHistoryItem => ({
@@ -19,6 +20,13 @@ const teamItem = (overrides: Partial<BackendHistoryItem>): BackendHistoryItem =>
   display_mode: "stream",
   timestamp: 1,
   ...overrides,
+});
+
+describe("backendDurationToMs", () => {
+  it("does not render an epoch timestamp as an elapsed duration", () => {
+    expect(backendDurationToMs(Math.floor(Date.now() / 1000))).toBe(0);
+    expect(backendDurationToMs(1.2)).toBe(1200);
+  });
 });
 
 describe("preserveLocalProcessDetails", () => {
@@ -60,6 +68,33 @@ describe("preserveLocalProcessDetails", () => {
 });
 
 describe("mapHistoryItems", () => {
+  it("replays each assignment and the corresponding member's recorded process", () => {
+    const source = "web_demo::turn::req_1";
+    const items: BackendHistoryItem[] = [
+      teamItem({ content: "@kimi 整理材料", agent_id: "leader", event_type: "team_assign", node_id: "a", source_session_id: `${source}::leader` }),
+      teamItem({ content: "整理成果", agent_name: "kimi", event_type: "team_submit", node_id: "a", source_session_id: `${source}::kk`, thinking: "检查来源", process_text: "正在整理", tool_calls: [{ id: "read-a", name: "read", arguments: {}, status: "done" }] }),
+      teamItem({ content: "@kimi 检查证据", agent_id: "leader", event_type: "team_assign", node_id: "b", source_session_id: `${source}::leader` }),
+      teamItem({ content: "检查成果", agent_name: "kimi", event_type: "team_submit", node_id: "b", source_session_id: `${source}::kk` }),
+    ];
+
+    const messages = mapHistoryItems(items);
+    expect(messages).toHaveLength(4);
+    expect(messages.map((item) => item.eventType)).toEqual(["team_assign", "team_submit", "team_assign", "team_submit"]);
+    expect(messages[1]).toMatchObject({ text: "整理成果", thinking: "检查来源", processText: "正在整理" });
+    expect(messages[1].toolCalls?.[0].toolCallId).toBe("read-a");
+    expect(messages[3].text).toBe("检查成果");
+  });
+
+  it("normalizes unknown backend roles to a safe status message", () => {
+    const [message] = mapHistoryItems([{
+      role: "unexpected_role",
+      content: "历史状态",
+    }]);
+
+    expect(message.role).toBe("status");
+    expect(message.text).toBe("历史状态");
+  });
+
   it("clamps non-finite file change counts at the history boundary", () => {
     expect(normalizeTurnFileChanges([
       { path: "/work/app.ts", added: "NaN", removed: Infinity },
@@ -208,6 +243,21 @@ describe("mapHistoryItems", () => {
     expect(messages[0].text).toBe("第一轮 Leader 正在汇总。");
     expect(messages[1].text).toBe("第二轮 Leader 已汇总。");
     expect(messages[0].processText).toBeUndefined();
+  });
+
+  it("does not merge same-node frames when explicit requests conflict", () => {
+    const first = mapHistoryItems([teamItem({
+      content: "第一回合",
+      source_session_id: "web_demo::turn::shared::coder",
+      request_id: "request_1",
+    })])[0];
+    const second = mapHistoryItems([teamItem({
+      content: "第二回合",
+      source_session_id: "web_demo::turn::shared::coder",
+      request_id: "request_2",
+    })])[0];
+
+    expect(mergeTeamInternalMessage([first], second, { append: true })).toHaveLength(2);
   });
 
   it("does not let completion without source session overwrite an existing node", () => {
@@ -452,6 +502,26 @@ describe("mapHistoryItems", () => {
     expect(messages[0].role).toBe("team_internal");
     expect(messages[0].eventType).toBe("team_summary");
   });
+
+  it("keeps same-looking final bubbles from different requests", () => {
+    const assistant: UiMessage = {
+      id: "assistant-final-req-1",
+      role: "assistant",
+      text: "项目总共用了 11 分钟 21 秒。",
+      requestId: "req_1",
+    };
+    const summary: UiMessage = {
+      id: "team-summary-req-2",
+      role: "team_internal",
+      text: assistant.text,
+      requestId: "req_2",
+      eventType: "team_summary",
+      nodeId: "leader_summary",
+      agentId: "leader",
+    };
+
+    expect(mergeTeamInternalMessage([assistant], summary)).toHaveLength(2);
+  });
 });
 
 describe("mergeHistoryWithLiveMessages", () => {
@@ -504,5 +574,181 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].role).toBe("team_internal");
     expect(merged[0].eventType).toBe("team_summary");
+  });
+
+  it("preserves direct user mention correlation fields from Team history", () => {
+    const [message] = mapHistoryItems([{
+      role: "team_internal",
+      content: "我当前使用 K3 模型。",
+      agent_id: "coder",
+      communication_kind: "user_mention_answer",
+      communication_status: "answered",
+      request_id: "mention_req_1",
+      reply_to: "bus_msg_1",
+      communication_request_text: "你使用的是什么模型？",
+    }]);
+
+    expect(message.communicationKind).toBe("user_mention_answer");
+    expect(message.communicationStatus).toBe("answered");
+    expect(message.requestId).toBe("mention_req_1");
+    expect(message.replyTo).toBe("bus_msg_1");
+    expect(message.communicationRequestText).toBe("你使用的是什么模型？");
+  });
+
+  it("replaces a waiting direct mention with the terminal answer by request id", () => {
+    const waiting: UiMessage = {
+      id: "waiting",
+      role: "team_internal",
+      text: "正在询问 coder…",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "waiting_reply",
+      requestId: "mention_req_waiting",
+      communicationRequestText: "你使用的是什么模型？",
+    };
+    const answered: UiMessage = {
+      ...waiting,
+      id: "answered",
+      text: "当前使用 K3 模型。",
+      communicationStatus: "answered",
+      replyTo: "bus_msg_waiting",
+    };
+
+    const merged = mergeTeamInternalMessage([waiting], answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].text).toBe("当前使用 K3 模型。");
+    expect(merged[0].communicationStatus).toBe("answered");
+  });
+
+  it("merges direct mention streaming frames into one answer timeline", () => {
+    const waiting: UiMessage = {
+      id: "waiting-stream",
+      role: "team_internal",
+      text: "正在询问 coder…",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "waiting_reply",
+      requestId: "mention_req_stream",
+    };
+    const stream: UiMessage = {
+      id: "stream",
+      role: "team_internal",
+      text: "当前使用 ",
+      agentId: "coder",
+      communicationKind: "user_mention_answer",
+      communicationStatus: "delivered",
+      requestId: "mention_req_stream",
+      eventType: "team_stream",
+      displayMode: "stream",
+      collapsedTitle: "coder 的回答过程",
+      thinking: "先确认模型配置。",
+      toolCalls: [{
+        toolCallId: "runtime-info-1",
+        name: "runtime_info",
+        args: "{}",
+        status: "running",
+        startedAt: 0,
+      }],
+    };
+    const answered: UiMessage = {
+      ...stream,
+      id: "answered-stream",
+      text: "当前使用 Kimi Code/K3。",
+      eventType: "team_communication",
+      displayMode: "chat",
+      communicationStatus: "answered",
+    };
+
+    const streaming = mergeTeamInternalMessage([waiting], stream, { append: true });
+    const merged = mergeTeamInternalMessage(streaming, answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      text: "当前使用 Kimi Code/K3。",
+      communicationStatus: "answered",
+      eventType: "team_communication",
+      processText: "当前使用 ",
+    });
+    expect(merged[0].thinking).toBe("先确认模型配置。");
+    expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: "runtime-info-1", status: "running" });
+  });
+
+  it("merges cumulative Team stream frames without duplicating text or losing timing", () => {
+    const base: UiMessage = {
+      id: "stream-base",
+      role: "team_internal",
+      text: "先检查",
+      sourceSessionId: "web_demo::turn::merge_req::coder",
+      agentId: "coder",
+      nodeId: "build_1",
+      eventType: "team_stream",
+      displayMode: "stream",
+      processText: "先检查",
+      turnStartedAt: 100,
+      timestamp: 101,
+    };
+    const cumulative: UiMessage = {
+      ...base,
+      id: "stream-cumulative",
+      text: "先检查模型配置",
+      processText: "先检查\n读取模型配置",
+      timestamp: 103,
+    };
+    const final: UiMessage = {
+      ...cumulative,
+      id: "stream-final",
+      text: "模型配置正常。",
+      processText: "先检查\n读取模型配置",
+      eventType: "team_submit",
+      displayMode: "chat",
+      turnDurationMs: 4200,
+      timestamp: 104,
+    };
+
+    const streaming = mergeTeamInternalMessage([base], cumulative, { append: true });
+    const merged = mergeTeamInternalMessage(streaming, final);
+
+    expect(streaming[0].text).toBe("先检查模型配置");
+    expect(streaming[0].processText).toBe("先检查\n读取模型配置");
+    expect(merged[0].text).toBe("模型配置正常。");
+    expect(merged[0].turnStartedAt).toBe(100);
+    expect(merged[0].turnDurationMs).toBe(4200);
+  });
+
+  it("deduplicates a live user mention answer already restored from history", () => {
+    const item = teamItem({
+      content: "我当前使用 K3 模型。",
+      event_type: "team_communication",
+      node_id: undefined,
+      source_session_id: "web_demo::turn::mention_req_2::coder",
+      communication_kind: "user_mention_answer",
+      communication_status: "answered",
+      request_id: "mention_req_2",
+      reply_to: "bus_msg_2",
+    });
+    const [historyMessage] = mapHistoryItems([item]);
+    const liveMessage: UiMessage = {
+      ...historyMessage,
+      id: "live-mention-answer",
+    };
+
+    const merged = mergeHistoryWithLiveMessages([historyMessage], [liveMessage]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].requestId).toBe("mention_req_2");
+    expect(merged[0].communicationStatus).toBe("answered");
+  });
+
+  it("does not deduplicate same-looking node results from different requests", () => {
+    const first = mapHistoryItems([teamItem({
+      content: "@leader 已完成",
+      event_type: "team_submit",
+      display_mode: "chat",
+      request_id: "request_1",
+    })])[0];
+    const second = { ...first, id: "result-2", requestId: "request_2" };
+
+    expect(mergeTeamInternalMessage([first], second)).toHaveLength(2);
   });
 });

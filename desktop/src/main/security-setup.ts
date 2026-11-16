@@ -38,10 +38,12 @@ export function buildElevatedSecuritySetup(
   stateDir: string,
   action: SecuritySetupAction,
 ): { executable: string; argv: string[] } {
-  if (!path.isAbsolute(runtimePath) || path.basename(runtimePath) !== 'ace-security-runtime.exe') {
+  // 该模块只服务 Windows 宿主，校验必须与宿主平台解耦：path.win32 无论运行在哪个
+  // 平台（如 macOS 上跑单元测试）都按 Windows 规则判断绝对路径与 basename。
+  if (!path.win32.isAbsolute(runtimePath) || path.win32.basename(runtimePath) !== 'ace-security-runtime.exe') {
     throw new Error('invalid packaged security runtime path');
   }
-  if (!path.isAbsolute(stateDir)) throw new Error('security state directory must be absolute');
+  if (!path.win32.isAbsolute(stateDir)) throw new Error('security state directory must be absolute');
   const runtimeArg = action === 'uninstall' ? '--windows-uninstall' : '--windows-setup';
   const script = [
     `$process = Start-Process -FilePath ${quotePowerShell(runtimePath)}`,

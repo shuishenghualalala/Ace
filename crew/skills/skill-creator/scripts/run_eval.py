@@ -84,13 +84,17 @@ def run_single_query(
         # programmatic subprocess usage is safe.
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            cwd=project_root,
-            env=env,
-        )
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=project_root,
+                env=env,
+            )
+        except FileNotFoundError:
+            print("Error: claude CLI not found in PATH", file=sys.stderr)
+            return False
 
         triggered = False
         start_time = time.time()

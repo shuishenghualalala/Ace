@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+from collections.abc import Coroutine
+from contextvars import ContextVar
 from dataclasses import asdict
+from functools import wraps
 from typing import Any
 from uuid import uuid4
 
 from crew.cli.app import CliContext, CliError, CliResult, parse_json
+from crew.features.runtime import FeatureLease, FeatureLeaseUnavailableError
+from crew.work.service import WORK_SERVICE_KEY
+
+_active_work_service: ContextVar[Any | None] = ContextVar(
+    "cli_active_work_service", default=None
+)
 
 
 def register(subparsers, handlers: dict[str, Any]) -> None:
@@ -276,10 +287,166 @@ async def _site_automations_run(args: Any, ctx: CliContext) -> CliResult:
 # ---------------------------------------------------------------------------
 
 def _work_service(app: Any):
-    service = getattr(app, "work_service", None)
-    if service is None:
-        raise CliError("Work service 未初始化")
-    return service
+    service = _active_work_service.get()
+    if service is not None:
+        return service
+    raise CliError("Work service 未初始化")
+
+
+def _acquire_work_service(
+    ctx: CliContext, command: str
+) -> tuple[Any, FeatureLease | None]:
+    """Resolve one current Work generation and retain its lease for a command."""
+    plugins = getattr(ctx.app, "plugins", None)
+    acquire = getattr(plugins, "acquire_service_lease", None)
+    if callable(acquire):
+        try:
+            acquired = acquire(WORK_SERVICE_KEY, label=f"cli:work:{command}")
+        except FeatureLeaseUnavailableError as exc:
+            raise CliError("Work service 未初始化") from exc
+        if acquired is not None:
+            return acquired
+
+    # Embedded hosts may expose a service without a product.work Feature record.
+    # Once a runtime record exists, its registry is authoritative and the
+    # compatibility field must not bypass a disabled or draining generation.
+    runtime = getattr(plugins, "feature_runtime", None)
+    record = (
+        runtime.get("product.work")
+        if callable(getattr(runtime, "get", None))
+        else None
+    )
+    if record is None:
+        external = getattr(ctx.app, "work_service", None)
+        if external is not None:
+            return external, None
+    raise CliError("Work service 未初始化")
+
+
+class _LeaseBoundCoroutine(Coroutine[Any, Any, Any]):
+    """Bind an awaitable's protocol lifetime to one Work service lease."""
+
+    def __init__(
+        self,
+        awaitable: Any,
+        service: Any,
+        lease: FeatureLease | None,
+    ) -> None:
+        self._awaitable = awaitable
+        self._iterator = awaitable.__await__()
+        self._service = service
+        self._lease = lease
+        self._finished = False
+
+    def __await__(self):
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.send(None)
+
+    def send(self, value: Any) -> Any:
+        token = _active_work_service.set(self._service)
+        try:
+            try:
+                return self._iterator.send(value)
+            except BaseException:
+                self._finish()
+                raise
+        finally:
+            _active_work_service.reset(token)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        token = _active_work_service.set(self._service)
+        try:
+            try:
+                if val is None:
+                    return self._iterator.throw(typ)
+                if tb is None:
+                    return self._iterator.throw(typ, val)
+                return self._iterator.throw(typ, val, tb)
+            except BaseException:
+                self._finish()
+                raise
+        finally:
+            _active_work_service.reset(token)
+
+    def close(self) -> None:
+        if self._finished:
+            return
+        token = _active_work_service.set(self._service)
+        try:
+            self._finish()
+        finally:
+            _active_work_service.reset(token)
+
+    def _finish(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            if isinstance(self._awaitable, asyncio.Future):
+                self._awaitable.cancel()
+            else:
+                target = (
+                    self._awaitable
+                    if inspect.iscoroutine(self._awaitable)
+                    else self._iterator
+                )
+                close = getattr(target, "close", None)
+                if callable(close):
+                    close()
+        finally:
+            if self._lease is not None:
+                self._lease.release()
+
+
+def _lease_work_handler(handler: Any, command: str) -> Any:
+    """Gate one Work command while preserving sync/async handler behavior."""
+    if inspect.iscoroutinefunction(handler):
+
+        @wraps(handler)
+        async def async_handler(args: Any, ctx: CliContext) -> Any:
+            service, lease = _acquire_work_service(ctx, command)
+            token = _active_work_service.set(service)
+            try:
+                if lease is None:
+                    return await handler(args, ctx)
+                async with lease:
+                    return await handler(args, ctx)
+            finally:
+                _active_work_service.reset(token)
+
+        return async_handler
+
+    @wraps(handler)
+    def sync_handler(args: Any, ctx: CliContext) -> Any:
+        service, lease = _acquire_work_service(ctx, command)
+        token = _active_work_service.set(service)
+        try:
+            result = handler(args, ctx)
+        except BaseException:
+            _active_work_service.reset(token)
+            if lease is not None:
+                lease.release()
+            raise
+        _active_work_service.reset(token)
+        if not inspect.isawaitable(result):
+            if lease is not None:
+                lease.release()
+            return result
+
+        return _LeaseBoundCoroutine(result, service, lease)
+
+    return sync_handler
+
+
+def _set_work_handler(parser: Any, handler: Any) -> None:
+    """Register one Work leaf with its dynamic Service generation gate."""
+    wrapped = _lease_work_handler(handler, handler.__name__.removeprefix("_work_"))
+    parser.set_defaults(handler=wrapped)
 
 
 def _register_work(subparsers) -> None:
@@ -291,10 +458,10 @@ def _register_work(subparsers) -> None:
     create = sessions_cmds.add_parser("create")
     create.add_argument("--workspace-id", default="default")
     create.add_argument("--title", default="新对话")
-    create.set_defaults(handler=_work_session_create)
+    _set_work_handler(create, _work_session_create)
     history = cmds.add_parser("history")
     history.add_argument("--include-archived", action="store_true")
-    history.set_defaults(handler=_work_history)
+    _set_work_handler(history, _work_history)
 
     items = cmds.add_parser("items", help="工作项")
     items_cmds = items.add_subparsers(dest="work_items_cmd")
@@ -302,149 +469,149 @@ def _register_work(subparsers) -> None:
     item_list.add_argument("--workspace-id")
     item_list.add_argument("--business-status")
     item_list.add_argument("--disposition")
-    item_list.set_defaults(handler=_work_items_list)
+    _set_work_handler(item_list, _work_items_list)
     item_show = items_cmds.add_parser("show")
     item_show.add_argument("--id", dest="item_id", required=True)
-    item_show.set_defaults(handler=_work_items_show)
+    _set_work_handler(item_show, _work_items_show)
     item_create = items_cmds.add_parser("create")
     item_create.add_argument("--json", dest="json_payload", required=True)
-    item_create.set_defaults(handler=_work_items_create)
+    _set_work_handler(item_create, _work_items_create)
     item_update = items_cmds.add_parser("update")
     item_update.add_argument("--id", dest="item_id", required=True)
     item_update.add_argument("--json", dest="json_payload", required=True)
     item_update.add_argument("--expected-version", type=int, required=True)
-    item_update.set_defaults(handler=_work_items_update)
+    _set_work_handler(item_update, _work_items_update)
     item_act = items_cmds.add_parser("act")
     item_act.add_argument("--id", dest="item_id", required=True)
     item_act.add_argument("--action", required=True)
     item_act.add_argument("--expected-version", type=int, required=True)
     item_act.add_argument("--due-at")
-    item_act.set_defaults(handler=_work_items_act)
+    _set_work_handler(item_act, _work_items_act)
     item_activity = items_cmds.add_parser("activity")
     item_activity.add_argument("--id", dest="item_id", required=True)
-    item_activity.set_defaults(handler=_work_items_activity)
+    _set_work_handler(item_activity, _work_items_activity)
     item_delete = items_cmds.add_parser("delete")
     item_delete.add_argument("--id", dest="item_id", required=True)
     item_delete.add_argument("--expected-version", type=int, required=True)
-    item_delete.set_defaults(handler=_work_items_delete)
+    _set_work_handler(item_delete, _work_items_delete)
 
     references = cmds.add_parser("references", help="工作引用")
     ref_cmds = references.add_subparsers(dest="work_references_cmd")
     ref_list = ref_cmds.add_parser("list")
     ref_list.add_argument("--target-session-id", default="")
-    ref_list.set_defaults(handler=_work_references_list)
+    _set_work_handler(ref_list, _work_references_list)
     ref_create = ref_cmds.add_parser("create")
     ref_create.add_argument("--target-session-id", required=True)
     ref_create.add_argument("--reference-type", default="")
     ref_create.add_argument("--source-id", default="")
     ref_create.add_argument("--source-link", default="")
-    ref_create.set_defaults(handler=_work_references_create)
+    _set_work_handler(ref_create, _work_references_create)
     ref_delete = ref_cmds.add_parser("delete")
     ref_delete.add_argument("--id", dest="reference_id", required=True)
-    ref_delete.set_defaults(handler=_work_references_delete)
+    _set_work_handler(ref_delete, _work_references_delete)
 
     preferences = cmds.add_parser("preferences", help="偏好")
     pref_cmds = preferences.add_subparsers(dest="work_preferences_cmd")
-    pref_cmds.add_parser("list").set_defaults(handler=_work_preferences_list)
+    _set_work_handler(pref_cmds.add_parser("list"), _work_preferences_list)
     settings_get = pref_cmds.add_parser("settings")
-    settings_get.set_defaults(handler=_work_preferences_settings)
+    _set_work_handler(settings_get, _work_preferences_settings)
     settings_set = pref_cmds.add_parser("settings-set")
     settings_set.add_argument("--enabled", type=lambda v: v.lower() in ("1", "true", "yes", "on"), required=True)
-    settings_set.set_defaults(handler=_work_preferences_settings_set)
+    _set_work_handler(settings_set, _work_preferences_settings_set)
     pref_create = pref_cmds.add_parser("create")
     pref_create.add_argument("--category", required=True)
     pref_create.add_argument("--content", required=True)
-    pref_create.set_defaults(handler=_work_preferences_create)
+    _set_work_handler(pref_create, _work_preferences_create)
     pref_delete = pref_cmds.add_parser("delete")
     pref_delete.add_argument("--id", dest="preference_id", required=True)
     pref_delete.add_argument("--expected-version", type=int, required=True)
-    pref_delete.set_defaults(handler=_work_preferences_delete)
+    _set_work_handler(pref_delete, _work_preferences_delete)
 
     sources = cmds.add_parser("sources", help="数据源")
     source_cmds = sources.add_subparsers(dest="work_sources_cmd")
-    source_cmds.add_parser("list").set_defaults(handler=_work_sources_list)
+    _set_work_handler(source_cmds.add_parser("list"), _work_sources_list)
     source_toggle = source_cmds.add_parser("toggle")
     source_toggle.add_argument("--connector-key", required=True)
     source_toggle.add_argument("--enabled", type=lambda v: v.lower() in ("1", "true", "yes", "on"), required=True)
-    source_toggle.set_defaults(handler=_work_sources_toggle)
+    _set_work_handler(source_toggle, _work_sources_toggle)
     source_refresh = source_cmds.add_parser("refresh")
     source_refresh.add_argument("--connector-key", required=True)
-    source_refresh.set_defaults(handler=_work_sources_refresh)
+    _set_work_handler(source_refresh, _work_sources_refresh)
 
     dashboard = cmds.add_parser("dashboard", help="看板/报表")
     dashboard_cmds = dashboard.add_subparsers(dest="work_dashboard_cmd")
     dash_get = dashboard_cmds.add_parser("get")
     dash_get.add_argument("--workspace-id")
-    dash_get.set_defaults(handler=_work_dashboard_get)
+    _set_work_handler(dash_get, _work_dashboard_get)
     dash_refresh = dashboard_cmds.add_parser("refresh")
     dash_refresh.add_argument("--workspace-id")
-    dash_refresh.set_defaults(handler=_work_dashboard_refresh)
+    _set_work_handler(dash_refresh, _work_dashboard_refresh)
     report_get = dashboard_cmds.add_parser("report")
     report_get.add_argument("--period", required=True)
     report_get.add_argument("--anchor", required=True)
     report_get.add_argument("--workspace-id")
-    report_get.set_defaults(handler=_work_report_get)
+    _set_work_handler(report_get, _work_report_get)
     report_archive = dashboard_cmds.add_parser("report-archive")
     report_archive.add_argument("--period", required=True)
     report_archive.add_argument("--anchor", required=True)
     report_archive.add_argument("--workspace-id")
-    report_archive.set_defaults(handler=_work_report_archive)
+    _set_work_handler(report_archive, _work_report_archive)
 
     settings = cmds.add_parser("settings", help="工作台设置")
     settings_cmds = settings.add_subparsers(dest="work_settings_cmd")
-    settings_cmds.add_parser("get").set_defaults(handler=_work_settings_get)
+    _set_work_handler(settings_cmds.add_parser("get"), _work_settings_get)
     settings_update = settings_cmds.add_parser("update")
     settings_update.add_argument("--json", dest="json_payload", required=True)
-    settings_update.set_defaults(handler=_work_settings_update)
+    _set_work_handler(settings_update, _work_settings_update)
     ws_get = settings_cmds.add_parser("workspace-get")
     ws_get.add_argument("--workspace-id", required=True)
-    ws_get.set_defaults(handler=_work_settings_workspace_get)
+    _set_work_handler(ws_get, _work_settings_workspace_get)
     ws_update = settings_cmds.add_parser("workspace-update")
     ws_update.add_argument("--workspace-id", required=True)
     ws_update.add_argument("--json", dest="json_payload", required=True)
-    ws_update.set_defaults(handler=_work_settings_workspace_update)
+    _set_work_handler(ws_update, _work_settings_workspace_update)
 
     templates = cmds.add_parser("templates", help="模板")
     template_cmds = templates.add_subparsers(dest="work_templates_cmd")
-    template_cmds.add_parser("list").set_defaults(handler=_work_templates_list)
+    _set_work_handler(template_cmds.add_parser("list"), _work_templates_list)
     template_create = template_cmds.add_parser("create")
     template_create.add_argument("--name", required=True)
     template_create.add_argument("--description", default="")
     template_create.add_argument("--category", default="")
     template_create.add_argument("--blueprint", default="{}")
-    template_create.set_defaults(handler=_work_templates_create)
+    _set_work_handler(template_create, _work_templates_create)
     template_show = template_cmds.add_parser("show")
     template_show.add_argument("--id", dest="template_id", required=True)
-    template_show.set_defaults(handler=_work_templates_show)
+    _set_work_handler(template_show, _work_templates_show)
     template_delete = template_cmds.add_parser("delete")
     template_delete.add_argument("--id", dest="template_id", required=True)
-    template_delete.set_defaults(handler=_work_templates_delete)
+    _set_work_handler(template_delete, _work_templates_delete)
     template_instantiate = template_cmds.add_parser("instantiate")
     template_instantiate.add_argument("--id", dest="template_id", required=True)
     template_instantiate.add_argument("--workspace-id", default="default")
-    template_instantiate.set_defaults(handler=_work_templates_instantiate)
+    _set_work_handler(template_instantiate, _work_templates_instantiate)
 
     knowledge = cmds.add_parser("knowledge", help="工作知识")
     knowledge_cmds = knowledge.add_subparsers(dest="work_knowledge_cmd")
-    knowledge_cmds.add_parser("personal-list").set_defaults(handler=_work_knowledge_personal_list)
+    _set_work_handler(knowledge_cmds.add_parser("personal-list"), _work_knowledge_personal_list)
     knowledge_save = knowledge_cmds.add_parser("personal-save")
     knowledge_save.add_argument("--title", required=True)
     knowledge_save.add_argument("--content", required=True)
-    knowledge_save.set_defaults(handler=_work_knowledge_personal_save)
+    _set_work_handler(knowledge_save, _work_knowledge_personal_save)
 
     index = cmds.add_parser("index", help="工作空间索引状态")
     index_cmds = index.add_subparsers(dest="work_index_cmd")
     index_get = index_cmds.add_parser("get")
     index_get.add_argument("--workspace-id", required=True)
-    index_get.set_defaults(handler=_work_index_get)
+    _set_work_handler(index_get, _work_index_get)
     index_set = index_cmds.add_parser("set")
     index_set.add_argument("--workspace-id", required=True)
     index_set.add_argument("--enabled", type=lambda v: v.lower() in ("1", "true", "yes", "on"))
     index_set.add_argument("--state")
-    index_set.set_defaults(handler=_work_index_set)
+    _set_work_handler(index_set, _work_index_set)
     index_delete = index_cmds.add_parser("delete")
     index_delete.add_argument("--workspace-id", required=True)
-    index_delete.set_defaults(handler=_work_index_delete)
+    _set_work_handler(index_delete, _work_index_delete)
 
 
 def _work_error(exc: BaseException) -> CliError:

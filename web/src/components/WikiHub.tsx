@@ -68,6 +68,9 @@ interface Props {
   onSelectSession: (sessionId: string) => void;
   /** 删除 Wiki 对话。 */
   onDeleteSession: (sessionId: string) => Promise<void> | void;
+  /** 外部场景（如主对话）请求打开的 [[Wiki 页面名]]：挂载后消费一次并回调清除。 */
+  pendingWikiLinkTitle?: string | null;
+  onPendingWikiLinkHandled?: () => void;
 }
 
 export default function WikiHub({
@@ -79,8 +82,12 @@ export default function WikiHub({
   onNewSession,
   onSelectSession,
   onDeleteSession,
+  pendingWikiLinkTitle,
+  onPendingWikiLinkHandled,
 }: Props) {
   const [kbs, setKbs] = useState<WikiKB[]>([]);
+  /** KB 列表首轮加载是否已完成（无论成败），供外部跳入等逻辑等待。 */
+  const [kbsLoaded, setKbsLoaded] = useState(false);
   const [pages, setPages] = useState<WikiPage[]>([]);
   /** 已加载完整正文的页面（pageId -> WikiPage），列表只返回 brief。 */
   const [pageDetails, setPageDetails] = useState<Record<string, WikiPage>>({});
@@ -96,6 +103,10 @@ export default function WikiHub({
   const [selectedDocumentName, setSelectedDocumentName] = useState<"Home.md" | "index.md" | null>(null);
   const [vaultDocument, setVaultDocument] = useState<WikiVaultDocument | null>(null);
   const [initializedKbId, setInitializedKbId] = useState<string | null>(null);
+  /** 跨知识库打开 [[Wiki 双链]] 的待处理目标：切 KB 且初始化完成后由 effect 打开。 */
+  const [pendingCrossKbPage, setPendingCrossKbPage] = useState<{ kbId: string; page: WikiPage } | null>(null);
+  /** 跨 KB 跳转落地后抑制一次 Home.md 自动加载（值为目标 KB id）。 */
+  const suppressHomeAutoloadRef = useRef<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
     new Set(["wiki", "wiki/sources"]),
@@ -120,6 +131,13 @@ export default function WikiHub({
     }
   });
   const catalogDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => {
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+  }, []);
   // onUp 闭包里拿不到最新 state，用 ref 镜像当前目录宽度用于拖拽结束时持久化。
   const catalogWidthRef = useRef(catalogWidth);
   catalogWidthRef.current = catalogWidth;
@@ -130,18 +148,7 @@ export default function WikiHub({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [creatingChat, setCreatingChat] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
-
-  const refreshHistory = useCallback(async () => {
-    setHistoryLoading(true);
-    try {
-      const res = await api.wikiAgentSessions(kbId);
-      setHistorySessions(res.sessions);
-    } catch {
-      setHistorySessions([]);
-    } finally {
-      setHistoryLoading(false);
-    }
-  }, [kbId]);
+  const historyRequestRef = useRef(0);
 
   // 切 KB 时收起浮层并清空缓存，避免展示上一个 KB 的会话。
   useEffect(() => {
@@ -226,6 +233,7 @@ export default function WikiHub({
         // ignore storage errors
       }
     };
+    dragCleanupRef.current = onUp;
     document.body.style.userSelect = "none";
     document.body.style.cursor = "col-resize";
     document.addEventListener("mousemove", onMove);
@@ -333,10 +341,38 @@ export default function WikiHub({
   const hasAutoInitRef = useRef(false);
   const stopBatchRef = useRef(false);
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const documentRequestRef = useRef(0);
+  const mountedRef = useRef(true);
+  const generationRef = useRef(0);
+  const activeKbRef = useRef(kbId);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+  useEffect(() => { activeKbRef.current = kbId; generationRef.current += 1; }, [kbId]);
+  const active = useCallback((id: string, generation: number) => (
+    mountedRef.current && activeKbRef.current === id && generationRef.current === generation
+  ), []);
+
+  const refreshHistory = useCallback(async () => {
+    const requestId = ++historyRequestRef.current;
+    const requestKbId = kbId;
+    const generation = generationRef.current;
+    setHistoryLoading(true);
+    try {
+      const res = await api.wikiAgentSessions(requestKbId);
+      if (!active(requestKbId, generation) || requestId !== historyRequestRef.current) return;
+      setHistorySessions(res.sessions);
+    } catch {
+      if (active(requestKbId, generation) && requestId === historyRequestRef.current) setHistorySessions([]);
+    } finally {
+      if (active(requestKbId, generation) && requestId === historyRequestRef.current) setHistoryLoading(false);
+    }
+  }, [kbId, active]);
 
   const refreshKbs = useCallback(async (options?: { targetKbId?: string }) => {
+    const requestKbId = kbId;
+    const generation = generationRef.current;
     try {
       const res = await api.wikiKBs();
+      if (!active(requestKbId, generation)) return;
       setKbs(res.kbs);
       const target = options?.targetKbId;
       if (target && res.kbs.some((k) => k.id === target)) {
@@ -347,9 +383,12 @@ export default function WikiHub({
         onKbChange(res.kbs[0].id);
       }
     } catch (err) {
+      if (!active(requestKbId, generation)) return;
       setMessage(`加载知识库失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      if (active(requestKbId, generation)) setKbsLoaded(true);
     }
-  }, [kbId, onKbChange]);
+  }, [kbId, onKbChange, active]);
 
   const _mergePageBatch = useCallback((prev: WikiPage[], batch: WikiPage[]) => {
     const seen = new Set(prev.map((p) => p.id));
@@ -364,11 +403,14 @@ export default function WikiHub({
   }, []);
 
   const refreshPages = useCallback(async () => {
+    const requestKbId = kbId;
+    const generation = generationRef.current;
     setLoading(true);
     setPageOffset(0);
     setHasMorePages(true);
     try {
       const res = await api.wikiPages({ limit: PAGE_LIMIT, offset: 0, kb_id: kbId, brief: true });
+      if (!active(requestKbId, generation)) return;
       setPages(res.pages);
       setPageOffset(res.pages.length);
       setHasMorePages(res.pages.length >= PAGE_LIMIT);
@@ -376,17 +418,20 @@ export default function WikiHub({
       setSourceFiles(res.source_files || {});
       setSelectedId((prev) => (prev && res.pages.some((p) => p.id === prev) ? prev : null));
     } catch {
-      setMessage("加载页面失败");
+      if (active(requestKbId, generation)) setMessage("加载页面失败");
     } finally {
-      setLoading(false);
+      if (active(requestKbId, generation)) setLoading(false);
     }
-  }, [kbId, _mergePageBatch]);
+  }, [kbId, _mergePageBatch, active]);
 
   const loadMorePages = useCallback(async () => {
     if (loadingMore || !hasMorePages) return;
+    const requestKbId = kbId;
+    const generation = generationRef.current;
     setLoadingMore(true);
     try {
       const res = await api.wikiPages({ limit: PAGE_LIMIT, offset: pageOffset, kb_id: kbId, brief: true });
+      if (!active(requestKbId, generation)) return;
       setPages((prev) => _mergePageBatch(prev, res.pages));
       const newOffset = pageOffset + res.pages.length;
       setPageOffset(newOffset);
@@ -394,18 +439,18 @@ export default function WikiHub({
       setSourceTitles((prev) => ({ ...prev, ...(res.source_titles || {}) }));
       setSourceFiles((prev) => ({ ...prev, ...(res.source_files || {}) }));
     } catch {
-      setMessage("加载更多页面失败");
+      if (active(requestKbId, generation)) setMessage("加载更多页面失败");
     } finally {
-      setLoadingMore(false);
+      if (active(requestKbId, generation)) setLoadingMore(false);
     }
-  }, [kbId, hasMorePages, loadingMore, pageOffset, _mergePageBatch]);
+  }, [kbId, hasMorePages, loadingMore, pageOffset, _mergePageBatch, active]);
 
   useEffect(() => {
     refreshKbs();
   }, [refreshKbs]);
 
   // 其他会话（如主对话委派的 Wiki 子代理）或本页 Wiki 会话改动 Wiki 数据后，
-  // 后端会推 wiki_changed；收到后刷新知识库列表与当前库页面，避免必须重新进入页面。
+  // 后端会推 wiki/changed@1 feature event；收到后刷新知识库列表与当前库页面，避免必须重新进入页面。
   useEffect(() => {
     const handler = (e: Event) => {
       const changes = (e as CustomEvent).detail as
@@ -605,8 +650,11 @@ export default function WikiHub({
     if (!raw) return;
     const id = raw.trim().replace(/\s+/g, "_");
     if (!id) return;
+    const requestGeneration = generationRef.current;
+    const requestKbId = kbId;
     try {
       await api.wikiCreateKB({ kb_id: id, name: id });
+      if (!active(requestKbId, requestGeneration)) return;
       setMessage(`已创建知识库：${id}`);
       await refreshKbs({ targetKbId: id });
       setSelectedId(null);
@@ -614,7 +662,7 @@ export default function WikiHub({
       setVaultDocument(null);
       setSelectedIds(new Set());
     } catch (err) {
-      setMessage(`创建失败：${err instanceof Error ? err.message : String(err)}`);
+      if (active(requestKbId, requestGeneration)) setMessage(`创建失败：${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -626,8 +674,11 @@ export default function WikiHub({
     if (!window.confirm(
       `确定删除知识库「${kbId}」吗？其中的全部页面、原始素材和专属 Wiki 问答历史都会永久删除，此操作不可恢复。`,
     )) return;
+    const requestGeneration = generationRef.current;
+    const requestKbId = kbId;
     try {
-      await api.wikiDeleteKB(kbId);
+      await api.wikiDeleteKB(requestKbId);
+      if (!active(requestKbId, requestGeneration)) return;
       setMessage("已删除知识库");
       await refreshKbs({ targetKbId: "default" });
       setSelectedId(null);
@@ -635,7 +686,7 @@ export default function WikiHub({
       setVaultDocument(null);
       setSelectedIds(new Set());
     } catch (err) {
-      setMessage(`删除失败：${err instanceof Error ? err.message : String(err)}`);
+      if (active(requestKbId, requestGeneration)) setMessage(`删除失败：${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -655,9 +706,13 @@ export default function WikiHub({
   };
 
   const processFile = async (file: File, jobId: string) => {
+    const requestKbId = kbId;
+    const requestGeneration = generationRef.current;
+    if (!active(requestKbId, requestGeneration)) return;
     updateJob(jobId, { status: "uploading", stage: "upload", label: "上传中", percent: 5, displayPercent: 0 });
     try {
-      const res = await api.wikiUpload(file, kbId);
+      const res = await api.wikiUpload(file, requestKbId);
+      if (!active(requestKbId, requestGeneration)) return;
       updateJob(jobId, {
         sourceId: res.source_id,
         status: "uploading",
@@ -706,7 +761,8 @@ export default function WikiHub({
 
       // 文本/文档：调用 ingest
       updateJob(jobId, { status: "ingesting", stage: "load", label: "读取文档", percent: 10 });
-      const ingest = await api.wikiIngest(res.source_id, kbId, sessionId);
+      const ingest = await api.wikiIngest(res.source_id, requestKbId, sessionId);
+      if (!active(requestKbId, requestGeneration)) return;
       const issues = ingest.issues || [];
       const hasPages = (ingest.pages || []).length > 0;
       if (issues.length > 0 || !hasPages) {
@@ -783,6 +839,7 @@ export default function WikiHub({
         continue;
       }
       await processFile(job.file, job.id);
+      if (!active(kbId, generationRef.current)) break;
     }
   };
 
@@ -870,6 +927,7 @@ export default function WikiHub({
   );
 
   const loadVaultDocument = useCallback(async (name: "Home.md" | "index.md") => {
+    const requestId = ++documentRequestRef.current;
     setSelectedId(null);
     setSelectedDocumentName(name);
     setVaultDocument(null);
@@ -877,8 +935,10 @@ export default function WikiHub({
     setOpenTabs((prev) => openTab(prev, { kind: "doc", name }).tabs);
     try {
       const res = await api.wikiVaultDocument(name, kbId);
+      if (requestId !== documentRequestRef.current || !mountedRef.current) return;
       setVaultDocument(res.document);
     } catch (err) {
+      if (requestId !== documentRequestRef.current || !mountedRef.current) return;
       setSelectedDocumentName(null);
       setMessage(`加载 ${name} 失败：${err instanceof Error ? err.message : String(err)}`);
     }
@@ -954,9 +1014,21 @@ export default function WikiHub({
   /**
    * 点击正文 [[Wiki 双链]]：先按标题/别名在已加载页面里精确匹配，
    * 找不到再走搜索接口兜底（对齐桌面端 resolveAndOpenWikiPage）。
+   * 当前知识库未命中时依次搜索其他知识库——主对话等场景的链接可能指向别的 KB。
+   *
+   * 回调身份稳定（空依赖），点击时从 ref 读最新状态：否则 pages/kbs/kbId 每次
+   * 变化都让回调换身份，击穿 AgentTurn / MarkdownContent 的 memo，导致整个
+   * Wiki 聊天随无关的页面列表更新而全量重算。
    */
+  const latestWikiLinkRef = useRef({ pages, kbs, kbId, onKbChange });
+  const wikiLinkRequestRef = useRef(0);
+  latestWikiLinkRef.current = { pages, kbs, kbId, onKbChange };
+
   const handleWikiLink = useCallback(
     async (title: string) => {
+      const requestId = ++wikiLinkRequestRef.current;
+      const { pages, kbs, kbId, onKbChange } = latestWikiLinkRef.current;
+      const generation = generationRef.current;
       const local = findPageByTitle(pages, title);
       if (local) {
         openPageTab(local.id);
@@ -964,8 +1036,25 @@ export default function WikiHub({
       }
       try {
         const res = await api.wikiSearch(title, kbId, 8);
+        if (!active(kbId, generation) || requestId !== wikiLinkRequestRef.current) return;
         const target = findPageByTitle(res.pages, title);
         if (!target) {
+          for (const kb of kbs) {
+            if (kb.id === kbId) continue;
+            try {
+              const other = await api.wikiSearch(title, kb.id, 8);
+              if (!active(kbId, generation) || requestId !== wikiLinkRequestRef.current) return;
+              const hit = findPageByTitle(other.pages, title);
+              if (hit) {
+                // 切到目标 KB，等其初始化完成后由 pendingCrossKbPage 的 effect 打开
+                setPendingCrossKbPage({ kbId: kb.id, page: hit });
+                onKbChange(kb.id);
+                return;
+              }
+            } catch {
+              // 某个 KB 搜索失败不影响继续尝试其他 KB
+            }
+          }
           setMessage(`未找到 Wiki 页面：${title}`);
           return;
         }
@@ -975,16 +1064,42 @@ export default function WikiHub({
         setSourceFiles((prev) => ({ ...prev, ...(res.source_files || {}) }));
         openPageTab(target.id);
       } catch (err) {
-        setMessage(`打开 Wiki 页面失败：${err instanceof Error ? err.message : String(err)}`);
+        if (active(kbId, generation) && requestId === wikiLinkRequestRef.current) setMessage(`打开 Wiki 页面失败：${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    [pages, kbId, openPageTab],
+    [],
   );
 
+  // 跨知识库跳转落地：目标 KB 初始化完成后，把目标页并入列表并打开 Tab
   useEffect(() => {
-    if (initializedKbId === kbId) {
-      void loadVaultDocument("Home.md");
+    if (!pendingCrossKbPage || pendingCrossKbPage.kbId !== kbId) return;
+    if (initializedKbId !== kbId) return;
+    const target = pendingCrossKbPage.page;
+    // 抑制本次 KB 初始化后的 Home.md 自动加载，避免抢走刚打开页面的焦点
+    suppressHomeAutoloadRef.current = kbId;
+    setPages((prev) => (prev.some((p) => p.id === target.id) ? prev : [target, ...prev]));
+    setPageDetails((prev) => ({ ...prev, [target.id]: target }));
+    openPageTab(target.id);
+    setPendingCrossKbPage(null);
+  }, [pendingCrossKbPage, kbId, initializedKbId, openPageTab]);
+
+  // 外部（主对话）点击 [[Wiki 双链]] 跳入：挂载后按标题打开一次，然后通知上层清除。
+  // 等当前 KB 初始化且 KB 列表加载完再执行——否则跨 KB 搜索会因 kbs 为空而直接误判"未找到"。
+  useEffect(() => {
+    if (!pendingWikiLinkTitle) return;
+    if (initializedKbId !== kbId || !kbsLoaded) return;
+    void handleWikiLink(pendingWikiLinkTitle).finally(() => onPendingWikiLinkHandled?.());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingWikiLinkTitle, initializedKbId, kbId, kbsLoaded]);
+
+  useEffect(() => {
+    if (initializedKbId !== kbId) return;
+    // 跨 KB 跳转刚落地时跳过 Home.md 自动加载，避免抢走目标页焦点
+    if (suppressHomeAutoloadRef.current === kbId) {
+      suppressHomeAutoloadRef.current = null;
+      return;
     }
+    void loadVaultDocument("Home.md");
   }, [initializedKbId, kbId, loadVaultDocument]);
 
   useEffect(() => {
@@ -1387,7 +1502,7 @@ export default function WikiHub({
                 </div>
               </header>
               {sessionId ? (
-                <ChatPanel {...chatProps} />
+                <ChatPanel {...chatProps} onWikiLink={handleWikiLink} />
               ) : (
                 <div className="wiki-hub__empty">正在连接 Wiki Agent…</div>
               )}

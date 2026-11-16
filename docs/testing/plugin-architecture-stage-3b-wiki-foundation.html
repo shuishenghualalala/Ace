@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 3B · Wiki Foundation 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 3B · Wiki Foundation</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-04 · 编码与测试：相互独立的 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>Scope Task Factory 只保留一个 Owner disposer，完成任务不泄漏，drain/恢复/幂等状态正确。</li>
+    <li><code>product.wiki</code> 同代拥有 <code>knowledge</code> Service、24 个 Tools、Prompt Context、Local Provider 与后台刷新 Task。</li>
+    <li>中途 Tool 冲突完整回滚；RESTART 成功替换，失败恢复旧 Definition；旧代资源不会清除新代贡献。</li>
+    <li>Feature 停用不删除 Wiki 数据，外部 Provider 不被关闭，Work 在 Wiki Provider 前停止。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Feature Runtime + Wiki Feature 定向</td><td class="ok">29 passed</td></tr>
+      <tr><td>Wiki / 生命周期 / Plugin / Gateway Wiki</td><td class="ok">453 passed</td></tr>
+      <tr><td>Cron / Sites / Browser / Feature 邻接回归</td><td class="ok">491 passed，28 skipped</td></tr>
+      <tr><td>Ruff、compileall、git diff check</td><td class="ok">全部通过</td></tr>
+      <tr><td>Import Linter</td><td class="ok">309 files，1348 dependencies，6 contracts kept，0 broken</td></tr>
+    </tbody>
+  </table>
+  <p>测试组存在重叠，不将数量相加作为全量总数。测试代码仅修改 <code>tests/test_feature_runtime.py</code> 并新增 <code>tests/wiki/test_feature.py</code>。</p>
+
+  <h2>关键场景</h2>
+  <p>覆盖真实 FileSystem Store 契约、同步 Handler 线程隔离、Home 导读任务 cancel/join、drain admission、工具中段冲突、g1→g2 更新、失败后 g3 恢复、动态 Service 撤销、未 startup 的应用关闭及单次 Store close。</p>
+
+  <div class="nav"><a href="../backend/adr/0020-wiki-knowledge-feature-foundation.html">ADR-0020</a> · <a href="../backend/modules/wiki.html">Wiki 模块</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

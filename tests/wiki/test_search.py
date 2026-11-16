@@ -12,7 +12,11 @@ from crew.wiki.search import SQLiteFTS5SearchIndex
 @pytest.fixture
 def index():
     with tempfile.TemporaryDirectory() as tmp:
-        yield SQLiteFTS5SearchIndex(Path(tmp) / "fts.db")
+        value = SQLiteFTS5SearchIndex(Path(tmp) / "fts.db")
+        try:
+            yield value
+        finally:
+            value.close()
 
 
 def _page(pid: str, title: str, content: str = "") -> WikiPage:
@@ -67,3 +71,50 @@ def test_search_respects_top_k(index: SQLiteFTS5SearchIndex):
         index.sync_page(_page(f"p{i}", f"通用标题 {i}", "通用内容"))
 
     assert len(index.search("通用", top_k=3)) == 3
+
+
+def test_batch_sync_commits_pages_together(index: SQLiteFTS5SearchIndex):
+    """批量同步应复用连接并在一个批次结束时一次提交。"""
+    statements: list[str] = []
+    index._conn.set_trace_callback(statements.append)
+    with index.batch():
+        index.sync_page(_page("p1", "批量一", "批量内容"))
+        index.sync_page(_page("p2", "批量二", "批量内容"))
+
+    assert statements.count("BEGIN IMMEDIATE") == 1
+    assert statements.count("COMMIT") == 1
+    assert set(index.search("批量内容", top_k=5)) == {"p1", "p2"}
+
+
+def test_sync_pages_updates_all_pages(index: SQLiteFTS5SearchIndex):
+    """显式批量 API 应将多个页面写入同一索引。"""
+    index.sync_pages([
+        _page("p1", "第一篇", "统一内容"),
+        _page("p2", "第二篇", "统一内容"),
+    ])
+
+    assert set(index.search("统一内容", top_k=5)) == {"p1", "p2"}
+
+
+def test_natural_language_query_does_not_require_every_token(index):
+    index.sync_page(_page("p1", "Neural research", "Neural therapy treats brain tumors."))
+    index.sync_page(_page("p2", "Ocean", "Coral reefs support biodiversity."))
+    assert index.search("neural treatment outcomes", top_k=5) == ["p1"]
+
+
+def test_operator_words_are_literal_and_punctuation_is_safe(index):
+    index.sync_page(_page("p1", "Neural research", "Neural therapy treats brain tumors."))
+    assert index.search('OR neural (NOT "AND")', top_k=5) == ["p1"]
+    assert index.search("?!", top_k=5) == []
+    assert index.search("neural", top_k=0) == []
+
+
+def test_chinese_short_keyword_matches_whole_phrase(index):
+    index.sync_page(_page("p1", "知识编排", "负责跨来源关联。"))
+    index.sync_page(_page("p2", "知识来源", "一般来源介绍。"))
+    assert index.search("跨来源", top_k=5) == ["p1"]
+
+
+def test_chinese_question_recalls_partial_query_terms(index):
+    index.sync_page(_page("p1", "作者", "张三提出了知识编排理论。"))
+    assert index.search("知识编排理论是谁提出的？", top_k=5) == ["p1"]

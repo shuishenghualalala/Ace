@@ -1,7 +1,7 @@
-"""上下文服务：文件上传、路径补全、附件内容解析与注入。
+"""Gateway context utilities for uploads, paths, and compatibility APIs.
 
-统一由 gateway/server.py 调用，把附件和 @引用 的业务逻辑集中在这里，
-避免 server.py 膨胀。
+Request-time injection is owned by Context Contributors. Browser reference
+resolution is re-exported here temporarily for callers of the previous API.
 """
 
 from __future__ import annotations
@@ -12,8 +12,11 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
+from crew.browser.tab_reading import (
+    resolve_browser_tab_references as resolve_browser_tab_references,
+)
 from crew.state.logging import get_logger
-from crew.state.home import get_owner_runtime_home, task_workspace_path
+from crew.state.home import get_owner_runtime_home, get_upload_dir, task_workspace_path
 
 log = get_logger("context")
 
@@ -22,11 +25,9 @@ _ATTACHMENT_MARKER_RE = re.compile(r"^附件「([^」]+)」位于[：:]\s*(.+)$"
 _STRUCTURED_PATH_REFERENCE_RE = re.compile(
     r"(?:^|\s)@(?P<kind>file|folder|image):(?P<path>[^\s@]+)"
 )
-
-
 def _get_upload_dir(owner_account_id: str | None = None) -> Path:
-    """返回上传文件存储根目录（延迟求值，确保 load_config 已设置 CREW_HOME）。"""
-    return get_owner_runtime_home(owner_account_id) / "uploads"
+    """返回上传文件存储根目录；实现收敛在 crew.state.home，此别名仅为 gateway 内部兼容。"""
+    return get_upload_dir(owner_account_id)
 
 
 def _ensure_upload_dir(owner_account_id: str | None = None) -> Path:

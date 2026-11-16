@@ -28,6 +28,7 @@ IDEMPOTENT_TOOL_NAMES = frozenset(
     {
         # —— 内置只读工具 ——
         "file_read",
+        "skill_view",
         # —— Wiki 只读工具（重复查询/列表会触发 guardrail 无进展提示/拦截）——
         "wiki_search",
         "wiki_read",

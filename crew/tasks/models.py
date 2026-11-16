@@ -15,7 +15,7 @@ TaskStatus = Literal[
     "cancelled",
     "timed_out",
 ]
-TaskKind = Literal["shell", "subagent", "agent_turn", "team"]
+TaskKind = Literal["shell", "subagent", "agent_turn", "team", "wiki_ingest"]
 
 _LEGACY_STATUS = {
     "in_progress": "running",

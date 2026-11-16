@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from crew.app import build_provider_for_profile
 from crew.providers.openai_provider import OpenAIProvider, _merge_tool_argument_fragment
+from crew.state.config import ModelProfile
 
 pytestmark = pytest.mark.asyncio
 
@@ -72,6 +74,37 @@ async def test_stream_emits_ready_tool_call_per_index(monkeypatch):
     done = out[done_positions[0]]
     assert [t.id for t in done.tool_calls] == ["call_a", "call_b"]
     assert ready_positions[-1] <= done_positions[0]
+
+
+async def test_chat_maps_structured_non_reasoning_options_for_deepseek(monkeypatch):
+    p = build_provider_for_profile(
+        ModelProfile(id="ds", api_key="sk-test", provider="deepseek", model="deepseek-v4-flash")
+    )
+    seen = {}
+
+    async def fake_create(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='{"ok":true}', tool_calls=None),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+    monkeypatch.setattr(p._client.chat.completions, "create", fake_create)
+
+    response = await p.chat(
+        [],
+        max_tokens=1024,
+        response_format={"type": "json_object"},
+        reasoning_mode="disabled",
+    )
+
+    assert response.text == '{"ok":true}'
+    assert seen["max_tokens"] == 1024
+    assert seen["response_format"] == {"type": "json_object"}
+    assert seen["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 async def test_stream_single_tool_emits_ready_when_json_complete(monkeypatch):

@@ -145,14 +145,12 @@
   border-color: var(--mw-action-primary);
   background: var(--mw-bg-selected);
   color: var(--mw-text-selected);
-  box-shadow: inset 3px 0 0 var(--mw-action-primary);
 }
 
 .security-center__mode[data-tone='danger'][data-selected='true'] {
   border-color: var(--mw-status-danger);
   background: var(--mw-status-danger-bg);
   color: var(--mw-status-danger);
-  box-shadow: inset 3px 0 0 var(--mw-status-danger);
 }
 
 .security-center__mode-label,

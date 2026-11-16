@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0032 · Team Route/CLI 消费路径生命周期化</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0032 · Team Route/CLI 消费路径生命周期化</h1>
+<p>状态：已实施并验证 · 日期：2026-09-10 · 阶段：4C-2。</p>
+<h2>背景与候选方案</h2>
+<p>4C-1 把 TeamManager 收进 <code>product.team</code> Generation 后，Gateway 与 CLI 仍通过模块级 <code>import crew.team.*</code> 和散点 <code>getattr(crew, "team", ...)</code> 消费 Team 能力。CLI 还逆向 import <code>gateway.routers.runtimes</code> 的私有投影函数。这些路径让 Gateway 的静态依赖面与 Team 内部实现耦合，且 CLI 与 Router 的投影逻辑形成双向依赖。</p>
+<h2>决定</h2>
+<p>将纯展示投影函数（<code>_runtime_availability</code>、<code>_external_agent_payloads</code>、<code>_external_team_payloads</code>、<code>_managed_temporary_agent_ids</code>）下沉到 <code>crew/team/payloads.py</code>，供 CLI 与 Router 共同消费，消除 CLI→Router 逆向依赖。Gateway 模块级 <code>crew.team.*</code> import 全部改为函数体内惰性 import，缩小静态依赖面。sessions.py 与 interaction_bridge.py 的 TeamManager 散点统一为 <code>crew.team</code> 动态属性访问，保留 <code>None</code> 安全分支；Team 未激活时 interaction_bridge 端点抛 <code>ValueError("Team 模式未启用")</code>，由上层返回 503/降级。</p>
+<h2>兼容、验证与回退</h2>
+<p>runtimes.py 的 8 个 <code>/api/external-teams*</code> 端点行为不变（数据源仍是 external catalog store）；sessions.py 的历史投影与模型绑定端点在 Team 未激活时安全跳过原有降级分支。新增 <code>tests/test_team_route_consumer.py</code> 覆盖 team=None 降级、CLI 不再 import gateway router、payloads 导出正确性。回归 309 passed / 1 skipped，Ruff、compileall、Import Linter（6 contracts kept, 0 broken）全部通过。</p>
+<p>已知边界：<code>crew/gateway/routers/runtimes.py</code> 仍通过函数内惰性 import 使用 Formation/Role/TeamSpec 纯函数；若未来需完全切断 gateway→team 调用链，需把这些能力也声明为 Service 接口，超出本切片范围。停用不删除 Team 业务数据；回退本切片恢复逆向 import 与模块级依赖。</p>
+<p><a href="../modules/team.html">Team 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

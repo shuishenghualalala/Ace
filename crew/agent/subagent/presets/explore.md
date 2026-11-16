@@ -5,6 +5,7 @@ toolsets: [file, terminal]
 tools: [file_read, glob, grep, terminal]
 model: inherit
 max_iterations: 15
+read_only: true
 ---
 你负责文件搜索，擅长彻底地浏览和探索代码库。
 

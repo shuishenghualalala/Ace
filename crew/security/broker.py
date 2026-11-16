@@ -255,7 +255,7 @@ class ExecutionRequest:
     stdin: bytes | None = None
     home_files: Mapping[str, bytes] | None = None
     env_overrides: Mapping[str, str] | None = None
-    timeout_seconds: float = 30.0
+    timeout_seconds: float | None = 30.0
     max_output_bytes: int = 2 * 1024 * 1024
 
 

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6T · 拆库 kanban 批次</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6T · 拆库 kanban 批次</h1>
+<p>2026-09-14 · 提交 <code>1157a05</code>（ADR-0038 第三批，子 agent 接续断网半成品完成、主 agent 审查后提交）。6 表迁 <code>crew_data/kanban.db</code>，主库同名旧表保留为回退备份。</p>
+<h2>处置</h2>
+<ul>
+<li>两条语义护栏：<code>legacy_owner_scan_targets</code> 对 kanban 显式传参才登记（防启动巡检改写备份歧义行）；<code>_migrate_workflow_ownership</code> 加 <code>isolation_state</code> 守卫（防拆库后歧义行被洗成 local）。</li>
+<li>修复半成品中映射缺省合并到主库的矛盾。</li>
+<li>external+team 批预研结论：门面单点构造、双 db 路径方案就绪；唯一障碍 <code>_backfill_member_agent_snapshots</code> 跨命名空间同库读需改跨库参数化。</li>
+</ul>
+<h2>验证记录（子 agent 开发，主 agent 审查后复跑）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>新增契约测试</td><td>11 个（语义护栏、歧义行守卫、映射缺省修正等）</td></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4129 passed / 0 failed</td></tr>
+</table>
+<p>平台说明：纯 SQLite/路径语义，无平台分支；本轮实测为 macOS 本机。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

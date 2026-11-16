@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0023 · Feature Event Contributor Registry</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0023 · Feature Event Contributor Registry</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-05 · 阶段：插件架构 3B</div>
+
+  <h2>背景</h2>
+  <p><code>feature_event</code> 已提供稳定命名空间和旧帧出口适配，但 Wiki cards/changes 的生产仍写在 Gateway WebSocket runner 中，并直接读取 <code>WikiSessionManager</code>。事件信封虽然中立，事件来源、资源生命周期和 Generation 选择仍没有归属 Feature。</p>
+
+  <h2>决策</h2>
+  <div class="decision">建立中立的 <code>FeatureEventContributorRegistry</code>：事件来源由 FeatureScope 注册，Registry 按确定顺序在所属 Generation Lease 内生成并投递，Gateway 只提供标准事件 sink。</div>
+  <ul>
+    <li><code>FeatureEvent</code> 固定承载 <code>feature/event/version/payload</code>，中立 Registry 不包含任何 Wiki 名称或旧 ChunkKind。</li>
+    <li>Contributor 注册返回 Scope-owned Token；只有 Active Generation 可见。同一 contributor ID 在 replace 期间选择最新 Active Generation，draining 后拒绝新 dispatch。</li>
+    <li>同步或异步 Handler、predicate、priority、timeout 和 DEGRADE/FAIL 策略属于显式契约；失败形成结构化报告或 fail-closed 错误，取消继续传播。</li>
+    <li><code>dispatch(envelope, sink)</code> 在 Lease 内顺序调用异步 sink。Contributor 失败遵循自身策略；sink 投递失败原样传播并停止后续来源，避免把 Host 传输错误误记为 Feature 降级。</li>
+    <li>Wiki Bundle 注册 <code>wiki.session.cards</code> 与 <code>wiki.session.changes</code> 两个同代来源。cards 优先投递；若其 push 失败，changes 尚未被摘取，保持既有待处理事件语义。</li>
+    <li>WebSocket runner 仅 dispatch 中立 Registry 并发送标准 <code>feature_event</code>；连接已断开时不 dispatch，旧帧转换与 replay 继续由 Gateway 出口适配器负责。</li>
+  </ul>
+
+  <h2>结果与后续</h2>
+  <p>Wiki 事件来源现在随 Bundle 激活、替换、回滚和停用自动注册或撤销；旧代在途投递结束前不会提前关闭。Stage 3B 仍需迁移 Agent Preset、Wiki API Route Contribution 与 UI Contribution；Work 的可选 Knowledge Service 依赖留在 Stage 3C。</p>
+
+  <h2>跨平台</h2>
+  <p>Registry 只使用 Python 类型、asyncio Lease 与内存事件，不依赖路径、信号、socket 绑定或操作系统命令，在 macOS、Linux 与 Windows 使用相同语义。</p>
+
+  <div class="nav"><a href="0022-wiki-cli-knowledge-service-consumer.html">ADR-0022</a> · <a href="0014-feature-event-namespace.html">ADR-0014</a> · <a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../modules/wiki.html">Wiki 模块</a> · <a href="../modules/gateway.html">Gateway 模块</a> · <a href="../../testing/plugin-architecture-stage-3b-wiki-event-contributor.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

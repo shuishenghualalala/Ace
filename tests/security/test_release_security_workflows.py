@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,18 @@ def test_runtime_npm_audit_discovers_every_committed_lockfile() -> None:
         "web",
         "desktop",
     }
+
+
+def test_runtime_npm_audit_handles_utf8_git_paths(tmp_path: Path) -> None:
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    nested = tmp_path / "资料"
+    nested.mkdir()
+    (nested / "package-lock.json").write_text("{}", encoding="utf-8")
+    (nested / "验证.md").write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+
+    assert set(package_lock_directories(tmp_path)) == {tmp_path, nested}
 
 
 def test_evidence_source_hash_matches_platform_prebuilt_manifests() -> None:

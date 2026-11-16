@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -18,10 +19,37 @@ DEFAULT_PROMPT = "描述一下这个视频"
 SUPPORTED_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".flv", ".m4v"}
 MAX_VIDEO_BYTES = 100 * 1024 * 1024
 MAX_PROMPT_LENGTH = 1000
+MAX_OUTPUT_CHARS = 20_000
 FORBIDDEN_PATTERNS = (
     "ignore previous", "ignore the above", "system prompt", "developer mode",
     "prompt injection", "leak password", "leak secret", "泄露密钥", "系统提示词",
 )
+
+
+def _emit_error(error: str, message: str) -> None:
+    print(
+        json.dumps({"status": "error", "error": error, "message": message}, ensure_ascii=False),
+        file=sys.stderr,
+    )
+
+
+def _classify_request_error(exc: requests.RequestException) -> str:
+    if isinstance(exc, requests.Timeout):
+        return f"请求超时（>{_timeout_seconds():.0f}s），请检查 VLM 服务连通性或调大 VLM_TIMEOUT_SECONDS"
+    if isinstance(exc, requests.ConnectionError):
+        return "连接失败（DNS 解析失败或服务不可达），请检查 VLM 服务地址"
+    if isinstance(exc, requests.HTTPError):
+        status = exc.response.status_code if exc.response is not None else "未知"
+        return f"HTTP {status}，请检查 VLM_API_KEY 与服务端状态"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _truncate_output(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    keep = MAX_OUTPUT_CHARS // 2
+    omitted = len(text) - keep * 2
+    return f"{text[:keep]}\n…（中间省略 {omitted} 字符）…\n{text[-keep:]}"
 
 
 def _env_file_value(key: str) -> str:
@@ -73,13 +101,13 @@ def sanitize_prompt(prompt: str | None) -> tuple[str | None, str | None]:
 def validate_video(video_path: str | Path) -> bool:
     path = Path(video_path)
     if not path.is_file():
-        print(f"错误：视频文件不存在 - {path}")
+        _emit_error("FileNotFound", f"视频文件不存在 - {path}")
         return False
     if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        print(f"错误：不支持的视频格式 - {path.suffix.lower()}")
+        _emit_error("UnsupportedFormat", f"不支持的视频格式 - {path.suffix.lower()}")
         return False
     if path.stat().st_size > MAX_VIDEO_BYTES:
-        print("错误：视频文件超过 100 MB")
+        _emit_error("FileTooLarge", "视频文件超过 100 MB")
         return False
     return True
 
@@ -100,7 +128,7 @@ def _nested_dict(payload: Any) -> dict[str, Any]:
 def upload_video(video_path: str | Path, api_key: str) -> str | None:
     endpoint = _config_value("VLM_VIDEO_UPLOAD_URL")
     if not endpoint:
-        print("错误：请配置 VLM_VIDEO_UPLOAD_URL")
+        _emit_error("MissingConfig", "请配置 VLM_VIDEO_UPLOAD_URL")
         return None
     if not validate_video(video_path):
         return None
@@ -115,14 +143,17 @@ def upload_video(video_path: str | Path, api_key: str) -> str | None:
             )
         response.raise_for_status()
         data = _nested_dict(response.json())
-    except (requests.RequestException, ValueError, OSError) as exc:
-        print(f"错误：视频上传失败 - {type(exc).__name__}")
+    except requests.RequestException as exc:
+        _emit_error("UploadFailed", f"视频上传失败 - {_classify_request_error(exc)}")
+        return None
+    except (ValueError, OSError) as exc:
+        _emit_error("ResponseParseFailed", f"视频上传响应解析失败 - {type(exc).__name__}: {exc}")
         return None
     for key in ("fileUrl", "filePath", "url"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    print("错误：上传接口未返回视频地址")
+    _emit_error("EmptyResponse", "上传接口未返回视频地址")
     return None
 
 
@@ -144,11 +175,11 @@ def analyze_video(video_url: str, prompt: str | None, api_key: str) -> str | Non
     endpoint = _config_value("VLM_VIDEO_ANALYZE_URL")
     model = _config_value("VLM_VIDEO_MODEL")
     if not endpoint or not model:
-        print("错误：请配置 VLM_VIDEO_ANALYZE_URL 和 VLM_VIDEO_MODEL")
+        _emit_error("MissingConfig", "请配置 VLM_VIDEO_ANALYZE_URL 和 VLM_VIDEO_MODEL")
         return None
     safe_prompt, error = sanitize_prompt(prompt)
     if error or safe_prompt is None:
-        print(f"错误：{error}")
+        _emit_error("UnsafePrompt", error or "提示词校验失败")
         return None
     headers = {**_headers(api_key), "Content-Type": "application/json"}
     body = {"model": model, "prompt": safe_prompt, "video": video_url, "stream": False}
@@ -156,13 +187,16 @@ def analyze_video(video_url: str, prompt: str | None, api_key: str) -> str | Non
         response = requests.post(endpoint, headers=headers, json=body, timeout=_timeout_seconds())
         response.raise_for_status()
         text = _response_text(response.json())
-    except (requests.RequestException, ValueError) as exc:
-        print(f"错误：视频分析失败 - {type(exc).__name__}")
+    except requests.RequestException as exc:
+        _emit_error("AnalyzeFailed", f"视频分析失败 - {_classify_request_error(exc)}")
+        return None
+    except ValueError as exc:
+        _emit_error("ResponseParseFailed", f"视频分析响应解析失败 - {type(exc).__name__}: {exc}")
         return None
     if not text:
-        print("错误：分析接口未返回视频描述")
+        _emit_error("EmptyResponse", "分析接口未返回视频描述")
         return None
-    return text
+    return _truncate_output(text)
 
 
 def print_security_notice() -> None:
@@ -182,16 +216,22 @@ def main() -> None:
 
     if not args.confirm_upload:
         print_security_notice()
-        print("错误：需要用户明确确认后才能上传视频", file=sys.stderr)
+        _emit_error("UploadNotConfirmed", "需要用户明确确认后才能上传视频")
         raise SystemExit(1)
-    api_key = load_api_key()
-    video_url = upload_video(args.video_path, api_key)
-    if not video_url:
+    try:
+        api_key = load_api_key()
+        video_url = upload_video(args.video_path, api_key)
+        if not video_url:
+            raise SystemExit(1)
+        result = analyze_video(video_url, args.prompt, api_key)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _emit_error("UnexpectedError", f"视频理解脚本异常 - {type(exc).__name__}: {exc}")
         raise SystemExit(1)
-    result = analyze_video(video_url, args.prompt, api_key)
     if not result:
         raise SystemExit(1)
-    print(result)
+    print(_truncate_output(result))
 
 
 if __name__ == "__main__":

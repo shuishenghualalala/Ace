@@ -14,9 +14,11 @@ vi.mock('../../src/ui/features/session-model', () => ({
 }));
 
 import {
+  backendDurationToMs,
   filterExistingTurnFileChanges,
   inferTurnFileChangesFromToolCalls,
   mapBackendHistoryItem,
+  mapBackendHistoryItems,
   mergeTeamInternalMessage,
   mergeTeamInternalMessages,
 } from '../../src/ui/features/history-mapping';
@@ -24,6 +26,11 @@ import type { BackendHistoryItem } from '../../src/ui/backend-client';
 import type { TurnFileChangeSummary } from '../../src/ui/chat-render';
 
 describe('mapBackendHistoryItem turnFileChanges', () => {
+  it('does not render an epoch timestamp as an elapsed duration', () => {
+    expect(backendDurationToMs(Math.floor(Date.now() / 1000))).toBe(0);
+    expect(backendDurationToMs(1.2)).toBe(1_200);
+  });
+
   it('历史消息优先保留生成当时的模型', () => {
     const msg = mapBackendHistoryItem({
       role: 'assistant',
@@ -104,6 +111,54 @@ describe('mapBackendHistoryItem turnFileChanges', () => {
         removed: 0,
         status: 'modified',
       },
+    ]);
+  });
+
+  it('marks tool-call turns with final content as answer segment (content stays outside the fold)', () => {
+    const withContent: BackendHistoryItem = {
+      role: 'assistant',
+      content: '排查完成，结论如下。',
+      tool_calls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.js' }, status: 'done' }],
+    };
+    expect(mapBackendHistoryItem(withContent).segmentRole).toBe('answer');
+
+    const processOnly: BackendHistoryItem = {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.js' }, status: 'done' }],
+    };
+    expect(mapBackendHistoryItem(processOnly).segmentRole).toBe('process');
+  });
+
+  it('batch mapping demotes non-final content segments of a split turn to process (narration stays in fold)', () => {
+    const items: BackendHistoryItem[] = [
+      { role: 'user', content: '整理成三条结论。' },
+      {
+        role: 'assistant',
+        content: '我先复核一遍引用。',
+        thinking: '先核对。',
+        tool_calls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.js' }, status: 'done' }],
+      },
+      {
+        role: 'assistant',
+        content: '## 三条结论\n1. 甲\n2. 乙\n3. 丙',
+      },
+      { role: 'user', content: '再来一条。' },
+      {
+        role: 'assistant',
+        content: '单段回合的最终回复。',
+        tool_calls: [{ id: 'tc2', name: 'grep', arguments: { query: 'x' }, status: 'done' }],
+      },
+    ];
+    const messages = mapBackendHistoryItems(items, null);
+    // user 消息的 segmentRole 是单条映射的既有行为（渲染只消费 assistant 段），
+    // 这里只断言 assistant 段：拆段回合的旁白降级 process，末段与单段回合保持 answer。
+    expect(messages.map((m) => (m.role === 'assistant' ? m.segmentRole : null))).toEqual([
+      null,
+      'process',
+      'answer',
+      null,
+      'answer',
     ]);
   });
 
@@ -231,6 +286,23 @@ describe('mapBackendHistoryItem turnFileChanges', () => {
 });
 
 describe('Team Session history mapping', () => {
+  it('replays each assignment and the corresponding member process separately', () => {
+    const source = 'parent::turn::request';
+    const common = { role: 'team_internal', display_mode: 'chat' } as const;
+    const messages = mapBackendHistoryItems([
+      { ...common, content: '@kimi 整理材料', agent_id: 'leader', event_type: 'team_assign', node_id: 'a', source_session_id: `${source}::leader` },
+      { ...common, content: '整理成果', agent_id: 'kimi', event_type: 'team_submit', node_id: 'a', source_session_id: `${source}::kimi`, thinking: '检查来源', process_text: '正在整理', tool_calls: [{ id: 'read-a', name: 'read', arguments: {}, status: 'done' }] },
+      { ...common, content: '@kimi 检查证据', agent_id: 'leader', event_type: 'team_assign', node_id: 'b', source_session_id: `${source}::leader` },
+      { ...common, content: '检查成果', agent_id: 'kimi', event_type: 'team_submit', node_id: 'b', source_session_id: `${source}::kimi` },
+    ]);
+
+    expect(messages).toHaveLength(4);
+    expect(messages.map((item) => item.eventType)).toEqual(['team_assign', 'team_submit', 'team_assign', 'team_submit']);
+    expect(messages[1]).toMatchObject({ content: '整理成果', thinking: '检查来源', processText: '正在整理' });
+    expect(messages[1].toolCalls?.[0].toolCallId).toBe('read-a');
+    expect(messages[3].content).toBe('检查成果');
+  });
+
   it('preserves team_internal identity and presentation metadata', () => {
     const msg = mapBackendHistoryItem({
       role: 'team_internal',
@@ -287,6 +359,29 @@ describe('Team Session history mapping', () => {
     expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: 'tool-1', status: 'done', result: 'ok' });
   });
 
+  it('does not merge same-node frames when explicit requests conflict', () => {
+    const first = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '第一回合',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      node_id: 'implement_core',
+      source_session_id: 'parent::turn::shared::coder',
+      request_id: 'request_1',
+    });
+    const second = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '第二回合',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      node_id: 'implement_core',
+      source_session_id: 'parent::turn::shared::coder',
+      request_id: 'request_2',
+    });
+
+    expect(mergeTeamInternalMessage([first], second, { append: true })).toHaveLength(2);
+  });
+
   it('uses the single-agent overlap merge for cumulative Team thinking frames', () => {
     const first = mapBackendHistoryItem({
       role: 'team_internal',
@@ -339,6 +434,142 @@ describe('Team Session history mapping', () => {
       processText: '实现过程',
       collapsedTitle: '核心逻辑的执行过程',
     });
+  });
+
+  it('keeps same-looking assistant final and Team summary from different requests', () => {
+    const assistant = {
+      id: 'assistant-final-req-1',
+      role: 'assistant' as const,
+      content: '项目总共用了 11 分钟 21 秒。',
+      requestId: 'req_1',
+    };
+    const summary = {
+      id: 'team-summary-req-2',
+      role: 'team_internal' as const,
+      content: assistant.content,
+      requestId: 'req_2',
+      eventType: 'team_summary' as const,
+      nodeId: 'leader_summary',
+      agentId: 'leader',
+    };
+
+    expect(mergeTeamInternalMessage([assistant], summary)).toHaveLength(2);
+  });
+
+  it('deduplicates a live user mention answer already restored from history', () => {
+    const history = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '我当前使用 K3 模型。',
+      event_type: 'team_communication',
+      source_session_id: 'desktop_demo::turn::mention_req_2::coder',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'answered',
+      request_id: 'mention_req_2',
+      reply_to: 'bus_msg_2',
+    });
+    const live = { ...history, id: 'live-mention-answer' };
+
+    const merged = mergeTeamInternalMessage([history], live);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].requestId).toBe('mention_req_2');
+    expect(merged[0].communicationStatus).toBe('answered');
+  });
+
+  it('does not deduplicate same-looking node results from different requests', () => {
+    const first = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '@leader 已完成',
+      agent_id: 'coder',
+      event_type: 'team_submit',
+      node_id: 'implement_core',
+      source_session_id: 'desktop_demo::turn::request_1::coder',
+      request_id: 'request_1',
+      display_mode: 'chat',
+    });
+    const second = { ...first, id: 'result-2', requestId: 'request_2' };
+
+    expect(mergeTeamInternalMessage([first], second)).toHaveLength(2);
+  });
+
+  it('replaces a waiting direct mention with the terminal answer by request id', () => {
+    const waiting = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'waiting_reply',
+      request_id: 'mention_req_waiting',
+      communication_request_text: '你使用的是什么模型？',
+    });
+    const answered = {
+      ...waiting,
+      id: 'answered',
+      content: '当前使用 K3 模型。',
+      communicationStatus: 'answered',
+      replyTo: 'bus_msg_waiting',
+    };
+
+    const merged = mergeTeamInternalMessage([waiting], answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].content).toBe('当前使用 K3 模型。');
+    expect(merged[0].communicationStatus).toBe('answered');
+  });
+
+  it('merges direct mention streaming frames into one answer timeline', () => {
+    const waiting = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '正在询问 coder…',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'waiting_reply',
+      request_id: 'mention_req_stream',
+      source_session_id: 'desktop_demo::turn::mention_req_stream::coder',
+    });
+    const stream = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '当前使用 ',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'delivered',
+      request_id: 'mention_req_stream',
+      event_type: 'team_stream',
+      display_mode: 'stream',
+      collapsed_title: 'coder 的回答过程',
+      source_session_id: 'desktop_demo::turn::mention_req_stream::coder',
+      thinking: '先确认模型配置。',
+      tool_calls: [{
+        id: 'runtime-info-1',
+        name: 'runtime_info',
+        arguments: {},
+        status: 'running',
+      }],
+    });
+    const answered = mapBackendHistoryItem({
+      role: 'team_internal',
+      content: '当前使用 Kimi Code/K3。',
+      agent_id: 'coder',
+      communication_kind: 'user_mention_answer',
+      communication_status: 'answered',
+      request_id: 'mention_req_stream',
+      source_session_id: 'desktop_demo::turn::mention_req_stream::coder',
+      event_type: 'team_communication',
+    });
+
+    const streaming = mergeTeamInternalMessage([waiting], stream, { append: true });
+    const merged = mergeTeamInternalMessage(streaming, answered);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      content: '当前使用 Kimi Code/K3。',
+      communicationStatus: 'answered',
+      eventType: 'team_communication',
+      processText: '当前使用 ',
+    });
+    expect(merged[0].thinking).toBe('先确认模型配置。');
+    expect(merged[0].toolCalls?.[0]).toMatchObject({ toolCallId: 'runtime-info-1', status: 'running' });
   });
 });
 

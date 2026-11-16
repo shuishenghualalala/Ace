@@ -100,7 +100,7 @@ body.welcome-active
   width: 38px;
   height: 29px;
   border: 4px solid var(--mw-text-primary);
-  border-radius: 19px 19px 12px 12px;
+  border-radius: var(--mw-radius-fine-19) var(--mw-radius-fine-19) var(--mw-radius-4) var(--mw-radius-4);
   background: color-mix(in srgb, var(--mw-symbol-accent) 76%, var(--mw-bg-surface));
   color: var(--mw-text-primary);
 }
@@ -357,8 +357,10 @@ body.welcome-active
 }
 
 body.welcome-active #chat-tab.tab-pane.active.chat-mode {
-  /* Composer 固定在内容区垂直中线；标题与场景分别占据等高的上下弹性轨道 */
-  grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);
+  /* Composer 固定在内容区垂直中线；标题与场景分别占据等高的上下弹性轨道。
+     标题轨道不允许小于 header 内容高度：窗口偏矮时压缩底部场景行，
+     否则 header 会向上溢出并被根容器裁掉（标题显示不全）。 */
+  grid-template-rows: minmax(min-content, 1fr) auto minmax(0, 1fr);
 }
 
 body.welcome-active #welcome-panel,
@@ -387,6 +389,20 @@ body.welcome-active #chat-composer-root {
   min-width: 0;
   grid-column: 1;
   grid-row: 2;
+}
+
+/* 文件 / 技能补全画布打开时，解除 Composer 的两层局部 stacking context：
+   只把承载 mention-pop 的输入面板抬到 Welcome Header 之上，项目灰条仍留在
+   mascot 下方，避免整块 Composer 反过来遮住 Crew。 */
+body.welcome-active #chat-composer-root:has(.mention-pop),
+body.welcome-active #chat-composer-root:has(.mention-pop) .mw-composer {
+  z-index: auto;
+}
+
+body.welcome-active
+  #chat-composer-root
+  .mw-composer__panel:has(.mention-pop) {
+  z-index: 3;
 }
 
 body.welcome-active .welcome-scenarios {
@@ -434,16 +450,49 @@ body.welcome-active .tab-pane#chat-tab.active.chat-mode .chat-disclaimer {
 
 @media (max-height: 680px) {
   body.welcome-active .welcome-view__header {
-    padding: var(--mw-space-2) var(--mw-space-4) 0;
+    padding: var(--mw-space-2) var(--mw-space-4) var(--mw-space-4);
   }
 
   .welcome-view__mascot {
-    width: 156px;
-    height: 156px;
+    width: 140px;
+    height: 140px;
   }
 
-  .welcome-view__identity {
-    gap: var(--mw-space-1);
+  /* 短窗不再把 Welcome 内容压进固定三行网格，面板本身负责纵向滚动。 */
+  body.welcome-active #welcome-panel {
+    display: block;
+    min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block: var(--mw-space-4);
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  body.welcome-active #welcome-panel .welcome-view {
+    display: grid;
+    min-height: 100%;
+    align-content: start;
+    padding: var(--mw-space-4) var(--mw-space-4) var(--mw-space-8);
+  }
+
+  body.welcome-active #welcome-panel .welcome-view__header {
+    position: static;
+    z-index: auto;
+    width: 100%;
+    align-self: auto;
+    justify-self: stretch;
+    grid-column: auto;
+    grid-row: auto;
+    padding: 0;
+  }
+
+  body.welcome-active #welcome-panel .welcome-scenarios {
+    align-self: stretch;
+    grid-column: auto;
+    grid-row: auto;
   }
 }
 

@@ -7,11 +7,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
+from crew.providers import stream_aux
 from crew.state.logging import get_logger
 
 log = get_logger("agent.auxiliary")
@@ -79,12 +79,16 @@ async def generate_session_title(
             snippet += f"\n助手：{first_assistant[:200]}"
     title = ""
     try:
-        resp = await asyncio.wait_for(
-            provider.chat([
+        resp = await stream_aux(
+            provider,
+            [
                 Message.system(_TITLE_PROMPT),
                 Message.user(snippet),
-            ], max_tokens=32),
+            ],
+            purpose="session-title",
             timeout=_TITLE_TIMEOUT,
+            max_tokens=32,
+            retry=0,
         )
         title = _sanitize_title_text((resp.text or "").replace("\n", " "))
     except Exception as exc:  # noqa: BLE001 - 标题生成失败/超时不影响主流程，下方兜底

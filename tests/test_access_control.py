@@ -100,3 +100,35 @@ def test_custom_prompt_profile():
     assert Path(resolved["prompt_profile_path"]).as_posix().endswith(
         "config/prompts/profiles/custom.md"
     )
+
+
+# --------------------------------------------------------------------------- #
+# user_type_for_owner（决策⑧：本机 owner 强制 internal）
+# --------------------------------------------------------------------------- #
+
+
+def test_local_owner_is_forced_internal_when_internal_accounts_configured():
+    """决策⑧：白名单枚举的是远程账号，本机 local 不在名单内也不得降权 external。"""
+    ac = AccessControlConfig(internal_accounts=["A:uid-a"])
+    assert ac.user_type_for_owner("local") == "internal"
+
+
+def test_local_owner_forced_internal_overrides_requested_external():
+    """'强制'优先于非严格安全模式下会话显式请求的角色兼容路径。"""
+    ac = AccessControlConfig(internal_accounts=["A:uid-a"])
+    assert ac.user_type_for_owner("local", requested="external") == "internal"
+
+
+def test_listed_remote_account_is_internal():
+    ac = AccessControlConfig(internal_accounts=["A:uid-a"])
+    assert ac.user_type_for_owner("A:uid-a") == "internal"
+
+
+def test_unlisted_remote_account_is_external():
+    ac = AccessControlConfig(internal_accounts=["A:uid-a"])
+    assert ac.user_type_for_owner("B:uid-b") == "external"
+
+
+def test_without_internal_accounts_falls_back_to_config_default():
+    ac = AccessControlConfig(user_type="external")
+    assert ac.user_type_for_owner("A:uid-a") == "external"

@@ -29,7 +29,7 @@ describe('侧栏会话操作入口', () => {
     renderWorkspaceHistory(() => {});
     const menu = document.querySelector('[data-session-menu="s1"]');
     expect(menu).toBeTruthy();
-    expect(menu?.classList.contains('history-item-menu-btn')).toBe(true);
+    expect(menu?.classList.contains('mw-session-history__menu')).toBe(true);
   });
 
   it('openSessionActionsMenu 调用 showContextMenu', () => {

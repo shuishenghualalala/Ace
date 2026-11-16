@@ -13,7 +13,12 @@ import re
 from typing import Any, Callable
 
 from crew.core.errors import ToolError, ToolNotFoundError
-from crew.core.interfaces import Tool, ToolRegistry
+from crew.core.interfaces import (
+    Tool,
+    ToolRegistry,
+    ToolResultPolicy,
+    ToolResultRetention,
+)
 from crew.core.types import ToolCall, ToolOutput, ToolPermissionDecision, ToolResult
 from crew.state.logging import get_logger
 from crew.tools.pipeline import (
@@ -57,6 +62,7 @@ class FunctionTool(Tool):
         emoji: str = "",
         display_name: str = "",
         ui_label_template: str = "",
+        ui_label_args_resolver: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
         should_defer: bool | None = None,
         search_hint: str = "",
         always_load: bool = False,
@@ -67,6 +73,10 @@ class FunctionTool(Tool):
         on_progress: str | None = None,
         permission_resolver: Callable[[dict[str, Any]], ToolPermissionDecision | None] | None = None,
         permission_approver: Callable[[str, dict[str, Any]], bool] | None = None,
+        result_retention: ToolResultRetention | str = ToolResultRetention.IMPORTANT,
+        result_identity_fields: list[str] | tuple[str, ...] | None = None,
+        result_policy_resolver: Callable[[dict[str, Any]], ToolResultPolicy] | None = None,
+        schema_resolver: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.name = name
         self.toolset = toolset
@@ -80,6 +90,11 @@ class FunctionTool(Tool):
         self.emoji = emoji
         self.display_name = display_name
         self.ui_label_template = ui_label_template
+        # Optional presentation-only enrichment.  The first argument is the
+        # already redacted UI projection; the second is the runtime argument
+        # set, which lets a tool resolve human-readable metadata without
+        # exposing its internal identifiers in the UI payload.
+        self.ui_label_args_resolver = ui_label_args_resolver
         self.should_defer = should_defer
         self.search_hint = search_hint
         self.always_load = always_load
@@ -96,13 +111,40 @@ class FunctionTool(Tool):
         self.on_progress = on_progress
         self.permission_resolver = permission_resolver
         self.permission_approver = permission_approver
+        self.result_retention = (
+            result_retention
+            if isinstance(result_retention, ToolResultRetention)
+            else ToolResultRetention(str(result_retention))
+        )
+        self.result_identity_fields = tuple(result_identity_fields or ())
+        self.result_policy_resolver = result_policy_resolver
+        self.schema_resolver = schema_resolver
 
     def to_schema(self) -> dict[str, Any]:
-        function_schema = dict(self.schema)
+        function_schema = self.current_function_schema()
+        return {
+            "type": "function",
+            "function": function_schema,
+        }
+
+    def current_function_schema(self) -> dict[str, Any]:
+        """Return the function schema currently visible to the runtime."""
+        function_schema = (
+            dict(self.schema_resolver())
+            if self.schema_resolver is not None
+            else dict(self.schema)
+        )
         function_schema.setdefault("name", self.name)
         function_schema.setdefault("description", self.description)
         function_schema.setdefault("parameters", self.parameters)
-        return {"type": "function", "function": function_schema}
+        return function_schema
+
+    def current_parameters(self) -> dict[str, Any]:
+        """Return parameters from the same schema used for model disclosure."""
+        return dict(
+            self.current_function_schema().get("parameters")
+            or {"type": "object", "properties": {}}
+        )
 
     def ui_meta(self) -> dict[str, str]:
         meta: dict[str, str] = {}
@@ -133,6 +175,22 @@ class FunctionTool(Tool):
             return result
         return json.dumps(result, ensure_ascii=False)
 
+    def result_policy(self, args: dict[str, Any]) -> ToolResultPolicy:
+        if self.result_policy_resolver is not None:
+            policy = self.result_policy_resolver(args)
+            if not isinstance(policy, ToolResultPolicy):
+                raise ToolError(f"工具 {self.name} 的 result_policy_resolver 返回值无效")
+            return policy
+        identity_parts = [
+            f"{field}={args[field]}"
+            for field in self.result_identity_fields
+            if field in args and args[field] is not None
+        ]
+        return ToolResultPolicy(
+            retention=self.result_retention,
+            identity="|".join(identity_parts),
+        )
+
 
 class Registry(ToolRegistry):
     def __init__(self) -> None:
@@ -154,6 +212,7 @@ class Registry(ToolRegistry):
                 emoji=kwargs.get("emoji", ""),
                 display_name=kwargs.get("display_name", ""),
                 ui_label_template=kwargs.get("ui_label_template", ""),
+                ui_label_args_resolver=kwargs.get("ui_label_args_resolver"),
                 should_defer=kwargs.get("should_defer"),
                 search_hint=kwargs.get("search_hint", ""),
                 always_load=bool(kwargs.get("always_load", False)),
@@ -164,6 +223,12 @@ class Registry(ToolRegistry):
                 on_progress=kwargs.get("on_progress"),
                 permission_resolver=kwargs.get("permission_resolver"),
                 permission_approver=kwargs.get("permission_approver"),
+                result_retention=kwargs.get(
+                    "result_retention", ToolResultRetention.IMPORTANT
+                ),
+                result_identity_fields=kwargs.get("result_identity_fields"),
+                result_policy_resolver=kwargs.get("result_policy_resolver"),
+                schema_resolver=kwargs.get("schema_resolver"),
             )
         if not tool.name:
             raise ToolError(f"工具缺少 name: {tool!r}")
@@ -178,12 +243,18 @@ class Registry(ToolRegistry):
                 log.debug("注册别名: %s -> %s", alias, tool.name)
         log.debug("注册工具: %s", tool.name)
 
-    def unregister(self, name: str) -> bool:
+    def unregister(self, name: str, *, expected: Tool | None = None) -> bool:
         """注销一个工具（含其别名）。用于删除/重连单个 MCP server 时清理旧工具。
 
         返回是否确实移除了工具。内置工具理论上不会被调用方 unregister，但不做硬限制——
         调用方（MCPClientManager）只对本 server 注册过的工具名调用。
+
+        ``expected`` 用于 Feature disposer 的所有权校验：若同名工具已被后续
+        Generation 替换，旧 Generation 的清理不能误删新工具。
         """
+        current = self._tools.get(name)
+        if expected is not None and current is not expected:
+            return False
         removed = self._tools.pop(name, None) is not None
         # 清理指向该 name 的别名
         stale_aliases = [a for a, c in self._aliases.items() if c == name]
@@ -219,6 +290,19 @@ class Registry(ToolRegistry):
     def toolset_for(self, name: str) -> str | None:
         tool = self._tools.get(name)
         return getattr(tool, "toolset", "default") if tool else None
+
+    def result_policy(self, name: str, args: dict[str, Any]) -> ToolResultPolicy:
+        """返回具体调用的结果生命周期；解析失败时宁可多保留，也不误删。"""
+        try:
+            tool, _note = self._lookup(name)
+            policy = tool.result_policy(args)
+            return policy if isinstance(policy, ToolResultPolicy) else ToolResultPolicy()
+        except ToolNotFoundError:
+            # 历史里可能保留已卸载插件或已断开的 MCP 工具，未知即安全保留。
+            return ToolResultPolicy()
+        except Exception:  # noqa: BLE001 - 压缩策略不得影响主工具链
+            log.exception("解析工具 %s 的结果生命周期失败，按重要结果保留", name)
+            return ToolResultPolicy()
 
     async def resolve_permission(self, tool_call: ToolCall) -> ToolPermissionDecision | None:
         """Return a tool-specific permission decision, if the tool declares one."""
@@ -271,16 +355,29 @@ class Registry(ToolRegistry):
             if value
         }
 
-    def render_ui_label(self, name: str, args: dict[str, Any] | None = None) -> str:
+    def render_ui_label(
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        raw_args: dict[str, Any] | None = None,
+    ) -> str:
         """按工具私有 UI 模板渲染展示标题；不会写入 LLM tool schema。"""
         meta = self.ui_meta(name)
         template = meta.get("ui_label_template") or meta.get("display_name") or ""
         if not template:
             return ""
-        values = {k: _short_ui_value(v) for k, v in (args or {}).items()}
+        label_args = dict(args or {})
+        tool = self._tools.get(name)
+        resolver = getattr(tool, "ui_label_args_resolver", None)
+        if callable(resolver):
+            resolved = resolver(label_args, dict(raw_args or {}))
+            if isinstance(resolved, dict):
+                label_args = resolved
+        values = {k: _short_ui_value(v) for k, v in label_args.items()}
         try:
             return template.format_map(_SafeFormatDict(values)).strip()
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             return meta.get("display_name", "").strip()
 
     def toolsets(self) -> list[str]:
@@ -350,7 +447,13 @@ class Registry(ToolRegistry):
 
         args = tool_call.arguments
         # JSON Schema 结构校验
-        schema_err = validate_arguments(tool.name, tool.parameters, args)
+        current_parameters = getattr(tool, "current_parameters", None)
+        parameters = (
+            current_parameters()
+            if callable(current_parameters)
+            else tool.parameters
+        )
+        schema_err = validate_arguments(tool.name, parameters, args)
         if schema_err:
             return ToolResult(
                 tool_call.id, tool.name,

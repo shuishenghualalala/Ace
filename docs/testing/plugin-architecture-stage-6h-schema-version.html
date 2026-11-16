@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6H · per-feature schema 版本底座</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6H · per-feature schema 版本底座</h1>
+<p>2026-09-11。命名空间审计修复建议 4（P2-4）：建立 Feature 级 schema 版本表助手与 <code>migrate feature</code> CLI 骨架，以 <code>product.work</code> 为首个试点。这是 P1-1 拆库与未来迁出仓库的前置底座。基线提交 22fcdc9；已验收通过并随本记录提交。</p>
+<h2>设计</h2>
+<ul>
+<li>助手 <code>crew/state/schema_version.py</code>（单文件，纯 sqlite3 无 crew 内部依赖）：<code>&lt;feature&gt;_schema_version</code> 单行表（<code>CHECK(singleton=1)</code> SQL 级锁死）；feature 名白名单 <code>[a-z][a-z0-9_]*</code> 防注入；<code>apply_version</code> 严格递增；<code>stamp_baseline</code> 装配期专用——首跑补基线，已有库绝不改动/降级。</li>
+<li>work 试点：整个 work 域一张 <code>work_schema_version</code> 表，登记在 8 个 store 的唯一公共构造点（<code>crew/work/feature.py::_store_factory</code>）在 WorkService 构造成功后统一写入，不在每个 store 重复。</li>
+<li>CLI：<code>crew migrate feature &lt;name&gt;</code>；<code>FEATURE_MIGRATIONS</code> 显式 dict 注册表（新 Feature 加一行，无 if 链）；主库 Feature 复用 <code>_run_main_db_migrator</code>；未注册 Feature 明确报错并列出已注册项。</li>
+</ul>
+<h2>验证记录（子 agent 执行后主 agent 复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>pytest tests/test_schema_version.py tests/test_work_cli_lifecycle.py tests/test_work_feature.py tests/test_work_references.py -q</code></td><td>31 passed（含 10 个新用例）</td></tr>
+<tr><td><code>pytest</code> workspace/state 相关（test_workspace + test_state_migration）</td><td>21 passed</td></tr>
+<tr><td><code>ruff check</code> / <code>compileall -q crew</code> / <code>lint-imports</code></td><td>通过 / 通过 / 7 kept 0 broken</td></tr>
+<tr><td>冒烟：<code>migrate feature work</code> / <code>migrate feature ghost</code></td><td>「work schema 已是最新：v1」 / CliError 列出已注册项</td></tr>
+</table>
+<h2>新 Feature 接入步骤</h2>
+<p>定义 <code>XXX_SCHEMA_VERSION</code> 常量 → 装配公共点 <code>stamp_baseline</code>（独立库用短连接写法）→ management.py 写薄 <code>_migrate_xxx</code> → 注册表加一行。此后表结构变更一律挂版本号，禁止迁移入口之外隐式改表。</p>
+<p><a href="../backend/modules/naming-audit.html">命名空间审计（P2-4）</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0016 · Core Feature 声明化与产品必需性守卫</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0016 · Core Feature 声明化与产品必需性守卫</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 收尾（§5.2、§6.2）</div>
+
+  <h2>背景</h2>
+  <p>组合根的内置能力（默认 Agent Driver、后台通知 Contributor、Host 路径、Session Source、Team/Kanban Driver Adapter 等）此前由 <code>CrewApp</code> 手写 <code>FeatureScope</code> 注册：有所有权，但没有 Feature 身份——启动审计、<code>dump-features</code> 和依赖图都看不见它们，「哪些能力是产品必需的」只存在于口头约定。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p><code>FeatureDefinition</code> 增加 <code>required_by_product</code> 标记；组合根的内置注册收敛为声明式 FeatureDefinition，经 FeatureRuntime 统一事务激活。<code>deactivate</code> 默认拒绝停用产品必需 Feature（<code>feature_required_by_product</code>），测试与部署装配可显式放行。同步宿主经共享的 <code>run_async_compat</code> 桥调用异步激活（原 plugins 私有桥上移为公共实现）。</p></div>
+  <table>
+    <thead><tr><th>职责</th><th>所有者</th><th>契约</th></tr></thead>
+    <tbody>
+      <tr><td>产品必需性判定</td><td><code>FeatureDefinition.required_by_product</code></td><td>组合根约定：<code>core.*/host.*/gateway.*</code> 必需，<code>product.*</code> 可选；只影响控制面停用，不改变生命周期模型。</td></tr>
+      <tr><td>停用守卫</td><td><code>FeatureRuntime.deactivate</code></td><td>默认抛 <code>FeatureRequiredByProductError</code>；<code>allow_required_by_product=True</code> 供测试/装配放行。配置更新不受限。</td></tr>
+      <tr><td>组合根声明式装配</td><td><code>CrewApp._install_builtin_feature</code></td><td>10 处手写 scope 注册收敛为声明 + 激活；返回 scope 供关闭时逆序 stop，关闭路径不变。</td></tr>
+      <tr><td>同步宿主桥</td><td><code>crew.features.run_async_compat</code></td><td>无循环时 asyncio.run，有循环时 worker 线程持有兼容循环；plugins 私有桥改为委托。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>行为兼容</h2>
+  <ul>
+    <li>全部内置贡献的注册内容、顺序与关闭路径不变（现有 Driver/Context/插件测试全绿）。</li>
+    <li>目录插件的加载/卸载语义不变；<code>_run_async_compat</code> 行为逐字保留，仅上移为共享实现。</li>
+    <li>启动审计与 dump-features 自动覆盖 10 个内置 Feature（其中 6 个 <code>required_by_product=True</code>）。</li>
+  </ul>
+
+  <h2>边界与后续</h2>
+  <p>本切片完成「声明化与产品必需性」，不等于默认 Agent Loop、Tool Runtime、Session/Task、LLM Provider 的资源所有权已迁入 Generation——它们的 store/连接/后台任务仍在 <code>CrewApp.startup()/shutdown()</code> 手写清单中，迁入属阶段 3 的纵向切片。产品控制面（UI/HTTP 的 Feature 开关）尚未暴露 required_by_product 拦截——目前守卫在 Runtime API 层，控制面落地时直接消费该错误码。</p>
+
+  <h2>跨平台</h2>
+  <p>同步桥只用 threading/contextvars 标准库，三平台语义一致。</p>
+
+  <div class="nav"><a href="0015-route-registry-gate.html">ADR-0015</a> · <a href="../modules/plugins.html">Plugins 模块</a> · <a href="../../testing/plugin-architecture-stage-2-core-features.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</div>
+</body>
+</html>

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0019 · Browser Host-loop Feature</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:920px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #1e8449;padding:8px 16px;background:#f7fbf8}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>ADR-0019 · Browser Host-loop Feature</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-04 · 阶段：插件架构 3A</div>
+
+  <h2>背景</h2>
+  <p>Browser 已通过目录插件 Scope 拥有 Tools、Skill、Context Contributor 和 <code>BrowserManager.aclose()</code>，但 Manager 的 <code>startup()</code> 仍由 <code>CrewApp</code> 手写调用。目录插件又在同步构造桥的短命事件循环中激活，不能直接在那里创建长期 idle/prepare Task；<code>CrewApp.browser_manager</code> 还是一次性对象快照，restart 后会过期。</p>
+
+  <h2>决策</h2>
+  <div class="decision">目录插件 manifest 增加 <code>activation_phase</code>。默认 <code>build</code> 保持兼容；Browser 使用 <code>startup</code>，Definition 先 discover，再由宿主事件循环通过同一 FeatureRuntime 激活。</div>
+  <ul>
+    <li>Browser 注册器改为异步：先登记 <code>aclose()</code> disposer，再启动 Manager，随后发布 <code>browser.manager</code> Service、五个 Tools、Skill Root 和标签页 Context Contributor。</li>
+    <li><code>CrewApp.browser_manager</code> 每次解析当前可见 Service；显式注入仅用于嵌入宿主和测试。</li>
+    <li><code>update_plugin_async()</code> 用 restart 策略切换 Generation，失败时由旧 Definition 恢复。</li>
+    <li>pre-activation unload 会抑制后续 phase 激活；重复 unload 保持返回 false。</li>
+    <li>Gateway Browser Router 动态读取 Manager，并以 Browser Tool 是否可见作为 API Gate；路由本体迁入 Route Contribution 留在后续纵向切片。</li>
+  </ul>
+
+  <h2>结果</h2>
+  <p><code>CrewApp.startup()</code> 不再直接认识 BrowserManager。idle/prepare Task、Owner、Session、Tab、Page 与 Driver/Host 进程最终由同一 Generation 的 <code>aclose()</code> 回收；旧 disposer 不会清除新一代 Service。</p>
+
+  <h2>跨平台</h2>
+  <p>新增控制面只使用 asyncio、manifest 数据和 Feature Service Registry。BrowserManager 原有 Electron/Playwright 平台实现及 Windows/macOS/Linux 资源关闭路径保持不变。</p>
+
+  <div class="nav"><a href="../modules/plugins.html">Feature / Plugin 模块</a> · <a href="../../testing/plugin-architecture-stage-3a-browser-runtime.html">测试记录</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

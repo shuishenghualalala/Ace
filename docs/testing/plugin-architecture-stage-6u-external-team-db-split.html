@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6U · 拆库 external+team 批次</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6U · 拆库 external+team 批次</h1>
+<p>2026-09-14 · 提交 <code>3aa48ad</code>（ADR-0038 第四批，子 agent 实施后断网、主 agent 验证审查收口）。双库一次落地：external 4 表 → <code>external.db</code>、team 2 表 → <code>team.db</code>，主库同名旧表保留为回退备份。</p>
+<h2>处置</h2>
+<ul>
+<li>门面单点双路径构造 + 两次域级 copy。</li>
+<li>快照回填障碍采方案 a——复制前在 legacy 连接完成（语义与拆库前逐字一致）。</li>
+<li>主审修复：<code>test_gateway_api</code> 的裸 SQL 校验改从 catalog 门面取 external 库路径。</li>
+</ul>
+<h2>验证记录（子 agent 实施，主 agent 验证审查后复跑）</h2>
+<table><tr><th>项</th><th>结果</th></tr>
+<tr><td>后端全量 <code>pytest tests/ -q</code></td><td>4140 passed / 0 failed</td></tr>
+</table>
+<p>平台说明：纯 SQLite/路径语义，无平台分支；本轮实测为 macOS 本机。ci.yml python 门禁三平台矩阵首跑结果待推送后回填。</p>
+<p><a href="../backend/adr/0038-feature-db-split.html">ADR-0038</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

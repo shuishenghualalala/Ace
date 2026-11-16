@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>故障报告：e2e 测试套件已知问题</title>
+<style>
+  :root{--text:#111;--t2:#4b5563;--muted:#6b7280;--border:#e5e7eb;--soft:#f8fafc;--red:#b91c1c;--amber:#92400e;--green:#166534;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box} body{margin:0;color:var(--text);background:#fff;font-family:var(--sans);line-height:1.75;font-size:15px}
+  .wrap{max-width:980px;margin:0 auto;padding:54px 24px 96px} h1{font-size:30px;line-height:1.3;margin:0 0 8px} h2{font-size:20px;margin:38px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)} h3{font-size:16px;margin:24px 0 8px}
+  .crumb,.meta{color:var(--muted);font-size:13px}.crumb{margin-bottom:8px}.meta{margin-bottom:28px}
+  p,li{color:var(--t2)} code{font:13px var(--mono);background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text)}
+  table{width:100%;border-collapse:collapse;margin:10px 0 18px;font-size:14px} th,td{border:1px solid var(--border);padding:9px 12px;text-align:left;vertical-align:top} th{background:var(--soft);font-weight:650}
+  .banner{border-left:4px solid var(--red);background:#fef2f2;padding:14px 16px;margin:20px 0}.banner b{color:var(--red)}
+  .note{border-left:4px solid #d97706;background:#fffbeb;padding:12px 16px;margin:16px 0}.ok{color:var(--green);font-weight:650}.risk{color:var(--red);font-weight:650}
+  pre{overflow:auto;background:#111827;color:#e5e7eb;padding:14px 16px;border-radius:6px;font:12px/1.6 var(--mono)} a{color:var(--text);text-decoration:none;border-bottom:1px solid #cbd5e1} a:hover{border-bottom-color:var(--text)}
+  .footer{margin-top:42px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="crumb">Ace / 后端模块 / 测试 / 故障报告</div>
+  <h1>e2e 测试套件已知问题</h1>
+  <div class="meta">报告编号：ACE-20260904-E2E-TEST-ISSUES　·　发现日期：2026-09-04　·　状态：待修复</div>
+
+  <div class="banner"><b>结论：</b>合并 <code>perf/skill-index-perf</code> 到 <code>dev</code>（merge commit <code>1ae17ff</code>）的验证期间，发现三类 e2e 测试问题：<b>compact 套件自身失效</b>（合并前代码可复现，与合并无关）、<b>两个真实模型用例的时限预算低于本机模型延迟</b>、以及 <b>e2e 依赖的 API Key 环境变量不会被自动加载</b>。合并代码本身未发现回归：非 e2e 相关测试 151 passed，委派链路端到端通过，skill 索引行为正确。</div>
+
+  <h2>1. 验证范围与通过项</h2>
+  <table>
+    <thead><tr><th>测试</th><th>结果</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>tests/test_skills.py</code>、<code>tests/test_subagent.py</code>、<code>tests/test_eventloop_blocking.py</code></td><td class="ok">151 passed, 8 skipped</td><td>合并涉及的默认套件，全绿</td></tr>
+      <tr><td><code>tests/test_e2e_subagent.py</code></td><td>4 passed, 1 failed, 1 skipped</td><td>失败与跳过见问题二</td></tr>
+      <tr><td><code>tests/test_e2e_compact.py</code></td><td>1 passed, 6 failed</td><td>失败见问题一</td></tr>
+      <tr><td>批量场景 <code>delegate_task_batch</code></td><td class="ok">PASSED（28.8s）</td><td>委派链路端到端正常</td></tr>
+      <tr><td>批量场景 <code>site_skill_survives_compaction</code></td><td>FAILED（超时）</td><td>见问题二；行为本身正确</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. 问题一：compact e2e 套件失效（与本次合并无关）</h2>
+  <h3>2.1 现象</h3>
+  <ul>
+    <li>全量运行时仅 <code>test_deepseek_connection</code> 通过，其余 6 个用例在测试自身的 setup 步骤（<code>app.session_store.save</code>，<code>crew/state/session_store.py:354</code> → <code>crew/state/sqlite.py:102</code>）抛出 <code>sqlite3.ProgrammingError: Cannot operate on a closed database</code>。</li>
+    <li>单独运行 <code>test_l1_microcompact_clears_old_tools</code> 不触发数据库错误，但在 <code>tests/test_e2e_compact.py:221</code> 报 <code>未找到该 session 的 LLM 请求 trace</code> —— 对 <code>llm.jsonl</code> 的 trace 查找与当前应用行为不匹配。</li>
+  </ul>
+  <h3>2.2 两个独立缺陷</h3>
+  <table>
+    <thead><tr><th>缺陷</th><th>事实</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td>A. trace 断言失效</td><td>单独运行即失败；<code>read_trace_entries</code> 类辅助函数按 session 过滤 <code>llm.jsonl</code> 的约定与当前写入行为不一致</td><td>任何依赖 trace 断言的 compact 用例都无法通过</td></tr>
+      <tr><td>B. 共享 app 生命周期</td><td>fixture 为 <code>scope="module"</code>（<code>test_e2e_compact.py:150</code>），7 个用例共用一个 app；第一个用例结束后 SQLite 连接即被关闭。代码库中 <code>CrewApp.shutdown</code> / <code>_close_persistent_stores</code> 没有被测试路径显式调用的入口，关闭来源未定位</td><td>第一个用例之后的所有用例必挂</td></tr>
+    </tbody>
+  </table>
+  <h3>2.3 与合并无关的证据</h3>
+  <p>在合并前的 <code>dev</code>（<code>a8d337a</code>）临时 worktree 中，配置相同、单独运行 <code>test_l1_microcompact_clears_old_tools</code>，结果同为 FAILED（trace 断言）。同一次运行中模型链路健康：单次 LLM 请求 total 8.362s，<code>run_total</code> 33.24s。</p>
+
+  <h2>3. 问题二：真实模型用例的时限预算不足</h2>
+  <table>
+    <thead><tr><th>用例</th><th>预算</th><th>实际</th><th>行为证据</th></tr></thead>
+    <tbody>
+      <tr><td><code>test_e2e_run_agent_explore</code></td><td><code>collect_chunks</code> timeout=240s（<code>tests/_e2e_helpers.py:26</code> 超时后追加「总超时」错误帧）</td><td>超时</td><td>合并代码 PERF 日志健康：<code>skills_index</code> 0.145s、<code>build_prompts</code> 0.165s；失败仅因总时长超预算</td></tr>
+      <tr><td>批量场景 <code>site_skill_survives_compaction</code></td><td><code>timeout_seconds: 600</code>（<code>tests/e2e/scenarios.yaml</code>）</td><td>717.2s 被 runner 终止</td><td>工作全部完成：3 个 widget、<code>app-notes.md</code>、<code>interaction-notes.md</code>、最后一帧为正常 <code>final</code>；全案 265 次 LLM 请求、<code>skill_view</code> 仅 4 次 start（无重复读取，watcher 化索引行为正确）</td></tr>
+    </tbody>
+  </table>
+  <p class="note">这类失败是「预算 vs 本机模型延迟」问题：<code>deepseek-v4-flash</code>（火山方舟）单次请求延迟叠加多轮任务后超出预算。断言的行为本身没有错。</p>
+
+  <h2>4. 问题三：e2e 的 API Key 环境依赖</h2>
+  <ul>
+    <li>应用从 profile 的 <code>api_key_env</code> 指定的<b>进程环境变量</b>读取 Key（本机为 <code>CREW_MODEL_API_KEY</code>，见 <code>config/config.yaml</code> 的 <code>llm.models.default</code>）。</li>
+    <li>仓库根的 <code>.env</code> 不会被 e2e 自动加载：e2e 使用隔离的临时 <code>crew_home</code>，只加载 <code>{crew_home}/.env</code>。</li>
+    <li>e2e 文件头注释约定的用法即为环境变量方式（<code>CREW_MODEL_API_KEY=... pytest -m e2e ...</code>）。批量 runner（<code>tests/e2e/_run_case.py</code>）内有从 <code>CREW_MODEL_API_KEY</code> 补齐 profile Key 的桥接，pytest e2e 文件没有，需直接提供该环境变量。</li>
+    <li>本机 <code>.env</code> 与 <code>config/config.yaml</code> 已于 2026-09-04 配置完成（均为 gitignore 文件），e2e 已可运行。</li>
+  </ul>
+
+  <h2>5. 建议修复方向</h2>
+  <ol>
+    <li>compact 套件：修正 <code>llm.jsonl</code> trace 查找约定；定位共享 app 的连接关闭来源，或将 fixture 改为每用例独立 app。</li>
+    <li>预算调整：<code>test_e2e_run_agent_explore</code> 的 240s 与 <code>site_skill_survives_compaction</code> 的 600s 按本机模型延迟放宽（例如 480s / 900s），或在文档中明确这些用例的最低模型速度要求。</li>
+    <li>问题三无需修代码，属运行约定；如需更顺滑，可让 e2e 辅助函数统一支持从仓库根 <code>.env</code> 读取。</li>
+  </ol>
+
+  <div class="footer">报告生成于 2026-09-04 · 验证环境：Windows · dev @ 553e06a · 模型 deepseek-v4-flash（火山方舟）</div>
+</main>
+</body>
+</html>

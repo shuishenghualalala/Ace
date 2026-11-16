@@ -4,6 +4,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  PYTHONUTF8: '1'
+
 jobs:
   native-security:
     runs-on: windows-2025
@@ -35,14 +38,17 @@ jobs:
           ACE_REQUIRE_NATIVE_TESTS: '1'
           ACE_WINDOWS_NATIVE_STATE_DIR: '${{ runner.temp }}\ace-security-state'
           ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
+      - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe --output desktop/security-runtime-bin
       - run: uv run pytest tests/security -q
+        env:
+          ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
+          ACE_WINDOWS_NATIVE_STATE_DIR: '${{ runner.temp }}\ace-security-state'
       - run: python tests/security/security_matrix.py --platform windows --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe
         env:
           ACE_REQUIRE_NATIVE_SECURITY: '1'
           ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
       - shell: pwsh
         run: ./tests/security/windows_install_matrix.ps1 -Runtime ./security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe
-      - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe --output desktop/security-runtime-bin
       - run: node desktop/scripts/verify-security-runtime.mjs desktop/security-runtime-bin
       - name: Bind Windows evidence to the tested release artifact
         shell: pwsh
@@ -68,4 +74,8 @@ jobs:
       - name: Remove Windows sandbox fixture
         if: always()
         shell: pwsh
-        run: ./security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe --windows-uninstall '${{ runner.temp }}\ace-security-state'
+        run: |
+          $runtime = './security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe'
+          if (Test-Path $runtime) {
+            & $runtime --windows-uninstall '${{ runner.temp }}\ace-security-state'
+          }

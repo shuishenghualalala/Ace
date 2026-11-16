@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0027 · 外援 Catalog 与 Team 存储边界</title>
+<style>body{font:15px/1.75 system-ui,sans-serif;color:#222;max-width:920px;margin:auto;padding:48px 24px}h2{border-bottom:1px solid #ddd;padding-bottom:8px}code{background:#f5f5f5;padding:2px 5px}a{color:#245a83}</style></head>
+<body><main>
+<h1>ADR-0027 · 外援 Catalog 与 Team 存储边界</h1>
+<p>状态：Accepted · 日期：2026-09-08 · 阶段：4A-1（Catalog/Profile 与 Team 存储边界）。</p>
+<h2>背景与候选方案</h2>
+<p>ExternalAgentStore 直接导入 Team 的 Profile、能力词汇及角色规则，同时拥有 Team 表、编队历史迁移和团队 CRUD。只移动导入或注入角色回调无法消除业务所有权耦合。把完整门面留在外援模块也会继续引入外援到 Team 的依赖。</p>
+<h2>决定</h2>
+<p>外援公开 <code>ExternalAgentCatalog</code> 契约及共享 Profile、能力词汇；角色映射和编队规则保留在 Team。现有 ExternalAgentStore 成为可独立初始化的 Catalog SQLite 实现，不创建或查询 Team 表。实际外援消费者按契约调用，使测试 Provider 可以替换具体存储。</p>
+<p>Team 模块拥有兼容存储门面，负责 Team 表、成员表、历史 formation 迁移、CRUD 及团队引用删除守卫。宿主组合根构造该门面，保持 <code>app.external_agents</code> 的既有用户可见行为。删除守卫与实际删除保持事务一致性。表名、已有业务数据和返回字段保持兼容。</p>
+<p>Team 旧 Profile 与能力入口只显式转出共享实现；兼容入口的删除目标为阶段 4C，消费者为 Team Formation、Planner、Task Runtime 及其测试，届时迁到公共描述接口。共享能力到具体角色的映射继续由 Team 维护。</p>
+<h2>范围、验证与回退</h2>
+<p>本切片不接入 Provider、子进程、Run、工具和路由的 Generation 生命周期；这些仍是阶段 4A 的待办。生产组合根在 4A-2 前继续构造 Team 门面以保持既有行为；<code>enable_team=False</code> 的既有语义保持不变（仅不构造 InProcessTeamManager）。验收包括纯 Catalog 独立存储、Owner 隔离、Profile/model overlay 兼容、fake Catalog 驱动真实 ClientExecutor consumer、Team 默认角色与历史迁移，以及移除外援到 Team 的依赖豁免（import-linter 全契约通过）。</p>
+<p>实现使用 SQLite 与 Python 标准库，路径使用平台无关抽象。macOS、Linux、Windows 的实际测试覆盖分别记录，不能以本机运行代替三平台验证。回退通过撤销本切片提交恢复旧装配，不删除数据。</p>
+<p><a href="../modules/agent.html">Agent 模块</a> · <a href="../modules/team.html">Team 模块</a> · <a href="../../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

@@ -24,11 +24,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from crew.channels.platform_registry import PlatformConfig  # noqa: F401 - 类型参考/对外
 from crew.core.envelope import Envelope
 from crew.core.interfaces import Channel, MessageHandler
-from crew.gateway.platform_registry import PlatformConfig  # noqa: F401 - 类型参考/对外
-from crew.gateway.response_filters import apply_text_filters
-from crew.gateway.session_context import SessionSource, build_session_key
+from crew.features.response_filters import apply_text_filters
+from crew.features.session_context import SessionSource, build_session_key
 from crew.state.logging import get_logger
 
 from . import ilink
@@ -139,6 +139,7 @@ class WeixinChannel(Channel):
         self._dedup_revision = 0
         self._dedup_persisted_revision = 0
         self._dedup_persist_task: asyncio.Task[None] | None = None
+        self._fire_and_forget_tasks: set[asyncio.Task] = set()
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._recent_downloads: dict[str, float] = {}
         self._connected = False
@@ -223,7 +224,7 @@ class WeixinChannel(Channel):
         self._initial_updates = response
 
     async def stop(self) -> None:
-        """停止逻辑入口：取消轮询任务并关闭会话。物理断连仍由 Gateway 受控重启完成。"""
+        """停止逻辑入口：取消轮询任务、fire-and-forget 任务并关闭会话。物理断连仍由 Gateway 受控重启完成。"""
         self._stopped = True
         self._connected = False
         self._handler = None
@@ -235,6 +236,15 @@ class WeixinChannel(Channel):
             except asyncio.CancelledError:
                 pass
         self._poll_task = None
+
+        fire_and_forget = set(self._fire_and_forget_tasks)
+        for task in fire_and_forget:
+            if not task.done():
+                task.cancel()
+        if fire_and_forget:
+            await asyncio.gather(*fire_and_forget, return_exceptions=True)
+        self._fire_and_forget_tasks.clear()
+
         for session in (self._poll_session, self._send_session):
             if session is not None and not session.closed:
                 await session.close()
@@ -260,19 +270,45 @@ class WeixinChannel(Channel):
         }
 
     # -- Owner 门禁（与其它渠道一致）--------------------------------------- #
+    def _gateway_owner(self) -> str:
+        return str(getattr(self, "_gateway_owner_account_id", "") or "").strip()
+
+    def _owner_lease(self, owner: str):
+        active_owner = self._app.active_owner
+        getter = getattr(active_owner, "get", None)
+        return getter(owner) if owner and callable(getter) else active_owner.current()
+
+    def _owner_is_draining(self, owner: str) -> bool:
+        coordinator = getattr(self._app, "logout_coordinator", None)
+        if coordinator is None:
+            return False
+        try:
+            return bool(coordinator.is_draining(owner))
+        except TypeError:
+            return bool(coordinator.is_draining())
+
+    def _owner_binding(self, owner: str) -> str:
+        bindings = getattr(self._app, "channel_bindings", None)
+        if bindings is None:
+            return ""
+        try:
+            return str(bindings.get_binding(self.name, owner) or "")
+        except TypeError:
+            return str(bindings.get_binding(self.name) or "")
+
     def _owner_may_connect(self) -> bool:
         if self._app is None:
             return True
         try:
-            lease = self._app.active_owner.current()
+            owner = self._gateway_owner()
+            lease = self._owner_lease(owner)
             if lease is None:
                 return False
-            coordinator = getattr(self._app, "logout_coordinator", None)
-            if coordinator is not None and coordinator.is_draining():
+            active_owner = str(lease.owner_account_id or "")
+            if self._owner_is_draining(active_owner):
                 return False
-            bindings = getattr(self._app, "channel_bindings", None)
-            bound_owner = str(bindings.get_binding(self.name) or "") if bindings is not None else ""
-            return not bound_owner or bound_owner == str(lease.owner_account_id or "")
+            bound_owner = self._owner_binding(active_owner)
+            return not bound_owner or bound_owner == active_owner
         except Exception as exc:  # noqa: BLE001 - 身份事实源异常必须 fail closed
             log.warning("Weixin 连接 Owner 门禁读取失败: %s", exc)
             return False
@@ -281,16 +317,17 @@ class WeixinChannel(Channel):
         if self._app is None:
             return True
         try:
-            lease = self._app.active_owner.current()
+            owner = self._gateway_owner()
+            lease = self._owner_lease(owner)
             if lease is None:
                 return False
-            coordinator = getattr(self._app, "logout_coordinator", None)
-            if coordinator is not None and coordinator.is_draining():
+            active_owner = str(lease.owner_account_id or "")
+            if self._owner_is_draining(active_owner):
                 return False
-            bindings = getattr(self._app, "channel_bindings", None)
-            return bindings is not None and str(bindings.get_binding(self.name) or "") == str(
-                lease.owner_account_id or ""
-            )
+            bound_owner = self._owner_binding(active_owner)
+            if not bound_owner:
+                return True
+            return bound_owner == active_owner
         except Exception as exc:  # noqa: BLE001 - 身份事实源异常必须 fail closed
             log.warning("Weixin Active Owner 门禁读取失败: %s", exc)
             return False
@@ -367,7 +404,7 @@ class WeixinChannel(Channel):
                     ilink.save_sync_buf(self.settings.sync_buf_path(), sync_buf)
 
                 for message in response.get("msgs") or []:
-                    asyncio.create_task(self._process_message_safe(message))
+                    self._track_fire_and_forget(asyncio.create_task(self._process_message_safe(message)))
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001 - 单次轮询失败不能终止通道
@@ -385,6 +422,16 @@ class WeixinChannel(Channel):
                 )
                 if consecutive_failures >= ilink.MAX_CONSECUTIVE_FAILURES:
                     consecutive_failures = 0
+
+    def _track_fire_and_forget(self, task: asyncio.Task) -> asyncio.Task:
+        """跟踪 fire-and-forget 任务，确保 stop() 时能 cancel 并等待。"""
+        self._fire_and_forget_tasks.add(task)
+
+        def _remove(_t: asyncio.Task) -> None:
+            self._fire_and_forget_tasks.discard(_t)
+
+        task.add_done_callback(_remove)
+        return task
 
     async def _process_message_safe(self, message: dict[str, Any]) -> None:
         try:
@@ -427,7 +474,7 @@ class WeixinChannel(Channel):
         context_token = str(message.get("context_token") or "").strip()
         if context_token:
             self._token_store.set(self._account_id, sender_id, context_token)
-        asyncio.create_task(self._maybe_fetch_typing_ticket(sender_id, context_token or None))
+        self._track_fire_and_forget(asyncio.create_task(self._maybe_fetch_typing_ticket(sender_id, context_token or None)))
 
         parsed = {
             "message_id": message_id,

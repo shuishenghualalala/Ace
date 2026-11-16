@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>阶段 6F · Gateway 流事件出口灰度开关</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;max-width:960px;margin:auto;padding:32px 24px;color:#222}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:left}code{background:#f4f4f4}a{color:#245a83}</style></head>
+<body><main>
+<h1>阶段 6F · Gateway 流事件出口灰度开关</h1>
+<p>2026-09-11。兼容层删除路线 Step 2（依据 6C 就绪度调查）：为 WS 出口增加 feature_event 透传灰度开关。基线提交 36b0a92；已验收通过并随本记录提交。</p>
+<h2>方案</h2>
+<p>环境变量 <code>CREW_GATEWAY_FEATURE_EVENT_PASSTHROUGH</code>（模块加载时解析一次缓存，热路径不读 env；1/true/yes/on 大小写不敏感）。默认关闭=现状（出口转换旧帧、未登记丢弃、replay 缓存旧帧）；开启后 feature_event 帧原样透传——插件贡献的未登记事件不再被出口丢弃，回放缓存与线上帧同形态。短路点在 <code>push_payload</code> 的 expand 调用（<code>_outgoing_frames</code>），推送/缓存时序与限流语义不变；启动日志输出当前出口模式。迁移期临时机制，删除条件 = Step 3 随 event_compat 整体摘除。</p>
+<h2>验收契约</h2>
+<table><tr><th>场景</th><th>证据</th><th>状态</th></tr>
+<tr><td>开关解析</td><td>缺省 off；1/true/yes/on/TRUE/On → on；0/false/no/off/空 → off</td><td>✅ 7 用例</td></tr>
+<tr><td>关闭时逐字节现状</td><td>已登记转换旧 kind + 帧级字段透传；未登记丢弃（不占 gateway_sequence）；replay 出旧帧；非 feature_event 不受影响</td><td>✅ 4 用例</td></tr>
+<tr><td>开启时透传</td><td>已登记事件原帧直发；kanban body 不重建 event 字段；未登记插件事件到达客户端；v2 不丢；replay 帧与直发帧逐字节相等</td><td>✅ 7 用例</td></tr>
+<tr><td>开关切换</td><td>开→插件事件送达；关→恢复丢弃与转换</td><td>✅ 1 用例</td></tr>
+</table>
+<h2>验证记录（子 agent 执行后主 agent 复跑）</h2>
+<table><tr><th>命令</th><th>结果</th></tr>
+<tr><td><code>pytest tests/gateway/test_event_passthrough.py tests/gateway/test_event_compat.py tests/gateway/test_ws_subscribe.py -q</code></td><td>56 passed</td></tr>
+<tr><td><code>ruff check</code> / <code>compileall -q crew</code> / <code>lint-imports</code></td><td>通过 / 通过 / 7 kept 0 broken</td></tr>
+</table>
+<h2>已知边界</h2>
+<ul>
+<li>透传帧按普通帧参与出口限流（与旧路径对转换后帧一致）。</li>
+<li>开关为进程级一次性读取，运行中改 env 需重启生效（重启灰度语义，启动日志可诊断）。</li>
+<li>第一方客户端就绪前提已满足：Desktop 6D 完成双协议等价、Web 双解析、CLI 不经 Gateway。Step 3（删 event_compat）前仍需：透传模式全量回归 + 已发布旧客户端最低支持版本的产品决策。</li>
+</ul>
+<p><a href="plugin-architecture-stage-6d-desktop-feature-event-path.html">阶段 6D</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进计划</a></p>
+</main></body></html>

@@ -19,10 +19,33 @@ function compactText(value?: string): string {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function mergedTeamTurnTiming(
+  existing: UiMessage,
+  incoming: UiMessage,
+): Pick<UiMessage, "turnStartedAt" | "turnDurationMs"> {
+  const turnStartedAt = existing.turnStartedAt ?? incoming.turnStartedAt;
+  const persistedDuration = incoming.turnDurationMs ?? existing.turnDurationMs;
+  const turnDurationMs = !isTeamStream(incoming) && turnStartedAt != null
+    ? Math.max(0, persistedDuration ?? (incoming.timestamp || 0) - turnStartedAt)
+    : persistedDuration;
+  return {
+    ...(turnStartedAt != null ? { turnStartedAt } : {}),
+    ...(turnDurationMs != null ? { turnDurationMs } : {}),
+  };
+}
+
 export function isDuplicateAssistantOfTeamResult(existing: UiMessage, incoming: UiMessage): boolean {
   const assistant = existing.role === "assistant" ? existing : incoming.role === "assistant" ? incoming : null;
   const team = existing.role === "team_internal" ? existing : incoming.role === "team_internal" ? incoming : null;
   if (!assistant || !team || !isTeamNodeResult(team)) return false;
+  if (assistant.requestId || team.requestId) {
+    return Boolean(
+      assistant.requestId
+      && team.requestId
+      && assistant.requestId === team.requestId
+      && team.eventType === "team_summary",
+    );
+  }
   const assistantText = compactText(assistant.text);
   const teamText = compactText(team.text);
   if (!assistantText || !teamText) return false;
@@ -37,6 +60,29 @@ function isTeamPlanningProgress(message: UiMessage): boolean {
   return message.eventType === "team_planning_progress";
 }
 
+function isUserMentionAnswer(message: UiMessage): boolean {
+  return message.communicationKind === "user_mention_answer" && Boolean(message.requestId);
+}
+
+function sameTeamRequest(existing: UiMessage, incoming: UiMessage): boolean {
+  const existingRequestId = String(existing.requestId || "").trim();
+  const incomingRequestId = String(incoming.requestId || "").trim();
+  if (existingRequestId || incomingRequestId) {
+    return Boolean(existingRequestId && incomingRequestId && existingRequestId === incomingRequestId);
+  }
+  return Boolean(
+    existing.sourceSessionId
+    && incoming.sourceSessionId
+    && existing.sourceSessionId === incoming.sourceSessionId,
+  );
+}
+
+function hasDifferentTeamRequests(existing: UiMessage, incoming: UiMessage): boolean {
+  const existingRequestId = String(existing.requestId || "").trim();
+  const incomingRequestId = String(incoming.requestId || "").trim();
+  return Boolean(existingRequestId && incomingRequestId && existingRequestId !== incomingRequestId);
+}
+
 function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean {
   return existing.role === "team_internal"
     && incoming.role === "team_internal"
@@ -45,7 +91,7 @@ function isDuplicateTeamEvent(existing: UiMessage, incoming: UiMessage): boolean
     && existing.eventType === incoming.eventType
     && existing.nodeId === incoming.nodeId
     && (existing.agentId || existing.mentionFrom) === (incoming.agentId || incoming.mentionFrom)
-    && existing.sourceSessionId === incoming.sourceSessionId
+    && sameTeamRequest(existing, incoming)
     && existing.text.trim() === incoming.text.trim();
 }
 
@@ -75,6 +121,7 @@ function teamTurnKey(message: UiMessage): string {
 function matchesTeamNode(existing: UiMessage, incoming: UiMessage): boolean {
   if (existing.role !== "team_internal") return false;
   if (!isTeamStream(existing) && !isTeamNodeResult(existing) && !isTeamPlanningProgress(existing)) return false;
+  if (hasDifferentTeamRequests(existing, incoming)) return false;
   if (incoming.nodeId && existing.nodeId === incoming.nodeId) {
     const existingTurn = teamTurnKey(existing);
     const incomingTurn = teamTurnKey(incoming);
@@ -108,15 +155,55 @@ export function mergeTeamInternalMessage(
   if (withoutDuplicateAssistant.some((message) => isDuplicateTeamEvent(message, incoming))) {
     return withoutDuplicateAssistant;
   }
+  if (isUserMentionAnswer(incoming)) {
+    const communicationIndex = withoutDuplicateAssistant.findIndex((message) =>
+      isUserMentionAnswer(message)
+      && message.requestId === incoming.requestId
+      && message.agentId === incoming.agentId,
+    );
+    if (communicationIndex >= 0) {
+      const matched = withoutDuplicateAssistant[communicationIndex];
+      if (isTeamStream(incoming) && !isTeamStream(matched)) {
+        return [
+          ...withoutDuplicateAssistant.slice(0, communicationIndex),
+          { ...matched, ...incoming },
+          ...withoutDuplicateAssistant.slice(communicationIndex + 1),
+        ];
+      }
+      if (!isTeamStream(incoming)) {
+        const matchedProcessText = isTeamStream(matched)
+          && (matched.text || '').trim()
+          && (matched.text || '').trim() !== (incoming.text || '').trim()
+          ? matched.processText || matched.text
+          : incoming.processText;
+        return [
+          ...withoutDuplicateAssistant.slice(0, communicationIndex),
+          {
+            ...matched,
+            ...incoming,
+            displayMode: incoming.displayMode || matched.displayMode,
+            collapsedTitle: matched.collapsedTitle || incoming.collapsedTitle,
+            processText: matchedProcessText,
+            thinking: mergeThinking(matched.thinking, incoming.thinking),
+            toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+            ...mergedTeamTurnTiming(matched, incoming),
+          },
+          ...withoutDuplicateAssistant.slice(communicationIndex + 1),
+        ];
+      }
+      // 流式 direct mention 继续进入下面的 append 合并，不覆盖已有过程。
+    }
+  }
   const matchingIndex = findMatchingTeamNode(withoutDuplicateAssistant, incoming);
 
   if (isTeamPlanningProgress(incoming) && matchingIndex >= 0) {
     return [
-      ...withoutDuplicateAssistant.slice(0, matchingIndex),
-      {
-        ...withoutDuplicateAssistant[matchingIndex],
-        ...incoming,
-      },
+        ...withoutDuplicateAssistant.slice(0, matchingIndex),
+        {
+          ...withoutDuplicateAssistant[matchingIndex],
+          ...incoming,
+          ...mergedTeamTurnTiming(withoutDuplicateAssistant[matchingIndex], incoming),
+        },
       ...withoutDuplicateAssistant.slice(matchingIndex + 1),
     ];
   }
@@ -145,6 +232,7 @@ export function mergeTeamInternalMessage(
           processText: preservedProcessText,
           thinking: mergeThinking(matched.thinking, incoming.thinking),
           toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+          ...mergedTeamTurnTiming(matched, incoming),
         }
       : {
           ...matched,
@@ -152,6 +240,7 @@ export function mergeTeamInternalMessage(
           displayMode,
           thinking: mergeThinking(matched.thinking, incoming.thinking),
           toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+          ...mergedTeamTurnTiming(matched, incoming),
         };
     return [
       ...withoutDuplicateAssistant.slice(0, matchingIndex),
@@ -172,9 +261,12 @@ export function mergeTeamInternalMessage(
       ...withoutDuplicateAssistant.slice(0, matchingIndex),
       {
         ...matched,
-        text: `${matched.text ?? ""}${incoming.text ?? ""}`,
+        text: mergeStreamingText(matched.text, incoming.text),
         thinking: mergeThinking(matched.thinking, incoming.thinking, true),
         toolCalls: mergeAgentToolCalls(matched.toolCalls, incoming.toolCalls),
+        processText: mergeStreamingText(matched.processText, incoming.processText),
+        turnStartedAt: matched.turnStartedAt ?? incoming.turnStartedAt,
+        turnDurationMs: incoming.turnDurationMs ?? matched.turnDurationMs,
         timestamp: incoming.timestamp,
       },
       ...withoutDuplicateAssistant.slice(matchingIndex + 1),

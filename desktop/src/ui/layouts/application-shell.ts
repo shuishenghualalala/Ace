@@ -1,6 +1,7 @@
 import { createIcon, MONOCHROME_ICON_CLASS } from '../components/icon';
 import {
-  resolveShellNavigation,
+  createShellNavigationRegistry,
+  type ShellNavigationRegistry,
   type FeatureState,
   type ShellFeatureStates,
   type ShellLocation,
@@ -19,6 +20,36 @@ const PRODUCT_LABEL: Record<ProductMode, string> = {
   work: 'Crew 办公助手',
 };
 
+const APP_CONTEXT_WIDTH_KEY = 'crew.desktop.appContextWidth.v1';
+const APP_CONTEXT_DEFAULT_WIDTH = 260;
+const APP_CONTEXT_MIN_WIDTH = 220;
+const APP_CONTEXT_MAX_WIDTH = 480;
+
+function clampAppContextWidth(width: number): number {
+  if (!Number.isFinite(width)) return APP_CONTEXT_DEFAULT_WIDTH;
+  const viewportCap = Math.max(APP_CONTEXT_MIN_WIDTH, Math.floor(window.innerWidth * 0.45));
+  return Math.max(APP_CONTEXT_MIN_WIDTH, Math.min(APP_CONTEXT_MAX_WIDTH, viewportCap, Math.round(width)));
+}
+
+function loadAppContextWidth(storage: Storage): number {
+  try {
+    const raw = storage.getItem(APP_CONTEXT_WIDTH_KEY);
+    const parsed = raw == null ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? clampAppContextWidth(parsed) : APP_CONTEXT_DEFAULT_WIDTH;
+  } catch {
+    return APP_CONTEXT_DEFAULT_WIDTH;
+  }
+}
+
+function persistAppContextWidth(storage: Storage, width: number | null): void {
+  try {
+    if (width == null) storage.removeItem(APP_CONTEXT_WIDTH_KEY);
+    else storage.setItem(APP_CONTEXT_WIDTH_KEY, String(clampAppContextWidth(width)));
+  } catch {
+    // localStorage unavailable: retain the in-memory width.
+  }
+}
+
 export interface ApplicationShellCommands {
   minimize?: () => void | Promise<void>;
   maximize?: () => void | Promise<void>;
@@ -33,6 +64,7 @@ export interface ApplicationShellOptions {
   features?: ShellFeatureStates;
   storage?: Storage;
   productIconUrl?: string;
+  navigationRegistry?: ShellNavigationRegistry;
   onNavigate?: (location: ShellLocation, productMode: ProductMode) => boolean | void;
   onProductModeChange?: (productMode: ProductMode) => void;
 }
@@ -102,6 +134,7 @@ export function createApplicationShell(
   const storage = options.storage ?? localStorage;
   let features = options.features ?? {};
   let disposed = false;
+  const navigationRegistry = options.navigationRegistry ?? createShellNavigationRegistry();
 
   restoreProductMode(storage);
 
@@ -118,6 +151,7 @@ export function createApplicationShell(
   const contextHeader = document.createElement('header');
   const contextTitle = document.createElement('strong');
   const contextContent = document.createElement('div');
+  const contextSash = document.createElement('div');
   const historyActions = document.createElement('div');
 
   element.className = 'mw-application-shell';
@@ -132,7 +166,24 @@ export function createApplicationShell(
   productIcon.src = options.productIconUrl ?? './icon.png';
   productIcon.alt = '';
   productLabel.className = 'mw-sidebar-brand__label';
-  productBrand.append(productIcon, productLabel);
+  // 通知中心铃铛：挂在 brand 块右上角（绝对定位，不挤占 logo/名称布局），
+  // 未读角标由 features/notification-center.ts 负责显隐与计数。
+  const notificationBell = document.createElement('button');
+  notificationBell.type = 'button';
+  notificationBell.id = 'notification-bell-btn';
+  notificationBell.className = 'mw-notification-bell';
+  notificationBell.title = '通知';
+  notificationBell.setAttribute('aria-label', '通知');
+  notificationBell.setAttribute('aria-haspopup', 'dialog');
+  const notificationBadge = document.createElement('span');
+  notificationBadge.id = 'notification-badge';
+  notificationBadge.className = 'mw-notification-bell__badge';
+  notificationBadge.hidden = true;
+  notificationBell.append(
+    createIcon('icon-bell', { className: 'mw-notification-bell__icon' }),
+    notificationBadge,
+  );
+  productBrand.append(productIcon, productLabel, notificationBell);
 
   windowCommands.className = 'mw-window-commands';
   windowCommands.append(
@@ -147,6 +198,14 @@ export function createApplicationShell(
   template.slots.context?.classList.add('mw-app-context');
   template.slots.main.classList.add('mw-app-page-outlet');
   template.slots.main.dataset.shellPageOutlet = '';
+  contextSash.className = 'mw-app-context__sash';
+  contextSash.dataset.shellContextSash = '';
+  contextSash.setAttribute('role', 'separator');
+  contextSash.setAttribute('aria-orientation', 'vertical');
+  contextSash.setAttribute('aria-label', '调整历史列表宽度');
+  contextSash.title = '拖拽调整历史列表宽度，双击复位';
+  contextSash.tabIndex = 0;
+  if (template.slots.context) template.element.insertBefore(contextSash, template.slots.main);
   navigation.className = 'mw-app-navigation';
   navigationList.className = 'mw-app-navigation__list';
   navigationList.setAttribute('aria-label', '主导航');
@@ -216,12 +275,74 @@ export function createApplicationShell(
   template.element.append(restoreContextCommand);
   element.append(titlebar, template.element);
 
+  let contextWidth = loadAppContextWidth(storage);
+  let finishContextResize: (() => void) | null = null;
+  const applyContextWidth = (width: number | null): void => {
+    if (width == null) {
+      contextWidth = APP_CONTEXT_DEFAULT_WIDTH;
+      template.element.style.removeProperty('--mw-app-context-width');
+    } else {
+      contextWidth = clampAppContextWidth(width);
+      template.element.style.setProperty('--mw-app-context-width', `${contextWidth}px`);
+    }
+    contextSash.setAttribute('aria-valuemin', String(APP_CONTEXT_MIN_WIDTH));
+    contextSash.setAttribute('aria-valuemax', String(APP_CONTEXT_MAX_WIDTH));
+    contextSash.setAttribute('aria-valuenow', String(contextWidth));
+  };
+  applyContextWidth(contextWidth);
+
+  const onContextSashMouseDown = (event: MouseEvent): void => {
+    if (contextSash.hidden || element.dataset.navigationCollapsed === 'true') return;
+    const startX = event.clientX;
+    const startWidth = contextWidth;
+    let currentWidth = startWidth;
+    const onMove = (moveEvent: MouseEvent): void => {
+      currentWidth = clampAppContextWidth(startWidth + moveEvent.clientX - startX);
+      applyContextWidth(currentWidth);
+    };
+    const onUp = (): void => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      finishContextResize = null;
+      contextSash.classList.remove('is-dragging');
+      document.body.classList.remove('mw-app-context-resizing');
+      persistAppContextWidth(storage, currentWidth);
+    };
+    finishContextResize = onUp;
+    contextSash.classList.add('is-dragging');
+    document.body.classList.add('mw-app-context-resizing');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    event.preventDefault();
+  };
+  const onContextSashDoubleClick = (): void => {
+    if (contextSash.hidden || element.dataset.navigationCollapsed === 'true') return;
+    applyContextWidth(null);
+    persistAppContextWidth(storage, null);
+  };
+  const onContextSashKeyDown = (event: KeyboardEvent): void => {
+    if (contextSash.hidden || element.dataset.navigationCollapsed === 'true') return;
+    if (event.key === 'Home') {
+      onContextSashDoubleClick();
+      event.preventDefault();
+      return;
+    }
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const delta = event.key === 'ArrowRight' ? 16 : -16;
+    applyContextWidth(contextWidth + delta);
+    persistAppContextWidth(storage, contextWidth);
+    event.preventDefault();
+  };
+  contextSash.addEventListener('mousedown', onContextSashMouseDown);
+  contextSash.addEventListener('dblclick', onContextSashDoubleClick);
+  contextSash.addEventListener('keydown', onContextSashKeyDown);
+
   const switchProductMode = (productMode: ProductMode): void => {
     if (productModeStore.get().productMode === productMode) return;
     setProductMode(productMode, storage);
     options.onProductModeChange?.(productMode);
     const state = productModeStore.get();
-    const item = resolveShellNavigation(productMode, features).find(
+    const item = navigationRegistry.resolve(productMode, features).find(
       (candidate) =>
         candidate.id === state.views[productMode].lastPosition &&
         candidate.featureState === 'available',
@@ -237,7 +358,7 @@ export function createApplicationShell(
         : undefined;
     const state = productModeStore.get();
     const modeView = state.views[state.productMode];
-    const items = resolveShellNavigation(state.productMode, features);
+    const items = navigationRegistry.resolve(state.productMode, features);
     navigationList.replaceChildren();
     for (const item of items) {
       const button = document.createElement('button');
@@ -307,6 +428,7 @@ export function createApplicationShell(
     syncCollapseCommand(contextCollapseCommand, '上下文');
     syncCollapseCommand(historyCollapseCommand, '历史');
     newChatCommand.hidden = !(assistantChat && modeView.navigationCollapsed);
+    contextSash.hidden = !assistantChat || modeView.navigationCollapsed || !hasContext;
     renderNavigation();
   };
 
@@ -364,6 +486,10 @@ export function createApplicationShell(
       disposed = true;
       unsubscribe();
       element.removeEventListener('click', handleClick);
+      finishContextResize?.();
+      contextSash.removeEventListener('mousedown', onContextSashMouseDown);
+      contextSash.removeEventListener('dblclick', onContextSashDoubleClick);
+      contextSash.removeEventListener('keydown', onContextSashKeyDown);
     },
   };
 }

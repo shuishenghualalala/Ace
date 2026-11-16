@@ -676,6 +676,7 @@ async def test_broker_preserves_read_write_deny_and_network_semantics(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shebang/venv layout; Windows uses native executable discovery")
 async def test_broker_derives_readonly_roots_for_host_python_venv_entrypoint(tmp_path):
     class RecordingRuntime:
         async def execute(self, **kwargs):

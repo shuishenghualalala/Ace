@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Subagent Stage E · 测试记录</title>
+<style>
+  :root{--text:#111;--muted:#666;--border:#e8e8e8;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;color:var(--text);font:15px/1.7 var(--sans)}main{max-width:900px;margin:auto;padding:56px 24px 100px}h1{margin:0 0 6px;font-size:28px}h2{margin-top:36px;border-bottom:1px solid var(--border);padding-bottom:8px;font-size:19px}.meta{color:var(--muted)}p,li{color:#444}code,pre{font-family:var(--mono);font-size:13px}code{background:var(--soft);border:1px solid var(--border);padding:1px 5px;border-radius:4px}pre{background:var(--soft);border:1px solid var(--border);padding:16px;border-radius:8px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}th{background:var(--soft)}.pass{font-weight:700}.note{border-left:3px solid #111;background:var(--soft);padding:10px 14px}a{color:var(--text)}
+</style>
+</head>
+<body><main>
+  <div class="meta">Ace / Testing / Subagent Stage E</div>
+  <h1>Fork、结构化输出、Preset 与 UI Contribution</h1>
+  <p class="meta">测试日期：2026-09-17 · 工作树：.worktrees/subagent-multiagent</p>
+
+  <h2>验证命令</h2>
+  <pre><code>PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile \
+  crew/core/runctx.py crew/core/types.py crew/state/session_store.py \
+  crew/agent/runtime.py crew/agent/subagent/tools.py \
+  crew/agent/subagent/providers.py crew/agent/subagent/feature.py crew/app.py
+
+.venv/bin/python -m pytest -q \
+  tests/test_subagent_stage_e.py tests/test_subagent.py \
+  tests/test_subagent_contract.py tests/test_subagent_runtime_contract.py \
+  tests/test_subagent_stage_b.py tests/test_subagent_stage_c.py \
+  tests/test_subagent_stage_d.py tests/test_subagent_batch.py \
+  tests/test_subagent_store.py tests/test_external_subagent_provider.py \
+  tests/test_agent_factory_feature.py
+
+cd web
+npm test -- --run
+npm run typecheck
+npm run build</code></pre>
+
+  <h2>结果</h2>
+  <table><thead><tr><th>范围</th><th>结果</th><th>覆盖内容</th></tr></thead><tbody>
+    <tr><td>Python 编译</td><td class="pass">PASS</td><td>新增 ContextVar、Message 来源字段、Provider、Feature 接线均可编译。</td></tr>
+    <tr><td>Subagent 后端回归</td><td class="pass">174 passed</td><td>阶段 E 新测试 + owner-scoped 活跃视图回归 + A/B/C/D、Store、外援与 Agent Factory 回归。</td></tr>
+    <tr><td>Stage E 专项</td><td class="pass">PASS</td><td>结构化工具一次提交、schema 校验/文本回退/非法拒绝、fork 前缀过滤、只读 preset、frontmatter 字段。</td></tr>
+    <tr><td>Web 全量回归</td><td class="pass">267 passed</td><td>既有 Web 组件与 Feature Event 测试、子智能体活动归并/渲染、API 请求投影测试。</td></tr>
+    <tr><td>Web typecheck/build</td><td class="pass">PASS</td><td>TypeScript 两个 tsconfig 与 Vite production bundle。</td></tr>
+  </tbody></table>
+
+  <h2>已知提示</h2>
+  <p class="note">Python 回归仍报告 2 个既有 RuntimeWarning：阶段 B 深度账本测试中的 <code>_immediate_result</code> 协程未 await。本阶段没有新增 warning，且测试结果为通过。</p>
+  <p class="note">Vite build 仅提示既有的大 chunk warning，不影响构建成功；本阶段未引入额外构建错误。</p>
+
+  <h2>人工检查点</h2>
+  <ul>
+    <li>fork Provider 不调用平台专有进程 API，只使用 asyncio、SessionStore 与 pathlib/值对象。</li>
+    <li><code>structured_output</code> 使用 Feature-owned 注册，普通主 Agent 的 subagent tool policy 会过滤 <code>subagent.output</code>。</li>
+    <li>生命周期事件未知版本仍走既有 registry 的安全忽略路径，多次 React effect 切换由 disposer 回收。</li>
+    <li>活动卡只读显示当前会话，API 返回的 items/runs 与生命周期状态按子智能体 id 归并；无记录时不占用聊天布局。</li>
+    <li>活跃子智能体兼容视图按 owner_account_id 过滤，验证同一 session id 的跨账号记录不会互相泄露。</li>
+  </ul>
+  <p><a href="../backend/adr/0049-subagent-stage-e-fork-structured-ui.html">查看 ADR-0049</a> · <a href="../backend/modules/subagent.html">返回模块文档</a></p>
+</main></body></html>

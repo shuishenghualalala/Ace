@@ -1,23 +1,43 @@
-/** 外部智能体/Team 产品开关：仅控制入口与日常历史展示，不删除任何会话数据。 */
+/**
+ * 外部智能体/Team 产品开关：仅控制入口与日常历史展示，不删除任何会话数据。
+ *
+ * 后端 /api/config 返回的 feature_capabilities 决定入口是否可用（ADR-0041 legacy-safe）：
+ * - config 未加载（null）或旧后端未返回 feature_capabilities 字段 → 视为可用；
+ * - 否则按 EXTERNAL_AGENTS_FEATURE_ID 查 available。
+ */
 
-import type { BackendConfig } from '../backend-client';
+import type { BackendConfig, SessionAgentBinding } from '../backend-client';
 import { state, type SessionRow } from '../state';
 
 export const EXTERNAL_AGENTS_DISABLED_MESSAGE = '外援功能暂未开放，请联系管理员开启。';
 
+export const EXTERNAL_AGENTS_FEATURE_ID = 'product.external-agents';
+
+function externalAgentsCapabilityEnabled(config: BackendConfig | null | undefined): boolean {
+  if (config == null || config.feature_capabilities == null) return true;
+  return Boolean(config.feature_capabilities[EXTERNAL_AGENTS_FEATURE_ID]?.available);
+}
+
 export function externalAgentsEnabled(config: BackendConfig | null | undefined = state.config): boolean {
-  return config?.external_agents?.enabled === true;
+  return externalAgentsCapabilityEnabled(config);
+}
+
+export function isExternalAgentSession(
+  binding: SessionAgentBinding | null | undefined,
+): boolean {
+  return binding?.kind === 'external_agent';
+}
+
+export function isExternalTeamSession(
+  binding: SessionAgentBinding | null | undefined,
+): boolean {
+  return binding?.kind === 'external_team';
 }
 
 export function isExternalAgentOrTeamSession(
-  session: Pick<SessionRow, 'agentBinding' | 'agentLabel'> | null | undefined,
+  session: Pick<SessionRow, 'agentBinding'> | null | undefined,
 ): boolean {
-  const kind = session?.agentBinding?.kind;
-  if (kind) return kind === 'external_agent' || kind === 'external_team';
-  // 兼容尚未返回 agent_binding 的旧 Gateway。
-  const provider = String(session?.agentLabel?.provider || '').trim().toLowerCase();
-  if (provider === 'team') return true;
-  return Boolean(provider && !['crew', 'builtin', 'client'].includes(provider));
+  return isExternalAgentSession(session?.agentBinding) || isExternalTeamSession(session?.agentBinding);
 }
 
 export function isSessionVisibleWithExternalAgentsFlag(session: SessionRow): boolean {
@@ -25,8 +45,8 @@ export function isSessionVisibleWithExternalAgentsFlag(session: SessionRow): boo
 }
 
 export function syncExternalAgentsFeatureUi(): void {
-  const entry = document.querySelector<HTMLElement>('[data-tab="agents"]');
-  if (entry) entry.hidden = !externalAgentsEnabled();
+  // 入口显隐统一由 shell capability 与 page-registry isAvailable 驱动，
+  // 本函数保留触发事件的能力，供旧调用方继续感知配置变化。
   window.dispatchEvent(new CustomEvent('external-agents:config-change'));
 }
 

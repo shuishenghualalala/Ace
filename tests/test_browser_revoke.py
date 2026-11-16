@@ -37,7 +37,7 @@ async def test_revoke_without_owner_instance_bumps_generation(browser):
     assert manager.capability_generation("owner-a") == 2
 
 
-async def test_renew_capability_clears_page_observations_without_approval_state(browser):
+async def test_renew_capability_clears_page_observations_and_approval_tokens(browser):
     manager, _driver = browser
     await manager.navigate("owner-a", "session-a", "https://example.com")
     owner = manager._owners["owner-a"]
@@ -45,12 +45,15 @@ async def test_renew_capability_clears_page_observations_without_approval_state(
     assert session.refs
     tab_ids = set(session.tabs)
 
-    assert manager.permission_for(
+    # 下载在默认治理档下弹一次性审批。
+    download_args = {"ref": "p1:e17"}
+    decision = manager.permission_for(
         "browser_download",
-        {"ref": "p1:e5"},
+        download_args,
         "owner-a",
         "session-a",
-    ) is None
+    )
+    assert decision is not None and decision.behavior == "ask"
 
     generation = manager.renew_capability("owner-a")
 
@@ -59,6 +62,10 @@ async def test_renew_capability_clears_page_observations_without_approval_state(
     assert session.screenshot_id == ""
     assert session.page_marker == ""
     assert set(session.tabs) == tab_ids
+    # refs 已清空，签发过的审批令牌随之失效。
+    assert not manager.confirm_approval(
+        decision.approval_token, "browser_download", download_args, "owner-a", "session-a"
+    )
 
 
 async def test_capability_runtime_state_reports_fail_closed_tombstones(browser):
@@ -83,20 +90,31 @@ async def test_capability_runtime_state_reports_fail_closed_tombstones(browser):
     }
 
 
-async def test_revoke_keeps_functional_build_free_of_approval_tokens(browser):
+async def test_revoke_invalidates_issued_approval_tokens(browser):
     manager, _driver = browser
     await manager.navigate("owner-a", "session-a", "https://example.com")
     await manager.navigate("owner-b", "session-a", "https://example.com/b")
 
-    assert manager.permission_for(
-        "browser_download", {"ref": "p1:e5"}, "owner-a", "session-a"
-    ) is None
-    assert manager.permission_for(
-        "browser_download", {"ref": "p1:e5"}, "owner-b", "session-a"
-    ) is None
+    args_a = {"ref": "p1:e17"}
+    decision_a = manager.permission_for(
+        "browser_download", args_a, "owner-a", "session-a"
+    )
+    assert decision_a is not None and decision_a.behavior == "ask"
+    args_b = {"ref": "p1:e17"}
+    decision_b = manager.permission_for(
+        "browser_download", args_b, "owner-b", "session-a"
+    )
+    assert decision_b is not None and decision_b.behavior == "ask"
 
     await manager.revoke_owner("owner-a")
 
+    # 吊销后 owner 整个移除：A 的未消费令牌立即失效；B 的不受影响。
+    assert not manager.confirm_approval(
+        decision_a.approval_token, "browser_download", args_a, "owner-a", "session-a"
+    )
+    assert manager.confirm_approval(
+        decision_b.approval_token, "browser_download", args_b, "owner-b", "session-a"
+    )
     assert not hasattr(manager, "_pending_approvals")
     assert not hasattr(manager, "_granted_approvals")
 

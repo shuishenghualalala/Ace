@@ -358,28 +358,24 @@ describe('ElectronCdpTransport', () => {
 
     await expect(transport.handleUnpublishedDialog(view, {
       accept: true,
-      expectedType: 'alert',
     })).resolves.toEqual({
       type: 'alert',
       message: 'first',
       defaultValue: '',
-      matched: true,
     });
     await expect(transport.handleUnpublishedDialog(view, {
       accept: true,
-      expectedType: 'prompt',
     })).resolves.toEqual({
       type: 'confirm',
       message: 'second',
       defaultValue: '',
-      matched: false,
     });
 
     expect(
       debug.sent.filter((command) => command.method === 'Page.handleJavaScriptDialog'),
     ).toEqual([
       expect.objectContaining({ params: { accept: true } }),
-      expect.objectContaining({ params: { accept: false } }),
+      expect.objectContaining({ params: { accept: true } }),
     ]);
     transport.markPageEventsReady(view);
     await flush();

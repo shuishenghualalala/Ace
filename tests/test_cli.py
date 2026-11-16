@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -81,6 +82,64 @@ def test_global_flags_work_before_subcommand(capsys, cli_home):
     assert any(item["id"] == "default" for item in data)
 
 
+def test_dump_features_outputs_audit_and_returns_nonzero_for_blocker(
+    capsys,
+    cli_home,
+    monkeypatch,
+):
+    class FakeReport:
+        healthy = False
+
+        @staticmethod
+        def as_dict():
+            return {
+                "healthy": False,
+                "issues": ["waiting-plugin"],
+                "features": [
+                    {
+                        "id": "waiting-plugin",
+                        "state": "waiting",
+                        "generation": None,
+                        "config": {
+                            "desired_revision": 1,
+                            "effective_revision": None,
+                        },
+                        "services": {
+                            "requires": ["storage"],
+                            "optional": [],
+                            "provides": [],
+                            "missing_required": ["storage"],
+                            "missing_optional": [],
+                        },
+                        "registrations": [],
+                        "error": None,
+                    }
+                ],
+            }
+
+    class FakePlugins:
+        @staticmethod
+        def startup_audit():
+            return FakeReport()
+
+    class FakeApp:
+        plugins = FakePlugins()
+        closed = False
+
+        async def shutdown(self):
+            self.closed = True
+
+    app = FakeApp()
+    monkeypatch.setattr("crew.cli.app.build_app", lambda _config: app)
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: object())
+
+    code, out = run_cli(capsys, "--dump-features", "--json")
+
+    assert code == 1
+    assert json_out(out)["issues"] == ["waiting-plugin"]
+    assert app.closed
+
+
 def test_config_models_list_json(capsys, cli_home):
     code, out = run_cli(capsys, "config", "models", "list", "--json")
     assert code == 0
@@ -125,9 +184,10 @@ def test_session_flow(capsys, cli_home):
     assert code == 0
 
 
-def test_session_show_missing_returns_404(capsys, cli_home):
+def test_session_show_missing_exit_code(capsys, cli_home):
     code, _ = run_cli(capsys, "session", "show", "--id", "missing")
-    assert code == 404
+    # 业务错误的语义码（404）在进程出口统一收敛为 1（见 _shell_exit_code）
+    assert code == 1
 
 
 def test_cron_flow(capsys, cli_home):
@@ -158,6 +218,21 @@ def test_cron_flow(capsys, cli_home):
     assert run_cli(capsys, "cron", "pause", "--id", job["id"])[0] == 0
     assert run_cli(capsys, "cron", "resume", "--id", job["id"])[0] == 0
     assert run_cli(capsys, "cron", "delete", "--id", job["id"])[0] == 0
+
+
+def test_channel_config_show_loads_builtin_platforms(capsys, cli_home):
+    code, out = run_cli(
+        capsys,
+        "channel",
+        "config",
+        "show",
+        "--platform",
+        "feishu",
+        "--json",
+    )
+    assert code == 0
+    data = json_out(out)
+    assert data is not None and data["ok"] is True and data["name"] == "feishu"
 
 
 def test_wiki_kbs_list(capsys, cli_home):
@@ -311,6 +386,25 @@ def test_run_non_interactive_json(capsys, cli_home):
     assert data is not None
     assert data["session_id"]
     assert "收到" in data["text"]
+
+
+def test_business_error_exit_code_normalized(capsys, cli_home):
+    """CliError 的 HTTP 风格语义码（404/409）在进程出口收敛为 1，
+    不再出现 404 被 shell 截断成 148（看起来像被信号杀死）的情况。"""
+    code, _ = run_cli(capsys, "task", "show", "--id", "badtask")
+    assert code == 1
+
+
+def test_cli_log_level_env_does_not_leak(capsys, cli_home):
+    """main() 运行期间把 CREW_LOG_LEVEL 压为 WARNING，退出后恢复原状，
+    不污染同进程的其他调用方（测试套件也在同进程跑 main()）。"""
+    os.environ.pop("CREW_LOG_LEVEL", None)
+    try:
+        code, _ = run_cli(capsys, "--help")
+        assert code == 0
+        assert os.environ.get("CREW_LOG_LEVEL") is None
+    finally:
+        os.environ.pop("CREW_LOG_LEVEL", None)
 
 
 def test_readonly_content_commands(capsys, cli_home):

@@ -54,7 +54,7 @@ struct RunnerRequest {
     interactive: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RunnerControl {
     Write { data_b64: String },
@@ -191,7 +191,7 @@ pub fn run_via_account(
         .and_then(|_| child_stdin.parent_file.write_all(b"\n"))
         .map_err(|error| format!("cannot send Windows runner request: {error}"))?;
     if let Some(control_rx) = control_rx {
-        let mut child_stdin = child_stdin.parent_file;
+        let mut child_stdin = child_stdin.into_parent_file_after_child_close();
         thread::spawn(move || {
             for control in control_rx {
                 let message = match control {

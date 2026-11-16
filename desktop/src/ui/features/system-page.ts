@@ -17,6 +17,7 @@ import { createSystemPageView, type SystemPageView } from './system-page-view';
 import { createStatus } from '../components/controls';
 import { createIcon, type IconId } from '../components/icon';
 import { setRuntimeStyle } from '../components/runtime-style';
+import { isObservationDevLaunch } from '../../shared/observability';
 
 // ── 工具函数 ────────────────────────────────────────
 function fmtUptime(seconds: number): string {
@@ -164,7 +165,8 @@ function renderOverviewValues(): void {
     const cpu = lastMetrics.cpu_percent;
     if (cpu != null) {
       const cpuPct = Math.min(100, Math.round(Number(cpu) || 0));
-      setBar('sys-bar-cpu', cpuPct, 'sys-bar-cpu-val', `${cpuPct}%${lastMetrics.cpu_count ? ` · ${lastMetrics.cpu_count} 核` : ''}`);
+      const idlePct = Math.max(0, 100 - cpuPct);
+      setBar('sys-bar-cpu', cpuPct, 'sys-bar-cpu-val', `使用 ${cpuPct}% · 空闲 ${idlePct}%${lastMetrics.cpu_count ? ` · ${lastMetrics.cpu_count} 核` : ''}`);
     } else {
       setBar('sys-bar-cpu', 0, 'sys-bar-cpu-val', '— (psutil)');
     }
@@ -172,7 +174,7 @@ function renderOverviewValues(): void {
     const mem = lastMetrics.memory;
     if (mem) {
       const memPct = Math.round(mem.percent);
-      setBar('sys-bar-mem', memPct, 'sys-bar-mem-val', `${mem.used_gb} / ${mem.total_gb} GB (${memPct}%)`);
+      setBar('sys-bar-mem', memPct, 'sys-bar-mem-val', `${mem.used_gb} / ${mem.total_gb} GB (${memPct}%) · 可用 ${mem.available_gb} GB`);
     } else {
       setBar('sys-bar-mem', 0, 'sys-bar-mem-val', '— (psutil)');
     }
@@ -180,7 +182,7 @@ function renderOverviewValues(): void {
     const disk = lastMetrics.disk;
     if (disk) {
       const dp = Math.round(disk.percent);
-      setBar('sys-bar-disk', dp, 'sys-bar-disk-val', `${disk.used_gb} / ${disk.total_gb} GB (${dp}%)`);
+      setBar('sys-bar-disk', dp, 'sys-bar-disk-val', `${disk.used_gb} / ${disk.total_gb} GB (${dp}%) · 剩余 ${disk.free_gb} GB`);
     } else {
       setBar('sys-bar-disk', 0, 'sys-bar-disk-val', '—');
     }
@@ -200,7 +202,7 @@ function renderOverviewValues(): void {
   const procEl = document.getElementById('sys-process-meta');
   if (procEl) {
     if (lastMetrics?.process) {
-      procEl.textContent = `服务进程 · PID ${lastMetrics.process.pid} · RSS ${lastMetrics.process.rss_mb} MB`;
+      procEl.textContent = `Crew Gateway 进程 · PID ${lastMetrics.process.pid} · RSS ${lastMetrics.process.rss_mb} MB`;
       procEl.hidden = false;
     } else {
       procEl.textContent = '';
@@ -321,11 +323,46 @@ export async function renderSystemLogs(): Promise<void> {
     return;
   }
   try {
-    const data = await backendApi.systemLogs({
-      level: logLevel || undefined,
-      q: logKeyword || undefined,
-      limit: 500,
-    });
+    let data: { items: LogEntry[]; total: number };
+    if (isObservationDevLaunch()) {
+      try {
+        const capabilities = await backendApi.tracingCapabilities();
+        if (capabilities.available) {
+          const tracingLogs = await backendApi.tracingLogs({
+            ...(logLevel ? { level: logLevel } : {}),
+            ...(logKeyword ? { q: logKeyword } : {}),
+            limit: 500,
+          });
+          data = {
+            total: tracingLogs.total,
+            items: tracingLogs.items.map((entry) => ({
+              ts: Number(entry.occurred_at_us || 0) / 1_000_000,
+              level: entry.level || 'INFO',
+              name: [entry.module, entry.component].filter(Boolean).join('.') || entry.name,
+              message: entry.message || entry.name,
+            })),
+          };
+        } else {
+          data = await backendApi.systemLogs({
+            level: logLevel || undefined,
+            q: logKeyword || undefined,
+            limit: 500,
+          });
+        }
+      } catch {
+        data = await backendApi.systemLogs({
+          level: logLevel || undefined,
+          q: logKeyword || undefined,
+          limit: 500,
+        });
+      }
+    } else {
+      data = await backendApi.systemLogs({
+        level: logLevel || undefined,
+        q: logKeyword || undefined,
+        limit: 500,
+      });
+    }
     const items = data.items;
     if (countEl) countEl.textContent = String(items.length);
     if (items.length === 0) {

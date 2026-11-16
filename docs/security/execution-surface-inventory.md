@@ -21,8 +21,8 @@
 |---|---|---|
 | `crew/tools/builtin.py` | indirect | terminal 前后台入口；P6 统一经 broker，managed 失败不得回退宿主。 |
 | `crew/security/runtime_client.py` | runtime-boundary | 唯一允许的 managed helper host spawn；固定 helper argv、随机启动 token、版本/nonce 校验，用户 command 只进入 stdin 协议。 |
-| `crew/security/launch.py` | runtime-boundary | 会话级统一 captured execution；managed 只启动固定 native helper，disabled 才使用当前 OS 用户权限。 |
-| `crew/security/process_lifecycle.py` | runtime-boundary | 安全执行边界的固定进程树清理 helper；Windows 只调用固定 `taskkill` argv，POSIX 只终止已启动的进程组。 |
+| `crew/security/launch.py` | indirect | 会话级统一 captured execution；managed 只启动固定 native helper，disabled 才使用当前 OS 用户权限。宿主 spawn 经 `process_lifecycle.spawn_tracked`（exit 事件 future 与管道排干分离），本文件不再直接持有进程创建调用。 |
+| `crew/security/process_lifecycle.py` | runtime-boundary | 唯一 ProcessOwner（signal / wait_for_exit / terminate_for_host_exit）：宿主 spawn 唯一入口 `spawn_tracked`；平台收容集中选择（Linux 探测 `systemd-run --user --scope --collect`、失败回退进程组；macOS 进程组 + 一次性降级警告；Windows `CREATE_NEW_PROCESS_GROUP` + 固定 `taskkill /T /F` argv）；PID 复用围栏现读现比。`taskkill`/`systemctl`/`ps`/`/proc` 仅服务于已登记进程树的终止、存活探测与围栏。 |
 | `crew/tools/process_registry.py` | broker | terminal 后台执行已按 `ProcessLaunch` 分流：disabled 才使用本地 shell；managed 只启动固定 Python bridge，再由 `NativeRuntimeClient` 执行协议内 command，runtime unavailable 不回退宿主。`taskkill/tasklist` 仅用于已登记进程的宿主生命周期清理/探测。 |
 | `crew/tools/mcp_client.py` | indirect | 默认禁用 MCP host stdio；只有操作者显式 host 配置可启用，managed transport 未实现时 unavailable。HTTP/SSE worker 每次调用前绑定配置 endpoint、完整工具名和参数摘要，并经当前会话安全服务审批精确网络 overlay；缺少会话上下文时失败关闭。 |
 | `crew/tools/web_tools.py` | indirect | 网页搜索/提取经公开 HTTP 与网络审批；视觉工具对模型路径复用结构化文件授权和 identity-checked read，不直接读取任意宿主路径。 |
@@ -55,10 +55,12 @@
 | `crew/wiki/parser.py` | broker | 旧 Office 转换已使用 `execute_captured_sync`；Gateway 的 `asyncio.to_thread` 会继承可信 `ProcessLaunch`，managed runtime 缺失或上下文丢失时失败关闭。 |
 | `scripts/audit_runtime_npm.py` | dev-only | CI/发布期遍历源码锁文件并以固定 npm audit argv 审计生产依赖；不进入用户安装包。 |
 | `scripts/check_release_readiness.py` | dev-only | CI/发布期以固定 git argv 绑定验收证据到当前提交；不执行用户输入命令，不进入用户安装包。 |
+| `scripts/run_e2e_batch.py` | dev-only | 本地/CI 的 E2E 批量 runner：以固定 argv 为每个场景启动独立 Python 子进程并产出报告；不执行用户输入命令，不进入用户安装包。 |
 | `desktop/src/main/index.ts` | host-fixed | Gateway 启停、更新器和 OS 生命周期；固定产品 argv。严格模式要求初始及重定向后最终地址均为 HTTPS、Ed25519 detached signature，并在下载和安装前后校验；兼容模式保留旧更新源能力。 |
 | `desktop/src/main/open-with-service.ts` | host-fixed | 仅响应 Desktop 用户“使用其他应用打开”；应用来自当前 OS 已登记清单，命令固定、argv 分离，并限制探测输出与超时；超时或输出超限会终止完整探测进程树。 |
 | `desktop/src/main/uninstall.ts` | host-fixed | 卸载清理；仅签名安装包的用户发起卸载流程可达。 |
 | `desktop/scripts/check-security.mjs` | dev-only | 构建期 Electron 安全配置检查。 |
+| `desktop/scripts/dev.mjs` | dev-only | 源码开发入口：仅以固定 argv 启动 esbuild 与依赖目录中的 Electron，不接收产品用户/模型命令，也不进入安装包。 |
 | `desktop/scripts/resolve-playwright-candidates.mjs` | dev-only | 定时/手动兼容性 CI 解析候选 npm 版本；不进入用户安装包，也不接收产品用户输入。 |
 | `desktop/src/main/security-setup.ts` | installer-only | 仅 Windows 安装包：固定 runtime 绝对路径经编码 PowerShell `RunAs` 请求一次 UAC，用户动作不能提供 executable/argv。 |
 

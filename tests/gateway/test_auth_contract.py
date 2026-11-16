@@ -14,8 +14,8 @@ from httpx import ASGITransport, AsyncClient
 from fastapi.testclient import TestClient
 
 from crew.app import build_app
-from crew.gateway.channel_manager import ChannelManager
-from crew.gateway.platform_registry import platform_registry
+from crew.channels.channel_manager import ChannelManager
+from crew.channels.platform_registry import platform_registry
 from crew.gateway.routers.channels import create_channels_router
 from crew.gateway.server import create_app
 from crew.state.config import Config, load_config
@@ -29,7 +29,7 @@ def _restore_platform_entries(entries):
 
 def _feishu_webhook_app(channel, *, dev_mode: bool = False) -> FastAPI:
     manager = ChannelManager()
-    manager.register(channel)
+    manager.register(channel, owner_account_id="A:uid-a")
     crew = SimpleNamespace(
         active_owner=SimpleNamespace(
             current=lambda: SimpleNamespace(owner_account_id="A:uid-a"),
@@ -218,7 +218,7 @@ def test_deferred_startup_does_not_connect_channels_without_active_owner(api):
     async def record_start(handler) -> None:
         starts.append(handler)
 
-    crew.logout_coordinator._channel_manager.start_all = record_start
+    crew.channel_manager.start_all = record_start
     with TestClient(api) as client:
         # A non-health API crosses the startup fence, so this observes the
         # completed deferred startup rather than racing it.

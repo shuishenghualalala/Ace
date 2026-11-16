@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0049 · Subagent 阶段 E</title>
+<style>
+  :root{--text:#111;--muted:#666;--border:#e8e8e8;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;color:var(--text);font:15px/1.7 var(--sans)}main{max-width:900px;margin:auto;padding:56px 24px 100px}h1{margin:0 0 6px;font-size:28px}h2{margin-top:36px;border-bottom:1px solid var(--border);padding-bottom:8px;font-size:19px}.meta{color:var(--muted)}p,li{color:#444}code,pre{font-family:var(--mono);font-size:13px}code{background:var(--soft);border:1px solid var(--border);padding:1px 5px;border-radius:4px}pre{background:var(--soft);border:1px solid var(--border);padding:16px;border-radius:8px;overflow:auto}table{width:100%;border-collapse:collapse}th,td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}th{background:var(--soft)}a{color:var(--text)}
+</style>
+</head>
+<body><main>
+  <div class="meta">Ace / Backend ADR / 0049</div>
+  <h1>Subagent 阶段 E：Fork、结构化输出与 UI Contribution</h1>
+  <p class="meta">状态：已实施 · 日期：2026-09-17 · 适用分支：codex/subagent-multiagent-upgrade</p>
+
+  <h2>背景</h2>
+  <p>阶段 D 已提供持久子身份、隐藏会话和生命周期事件，但还缺少三类产品能力：从父会话已完成上下文创建隔离子会话、让子级返回可校验的数据对象，以及让 Web 消费子智能体运行状态。</p>
+
+  <h2>决策</h2>
+  <table><thead><tr><th>问题</th><th>决策</th></tr></thead><tbody>
+    <tr><td>Fork 语义</td><td>新增 <code>inprocess-fork</code> Provider。它通过 SessionStore 读取 owner-scoped 父历史，只保留最后一个无工具调用 assistant 消息之前的已完成前缀；不使用 Unix 进程 fork，因此 macOS/Linux/Windows 语义一致。</td></tr>
+    <tr><td>历史净化</td><td>Message 增加 <code>source_kind</code>，并与 <code>is_meta</code> 一起过滤提醒、技能上下文等内部消息；过滤依据是结构化字段，不扫描正文关键词。</td></tr>
+    <tr><td>结构化结果</td><td>Provider 支持 <code>output_schema</code> 能力位。子作用域工具 <code>structured_output</code> 只对 schema-bound child 注入；ContextVar sink 做一次性提交与 JSON Schema 子集校验，成功后关闭 child iterator。兼容路径仍可从最终 JSON 文本解析。</td></tr>
+    <tr><td>Preset 权限</td><td>增加 <code>extends</code>、<code>subagents</code> 和 <code>read_only</code>。继承在注册表 reload 时字段级合并并防循环；白名单同时收窄 schema 与 handler；只读 preset 结构性移除 shell/写类工具。</td></tr>
+    <tr><td>UI</td><td>复用 FeatureEventRegistry，注册 <code>run_started</code>/<code>run_settled</code>，转为现有 status timeline；<code>SubagentActivityView</code> 轮询 <code>api.subagents(sessionId)</code>，归并活跃项、历史 runs 与生命周期消息，呈现紧凑只读活动卡。</td></tr>
+  </tbody></table>
+
+  <h2>能力边界</h2>
+  <ul>
+    <li>Fork 默认关闭，配置键为 <code>subagent.fork_enabled</code>；开启后 Provider 仍需显式选择。</li>
+    <li>Fork Provider 不支持 continuable，避免把一次性快照和持续身份混成两种生命周期。</li>
+    <li>结构化输出当前以 JSON object 为提交形状，校验支持 object/array/string/number/integer/boolean/null、required、properties、items、enum 与基本长度/数值边界。</li>
+    <li>旧的 delegate/run_agent 返回结构只增不改；<code>structured</code> 仅在存在时出现在结果中。</li>
+  </ul>
+
+  <h2>关键路径</h2>
+  <pre><code>delegate_task(output_schema)
+  └─ StartRequest.output_schema
+      └─ CrewApp child tool filter += structured_output
+          └─ ContextVar sink → validate → single submit
+              └─ Provider closes child iterator
+                  └─ SubagentResult.structured
+
+parent session → SessionStore.load(owner)
+  → fork_completed_prefix(messages)
+  → child SessionStore.save(owner)
+  → existing Agent run loop</code></pre>
+
+  <h2>取舍与后续</h2>
+  <p>本阶段选择值对象快照播种，保持实现简单且跨平台；后续如果父会话规模带来复制成本，可在 SessionStore 公共 fork API 上优化为事件链共享，但不改变 Provider 契约。UI 活动卡保持只读，数据由 owner-scoped API 投影与生命周期事件共同驱动，未知事件和无子智能体会安全降级为空。</p>
+  <p><a href="../modules/subagent.html">返回 subagent 模块文档</a> · <a href="../../testing/subagent-stage-e-fork-structured-ui.html">查看测试记录</a></p>
+</main></body></html>

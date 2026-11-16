@@ -20,6 +20,8 @@ export const STORAGE_KEYS = {
   usageRecords: 'Crew.usage.records.v1',
   /** 检查器面板宽度。 */
   inspectorWidth: 'crew.inspector.width',
+  /** 浏览器工作台宽度（与普通检查器分别记忆）。 */
+  browserWorkbenchWidth: 'crew.browser.workbench.width',
   /** 设置页偏好。 */
   settings: 'crew.settings',
   /** 历史面板折叠状态。 */

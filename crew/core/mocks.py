@@ -36,6 +36,9 @@ class FakeProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
+        purpose: str | None = None,
     ) -> ChatResponse:
         self.calls.append(list(messages))
         if self._script:
@@ -49,6 +52,8 @@ class FakeProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         *,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        reasoning_mode: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         self.stream_calls.append(list(messages))
         # 复用 chat() 的逻辑，把结果拆成字符逐个发出。
@@ -79,9 +84,11 @@ class InMemorySessionStore(SessionStore):
         self._status: dict[tuple[str, str], tuple[str, str]] = {}
         self._archived: dict[tuple[str, str], bool] = {}
         self._pinned: dict[tuple[str, str], bool] = {}
+        self._last_prompt_tokens: dict[tuple[str, str], int | None] = {}
+        self._last_prompt_tokens_source: dict[tuple[str, str], str | None] = {}
 
     @staticmethod
-    def _key(session_id: str, owner_account_id: str = "") -> tuple[str, str]:
+    def _key(session_id: str, owner_account_id: str) -> tuple[str, str]:
         return owner_account_id, session_id
 
     @staticmethod
@@ -89,7 +96,7 @@ class InMemorySessionStore(SessionStore):
         """返回首条非空用户消息；不存在时使用与 SQLite store 一致的占位标题。"""
         return next((m.content for m in messages if m.role == "user" and m.content), "新会话")
 
-    def load(self, session_id: str, owner_account_id: str = "") -> list[Message]:
+    def load(self, session_id: str, owner_account_id: str) -> list[Message]:
         return list(self._data.get(self._key(session_id, owner_account_id), []))
 
     def load_child_sessions(
@@ -105,7 +112,7 @@ class InMemorySessionStore(SessionStore):
             if owner == owner_account_id and sid.startswith(prefix)
         ]
 
-    def append(self, session_id: str, messages: list[Message], owner_account_id: str = "") -> None:
+    def append(self, session_id: str, messages: list[Message], owner_account_id: str) -> None:
         self._data.setdefault(self._key(session_id, owner_account_id), []).extend(messages)
 
     def save(
@@ -113,12 +120,16 @@ class InMemorySessionStore(SessionStore):
         session_id: str,
         messages: list[Message],
         workspace_id: str = "default",
-        owner_account_id: str = "",
         *,
+        owner_account_id: str,
         title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
     ) -> None:
         key = self._key(session_id, owner_account_id)
         self._data[key] = list(messages)
+        self._last_prompt_tokens[key] = last_prompt_tokens
+        self._last_prompt_tokens_source[key] = last_prompt_tokens_source
         # workspace_id 仅在首次创建时写入，后续 save 不覆盖（与 SQLiteSessionStore 对齐：
         # 会话归属在创建时确定，避免每轮回写把归属冲掉）。
         if key not in self._ws:
@@ -129,7 +140,11 @@ class InMemorySessionStore(SessionStore):
             title_fallback if title_fallback is not None else self._first_user_title(messages)
         )
 
-    def clear(self, session_id: str, owner_account_id: str = "") -> None:
+    def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:
+        self._last_prompt_tokens[self._key(session_id, owner_account_id)] = None
+        self._last_prompt_tokens_source[self._key(session_id, owner_account_id)] = None
+
+    def clear(self, session_id: str, owner_account_id: str) -> None:
         key = self._key(session_id, owner_account_id)
         self._data.pop(key, None)
         self._ws.pop(key, None)
@@ -139,8 +154,10 @@ class InMemorySessionStore(SessionStore):
         self._status.pop(key, None)
         self._archived.pop(key, None)
         self._pinned.pop(key, None)
+        self._last_prompt_tokens.pop(key, None)
+        self._last_prompt_tokens_source.pop(key, None)
 
-    def set_title(self, session_id: str, title: str, owner_account_id: str = "") -> None:
+    def set_title(self, session_id: str, title: str, owner_account_id: str) -> None:
         key = self._key(session_id, owner_account_id)
         if key in self._data:
             self._titles[key] = title
@@ -148,7 +165,7 @@ class InMemorySessionStore(SessionStore):
     def mark_title_manual(
         self,
         session_id: str,
-        owner_account_id: str = "",
+        owner_account_id: str,
         manual: bool = True,
     ) -> None:
         """记录用户是否手动命名标题，与 SQLite store 的覆盖保护语义一致。"""
@@ -156,24 +173,24 @@ class InMemorySessionStore(SessionStore):
         if key in self._data:
             self._manual_titles[key] = manual
 
-    def set_archived(self, session_id: str, archived: bool, owner_account_id: str = "") -> None:
+    def set_archived(self, session_id: str, archived: bool, owner_account_id: str) -> None:
         key = self._key(session_id, owner_account_id)
         if key in self._data:
             self._archived[key] = archived
             if archived:
                 self._pinned[key] = False
 
-    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str = "") -> None:
+    def set_pinned(self, session_id: str, pinned: bool, owner_account_id: str) -> None:
         key = self._key(session_id, owner_account_id)
         if key in self._data:
             self._pinned[key] = pinned
 
-    def set_status(self, session_id: str, status: str, error: str = "", owner_account_id: str = "") -> None:
+    def set_status(self, session_id: str, status: str, owner_account_id: str, error: str = "") -> None:
         key = self._key(session_id, owner_account_id)
         self._data.setdefault(key, [])
         self._status[key] = (status, error)
 
-    def touch_session(self, session_id: str, owner_account_id: str = "") -> None:
+    def touch_session(self, session_id: str, owner_account_id: str) -> None:
         """内存 store 无需保活，空实现。"""
         return None
 
@@ -183,8 +200,8 @@ class InMemorySessionStore(SessionStore):
 
     def list_sessions(
         self,
+        owner_account_id: str,
         workspace_id: str | None = None,
-        owner_account_id: str = "",
         *,
         include_archived: bool = False,
         exclude_channel_sessions: bool = True,
@@ -228,11 +245,11 @@ class InMemorySessionStore(SessionStore):
         out.sort(key=lambda r: (not r["pinned"], -r["updated_at"]))
         return out
 
-    def get_status(self, session_id: str, owner_account_id: str = "") -> tuple[str, str]:
+    def get_status(self, session_id: str, owner_account_id: str) -> tuple[str, str]:
         """测试辅助：取 (last_status, last_error)。"""
         return self._status.get(self._key(session_id, owner_account_id), ("", ""))
 
-    def get_workspace_id(self, session_id: str, owner_account_id: str = "") -> str | None:
+    def get_workspace_id(self, session_id: str, owner_account_id: str) -> str | None:
         """读取会话所属 workspace_id；不存在返回 None（对齐真实 SessionStore）。"""
         return self._ws.get(self._key(session_id, owner_account_id))
 
@@ -250,7 +267,7 @@ class InMemoryWorkspaceStore(WorkspaceStore):
         self._data: dict[tuple[str, str], dict] = {}
 
     @staticmethod
-    def _key(workspace_id: str, owner_account_id: str = "") -> tuple[str, str]:
+    def _key(workspace_id: str, owner_account_id: str) -> tuple[str, str]:
         return owner_account_id, workspace_id
 
     @classmethod
@@ -258,16 +275,16 @@ class InMemoryWorkspaceStore(WorkspaceStore):
         name, hidden = cls._BUILTIN_WORKSPACES[workspace_id]
         return {"id": workspace_id, "name": name, "description": "", "instructions": "", "hidden": hidden}
 
-    def _ensure_default(self, owner_account_id: str = "") -> None:
+    def _ensure_default(self, owner_account_id: str) -> None:
         self._data.setdefault(self._key("default", owner_account_id), self._builtin("default"))
 
     def create(
         self,
         name: str,
+        owner_account_id: str,
         description: str = "",
         instructions: str = "",
         root_path: str = "",
-        owner_account_id: str = "",
     ) -> dict:
         self._ensure_default(owner_account_id)
         wid = f"ws_{uuid.uuid4().hex[:8]}"
@@ -282,21 +299,21 @@ class InMemoryWorkspaceStore(WorkspaceStore):
         self._data[self._key(wid, owner_account_id)] = ws
         return dict(ws)
 
-    def get(self, workspace_id: str, owner_account_id: str = "") -> dict:
+    def get(self, workspace_id: str, owner_account_id: str) -> dict:
         if workspace_id in self._BUILTIN_WORKSPACES:
             self._data.setdefault(self._key(workspace_id, owner_account_id), self._builtin(workspace_id))
         return dict(self._data[self._key(workspace_id, owner_account_id)])
 
-    def list(self, owner_account_id: str = "") -> list[dict]:
+    def list(self, owner_account_id: str) -> list[dict]:
         self._ensure_default(owner_account_id)
         return [dict(w) for (owner, _), w in self._data.items() if owner == owner_account_id]
 
-    def update(self, workspace_id: str, owner_account_id: str = "", **fields) -> dict:
+    def update(self, workspace_id: str, owner_account_id: str, **fields) -> dict:
         key = self._key(workspace_id, owner_account_id)
         self._data[key].update({k: v for k, v in fields.items() if v is not None})
         return dict(self._data[key])
 
-    def delete(self, workspace_id: str, owner_account_id: str = "") -> None:
+    def delete(self, workspace_id: str, owner_account_id: str) -> None:
         if workspace_id not in self._BUILTIN_WORKSPACES:
             self._data.pop(self._key(workspace_id, owner_account_id), None)
 

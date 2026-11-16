@@ -6,13 +6,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.runctx import (
     current_agent_workdir,
     current_owner_account_id,
     current_session_id,
     current_workspace_id,
 )
-from crew.tools.registry import Registry, tool_result
+from crew.sites.native_visual import validate_visual
+from crew.tools.registry import FunctionTool, Registry, tool_result
 
 
 def _response(data: Any = None, **extra: Any) -> str:
@@ -29,6 +31,28 @@ def _context() -> tuple[str, str, str, str]:
     if not owner:
         raise ValueError("当前会话缺少用户身份")
     return owner, workspace_id, session_id, workdir
+
+
+def _blueprint_result_policy(args: dict[str, Any]) -> ToolResultPolicy:
+    action = str(args.get("action") or "").strip()
+    if action == "readRunArtifact":
+        identity = "|".join(
+            f"{key}={args[key]}"
+            for key in ("automationId", "runId")
+            if args.get(key) is not None
+        )
+        return ToolResultPolicy(ToolResultRetention.RESOURCE, identity)
+    if action in {
+        "list",
+        "read",
+        "show",
+        "validate",
+        "readRun",
+        "readRunLogs",
+        "listRuns",
+    }:
+        return ToolResultPolicy(ToolResultRetention.TEMPORARY)
+    return ToolResultPolicy(ToolResultRetention.IMPORTANT)
 
 
 def _schema(name: str, description: str, actions: list[str]) -> dict[str, Any]:
@@ -50,6 +74,9 @@ def _schema(name: str, description: str, actions: list[str]) -> dict[str, Any]:
                 "result": {"type": "object"}, "enabled": {"type": "boolean"},
                 "runInput": {}, "kind": {"type": "string"}, "limit": {"type": "integer"},
                 "offset": {"type": "integer"}, "runId": {"type": "string"},
+                "spec": {"type": "object", "description": "Widget.render: v3 declarative rich reply (cards, fields, charts, tables, actions). Read widget/references/native-visual.md. No HTML, files, create or validate required."},
+                "display": {"type": "string", "enum": ["panel"],
+                            "description": "Widget.show: display the HTML Widget in its independent panel. Use Widget.render for interactive content inside desktop chat."},
             },
             "required": ["action"],
             "additionalProperties": True,
@@ -63,8 +90,8 @@ CANVAS_SCHEMA = _schema(
      "removePlacement", "show", "delete"],
 )
 WIDGET_SCHEMA = _schema(
-    "Widget", "创建、读取、更新、验证和展示灵感 App 的 HTML Widget。",
-    ["list", "create", "read", "update", "validate", "show", "delete"],
+    "Widget", "桌面聊天图表/表单优先用 render(spec)，直接显示原生交互，无需编写 HTML。其他 action 管理 HTML Widget。",
+    ["render", "list", "create", "read", "update", "validate", "show", "delete"],
 )
 AUTOMATION_SCHEMA = _schema(
     "Automation", "创建、运行、调度和检查可向 Widget 产出 JSON Artifact 的任务。",
@@ -77,13 +104,12 @@ BINDING_SCHEMA = _schema(
 )
 
 
-def register_blueprint_tools(
-    registry: Registry,
+def build_blueprint_tools(
     sites,
     *,
     workspace_store=None,
     security_service=None,
-) -> None:
+) -> tuple[FunctionTool, ...]:
     manager = sites.blueprint
     store = manager.store
 
@@ -139,6 +165,14 @@ def register_blueprint_tools(
     def widget_tool(args: dict[str, Any]):
         owner, workspace_id, session_id, workdir = _context()
         action = args["action"]
+        if action == "render":
+            if not session_id:
+                raise ValueError("原生交互需要有效会话")
+            spec = validate_visual(args.get("spec"))
+            return _response(surface={
+                "kind": "inspiration", "mode": "native", "display": "inline", "version": 3,
+                "sessionId": session_id, "status": "ready", "title": spec["title"], "spec": spec,
+            })
         if action == "list":
             return _response(page(store.list_widgets(owner), args))
         if action == "create":
@@ -291,12 +325,42 @@ def register_blueprint_tools(
             return _response({"deleted": True})
         raise ValueError("未知 Binding action")
 
-    registry.register(name="Canvas", toolset="blueprint", schema=CANVAS_SCHEMA, handler=canvas_tool,
-                      display_name="灵感 App", ui_label_template="管理 App {title}", always_load=True)
-    registry.register(name="Widget", toolset="blueprint", schema=WIDGET_SCHEMA, handler=widget_tool,
-                      display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True)
-    registry.register(name="Automation", toolset="blueprint", schema=AUTOMATION_SCHEMA,
-                      handler=automation_tool, is_async=True, display_name="App 自动化",
-                      ui_label_template="运行自动化 {title}", always_load=True)
-    registry.register(name="Binding", toolset="blueprint", schema=BINDING_SCHEMA, handler=binding_tool,
-                      display_name="数据绑定", ui_label_template="绑定组件数据", always_load=True)
+    return (
+        FunctionTool(
+            name="Canvas", toolset="blueprint", schema=CANVAS_SCHEMA, handler=canvas_tool,
+            display_name="灵感 App", ui_label_template="管理 App {title}", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+        FunctionTool(
+            name="Widget", toolset="blueprint", schema=WIDGET_SCHEMA, handler=widget_tool,
+            display_name="App 组件", ui_label_template="管理组件 {title}", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+        FunctionTool(
+            name="Automation", toolset="blueprint", schema=AUTOMATION_SCHEMA,
+            handler=automation_tool, is_async=True, display_name="App 自动化",
+            ui_label_template="运行自动化 {title}", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+        FunctionTool(
+            name="Binding", toolset="blueprint", schema=BINDING_SCHEMA, handler=binding_tool,
+            display_name="数据绑定", ui_label_template="绑定组件数据", always_load=True,
+            result_policy_resolver=_blueprint_result_policy,
+        ),
+    )
+
+
+def register_blueprint_tools(
+    registry: Registry,
+    sites,
+    *,
+    workspace_store=None,
+    security_service=None,
+) -> None:
+    """Compatibility wrapper for hosts that still own the Registry directly."""
+    for tool in build_blueprint_tools(
+        sites,
+        workspace_store=workspace_store,
+        security_service=security_service,
+    ):
+        registry.register(tool)

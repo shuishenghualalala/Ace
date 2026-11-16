@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 4B-2 · Dynamic Kanban 流事件命名空间迁移测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 4B-2 · Dynamic Kanban 流事件命名空间迁移</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-10 · 开发：独立子 Agent · 审查与收口：主 Agent · 提交：4d9a782</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>生产侧 6 处 <code>kanban_event</code> + 1 处 <code>workflow_progress</code> 改发 <code>feature_event(feature="kanban", event=…, version=1)</code>，不再直接构造旧帧。</li>
+    <li>Gateway <code>event_compat</code> 出口旧帧与迁移前逐字节一致（含旧 <code>kanban</code> 帧 body 的 <code>event</code> 字段重建）；未登记事件丢弃并有诊断日志。</li>
+    <li><code>manager.py</code> 后台消费路径双帧兼容，后台化场景清空 <code>request_id</code> 语义不变。</li>
+  </ul>
+
+  <h2>事件命名清单</h2>
+  <table>
+    <thead><tr><th>feature / event / version</th><th>旧帧 kind</th><th>旧帧 body</th></tr></thead>
+    <tbody>
+      <tr><td><code>kanban.started v1</code></td><td><code>kanban</code></td><td><code>{"event":"started","workflow_id":…}</code></td></tr>
+      <tr><td><code>kanban.board_changed v1</code></td><td><code>kanban</code></td><td><code>{"event":"board_changed","workflow_id":…}</code></td></tr>
+      <tr><td><code>kanban.call_completed v1</code></td><td><code>kanban</code></td><td><code>{"event":"call_completed","workflow_id":…,…}</code></td></tr>
+      <tr><td><code>kanban.workflow_progress v1</code></td><td><code>workflow_progress</code></td><td>原 body 全量透传</td></tr>
+    </tbody>
+  </table>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>事件契约（tests/gateway/test_event_compat.py，新增参数化映射、旧帧重建对比、未登记丢弃）</td><td class="ok">通过</td></tr>
+      <tr><td>目标回归（event_compat + gateway_api + ws_subscribe + dynamic_kanban + kanban 生命周期 + dispatcher）</td><td class="ok">194 passed</td></tr>
+      <tr><td>4C-3 合并后复验（含 test_team_kanban_app_compat）</td><td class="ok">214 passed</td></tr>
+      <tr><td>全量回归（tests/）</td><td class="ok">4013 passed · 38 skipped；43 项失败经 d661fda 基线 worktree 逐一复算为既有失败（401 fixture / 微信环境依赖），与本切片无关</td></tr>
+      <tr><td>Ruff、compileall、Import Linter</td><td class="ok">全部通过；6 contracts kept, 0 broken</td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav"><a href="../backend/adr/0034-dynamic-kanban-feature-event.html">ADR-0034</a> · <a href="../backend/modules/dynamickanban.html">Dynamic Kanban 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

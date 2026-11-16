@@ -567,7 +567,6 @@ const pageState: UsagePageState = {
 let refreshTimer: number | null = null;
 let unsubscribeTracker: (() => void) | null = null;
 let lastTrendSnapshot: TrendPoint[] = [];
-let lastTrendHours = 24;
 
 function timePresetHours(): number {
   return TIME_PRESETS.find((t) => t.id === pageState.timePreset)?.hours ?? 24;
@@ -586,7 +585,6 @@ async function render(): Promise<void> {
   const hours = timePresetHours();
   const trend = getTrend(hours);
   lastTrendSnapshot = trend;
-  lastTrendHours = hours;
   root.innerHTML = `
     ${renderHero(summary)}
 
@@ -728,7 +726,6 @@ function bindTrendHover(): void {
     setRuntimeStyle(tip, 'top', `${y}px`);
     if (cross) {
       const xSvg = padL + (idx / Math.max(1, trend.length - 1)) * innerW;
-      const scale = rect.width / W;
       cross.setAttribute('x1', String(xSvg));
       cross.setAttribute('x2', String(xSvg));
       cross.setAttribute('opacity', '0.55');

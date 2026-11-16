@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 4C-3 · CrewApp Team/Kanban 中心接线收口测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 4C-3 · CrewApp Team/Kanban 中心接线收口</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-10 · 开发：独立子 Agent（停滞后由主 Agent 审查补齐） · 审查与收口：主 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li><code>dynamic_kanban</code> / <code>dynamic_kanban_consumer</code> 改动态 compat 属性：override 注入 + Service Registry 解析，Feature 非 ACTIVE fail-closed。</li>
+    <li><code>steer</code> / <code>interrupt</code> / <code>active_tasks_snapshot</code> 与 owner provider 失效路径经 <code>_active_team_manager()</code> / <code>_active_dynamic_kanban_manager()</code> 分派，去除 getattr 特判链。</li>
+    <li>三处 provider 中心直写收口为 <code>_sync_default_provider_to_features()</code>，<code>DynamicKanbanManager.set_provider()</code> 显式接口替换属性直写。</li>
+    <li>删除 <code>set_dynamic_kanban_manager</code> 中冗余的 driver-adapter 注册与 <code>_run_dynamic_kanban_execution_driver</code>。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>消费路径（tests/test_team_kanban_app_compat.py，新增 7 例）</td><td class="ok">真实 build_app 解析同代 Service · 停用 fail-closed · steer/interrupt owner scope 透传</td></tr>
+      <tr><td>组合回归（compat + kanban + kanban 生命周期 + team 生命周期 + team route + gateway 事件/API/WS/dispatcher）</td><td class="ok">214 passed</td></tr>
+      <tr><td>全量回归（tests/）</td><td class="ok">4013 passed · 38 skipped；43 项失败经 d661fda 基线 worktree 逐一复算为既有失败（401 fixture / 微信环境依赖），与本切片无关</td></tr>
+      <tr><td>Ruff、compileall、Import Linter</td><td class="ok">全部通过；6 contracts kept, 0 broken</td></tr>
+    </tbody>
+  </table>
+
+  <div class="nav"><a href="../backend/adr/0035-app-team-kanban-wiring.html">ADR-0035</a> · <a href="../backend/modules/dynamickanban.html">Dynamic Kanban 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>
+</main></body>
+</html>

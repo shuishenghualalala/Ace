@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from crew.app import build_app
-from crew.core.envelope import Envelope
-from crew.core.types import Message
-from crew.gateway.channel_sessions import (
+from crew.channels.channel_bindings import ChannelBindingsStore
+from crew.channels.channel_session_routes import ChannelSessionRouteStore
+from crew.channels.channel_sessions import (
     channel_platform_from_session_id,
     is_channel_session_id,
     list_channel_session_groups,
     prepare_inbound_channel_envelope,
 )
+from crew.core.envelope import Envelope
+from crew.core.types import Message
 from crew.gateway.server import create_app
-from crew.state.channel_bindings import ChannelBindingsStore
 from crew.state.config import Config
 from crew.state.session_store import SQLiteSessionStore
 
@@ -31,7 +33,12 @@ def store(tmp_path):
 
 @pytest.fixture
 def bindings(tmp_path):
-    return ChannelBindingsStore(str(tmp_path / "crew.db"))
+    return ChannelBindingsStore(str(tmp_path / "channels.db"))
+
+
+@pytest.fixture
+def routes(tmp_path):
+    return ChannelSessionRouteStore(str(tmp_path / "channels.db"))
 
 
 def test_is_channel_session_id():
@@ -61,6 +68,34 @@ def test_bind_on_connect_resets_bound_at_when_owner_changes(bindings):
     time.sleep(0.01)
     second = bindings.bind_on_connect("feishu", "B:uid-b")
     assert second["bound_at"] > first["bound_at"]
+
+
+def test_legacy_single_platform_binding_migrates_to_composite_owner_key(tmp_path):
+    db_path = tmp_path / "crew.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE channel_bindings (
+            platform TEXT PRIMARY KEY,
+            owner_account_id TEXT NOT NULL,
+            bound_at REAL NOT NULL
+        );
+        INSERT INTO channel_bindings VALUES ('feishu', 'A:uid-a', 10);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = ChannelBindingsStore(str(db_path))
+    store.bind_on_connect("feishu", "B:uid-b")
+
+    assert {row["owner_account_id"] for row in store.list_for_platform("feishu")} == {
+        "A:uid-a",
+        "B:uid-b",
+    }
+    assert store.get_binding("feishu", "A:uid-a") == "A:uid-a"
+    assert store.get_binding("feishu", "B:uid-b") == "B:uid-b"
+    store.close()
 
 
 def test_list_sessions_excludes_channel_by_default(store):
@@ -107,7 +142,7 @@ def test_list_channel_session_groups_filters_by_bound_at_and_message_count(store
     assert [s["session_id"] for s in groups[0]["sessions"]] == [new_sid]
 
 
-def test_prepare_inbound_remaps_owner(store, bindings):
+def test_prepare_inbound_remaps_owner(store, bindings, routes):
     bindings.bind_on_connect("feishu", OWNER)
     store.ensure_session("agent:main:feishu:dm:u1", owner_account_id="platform-user")
 
@@ -119,6 +154,7 @@ def test_prepare_inbound_remaps_owner(store, bindings):
 
     class _Crew:
         channel_bindings = bindings
+        channel_session_routes = routes
         session_store = store
 
     env = _Env()
@@ -128,7 +164,7 @@ def test_prepare_inbound_remaps_owner(store, bindings):
     assert cfg.get("channel_source")
 
 
-def test_bound_channel_message_is_listed_for_desktop_owner(store, bindings):
+def test_bound_channel_message_is_listed_for_desktop_owner(store, bindings, routes):
     bindings.bind_on_connect("feishu", OWNER)
     sid = "agent:main:feishu:dm:u1"
 
@@ -140,6 +176,7 @@ def test_bound_channel_message_is_listed_for_desktop_owner(store, bindings):
 
     class _Crew:
         channel_bindings = bindings
+        channel_session_routes = routes
         session_store = store
 
     env = _Env()

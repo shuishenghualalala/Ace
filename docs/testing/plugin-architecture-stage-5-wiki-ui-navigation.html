@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>插件架构阶段 5 · Wiki UI Navigation Registry 测试记录</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.ok{font-weight:700;color:#1e8449}.note{border-left:3px solid #999;padding:8px 16px;background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body><main class="wrap">
+  <h1>插件架构阶段 5 · Wiki UI Navigation Registry</h1>
+  <div class="sub">分支：refactor/plugin-architecture-stage-0 · 日期：2026-09-07 · 编码与测试：相互独立的 Luna 子 Agent</div>
+
+  <h2>验证目标</h2>
+  <ul>
+    <li>Desktop/Web 建立构建期可信的 UI Navigation Registry，支持注册、确定性排序、重复冲突失败和可逆 unregister/dispose。</li>
+    <li>Wiki 由独立 UI module/descriptor 提供导航贡献；核心导航 inventory 与 render 分支不再硬编码 Wiki descriptor。宿主 capability state 以及现有 <code>SidebarView</code>/<code>TabKey</code> 兼容类型仍在迁移期保留，Assistant 与 Work 原有共享导航语义保持不变。</li>
+    <li>以现有 <code>/api/config</code> 的 <code>wiki.enabled</code> 作为兼容能力事实来源；配置加载中或失败时保持旧行为，明确禁用时隐藏 Wiki、拒绝程序化切换，并从当前 Wiki view 安全回落 Chat。</li>
+    <li>本切片不迁 Wiki 页面生命周期、API Client、Feature Event Reducer，也不迁外援、Team 等其他 UI Contribution。</li>
+  </ul>
+
+  <h2>测试结果</h2>
+  <table>
+    <thead><tr><th>范围</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>Desktop UI Registry / Wiki Navigation 定向</td><td class="ok">11 passed</td></tr>
+      <tr><td>Desktop 全量测试</td><td class="ok">1805 passed</td></tr>
+      <tr><td>Web UI Registry / Wiki Navigation 定向</td><td class="ok">10 passed</td></tr>
+      <tr><td>Web 全量测试</td><td class="ok">185 passed</td></tr>
+      <tr><td>Desktop/Web typecheck 与 build</td><td class="ok">全部通过</td></tr>
+      <tr><td>Desktop lint 与 CSS lint</td><td class="ok">全部通过</td></tr>
+      <tr><td>git diff check</td><td class="ok">通过</td></tr>
+    </tbody>
+  </table>
+  <p>Desktop 与 Web 的定向测试分别覆盖注册、顺序、重复冲突、disposer/unregister、Wiki enabled/disabled、程序化切换 gate、禁用后的回落及其他导航不受影响。两端对配置未加载/失败的兼容默认语义均有测试锁定。</p>
+
+  <h2>设计与边界</h2>
+  <p>Registry 是宿主拥有的构建期装配面；Wiki module 只返回自己的 navigation descriptor，宿主显式 mount 并持有 disposer。重复 ID 立即失败，投影按声明顺序和稳定 ID 排序，旧 disposer 不会删除 unregister 后重新注册的替代贡献。Backend capability 与本地构建能力同时满足时才展示入口。</p>
+  <div class="note">待办：Wiki 页面 activate/dispose 生命周期、Wiki API Client、全局 Feature Event reducer/未知事件处理、Composer 贡献，以及 External Agent、Team 等其他 UI Feature 尚未迁移。下一项后端优先级为阶段 3C Work Foundation + API Consumer；本阶段没有修改后端协议。</div>
+
+  <h2>非阻塞提示</h2>
+  <p>验证过程中仅出现现有工具链的非阻塞提示（例如 npm 的 <code>ELECTRON_MIRROR</code> 配置提示、Node 对 ESLint 配置模块类型的提示，以及测试运行时 localStorage 参数提示）；这些提示不影响上述测试、构建或 lint 结果。</p>
+
+  <div class="nav"><a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a> · <a href="plugin-architecture-stage-3b-wiki-agent-preset.html">阶段 3B Wiki Agent Preset</a> · <a href="plugin-architecture-stage-3b-wiki-gateway-consumer.html">阶段 3B Wiki Gateway Consumer</a> · <a href="../frontend/desktop-frontend.html">Desktop 前端</a> · <a href="../frontend/web-frontend.html">Web 前端</a></div>
+</main></body>
+</html>

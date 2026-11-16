@@ -3,10 +3,12 @@ import type { Task, UiMessage } from "../types";
 import {
   collectSessionFileItems,
   currentTurnNodesForBoard,
+  durationLabel,
   makeNodes,
   makeTurnGroups,
-  nodeLogs,
+  nodeMessageId,
   nodeTitle,
+  stageDispatches,
   teamDagInfo,
 } from "./TaskBoard";
 
@@ -17,6 +19,48 @@ const task = (overrides: Partial<Task>): Task => ({
   status: "completed",
   result: "",
   ...overrides,
+});
+
+describe("stageDispatches", () => {
+  it("recovers historical dispatches from completed collaboration attempts", () => {
+    const nodes = makeNodes([
+      task({ id: "one", assignee: "kimi", progress: { collaboration_task_id: "t1", execution_attempts: [{ state: "completed", planned_member: "kimi", actual_executor: "kimi" }] } }),
+      task({ id: "two", assignee: "hermes", progress: { collaboration_task_id: "t1", execution_attempts: [{ state: "completed", planned_member: "hermes", actual_executor: "hermes" }] } }),
+      task({ id: "pending", assignee: "kimi", progress: { collaboration_task_id: "t1", execution_attempts: [{ state: "dispatching", planned_member: "kimi", actual_executor: null }] } }),
+    ]);
+    const result = stageDispatches(nodes, [], (id) => id === "leader" ? "Crew" : id);
+    expect(result).toHaveLength(1);
+    expect(result[0].nodes.map((node) => node.id)).toEqual(["one", "two"]);
+  });
+
+  it("uses real assignment events from this turn and groups their recipients", () => {
+    const turn = "session::turn::new";
+    const nodes = makeNodes([
+      task({ id: "one", assignee: "kimi", progress: { turn_session_id: turn, plan_node_id: "one" } }),
+      task({ id: "two", assignee: "hermes", progress: { turn_session_id: turn, plan_node_id: "two" } }),
+    ]);
+    const event = (id: string, target: string, source: string): UiMessage => ({
+      id: `${id}-${source}`, role: "team_internal", text: "", eventType: "team_assign",
+      nodeId: id, mentionFrom: "leader", mentionTo: [target], sourceSessionId: source,
+    });
+    const display = (id: string) => id === "leader" ? "Crew" : id;
+    const events = [event("one", "kimi", `${turn}::leader`), event("two", "hermes", `${turn}::leader`),
+      event("one", "wrong", "session::turn::old::leader")];
+    const result = stageDispatches(nodes, events, display);
+    expect(result).toHaveLength(1);
+    expect(result[0].sender).toBe("Crew");
+    expect(result[0].nodes.map((node) => node.id)).toEqual(["one", "two"]);
+    expect(stageDispatches(nodes, [], display)).toEqual([]);
+  });
+});
+
+describe("node duration", () => {
+  it("uses the latest actual attempt and keeps running time distinct from waiting time", () => {
+    const leader = task({ assignee: "leader", created_at: 1, progress: { execution_attempts: [{ started_at: 100, ended_at: 115 }] } });
+    expect(durationLabel(leader, 120)).toBe("耗时 15s");
+    expect(durationLabel({ ...leader, status: "running", progress: { execution_attempts: [{ started_at: 100 }] } }, 125)).toBe("已运行 25s");
+    expect(durationLabel({ ...leader, started_at: undefined, progress: { execution_attempts: [] } }, 125)).toBe("");
+  });
 });
 
 describe("nodeTitle", () => {
@@ -73,6 +117,24 @@ describe("nodeTitle", () => {
   });
 });
 
+describe("blocked Team node ownership", () => {
+  it("shows an unassigned blocked node as waiting for assignment", () => {
+    const nodes = makeNodes([task({
+      kind: "team",
+      assignee: "",
+      status: "blocked",
+      progress: {
+        source: "team_kanban",
+        plan_node_id: "verify",
+        runtime_blocking: { status: "blocked" },
+        previous_assignee: "kk",
+      },
+    })]);
+
+    expect(nodes[0].owner).toBe("待分配");
+  });
+});
+
 describe("currentTurnNodesForBoard", () => {
   it("uses the latest Team turn for DAG metadata instead of mixing old fallback turns", () => {
     const nodes = makeNodes([
@@ -109,92 +171,42 @@ describe("currentTurnNodesForBoard", () => {
     const currentNodes = currentTurnNodesForBoard(nodes, turnGroups);
 
     expect(currentNodes.map((node) => node.id)).toEqual(["new_1"]);
-    expect(teamDagInfo(currentNodes, [turnGroups[turnGroups.length - 1]])?.label).toBe("Standard Semantic DAG");
+    expect(teamDagInfo(currentNodes, [turnGroups[turnGroups.length - 1]])?.label).toBe("团队协作");
   });
 });
 
-describe("nodeLogs", () => {
-  it("does not use node detail handoff text as execution log fallback", () => {
-    const node = {
-      id: "leader_plan",
-      title: "Leader 拆分任务",
-      owner: "leader",
-      agents: ["Leader"],
-      status: "completed" as const,
-      summary: "",
-      summaryItems: [],
-      raw: task({
-        kind: "team",
-        detail: "leader 将按 DAG 节点「Leader 审阅方案：贪吃蛇小游戏吧」执行。",
-        progress: {
-          source: "team_plan",
-          plan_node_id: "leader_plan",
-          workflow_lane: "lead",
-        },
-      }),
-    };
+describe("nodeMessageId", () => {
+  it("locates the latest Team message associated with a DAG node", () => {
+    const node = makeNodes([task({
+      id: "task-build",
+      task_id: "task-build",
+      kind: "team",
+      progress: { source: "team_plan", plan_node_id: "build" },
+    })])[0];
 
-    expect(nodeLogs(node, [])).toEqual([]);
+    expect(nodeMessageId(node, [
+      { id: "assign", role: "team_internal", text: "@kk 开始执行", nodeId: "build" },
+      { id: "submit", role: "team_internal", text: "已完成", nodeId: "build" },
+    ])).toBe("submit");
   });
 
-  it("filters legacy handoff execution events from node logs", () => {
-    const node = {
-      id: "fast_execute",
-      title: "成员执行任务",
-      owner: "kk",
-      agents: ["kk"],
-      status: "completed" as const,
-      summary: "",
-      summaryItems: [],
-      raw: task({
-        kind: "team",
-        progress: {
-          source: "team_plan",
-          execution_events: [{
-            kind: "status",
-            event_title: "节点承接",
-            event_text: "kk 将按 DAG 节点「快速执行：2048小游戏」执行。",
-          }],
-        },
-      }),
-    };
+  it("does not invent a locate target when history has no node message", () => {
+    const node = makeNodes([task({
+      kind: "team",
+      progress: { source: "team_plan", plan_node_id: "build" },
+    })])[0];
 
-    expect(nodeLogs(node, [])).toEqual([]);
-  });
-
-  it("keeps structured execution events as log entries", () => {
-    const node = {
-      id: "verify",
-      title: "测试验证",
-      owner: "kk",
-      agents: ["kk"],
-      status: "completed" as const,
-      summary: "",
-      summaryItems: [],
-      raw: task({
-        kind: "team",
-        progress: {
-          source: "team_plan",
-          execution_events: [{
-            kind: "tool",
-            title: "运行测试",
-            message: "npm test -- --run snake.test.ts\n2 passed",
-          }],
-        },
-      }),
-    };
-
-    expect(nodeLogs(node, [])).toEqual([
-      expect.objectContaining({
-        kind: "tool",
-        title: "运行测试",
-        body: "npm test -- --run snake.test.ts\n2 passed",
-      }),
-    ]);
+    expect(nodeMessageId(node, [])).toBe("");
   });
 });
 
 describe("collectSessionFileItems", () => {
+  it("does not expose the internal agent_turn task JSON as a user artifact", () => {
+    expect(collectSessionFileItems([
+      task({ output_ref: "/owner/.crew/tasks/task_internal.json" }),
+    ], [])).toEqual([]);
+  });
+
   it("collects node artifact paths and message artifacts into one session file list", () => {
     const tasks: Task[] = [
       task({

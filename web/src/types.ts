@@ -64,11 +64,7 @@ export type ChunkKind =
   | "todo_updated"
   | "todo_reminder"
   | "file_changes"
-  | "workflow_progress"
-  | "wiki_cards"
-  | "wiki_ingest_progress"
-  | "wiki_changed"
-  | "team_internal";
+  | "feature_event";
 
 export interface TodoItem {
   id: string;
@@ -120,9 +116,18 @@ export interface ToolCallInfo {
   duration?: number;
 }
 
+export interface FeatureEventBody {
+  feature: string;
+  event: string;
+  version?: number;
+  payload?: Record<string, any>;
+}
+
 export interface Chunk {
   kind: ChunkKind;
   body: Record<string, any>;
+  /** Gateway frames carry the originating request identity at the top level. */
+  request_id?: string;
   is_final: boolean;
   sequence: number;
   /** Gateway 内部单调序列号，用于断线重连后回放定位 */
@@ -178,6 +183,28 @@ export interface Task {
   auto_backgrounded?: boolean;
 }
 
+export interface SubagentApiRecord {
+  subagent_id?: string;
+  child_id?: string;
+  label?: string;
+  provider?: string;
+  lifecycle?: string;
+  state?: string;
+  status?: string;
+  stop_reason?: string | null;
+  started_at?: number;
+  created_at?: number;
+  settled_at?: number | null;
+  [key: string]: unknown;
+}
+
+export interface SubagentListResponse {
+  ok: boolean;
+  items: SubagentApiRecord[] | Record<string, SubagentApiRecord[]>;
+  runs: SubagentApiRecord[];
+  error?: string;
+}
+
 export interface RuntimeSessionStatus {
   session_id: string;
   live: "idle" | "running" | "queued" | string;
@@ -231,6 +258,13 @@ export interface AppConfig {
   external_agents?: {
     enabled: boolean;
   };
+  feature_capabilities?: Record<string, FeatureCapability>;
+}
+
+export interface FeatureCapability {
+  state: string;
+  available: boolean;
+  generation: string | null;
 }
 
 export type WikiPageType = "entity" | "topic" | "source" | "comparison" | "synthesis";
@@ -354,15 +388,6 @@ export interface WikiUploadResult {
   needs_confirmation?: boolean;
   pages?: WikiPage[];
   issues?: string[];
-}
-
-export interface WikiSummary {
-  summary: string;
-  kb_id: string;
-  page_count?: number;
-  source_count?: number;
-  generated_at?: number;
-  status: "ready" | "generating" | "empty" | "stale";
 }
 
 export interface ExternalRuntime {
@@ -519,6 +544,7 @@ export interface FormationPlanMember {
   assigned_capabilities: string[];
   responsibility: Record<string, unknown>;
   responsibility_markdown: string;
+  responsibility_source?: string;
   selection_source: "user" | "system" | string;
   locked: boolean;
   selection_reason: string;
@@ -539,6 +565,9 @@ export interface FormationPlan {
   excluded_agent_ids: string[];
   reasons: string[];
   warnings: string[];
+  formation_allow_system_fill?: boolean;
+  runtime_allow_suggestions?: boolean;
+  runtime_allow_auto_reassign?: boolean;
 }
 
 export interface ExternalTeamDraftSlot {
@@ -600,6 +629,8 @@ export interface DebugEvent {
 
 export type MsgRole = "user" | "assistant" | "tool" | "status" | "error" | "team_internal";
 
+export type SessionStatus = "idle" | "running" | "queued" | "error";
+
 /** 附件类型 */
 export interface Attachment {
   id: string;
@@ -649,6 +680,11 @@ export interface UiMessage {
   mentionFrom?: string;
   mentionTo?: string[];
   mentionIntent?: string;
+  communicationKind?: string;
+  communicationStatus?: string;
+  requestId?: string;
+  replyTo?: string;
+  communicationRequestText?: string;
   displayMode?: "chat" | "collapsible" | string;
   collapsedTitle?: string;
   processText?: string;
@@ -666,15 +702,29 @@ export interface UiMessage {
   todoSnapshot?: TodoItem[];
   /** 本消息回合内产生的 Wiki 页面卡片。 */
   wikiCards?: WikiPage[];
+  /** 子智能体生命周期事件的结构化标识，状态消息仍复用现有 agent timeline。 */
+  subagentId?: string;
+  subagentState?: "started" | "settled" | "running" | "ready" | "idle";
+  subagentLabel?: string;
+  subagentProvider?: string;
+  subagentStopReason?: string;
 }
 
 export interface TeamMemberView {
   agentId?: string;
+  /** 可读的历史 mention 别名；结构化 mention 传输始终使用 agentId。 */
+  mentionId?: string;
   name: string;
   displayBadge?: string;
   role: string;
   isLeader?: boolean;
   tone?: number;
+}
+
+/** 用户在 Team Composer 中通过 @ 选择的成员，发送时随 WebSocket 请求传递。 */
+export interface UserAgentMention {
+  kind: "team_member";
+  member_id: string;
 }
 
 /** 前端本地待发送队列项 */
@@ -688,5 +738,8 @@ export interface PendingMessage {
   subScenario?: string;
   externalTeamId?: string;
   wikiKbId?: string;
+  /** Per-run consent to expose read-only Wiki tools to this external team. */
+  externalWikiReadKbId?: string;
   teamExecutionTier?: TeamExecutionTier;
+  userMentions?: UserAgentMention[];
 }

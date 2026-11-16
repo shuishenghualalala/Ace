@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +233,7 @@ def _render_report(
             "</tr>"
         )
 
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")  # noqa: UP017
     title = "Ace 后端 E2E 批量测试报告"
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
@@ -256,7 +257,7 @@ def _render_report(
 </head>
 <body>
   <h1>{title}</h1>
-  <p>生成时间: {datetime.now(UTC).isoformat(timespec='seconds')}</p>
+  <p>生成时间: {generated_at}</p>
   <p>通过 {counts['passed']} / 失败 {counts['failed']} / 跳过 {counts['skipped']} / 总数 {len(results)}</p>
   <table>
     <thead><tr><th>Case</th><th>标题</th><th>状态</th><th>耗时</th><th>工具</th><th>错误</th><th>产物</th></tr></thead>
@@ -278,10 +279,9 @@ def main() -> int:
     parser.add_argument(
         "--report-dir",
         type=Path,
-        default=ROOT
-        / "build"
-        / "e2e"
-        / datetime.now(UTC).strftime("%Y%m%d-%H%M%S"),
+        default=ROOT / "build" / "e2e" / datetime.now(timezone.utc).strftime(  # noqa: UP017
+            "%Y%m%d-%H%M%S"
+        ),
     )
     parser.add_argument(
         "--fail-on-skip",

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from crew.core.interfaces import WorkspaceStore
 from crew.state.models import Workspace
-from crew.state._migration import primary_key_columns, rebuild_table_pk
+from crew.state._migration import backfill_empty_owner_rows, primary_key_columns, rebuild_table_pk
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 DEFAULT_ID = "default"
@@ -47,6 +47,11 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
 
+    def close(self) -> None:
+        """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
+        with self._lock:
+            self._conn.close()
+
     def _init_schema(self, conn) -> None:
         conn.execute(
             """
@@ -65,6 +70,8 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         self._migrate_owner_primary_key(conn)
         self._migrate_root_path_column(conn)
         self._migrate_hidden_column(conn)
+        # 历史 owner='' 行归属本机 local（owner 统一后不存在无主工作空间）。
+        backfill_empty_owner_rows(conn, ["workspaces"])
 
     def _migrate_root_path_column(self, conn) -> None:
         info = conn.execute("PRAGMA table_info(workspaces)").fetchall()
@@ -140,7 +147,8 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         description: str = "",
         instructions: str = "",
         root_path: str = "",
-        owner_account_id: str = "",
+        *,
+        owner_account_id: str,
     ) -> dict:
         normalized_root = _normalize_root_path(root_path)
         ws = Workspace(
@@ -170,7 +178,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         self._writer.execute(_write)
         return ws.to_dict()
 
-    def get(self, workspace_id: str, owner_account_id: str = "") -> dict:
+    def get(self, workspace_id: str, owner_account_id: str) -> dict:
         if workspace_id in BUILTIN_WORKSPACES:
             self._ensure_builtin(workspace_id, owner_account_id)
         with self._lock:
@@ -183,7 +191,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             raise KeyError(f"工作空间不存在: {workspace_id}")
         return self._row(r)
 
-    def list(self, owner_account_id: str = "") -> list[dict]:
+    def list(self, owner_account_id: str) -> list[dict]:
         self._ensure_builtin(DEFAULT_ID, owner_account_id)
         with self._lock:
             rows = self._conn.execute(
@@ -193,7 +201,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             ).fetchall()
         return [self._row(r) for r in rows]
 
-    def update(self, workspace_id: str, owner_account_id: str = "", **fields) -> dict:
+    def update(self, workspace_id: str, owner_account_id: str, **fields) -> dict:
         allowed = {
             k: v for k, v in fields.items()
             if k in ("name", "description", "instructions", "root_path", "hidden") and v is not None
@@ -212,7 +220,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             self._writer.execute(_write)
         return self.get(workspace_id, owner_account_id=owner_account_id)
 
-    def delete(self, workspace_id: str, owner_account_id: str = "", *, writer=None) -> None:
+    def delete(self, workspace_id: str, owner_account_id: str, *, writer=None) -> None:
         if workspace_id in BUILTIN_WORKSPACES:
             raise ValueError("内置工作空间不可删除")
         if writer is not None:

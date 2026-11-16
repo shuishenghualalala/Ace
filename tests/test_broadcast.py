@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 
 from crew.core.envelope import Envelope, ResponseChunk
-from crew.gateway.broadcast import make_broadcasting_handler, stream_and_broadcast
+from crew.channels.broadcast import make_broadcasting_handler, stream_and_broadcast
 
 
 class _FakeConnections:

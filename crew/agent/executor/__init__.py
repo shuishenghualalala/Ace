@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from crew.agent.executor.base import AgentExecutor, ExecutionContext
+from crew.agent.executor.base import AgentExecutor, ExecutionContext, FinalRequestView
 from crew.agent.executor.builtin import BuiltinExecutor
 from crew.agent.executor.external import (
     AcpExecutor,
@@ -29,6 +29,7 @@ from crew.plugins.manager import PluginManager
 __all__ = [
     "AgentExecutor",
     "ExecutionContext",
+    "FinalRequestView",
     "BuiltinExecutor",
     "ClientExecutor",
     "ClientExecutorConfig",
@@ -60,6 +61,8 @@ def create_executor(
     max_delegate_tool_calls: int = 3,
     plan_manager: Any = None,
     stream_continuation_max: int = 3,
+    tool_execution_timeout_seconds: float = 600.0,
+    turn_deadline_seconds: float = 0.0,
 ) -> AgentExecutor:
     """按 kind 创建执行内核。
 
@@ -84,6 +87,8 @@ def create_executor(
             max_delegate_tool_calls=max_delegate_tool_calls,
             plan_manager=plan_manager,
             stream_continuation_max=stream_continuation_max,
+            tool_execution_timeout_seconds=tool_execution_timeout_seconds,
+            turn_deadline_seconds=turn_deadline_seconds,
         )
     if kind == "client":
         return ClientExecutor(config)

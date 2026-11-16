@@ -36,11 +36,11 @@ def conn():
 @pytest.mark.asyncio
 async def test_push_assigns_gateway_sequence_and_buffers(conn: ConnectionManager):
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     key = ("", "s1")
 
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "a"}})
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "b"}})
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "a"}}, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "b"}}, owner_account_id="")
 
     # 推送成功
     assert len(ws.sent) == 2
@@ -56,17 +56,17 @@ async def test_push_assigns_gateway_sequence_and_buffers(conn: ConnectionManager
 @pytest.mark.asyncio
 async def test_buffer_survives_disconnect(conn: ConnectionManager):
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     key = ("", "s1")
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "a"}})
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "a"}}, owner_account_id="")
 
     # 模拟断线：注销 socket
-    conn.unregister_all(ws, {"s1"})
-    assert not conn.has_connection("s1")
+    conn.unregister_all(ws, {"s1"}, owner_account_id="")
+    assert not conn.has_connection("s1", owner_account_id="")
 
     # 断线期间继续产生 chunk
-    await conn.push_payload("s1", {"kind": "tool", "body": {"name": "x"}})
-    await conn.push_payload("s1", {"kind": "final", "body": {"text": "done"}})
+    await conn.push_payload("s1", {"kind": "tool", "body": {"name": "x"}}, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "final", "body": {"text": "done"}}, owner_account_id="")
 
     # 缓存保留
     assert len(conn._chunk_buffers[key]) == 3
@@ -75,13 +75,13 @@ async def test_buffer_survives_disconnect(conn: ConnectionManager):
 @pytest.mark.asyncio
 async def test_replay_respects_after_sequence(conn: ConnectionManager):
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     for i in range(5):
-        await conn.push_payload("s1", {"kind": "delta", "body": {"text": str(i)}})
+        await conn.push_payload("s1", {"kind": "delta", "body": {"text": str(i)}}, owner_account_id="")
 
     ws2 = _FakeWS()
-    conn.register("s1", ws2)
-    await conn.replay("s1", ws2, after_gateway_sequence=3)
+    conn.register("s1", ws2, owner_account_id="")
+    await conn.replay("s1", ws2, after_gateway_sequence=3, owner_account_id="")
 
     # 只收到 4、5（gateway_sequence 4, 5）
     assert [p["gateway_sequence"] for p in ws2.sent] == [4, 5]
@@ -95,9 +95,9 @@ async def test_replay_survives_concurrent_push_append(conn: ConnectionManager):
     快照迭代免疫，且回放期间新到的帧应由 push_payload 在回放结束后实时补发。
     """
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     for i in range(3):
-        await conn.push_payload("s1", {"kind": "delta", "body": {"text": str(i)}})
+        await conn.push_payload("s1", {"kind": "delta", "body": {"text": str(i)}}, owner_account_id="")
 
     class _SlowWS(_FakeWS):
         async def send_json(self, data: dict) -> None:
@@ -105,14 +105,14 @@ async def test_replay_survives_concurrent_push_append(conn: ConnectionManager):
             await super().send_json(data)
 
     ws2 = _SlowWS()
-    conn.register("s1", ws2)
+    conn.register("s1", ws2, owner_account_id="")
 
     async def _concurrent_push() -> None:
         await asyncio.sleep(0)
-        await conn.push_payload("s1", {"kind": "delta", "body": {"text": "late"}})
+        await conn.push_payload("s1", {"kind": "delta", "body": {"text": "late"}}, owner_account_id="")
 
     await asyncio.gather(
-        conn.replay("s1", ws2, after_gateway_sequence=0),
+        conn.replay("s1", ws2, after_gateway_sequence=0, owner_account_id=""),
         _concurrent_push(),
     )
 
@@ -230,14 +230,14 @@ async def test_notify_owner_removes_dead_owner_socket(conn: ConnectionManager):
 @pytest.mark.asyncio
 async def test_clear_buffer_clears_payloads_but_keeps_sequence(conn: ConnectionManager):
     ws = _FakeWS()
-    conn.register("s1", ws)
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "a"}})
+    conn.register("s1", ws, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "a"}}, owner_account_id="")
     key = ("", "s1")
     assert conn._gateway_seq[key] == 1
     assert len(conn._chunk_buffers[key]) == 1
 
-    conn.clear_buffer("s1")
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "b"}})
+    conn.clear_buffer("s1", owner_account_id="")
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "b"}}, owner_account_id="")
 
     # 清空缓存后 sequence 保持单调递增，不重置；缓存只保留新帧
     assert conn._gateway_seq[key] == 2
@@ -248,27 +248,27 @@ async def test_clear_buffer_clears_payloads_but_keeps_sequence(conn: ConnectionM
 @pytest.mark.asyncio
 async def test_register_resets_consecutive_failures(conn: ConnectionManager):
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     key = ("", "s1")
     conn._consecutive_failures[key] = 5
 
-    conn.unregister_all(ws, {"s1"})
+    conn.unregister_all(ws, {"s1"}, owner_account_id="")
     # 默认 cleanup 会清掉失败计数
     ws2 = _FakeWS()
-    conn.register("s1", ws2)
+    conn.register("s1", ws2, owner_account_id="")
     assert conn._consecutive_failures.get(key) is None
 
 
 @pytest.mark.asyncio
 async def test_replay_stops_on_dead_socket(conn: ConnectionManager):
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     for i in range(3):
-        await conn.push_payload("s1", {"kind": "delta", "body": {"text": str(i)}})
+        await conn.push_payload("s1", {"kind": "delta", "body": {"text": str(i)}}, owner_account_id="")
 
     dead = _FakeWS()
     dead.closed = True
-    await conn.replay("s1", dead, after_gateway_sequence=0)
+    await conn.replay("s1", dead, after_gateway_sequence=0, owner_account_id="")
 
     # 遇到死 socket 应立即停止，不抛异常
     assert dead.sent == []
@@ -277,18 +277,19 @@ async def test_replay_stops_on_dead_socket(conn: ConnectionManager):
 @pytest.mark.asyncio
 async def test_replay_filter_skips_filtered_payloads(conn: ConnectionManager):
     ws = _FakeWS()
-    conn.register("s1", ws)
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "keep"}})
-    await conn.push_payload("s1", {"kind": "followup_question", "body": {"question_id": "q1"}})
-    await conn.push_payload("s1", {"kind": "final", "body": {"text": "done"}})
+    conn.register("s1", ws, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "keep"}}, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "followup_question", "body": {"question_id": "q1"}}, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "final", "body": {"text": "done"}}, owner_account_id="")
 
     ws2 = _FakeWS()
-    conn.register("s1", ws2)
+    conn.register("s1", ws2, owner_account_id="")
     await conn.replay(
         "s1",
         ws2,
         after_gateway_sequence=0,
         filter_fn=lambda p: p.get("kind") != "followup_question",
+    owner_account_id="",
     )
 
     assert [p["kind"] for p in ws2.sent] == ["delta", "final"]
@@ -368,13 +369,13 @@ def test_merge_pending_thinking_preserves_mixed_event_order(conn: ConnectionMana
 async def test_pending_payloads_are_not_bypassed_when_rate_window_reopens():
     conn = ConnectionManager(min_interval=10.0)
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     key = ("", "s1")
 
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "A"}, "is_final": False})
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "B"}, "is_final": False})
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "A"}, "is_final": False}, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "B"}, "is_final": False}, owner_account_id="")
     conn._last_push_ts[key] = 0
-    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "C"}, "is_final": False})
+    await conn.push_payload("s1", {"kind": "delta", "body": {"text": "C"}, "is_final": False}, owner_account_id="")
     await conn._flush_pending(key)
 
     assert [p["body"]["text"] for p in ws.sent] == ["A", "BC"]
@@ -385,15 +386,16 @@ async def test_final_flushes_pending_deltas_before_final():
     """final 到达时，pending delta 合并帧应先于 final 帧推送。"""
     conn = ConnectionManager(min_interval=10.0)
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     key = ("", "s1")
     # 让后续 delta 进入限流缓存而非立即推送
     conn._last_push_ts[key] = time.monotonic()
 
-    await conn.push_payload("s1", {"kind": "delta", "sequence": 1, "body": {"text": "A"}})
-    await conn.push_payload("s1", {"kind": "delta", "sequence": 2, "body": {"text": "B"}})
+    await conn.push_payload("s1", {"kind": "delta", "sequence": 1, "body": {"text": "A"}}, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "delta", "sequence": 2, "body": {"text": "B"}}, owner_account_id="")
     await conn.push_payload(
-        "s1", {"kind": "final", "body": {"text": "AB"}, "is_final": True}
+        "s1", {"kind": "final", "body": {"text": "AB"}, "is_final": True},
+    owner_account_id="",
     )
 
     # 合并后的 delta 在 final 之前到达
@@ -413,11 +415,11 @@ async def test_tool_start_flushes_pending_and_bypasses_rate_limit():
     """tool/start 是用户可感知控制帧：先刷新 pending delta，再立即推送工具开始。"""
     conn = ConnectionManager(min_interval=10.0)
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     key = ("", "s1")
     conn._last_push_ts[key] = time.monotonic()
 
-    await conn.push_payload("s1", {"kind": "delta", "sequence": 1, "body": {"text": "准备"}})
+    await conn.push_payload("s1", {"kind": "delta", "sequence": 1, "body": {"text": "准备"}}, owner_account_id="")
     assert ws.sent == []
     assert key in conn._pending_payloads
 
@@ -428,6 +430,7 @@ async def test_tool_start_flushes_pending_and_bypasses_rate_limit():
             "sequence": 2,
             "body": {"phase": "start", "tool_call_id": "t1", "name": "file_write"},
         },
+    owner_account_id="",
     )
 
     assert [p["kind"] for p in ws.sent] == ["delta", "tool"]
@@ -442,7 +445,7 @@ async def test_tool_result_remains_rate_limited():
     """只有 tool/start 绕过限流；tool/result 继续受限流保护。"""
     conn = ConnectionManager(min_interval=10.0)
     ws = _FakeWS()
-    conn.register("s1", ws)
+    conn.register("s1", ws, owner_account_id="")
     key = ("", "s1")
     conn._last_push_ts[key] = time.monotonic()
 
@@ -453,9 +456,10 @@ async def test_tool_result_remains_rate_limited():
             "sequence": 1,
             "body": {"phase": "result", "tool_call_id": "t1", "name": "file_write"},
         },
+    owner_account_id="",
     )
 
     assert ws.sent == []
     assert conn._pending_payloads[key][0]["body"]["phase"] == "result"
-    conn.unregister_all(ws, {"s1"})
+    conn.unregister_all(ws, {"s1"}, owner_account_id="")
     await asyncio.sleep(0)

@@ -5,6 +5,7 @@ import {
   applyOrderedDelta,
   applyToolChunk,
   isTeamRuntimeStatus,
+  isSuppressedRequest,
   normalizeWikiCardPages,
   resolveFinalText,
   type AssistantTextDeltaAccumulator,
@@ -73,6 +74,15 @@ describe("resolveFinalText", () => {
 describe("isTeamRuntimeStatus", () => {
   it("treats direct leader notices as team runtime status, not chat messages", () => {
     expect(isTeamRuntimeStatus("简单消息由 Leader 直接回复…")).toBe(true);
+  });
+});
+
+describe("isSuppressedRequest", () => {
+  it("drops a late frame from a cancelled request but keeps a retry request", () => {
+    const suppressed = new Set(["mention_cancelled"]);
+    expect(isSuppressedRequest("mention_cancelled", suppressed)).toBe(true);
+    expect(isSuppressedRequest("mention_retry", suppressed)).toBe(false);
+    expect(isSuppressedRequest("", suppressed)).toBe(false);
   });
 });
 

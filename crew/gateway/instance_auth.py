@@ -110,6 +110,25 @@ def is_valid_gateway_instance_challenge(challenge: str) -> bool:
     return _CHALLENGE_RE.fullmatch(challenge) is not None
 
 
+def build_gateway_health_payload(challenge: str | None) -> tuple[dict, int]:
+    """计算 health 响应体与状态码，主 ``/api/health`` 与独立线程 health 服务共用。
+
+    无 challenge 时返回通用就绪响应；带 challenge 时 fail closed：
+    challenge 格式非法返回 400，本机无实例密钥可用时返回 503。
+    """
+
+    payload: dict = {"ok": True, "service": "crew-gateway"}
+    if challenge is None:
+        return payload, 200
+    if not is_valid_gateway_instance_challenge(challenge):
+        return {"ok": False, "error": "invalid gateway instance challenge"}, 400
+    proof = create_gateway_instance_proof(challenge)
+    if proof is None:
+        return {"ok": False, "error": "gateway instance identity unavailable"}, 503
+    payload[GATEWAY_INSTANCE_PROOF_FIELD] = proof
+    return payload, 200
+
+
 def verify_gateway_instance_access_token(token: str) -> bool:
     """Validate the Desktop-only token used by privileged Browser sockets."""
 
@@ -178,6 +197,7 @@ __all__ = [
     "GATEWAY_INSTANCE_DIRECTORY",
     "GATEWAY_INSTANCE_KEY_FILENAME",
     "GATEWAY_INSTANCE_PROOF_FIELD",
+    "build_gateway_health_payload",
     "create_gateway_instance_proof",
     "is_valid_gateway_instance_challenge",
     "verify_gateway_instance_access_token",

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ADR-0008 · Team 与 Kanban Driver Adapter</title>
+<style>
+  :root{--text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif}
+  *{box-sizing:border-box}body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}.wrap{max-width:960px;margin:0 auto;padding:56px 24px 100px}h1{font-size:28px;margin:0 0 4px}.sub{color:var(--t3);margin-bottom:36px}h2{font-size:19px;margin:40px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}p,li{color:var(--t2)}code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px}.decision{border-left:3px solid #111;padding:8px 16px;background:var(--soft)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top}th{background:var(--soft)}.nav{margin-top:40px;color:var(--t3);font-size:13px}a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADR-0008 · Team 与 Kanban Driver Adapter</h1>
+  <div class="sub">状态：Accepted · 日期：2026-09-03 · 阶段：插件架构 Stage 2 / Commit 2</div>
+
+  <h2>背景</h2>
+  <p>Execution Driver Registry 已承接默认 Agent 和第三方 Feature，但 <code>CrewApp.handle()</code> 仍直接判断 Team 与 Dynamic Kanban。这样中心入口仍认识产品业务，而且这两条长请求没有使用 Driver Generation Lease。两类 Manager 的内部资源所有权较复杂，不适合在删除 mode 分支的同时整体重构。</p>
+
+  <h2>决定</h2>
+  <div class="decision"><p>先以窄适配层将 Team 与 Dynamic Kanban 的现有 <code>interact()</code> 包装成 Execution Driver。每个 Adapter 使用独立 FeatureScope；Host 只在组合时注册，<code>handle()</code> 只解析 Registry，不再包含任何业务 mode 分支。</p></div>
+  <table>
+    <thead><tr><th>Driver</th><th>Generation</th><th>兼容行为</th></tr></thead>
+    <tbody>
+      <tr><td><code>team</code></td><td><code>product.team-driver-adapter@g1</code></td><td>仅在 Team 启用时注册；继续从会话配置补全 external_team_id。</td></tr>
+      <tr><td><code>dynamic_kanban</code></td><td><code>product.dynamic-kanban-driver-adapter@g1</code></td><td>保留旧 mode、Manager 调用和流式 ResponseChunk。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>生命周期</h2>
+  <p>Driver dispatch 自动持有所属 Scope 的请求 Lease。应用关闭时先停止 Session Dispatcher，再并行 drain 默认 Agent、Team 与 Dynamic Kanban 的桥接 Scope，最后关闭 Team Manager、Provider、插件和 Store。禁用 Team 时不注册占位 Driver，请求统一返回 <code>capability_unavailable</code>。</p>
+
+  <h2>边界</h2>
+  <ul>
+    <li>本决定只迁移执行入口与请求 Lease，不迁移 Manager 内部结构。</li>
+    <li>Team 的后台任务、Provider 和活动协作状态仍在后续复杂并发阶段迁入完整 Product Feature。</li>
+    <li>Dynamic Kanban 的 Store、运行 Task 和 Provider 状态仍在后续复杂并发阶段迁入完整 Product Feature。</li>
+    <li>Gateway 对 Dynamic Kanban sidechain 的兼容判断暂不改变；后续由 Driver Descriptor 或策略贡献替代。</li>
+  </ul>
+
+  <h2>结果</h2>
+  <p>新增执行模式只需注册 Driver；默认 Agent、Team、Dynamic Kanban 和目录插件共享同一解析路径。<code>CrewApp.handle()</code> 只保留 Host 公共前处理、一次 Driver 分派与标准 unavailable 响应。</p>
+
+  <h2>跨平台</h2>
+  <p>Adapter、Scope drain 与并行关闭只使用 Python asyncio；不依赖 Unix signal、fork、文件锁或平台路径语义，macOS、Linux 与 Windows 使用同一实现。</p>
+
+  <div class="nav"><a href="0007-execution-driver-registry.html">ADR-0007</a> · <a href="../modules/app.html">App 模块文档</a> · <a href="../modules/team.html">Team 模块文档</a> · <a href="../modules/dynamickanban.html">Dynamic Kanban 模块文档</a> · <a href="../../testing/plugin-architecture-stage-2-driver-adapters.html">测试记录</a></div>
+</div>
+</body>
+</html>

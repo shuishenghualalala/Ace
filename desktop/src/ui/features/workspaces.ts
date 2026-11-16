@@ -18,7 +18,11 @@ import {
 } from '../backend-client';
 import { openDialog, type OverlayHandle } from '../components/overlays';
 import { isChannelSessionId, type ChannelSessionGroup } from './channel-sessions';
-import { isSessionVisibleWithExternalAgentsFlag } from './external-agents-feature';
+import {
+  isExternalAgentSession,
+  isExternalTeamSession,
+  isSessionVisibleWithExternalAgentsFlag,
+} from './external-agents-feature';
 import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 import { applySessionModelBinding, mergeSessionModelsFromBackend, modelIdForNewCrewSession, modelLabelForId, syncSessionModelUi } from './session-model';
 import { assignSecurityMode } from './security-approval';
@@ -256,16 +260,7 @@ export function syncSessionsFromBackend(rows: BackendSession[]): void {
         }
       : prev?.agentLabel;
     const agentBinding = row.agent_binding ?? prev?.agentBinding;
-    const provider = String(agentLabel?.provider || '').toLowerCase();
-    const isExternalAgent = agentBinding
-      ? agentBinding.kind === 'external_agent'
-      : Boolean(
-          provider
-          && provider !== 'crew'
-          && provider !== 'builtin'
-          && provider !== 'client'
-          && provider !== 'team',
-        );
+    const isExternalAgent = isExternalAgentSession(agentBinding);
     const modelLabel = isExternalAgent
       ? agentLabel?.model || prev?.modelLabel
       : row.model_label || prev?.modelLabel;
@@ -315,10 +310,10 @@ function sessionLeadingInner(s: SessionRow): string {
   if (provider === 'sites') {
     return '<span class="session__sites-logo" data-sites-logo aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="15" height="14" rx="2.25"/><path d="M2.5 7h15M6 11h5M6 14h8"/></svg></span>';
   }
-  if (provider === 'team') {
+  if (isExternalTeamSession(s.agentBinding)) {
     return '<span class="session__team-logo" aria-hidden="true"><i></i><i></i></span>';
   }
-  if (provider && provider !== 'crew' && provider !== 'builtin' && provider !== 'client') {
+  if (isExternalAgentSession(s.agentBinding)) {
     return `<span class="session__external-agent-icon agent-provider-tone-${externalAgentTone(provider)}" aria-hidden="true">${escapeHtml(externalAgentInitial(provider, s.agentLabel?.display_badge))}</span>`;
   }
   return CONVERSATION_ICON;

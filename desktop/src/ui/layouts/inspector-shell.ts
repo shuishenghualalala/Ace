@@ -17,8 +17,12 @@ export function mountInspectorShell(root: HTMLElement): void {
   const resize = document.createElement('div');
   resize.id = 'chat-inspector-resize-handle';
   resize.className = 'chat-inspector__resize-handle';
-  resize.title = '拖拽调整检查器宽度';
-  resize.setAttribute('aria-hidden', 'true');
+  resize.title = '拖动调整看板宽度，双击恢复默认';
+  resize.tabIndex = 0;
+  resize.setAttribute('role', 'separator');
+  resize.setAttribute('aria-label', '调整看板宽度');
+  resize.setAttribute('aria-orientation', 'vertical');
+  resize.setAttribute('aria-controls', root.id);
 
   const header = document.createElement('header');
   header.className = 'chat-inspector__head mw-inspector__header';

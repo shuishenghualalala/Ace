@@ -10,12 +10,12 @@ import logging
 import os
 import re
 import secrets
-import signal
 import subprocess
-import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+
+from crew.security.process_lifecycle import terminate_process_tree
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 
@@ -192,7 +192,7 @@ class NativeInteractiveSession:
         *,
         open_nonce: str,
         stderr_task: asyncio.Task[bytes],
-        timeout: float,
+        timeout: float | None,
         max_output_bytes: int,
         full_disk_read: bool,
     ) -> None:
@@ -200,7 +200,7 @@ class NativeInteractiveSession:
         self.process = process
         self._open_nonce = open_nonce
         self._stderr_task = stderr_task
-        self._timeout = max(0.1, float(timeout or 0.0))
+        self._timeout = float("inf") if timeout is None else max(0.1, float(timeout or 0.0))
         self._max_output_bytes = max_output_bytes
         self._full_disk_read = full_disk_read
         self._next_seq = 0
@@ -315,7 +315,7 @@ class NativeInteractiveSession:
         if self._closed:
             return
         self._closed = True
-        await self._client._terminate_tree(self.process)
+        await terminate_process_tree(self.process)
         await self._finish_helper()
 
     async def _send_request(self, payload: dict[str, Any], *, nonce: str | None = None) -> None:
@@ -347,7 +347,7 @@ class NativeInteractiveSession:
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=2.0)
             except asyncio.TimeoutError:
-                await self._client._terminate_tree(self.process)
+                await terminate_process_tree(self.process)
         await self._stderr_task
 
 
@@ -413,7 +413,7 @@ class NativeRuntimeClient:
             return _parse_classification(result.get("classification"), shell_kind, raw_command)
         except (asyncio.TimeoutError, NativeRuntimeError, OSError):
             if process is not None:
-                await self._terminate_tree(process)
+                await terminate_process_tree(process)
             return _ask_classification(shell_kind, raw_command, "classifier_unavailable")
         finally:
             if stderr_task is not None:
@@ -432,7 +432,7 @@ class NativeRuntimeClient:
         network_enabled: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
-        timeout: float = 30.0,
+        timeout: float | None = 30.0,
         max_output_bytes: int = 2 * 1024 * 1024,
         stdin: bytes | None = None,
         home_files: Mapping[str, bytes] | None = None,
@@ -481,11 +481,15 @@ class NativeRuntimeClient:
 
         process = await self._spawn(token)
         stderr_task = asyncio.create_task(self._drain_helper_stderr(process))
-        deadline = asyncio.get_running_loop().time() + timeout
+        deadline = (
+            None
+            if timeout is None
+            else asyncio.get_running_loop().time() + max(0.1, float(timeout or 0.0))
+        )
         try:
             ready = await self._read_frame(
                 process,
-                min(self._startup_timeout, _remaining(deadline)),
+                self._startup_timeout if deadline is None else min(self._startup_timeout, _remaining(deadline)),
             )
             self._validate_ready(ready)
             assert process.stdin is not None
@@ -505,16 +509,16 @@ class NativeRuntimeClient:
             )
             await asyncio.wait_for(process.wait(), timeout=_remaining(deadline))
         except asyncio.TimeoutError as exc:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise NativeRuntimeError(RuntimeErrorCode.TIMEOUT, "native runtime timed out") from exc
         except asyncio.CancelledError:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise
         except NativeRuntimeError:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise
         except (BrokenPipeError, ConnectionError, OSError) as exc:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             raise NativeRuntimeError(
                 RuntimeErrorCode.RUNTIME_CRASHED, "native runtime terminated unexpectedly"
             ) from exc
@@ -536,7 +540,7 @@ class NativeRuntimeClient:
         network_enabled: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
-        timeout: float = 120.0,
+        timeout: float | None = 120.0,
         max_output_bytes: int = 64 * 1024 * 1024,
         home_files: Mapping[str, bytes] | None = None,
         env_overrides: Mapping[str, str] | None = None,
@@ -579,11 +583,15 @@ class NativeRuntimeClient:
 
         process = await self._spawn(token)
         stderr_task = asyncio.create_task(self._drain_helper_stderr(process))
-        deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout or 0.0))
+        deadline = (
+            None
+            if timeout is None
+            else asyncio.get_running_loop().time() + max(0.1, float(timeout or 0.0))
+        )
         try:
             ready = await self._read_frame(
                 process,
-                min(self._startup_timeout, _remaining(deadline)),
+                self._startup_timeout if deadline is None else min(self._startup_timeout, _remaining(deadline)),
             )
             self._validate_ready(
                 ready,
@@ -603,11 +611,11 @@ class NativeRuntimeClient:
             await process.stdin.drain()
             return session
         except asyncio.CancelledError:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             await stderr_task
             raise
         except Exception:
-            await self._terminate_tree(process)
+            await terminate_process_tree(process)
             await stderr_task
             raise
 
@@ -616,7 +624,7 @@ class NativeRuntimeClient:
         process: asyncio.subprocess.Process,
         *,
         nonce: str,
-        deadline: float,
+        deadline: float | None,
         max_output_bytes: int,
         network_enabled: bool,
         allow_local_binding: bool,
@@ -794,7 +802,7 @@ class NativeRuntimeClient:
                 captured.extend(chunk[: _MAX_HELPER_STDERR - len(captured)])
 
     @staticmethod
-    async def _read_frame(process: asyncio.subprocess.Process, timeout: float) -> dict[str, Any]:
+    async def _read_frame(process: asyncio.subprocess.Process, timeout: float | None) -> dict[str, Any]:
         assert process.stdout is not None
         try:
             line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
@@ -826,7 +834,7 @@ class NativeRuntimeClient:
     @staticmethod
     async def _validate_protocol_eof(
         process: asyncio.subprocess.Process,
-        deadline: float,
+        deadline: float | None,
     ) -> None:
         assert process.stdout is not None
         try:
@@ -861,29 +869,6 @@ class NativeRuntimeClient:
             raise NativeRuntimeError(
                 RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH, "native runtime handshake mismatch"
             )
-
-    @staticmethod
-    async def _terminate_tree(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        if sys.platform == "darwin":
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=0.5)
-                return
-            except (ProcessLookupError, asyncio.TimeoutError):
-                pass
-        try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
-            pass
 
 
 def _ask_classification(shell_kind: str, raw_command: str, reason: str) -> ShellClassification:
@@ -1009,7 +994,9 @@ def _safe_callback(callback: Callable[[Any], None] | None, value: Any) -> None:
         _LOGGER.warning("native runtime activity callback failed")
 
 
-def _remaining(deadline: float) -> float:
+def _remaining(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
     remaining = deadline - asyncio.get_running_loop().time()
     if remaining <= 0:
         raise asyncio.TimeoutError
