@@ -882,6 +882,9 @@ async def test_inspiration_gateway_merges_sorts_and_isolates_owners(
         owner="owner-1", workspace_id="ws-1", session_id="site-session",
         workspace_root=str(workspace), source_path="site", name="网站产物",
     )
+    # Windows 的系统时钟精度约 15.6ms，紧接着创建会拿到相同 updatedAt，
+    # 「最近更新在前」就退化成任意顺序；这里拉开一个可分辨的时间戳。
+    await asyncio.sleep(0.02)
     canvas = site_manager.blueprint.store.create_canvas(
         "owner-1", "ws-2", "canvas-session", "工作台", "每日使用的工具",
     )

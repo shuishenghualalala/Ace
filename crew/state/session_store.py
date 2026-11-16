@@ -1157,7 +1157,10 @@ class SQLiteSessionStore(SessionStore):
                 SELECT session_id
                 FROM sessions
                 WHERE session_id >= ? AND session_id < ? AND owner_account_id = ?
-                ORDER BY created_at ASC, updated_at ASC, session_id ASC
+                -- created_at 在粗时钟平台上会撞同一时刻，rowid 是写入顺序，
+                -- 用它兜底才等于「先创建的子会话先回放」；session_id 排序会把
+                -- ::kk 排在 ::leader 前面。
+                ORDER BY created_at ASC, updated_at ASC, rowid ASC
                 """,
                 (prefix, upper, owner_account_id),
             ).fetchall()

@@ -145,6 +145,16 @@ def _visible_session_id(session_id: str) -> str:
     return session_id.split(marker, 1)[0] if marker in session_id else session_id
 
 
+def _planning_request_id(session_id: str, goal: str) -> str:
+    """规划请求标识：同一 session 的每个目标各占一个幂等键。
+
+    规划服务以 (账户, request_id) 做幂等，同一 session 换目标再规划时复用
+    session_id 会触发「请求标识已用于不同的任务」。
+    """
+    digest = hashlib.sha256(str(goal or "").strip().encode("utf-8")).hexdigest()[:16]
+    return f"{session_id}:{digest}"
+
+
 @dataclass
 class Team:
     leader: Agent
@@ -5433,7 +5443,11 @@ class InProcessTeamManager(TeamManager):
                         planning_progress({"phase": "started", "status": "running", "label": "正在规划团队任务"})
                     from crew.collaboration.inputs import wiki_source_snapshot
                     resolved_inputs = []
-                    existing_request = service.store.get_by_request(owner_account_id, session_id)
+                    # 请求标识按 (session, 目标) 派生：同一 session 的多轮任务目标不同，
+                    # 直接复用 session_id 会撞上规划服务「请求标识已用于不同的任务」的
+                    # 幂等校验；同目标重试仍命中同一任务。
+                    planning_request_id = _planning_request_id(session_id, goal)
+                    existing_request = service.store.get_by_request(owner_account_id, planning_request_id)
                     if existing_request:
                         resolved_inputs = existing_request["task"].get("inputs", [])
                     else:
@@ -5444,7 +5458,7 @@ class InProcessTeamManager(TeamManager):
                             else:
                                 resolved_inputs.append(ref)
                     workflow = await plan_conversation(
-                        service, owner=owner_account_id, request_id=session_id, session_id=session_id,
+                        service, owner=owner_account_id, request_id=planning_request_id, session_id=session_id,
                         goal=goal, team=stored_team, provider=self._provider_for_owner(owner_account_id),
                         inputs=resolved_inputs, ask=ask_decision,
                         current_team=current_team,
