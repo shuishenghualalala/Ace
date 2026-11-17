@@ -197,8 +197,8 @@ describe('sites page annotation handoff', () => {
     const fs = await import('node:fs/promises');
     const main = await fs.readFile('src/main/index.ts', 'utf8');
     expect(main).not.toContain("webContents.on('did-start-loading'");
-    expect(main).toContain("webContents.on('did-start-navigation'");
-    expect(main).toContain('if (!isMainFrame || !isTrustedRendererFileUrl');
+    expect(main).toContain("contents.on('did-start-navigation'");
+    expect(main).toContain('|| !isMainFrame || isInPlace || !isTrustedRendererFileUrl');
     expect(main).toContain('!isTrustedRendererFileUrl(url, expected, RENDERER_LAUNCH_SEARCH)');
   });
 

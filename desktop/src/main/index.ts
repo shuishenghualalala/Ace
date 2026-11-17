@@ -71,7 +71,9 @@ import { GatewayRestartController } from './gateway-restart-controller';
 import { GatewayProcessRetirement, GatewayStopTimeoutError } from './gateway-process-retirement';
 import { DesktopShutdown, waitForShutdownTask, type ShutdownReason } from './desktop-shutdown';
 import { DesktopChatOutbox, desktopChatOutboxScope } from './chat-outbox';
-import { MAX_CHAT_FRAME_BYTES } from '../shared/chat-outbox';
+import { MAX_CHAT_FRAME_BYTES, type DesktopChatOutboxEntry } from '../shared/chat-outbox';
+import { RendererRecovery, type RecoveryEvent, type RendererFailure } from './renderer-recovery';
+import { RendererCheckpointStore } from './renderer-checkpoint';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
   AuthStateSnapshot,
@@ -214,9 +216,12 @@ const gatewaySockets = new Map<number, WebSocket>();
 type GatewaySocketChat = { scope: string | null; capability?: { frame: string; storeId: string } };
 const gatewaySocketChat = new WeakMap<WebSocket, GatewaySocketChat>();
 let desktopChatOutbox: DesktopChatOutbox | undefined;
+let desktopRendererCheckpoint: RendererCheckpointStore | undefined;
+let rendererSocketAttempt = 0;
 const gatewaySocketGenerations = new Map<number, number>();
 const browserSockets = new Map<number, WebSocket>();
 const browserSocketGenerations = new Map<number, number>();
+const gatewayStreamControllers = new Map<number, Map<string, AbortController>>();
 let browserHost: BrowserHost | null = null;
 let browserHostSocket: WebSocket | null = null;
 let browserHostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -225,19 +230,33 @@ let browserHostConnectPending = false;
 let browserHostDisposePromise: Promise<void> | null = null;
 let trayService: TrayService | null = null;
 
-// Renderer readiness reveal-gate.
-//
-// Default state is "open" (rendererInitialStateReady=true) so HEAD's existing
-// show-on-ready-to-show behavior is unchanged. When the email-tenant-auth
-// re-port wires resetRendererRevealGate() into createWindow(), the gate closes
-// on cold start and reopens when the renderer signals app:renderer-initial-state-ready
-// (or when RENDERER_READY_FALLBACK_MS elapses as a safety net).
-let rendererInitialStateReady = true;
+let rendererDocumentId = 0;
 let nativeWindowReady = false;
 let windowShowRequested = true;
-let rendererReadyFallbackTimer: ReturnType<typeof setTimeout> | null = null;
-
-const RENDERER_READY_FALLBACK_MS = 15_000;
+let restoreMaximized = false;
+let restoreMinimized = false;
+let focusOnReveal = true;
+let exhaustedRenderer: { documentId: number; failure: RendererFailure } | null = null;
+let recoveryDialogOpen = false;
+const rendererRecoveryEvents: Array<RecoveryEvent & { time: string }> = [];
+const rendererRecovery = new RendererRecovery({
+  record: recordRendererRecovery,
+  release: (documentId) => {
+    if (rendererDocumentId === documentId && mainWindow && !mainWindow.isDestroyed()) {
+      releaseRendererDocument(mainWindow);
+    }
+  },
+  restart: restartMainRenderer,
+  exhausted: (documentId, failure) => {
+    exhaustedRenderer = { documentId, failure };
+    showRendererRecoveryDialog();
+  },
+  watchHeartbeat: (documentId) => {
+    const win = mainWindow;
+    return !isQuitting && rendererDocumentId === documentId && win !== null && !win.isDestroyed()
+      && win.isVisible() && !win.isMinimized() && win.isFocused();
+  },
+});
 
 let isQuitting = false;
 const GATEWAY_APP_QUIT_GRACE_MS = 33_000;
@@ -349,7 +368,7 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
 const MANAGED_GATEWAY_PORT = 28180;
 const AUTOSTART_ARG = '--autostart';
 const IS_DEV_LAUNCH = process.argv.includes('--dev');
-const RENDERER_LAUNCH_SEARCH = `?launchMode=${IS_DEV_LAUNCH ? 'dev' : 'account'}`;
+const RENDERER_LAUNCH_SEARCH = '';
 let gatewayIdentityMode: GatewayIdentityMode = 'local';
 
 function usesDevGatewayIdentity(): boolean {
@@ -416,6 +435,16 @@ function currentChatOutboxScope(): string | null {
 
 function chatOutbox(): DesktopChatOutbox {
   return desktopChatOutbox ??= new DesktopChatOutbox(path.join(app.getPath('userData'), 'chat-outbox'));
+}
+
+function rendererCheckpoint(): RendererCheckpointStore {
+  return desktopRendererCheckpoint ??= new RendererCheckpointStore(path.join(app.getPath('userData'), 'renderer-checkpoint'));
+}
+
+function consumeSentCheckpoint(scope: string, entry: DesktopChatOutboxEntry): Promise<void> {
+  return entry.phase === 'accepted' || entry.phase === 'queued'
+    ? rendererCheckpoint().consume(scope, entry.value.composerCheckpoint)
+    : Promise.resolve();
 }
 
 function requireChatOutboxScope(expected?: unknown): string {
@@ -922,54 +951,120 @@ function resolveAppIcon(): Electron.NativeImage {
   return image.isEmpty() ? nativeImage.createEmpty() : image;
 }
 
-function revealMainWindowIfReady(): void {
-  if (!mainWindow || !rendererInitialStateReady || !nativeWindowReady || !windowShowRequested) return;
-  mainWindow.setSkipTaskbar(false);
-  if (!mainWindow.isVisible()) mainWindow.show();
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.focus();
-}
-
-/**
- * Close the reveal-gate and arm the fallback timer.
- *
- * NOT wired into createWindow() by default -- HEAD shows the window on
- * ready-to-show without waiting for the renderer. The email-tenant-auth
- * re-port should call this in createWindow()/did-start-loading to hide the
- * window until the renderer resolves initial auth state.
- */
-function resetRendererRevealGate(): void {
-  rendererInitialStateReady = false;
-  if (rendererReadyFallbackTimer) clearTimeout(rendererReadyFallbackTimer);
-  rendererReadyFallbackTimer = setTimeout(() => {
-    rendererReadyFallbackTimer = null;
-    rendererInitialStateReady = true;
-    console.warn('[main] renderer initial state readiness timed out; revealing window via fallback');
-    revealMainWindowIfReady();
-  }, RENDERER_READY_FALLBACK_MS);
-  mainWindow?.hide();
-}
-
-function markRendererInitialStateReady(): void {
-  rendererInitialStateReady = true;
-  if (rendererReadyFallbackTimer) {
-    clearTimeout(rendererReadyFallbackTimer);
-    rendererReadyFallbackTimer = null;
+function recordRendererRecovery(event: RecoveryEvent): void {
+  const record = { ...event, time: new Date().toISOString() };
+  rendererRecoveryEvents.push(record);
+  if (rendererRecoveryEvents.length > 96) rendererRecoveryEvents.shift();
+  console.log('[renderer-recovery]', JSON.stringify(record));
+  try {
+    const file = path.join(app.getPath('userData'), 'logs', 'renderer-recovery.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (fs.existsSync(file) && fs.statSync(file).size > 128 * 1024) fs.renameSync(file, `${file}.1`);
+    fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // The in-memory events are still available when diagnostics are exported.
   }
-  revealMainWindowIfReady();
+}
+
+function sendToMainRenderer(channel: string, ...args: unknown[]): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !rendererRecovery.canServe(rendererDocumentId)) return;
+  const contents = mainWindow.webContents;
+  if (contents.isDestroyed() || contents.isCrashed()) return;
+  try { contents.send(channel, ...args); } catch {
+    // The native frame can detach while a replacement is loading.
+  }
+}
+
+function releaseRendererDocument(win: BrowserWindow): void {
+  releaseRendererTransports(win.webContents.id);
+  browserHost?.hidePanel();
+  setBackendTransportState('disconnected');
+}
+
+function restartMainRenderer(documentId: number): void {
+  if (isQuitting || rendererDocumentId !== documentId || !mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    createWindow(mainWindow);
+  } catch {
+    rendererRecovery.replacementFailed(documentId);
+  }
+}
+
+function showNativeMainWindow(win: BrowserWindow, activate: boolean): void {
+  win.setSkipTaskbar(false);
+  if (win.isVisible()) return;
+  const show = () => activate ? win.show() : win.showInactive();
+  show();
+  // A Windows launcher can supply SW_HIDE for the first native show call.
+  if (process.platform === 'win32' && !win.isVisible()) show();
+}
+
+function showRendererRecoveryDialog(): void {
+  const exhausted = exhaustedRenderer;
+  if (!exhausted || !windowShowRequested || isQuitting || recoveryDialogOpen) return;
+  recoveryDialogOpen = true;
+  void (async () => {
+    while (exhaustedRenderer === exhausted && windowShowRequested && !isQuitting) {
+      if (mainWindow && !mainWindow.isDestroyed()) showNativeMainWindow(mainWindow, true);
+      const { response } = await dialog.showMessageBox({
+        type: 'error', title: 'Ace 无法打开窗口', message: 'Ace 窗口多次恢复失败',
+        detail: `你可以重试打开窗口，或保存本地诊断。故障类型 ${exhausted.failure.reason}`,
+        buttons: ['重试', '导出诊断', '退出'], defaultId: 0, cancelId: 2, noLink: true,
+      });
+      if (isQuitting || exhaustedRenderer !== exhausted) return;
+      if (response === 0) {
+        exhaustedRenderer = null;
+        rendererRecovery.retry(exhausted.documentId);
+        return;
+      }
+      if (response !== 1) {
+        app.quit();
+        return;
+      }
+      const chosen = await dialog.showSaveDialog({
+        title: '保存窗口恢复诊断', defaultPath: 'ace-renderer-recovery.json',
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (!chosen.canceled && chosen.filePath && !isQuitting && exhaustedRenderer === exhausted) {
+        try {
+          await fs.promises.writeFile(chosen.filePath, JSON.stringify({
+            version: app.getVersion(), platform: process.platform, arch: process.arch,
+            electron: process.versions.electron, events: rendererRecoveryEvents,
+          }, null, 2), 'utf8');
+        } catch {
+          await dialog.showMessageBox({ type: 'warning', message: '无法保存窗口恢复诊断' });
+        }
+      }
+    }
+  })().catch(() => {
+    console.warn('[renderer-recovery] native recovery dialog unavailable');
+  }).finally(() => { recoveryDialogOpen = false; });
+}
+
+function revealMainWindowIfReady(): void {
+  const win = mainWindow;
+  if (isQuitting || !win || win.isDestroyed() || !nativeWindowReady || !windowShowRequested
+    || !rendererRecovery.isReady(rendererDocumentId)) return;
+  if (focusOnReveal && win.isMinimized()) win.restore();
+  showNativeMainWindow(win, focusOnReveal);
+  if (restoreMaximized) { restoreMaximized = false; win.maximize(); }
+  if (restoreMinimized) { restoreMinimized = false; win.minimize(); }
+  else if (focusOnReveal) win.focus();
+  focusOnReveal = false;
 }
 
 function showMainWindow(): void {
   if (isQuitting) return;
-  if (!mainWindow) return;
-  mainWindow.setSkipTaskbar(false);
-  if (!mainWindow.isVisible()) mainWindow.show();
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.focus();
+  windowShowRequested = true;
+  focusOnReveal = true;
+  restoreMinimized = false;
+  if (exhaustedRenderer) showRendererRecoveryDialog();
+  else revealMainWindowIfReady();
 }
 
 function hideMainWindowToTray(): void {
-  if (!mainWindow) return;
+  windowShowRequested = false;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setSkipTaskbar(true);
   mainWindow.hide();
 }
@@ -1006,17 +1101,17 @@ function createTray(): void {
     assetsDir: path.join(__dirname, '../assets'),
     onActivate: () => {
       showMainWindow();
-      mainWindow?.webContents.send('tray:activated');
+      sendToMainRenderer('tray:activated');
     },
     onUninstall: () => { if (!isQuitting) void handleUninstall(); },
     onQuit: () => app.quit(),
     onNotificationSelected: (id: string) => {
       showMainWindow();
-      mainWindow?.webContents.send('tray:notification-selected', id);
+      sendToMainRenderer('tray:notification-selected', id);
     },
     onNotificationsMarkAllRead: () => {
       showMainWindow();
-      mainWindow?.webContents.send('tray:notifications-mark-all-read');
+      sendToMainRenderer('tray:notifications-mark-all-read');
     },
   });
   trayService.create();
@@ -1040,7 +1135,7 @@ function rendererAuthState(): AuthStateSnapshot {
 }
 
 function pushSessionState(): void {
-  mainWindow?.webContents.send('auth:session-state', rendererAuthState());
+  sendToMainRenderer('auth:session-state', rendererAuthState());
 }
 
 function refreshGatewayAuth(baseUrl: string): Promise<void> {
@@ -1064,33 +1159,34 @@ function resetGatewayAuthRefresh(): void {
   gatewayAuthRefresh = null;
 }
 
-function closeGatewaySockets(reason = 'auth-state-changed'): WebSocket[] {
+function releaseRendererSockets(senderId: number, reason: string): WebSocket[] {
   const closing: WebSocket[] = [];
-  for (const [id, generation] of gatewaySocketGenerations) {
-    gatewaySocketGenerations.set(id, generation + 1);
-  }
-  for (const [id, generation] of browserSocketGenerations) {
-    browserSocketGenerations.set(id, generation + 1);
-  }
-  for (const [id, socket] of gatewaySockets.entries()) {
+  for (const [sockets, generations] of [
+    [gatewaySockets, gatewaySocketGenerations],
+    [browserSockets, browserSocketGenerations],
+  ] as const) {
+    generations.delete(senderId);
+    const socket = sockets.get(senderId);
+    if (!socket) continue;
+    sockets.delete(senderId);
     closing.push(socket);
-    try {
-      socket.close(1000, reason);
-    } catch {
-      // best-effort cleanup
-    }
-    gatewaySockets.delete(id);
-  }
-  for (const [id, socket] of browserSockets.entries()) {
-    closing.push(socket);
-    try {
-      socket.close(1000, reason);
-    } catch {
-      // best-effort cleanup of the browser state/debug channel
-    }
-    browserSockets.delete(id);
+    try { socket.close(1000, reason); } catch { /* best-effort disconnect */ }
   }
   return closing;
+}
+
+function releaseRendererTransports(senderId: number): void {
+  releaseRendererSockets(senderId, 'renderer-document-ended');
+  const streams = gatewayStreamControllers.get(senderId);
+  gatewayStreamControllers.delete(senderId);
+  if (streams) {
+    for (const controller of streams.values()) controller.abort();
+  }
+}
+
+function closeGatewaySockets(reason = 'auth-state-changed'): WebSocket[] {
+  const senders = new Set([...gatewaySocketGenerations.keys(), ...browserSocketGenerations.keys()]);
+  return Array.from(senders).flatMap((senderId) => releaseRendererSockets(senderId, reason));
 }
 
 /**
@@ -1190,13 +1286,14 @@ function closeInspirationWindow(inspirationId: string): boolean {
   return true;
 }
 
-function createWindow() {
-  const launchHidden = shouldLaunchHidden();
-  nativeWindowReady = false;
-  windowShowRequested = !launchHidden;
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
+function createWindow(previous?: BrowserWindow): void {
+  const bounds = previous?.getNormalBounds() ?? { width: 1280, height: 800 };
+  const maximize = previous ? restoreMaximized || previous.isMaximized() : false;
+  const minimize = previous ? restoreMinimized || previous.isMinimized() : false;
+  const focus = previous ? focusOnReveal || previous.isFocused() : true;
+  if (!previous) windowShowRequested = !shouldLaunchHidden();
+  const win = new BrowserWindow({
+    ...bounds,
     minWidth: 960,
     minHeight: 640,
     resizable: true,
@@ -1204,7 +1301,8 @@ function createWindow() {
     icon: resolveAppIcon(),
     backgroundColor: resolveWindowBackgroundColor(),
     title: 'Crew Desktop',
-    show: !launchHidden,
+    show: false,
+    skipTaskbar: !windowShowRequested,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1212,118 +1310,87 @@ function createWindow() {
       sandbox: true,
       webSecurity: true,
       webviewTag: false,
-      // Electron 36+ 不再把 app.commandLine 动态开关下传给渲染子进程。
+      // Electron 36+ does not forward dynamically appended switches to renderers.
       additionalArguments: [`--js-flags=${PPTX_WASM_V8_FLAGS.join(' ')}`],
     },
   });
+  mainWindow = win;
+  nativeWindowReady = false;
+  restoreMaximized = maximize;
+  restoreMinimized = minimize;
+  focusOnReveal = focus;
+  exhaustedRenderer = null;
+  const contents = win.webContents;
+  const senderId = contents.id;
+  const expected = path.join(__dirname, '../assets/index.html');
+  let startedNavigation = false;
+  let documentId = rendererRecovery.begin();
+  rendererDocumentId = documentId;
+  const currentWindow = () => mainWindow === win && !win.isDestroyed() && !isQuitting;
   if (!browserHostDisposePromise) ensureBrowserHost();
 
-  mainWindow.loadFile(path.join(__dirname, '../assets/index.html'));
-  installSitePreviewNavigation(mainWindow.webContents, externalLinkBridge.openUrl);
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    const expected = path.join(__dirname, '../assets/index.html');
-    if (!isTrustedRendererFileUrl(url, expected)) event.preventDefault();
+  installSitePreviewNavigation(contents, externalLinkBridge.openUrl);
+  contents.on('will-navigate', (event, url) => {
+    if (!isTrustedRendererFileUrl(url, expected, RENDERER_LAUNCH_SEARCH)) event.preventDefault();
   });
-
-  mainWindow.once('ready-to-show', () => {
+  win.once('ready-to-show', () => {
+    if (!currentWindow()) return;
     nativeWindowReady = true;
-    if (launchHidden) {
-      hideMainWindowToTray();
-      return;
-    }
-    mainWindow?.show();
+    revealMainWindowIfReady();
   });
-
-  if (process.argv.includes('--dev')) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-  }
-
-  // 渲染崩溃/加载失败：自动 reload（带防抖防崩溃循环）。
-  // 单 reload 而不是 process.exit：白屏体验可救，比让用户手动重开强太多。
-  // 30s 窗口内最多 reload 3 次——超过就停手记日志，避免 GPU 进程 OOM 类问题的循环拉起。
-  let reloadCount = 0;
-  let firstReloadAt = 0;
-  const RELOAD_WINDOW_MS = 30_000;
-  const RELOAD_MAX_PER_WINDOW = 3;
-  const tryAutoReload = (reason: string): void => {
-    const now = Date.now();
-    if (now - firstReloadAt > RELOAD_WINDOW_MS) {
-      // 开新窗口：重置计数
-      firstReloadAt = now;
-      reloadCount = 0;
-    }
-    if (reloadCount >= RELOAD_MAX_PER_WINDOW) {
-      logFatal(`auto-reload-exceeded (${reason})`, new Error('renderer reload 超过上限，已停止自动恢复'));
-      return;
-    }
-    reloadCount += 1;
-    console.warn(`[main] Auto-reloading renderer (${reloadCount}/${RELOAD_MAX_PER_WINDOW}) — reason: ${reason}`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      browserHost?.hidePanel();
-      mainWindow.webContents.reload();
-    }
-  };
-  mainWindow.webContents.on('render-process-gone', (_e, details) => {
-    browserHost?.hidePanel();
-    console.error('[main] Renderer crashed:', details);
-    logFatal('render-process-gone', new Error(JSON.stringify(details)));
-    // reason === 'crashed' | 'abnormal-exit' | 'launch-failed' | 'oom'
-    // 后两者一般是渲染启动前就死了，reload 也救不回来——只对 crash/abnormal-exit 触发 reload
-    if (details.reason === 'crashed' || details.reason === 'abnormal-exit') {
-      tryAutoReload(`render-process-gone: ${details.reason}`);
+  contents.on('render-process-gone', (_event, details) => {
+    if (currentWindow()) rendererRecovery.fail(documentId, { reason: details.reason, code: details.exitCode });
+  });
+  contents.on('unresponsive', () => {
+    if (currentWindow()) rendererRecovery.unresponsive(documentId);
+  });
+  contents.on('responsive', () => {
+    if (currentWindow()) rendererRecovery.responsive(documentId);
+  });
+  contents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+    if (currentWindow() && isMainFrame && code !== -3) {
+      rendererRecovery.fail(documentId, { reason: 'load-failed', code });
     }
   });
-  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
-    // Inspector 的 HTML/PPT 预览会频繁创建和销毁子 frame。重绘期间取消
-    // about:srcdoc 属于正常的 ERR_ABORTED，不是主窗口加载失败，也不应误报。
-    if (!isMainFrame) {
-      if (code !== -3) console.warn(`[main] Subframe failed to load ${url}: ${desc} (${code})`);
-      return;
+  contents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+    if (!currentWindow() || !isMainFrame || isInPlace || !isTrustedRendererFileUrl(url, expected, RENDERER_LAUNCH_SEARCH)) return;
+    if (startedNavigation) {
+      releaseRendererDocument(win);
+      exhaustedRenderer = null;
+      documentId = rendererRecovery.begin();
+      rendererDocumentId = documentId;
     }
-    browserHost?.hidePanel();
-    console.error(`[main] Failed to load ${url}: ${desc} (${code})`);
-    // -3 ERR_ABORTED（用户主动 reload 引发）跳过；其它真实加载失败才 auto-reload
-    if (code !== -3) {
-      tryAutoReload(`did-fail-load: ${code} ${desc}`);
-    }
+    startedNavigation = true;
   });
-  mainWindow.webContents.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
-    const expected = path.join(__dirname, '../assets/index.html');
-    if (!isMainFrame || !isTrustedRendererFileUrl(url, expected, RENDERER_LAUNCH_SEARCH)) return;
-    browserHost?.hidePanel();
-    resetRendererRevealGate();
-  });
-  // Cold-start session-state push. This MUST be registered inside
-  // createWindow() (after `mainWindow` is assigned) — previously it lived in
-  // registerIpc() which runs at bootstrap BEFORE createWindow(), so
-  // `mainWindow` was null there and the optional chaining silently no-op'd,
-  // meaning the auth:session-state push the renderer relies on never fired.
-  mainWindow.webContents.on('did-finish-load', () => {
+  contents.on('did-finish-load', () => {
+    if (!currentWindow()) return;
     pushSessionState();
-    // Push current backend health status on load so the renderer knows immediately
-    mainWindow?.webContents.send('backend:status', backendStatusPayload(backendConnected));
+    sendToMainRenderer('backend:status', backendStatusPayload(backendConnected));
   });
 
-  mainWindow.on('hide', () => browserHost?.hidePanel());
-  mainWindow.on('show', () => {
-    mainWindow?.webContents.send('browser-view:layout-invalidated');
+  win.on('hide', () => {
+    if (mainWindow === win) browserHost?.hidePanel();
   });
-  mainWindow.on('closed', () => {
-    if (rendererReadyFallbackTimer) {
-      clearTimeout(rendererReadyFallbackTimer);
-      rendererReadyFallbackTimer = null;
-    }
+  win.on('show', () => {
+    if (currentWindow()) sendToMainRenderer('browser-view:layout-invalidated');
+  });
+  win.on('closed', () => {
+    releaseRendererTransports(senderId);
+    gatewaySocketGenerations.delete(senderId);
+    browserSocketGenerations.delete(senderId);
+    if (mainWindow !== win) return;
+    rendererRecovery.close(documentId);
+    exhaustedRenderer = null;
     browserHost?.hidePanel();
     mainWindow = null;
   });
-  mainWindow.on('close', (event) => {
-    if (desktopShutdown.canCloseWindows) return;
+  win.on('close', (event) => {
+    if (mainWindow !== win || desktopShutdown.canCloseWindows) return;
     if (isQuitting) {
       event.preventDefault();
       return;
     }
-    if (!mainWindow) return;
-    if (loginNewServiceInstance.getSessionInfo().isLoggedIn && mainWindow.isVisible()) {
+    if (rendererAuthState().isLoggedIn && win.isVisible()) {
       if (shouldPreventClose()) {
         event.preventDefault();
         return;
@@ -1331,11 +1398,23 @@ function createWindow() {
     } else if (process.platform === 'darwin') {
       return;
     }
-    // A separate native quit lets Electron finish this close event before
-    // the shutdown gate later replays app.quit().
+    // Let Electron finish this close event before the shutdown gate replays app.quit().
     event.preventDefault();
     setImmediate(() => app.quit());
   });
+
+  // Keep a primary window registered while retiring the old one so replacement
+  // never triggers window-all-closed and shuts down the surviving Gateway.
+  previous?.destroy();
+  const initialDocumentId = documentId;
+  void win.loadFile(expected).catch((error: NodeJS.ErrnoException) => {
+    if (currentWindow() && error.code !== 'ERR_ABORTED') {
+      rendererRecovery.fail(initialDocumentId, { reason: 'load-failed' });
+    }
+  });
+  if (IS_DEV_LAUNCH && !previous && windowShowRequested) {
+    contents.openDevTools({ mode: 'detach' });
+  }
 }
 
 function repoRoot(): string {
@@ -2315,10 +2394,23 @@ function parseOrThrow<T>(parsed: { ok: true; value: T } | { ok: false; error: st
 type TrustedIpcEvent = Electron.IpcMainEvent | Electron.IpcMainInvokeEvent;
 type TrustedIpcHandler = (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 
+function rendererDocumentLease(event: TrustedIpcEvent): () => boolean {
+  const win = mainWindow;
+  const frame = event.senderFrame;
+  const sender = event.sender;
+  const documentId = rendererDocumentId;
+  return () => !isQuitting && win !== null && win === mainWindow && !win.isDestroyed()
+    && rendererRecovery.canServe(documentId) && sender === win.webContents
+    && !sender.isCrashed() && frame === sender.mainFrame;
+}
+
 function assertTrustedRenderer(event: TrustedIpcEvent): void {
   const senderFrame = event.senderFrame;
   if (!mainWindow || !senderFrame || event.sender.id !== mainWindow.webContents.id || senderFrame !== mainWindow.webContents.mainFrame) {
     throw new Error(`${IPC_ARG_VALIDATION_FAILED}: untrusted IPC sender`);
+  }
+  if (!rendererRecovery.canServe(rendererDocumentId)) {
+    throw new Error(`${IPC_ARG_VALIDATION_FAILED}: renderer document is no longer active`);
   }
   const expectedFile = path.join(__dirname, '../assets/index.html');
   if (!isTrustedRendererFileUrl(senderFrame.url, expectedFile)) {
@@ -2664,7 +2756,8 @@ function registerIpc() {
     return shell.openPath(resolved);
   });
 
-  trustedHandle('dialog:saveLocalExport', async (_e, raw: unknown) => {
+  trustedHandle('dialog:saveLocalExport', async (event, raw: unknown) => {
+    const documentIsCurrent = rendererDocumentLease(event);
     const args = parseOrThrow(DialogSaveLocalExportArgs.parse(raw), 'dialog:saveLocalExport');
     const source = path.resolve(args.sourcePath);
     const ownerSegment = currentCrewFileOwnerSegment();
@@ -2693,19 +2786,27 @@ function registerIpc() {
     if (path.dirname(realSource) !== realExportRoot || realSource !== source) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: export source path is not canonical`);
     }
+    if (!documentIsCurrent() || currentCrewFileOwnerSegment() !== ownerSegment) return { ok: false, canceled: true };
     const result = await dialog.showSaveDialog(mainWindow!, {
       title: '分享灵感',
       defaultPath: path.join(app.getPath('downloads'), args.suggestedName),
       filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
     });
-    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    if (result.canceled || !result.filePath || !documentIsCurrent() || currentCrewFileOwnerSegment() !== ownerSegment) {
+      return { ok: false, canceled: true };
+    }
     await fs.promises.copyFile(source, result.filePath);
     return { ok: true, canceled: false, path: result.filePath };
   });
 
-  trustedHandle('tracing:save-export', async (_e, raw: unknown) => {
+  trustedHandle('tracing:save-export', async (event, raw: unknown) => {
+    const documentIsCurrent = rendererDocumentLease(event);
+    const owner = currentBrowserOwnerId();
     const args = parseOrThrow(TracingSaveExportArgs.parse(raw), 'tracing:save-export');
     const { baseUrl } = await ensureGateway();
+    const generation = gatewayGeneration;
+    const isCurrent = () => documentIsCurrent() && owner === currentBrowserOwnerId() && generation === gatewayGeneration;
+    if (!isCurrent()) return { ok: false, canceled: true };
     const exportPath = `/api/tracing/exports/${args.exportId}`;
     const buildGatewayHeaders = (): Record<string, string> => {
       const headers: Record<string, string> = { ...gatewayAccessHeaders(exportPath) };
@@ -2729,6 +2830,7 @@ function registerIpc() {
       ? statusBody.format
       : 'jsonl';
     const extension = format === 'jsonl' ? 'jsonl' : format;
+    if (!isCurrent()) return { ok: false, canceled: true };
     const result = await dialog.showSaveDialog(mainWindow!, {
       title: '保存追踪导出',
       defaultPath: path.join(app.getPath('downloads'), `ace-traces-${args.exportId}.${extension}`),
@@ -2738,12 +2840,16 @@ function registerIpc() {
         { name: 'CSV', extensions: ['csv'] },
       ],
     });
-    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    if (result.canceled || !result.filePath || !isCurrent()) return { ok: false, canceled: true };
 
     const downloadPath = `${exportPath}/download`;
     const response = await fetchGatewayWithStartupRetry(`${baseUrl}${downloadPath}`, {
       headers: buildGatewayHeaders(),
     });
+    if (!isCurrent()) {
+      await response.body?.cancel().catch(() => undefined);
+      return { ok: false, canceled: true };
+    }
     if (!response.ok) {
       const detail = (await response.text().catch(() => '')).slice(0, 500);
       throw new Error(`追踪导出下载失败 (${response.status})${detail ? `: ${detail}` : ''}`);
@@ -2766,16 +2872,18 @@ function registerIpc() {
       },
     });
     const tempPath = `${result.filePath}.${args.exportId}.${process.hrtime.bigint().toString()}.tmp`;
+    let committed = false;
     try {
       await pipeline(
         Readable.fromWeb(response.body as unknown as NodeReadableStream),
         limiter,
         fs.createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }),
       );
+      if (!isCurrent()) return { ok: false, canceled: true };
       await commitDownloadedExport(tempPath, result.filePath);
-    } catch (error) {
-      await fs.promises.unlink(tempPath).catch(() => undefined);
-      throw error;
+      committed = true;
+    } finally {
+      if (!committed) await fs.promises.unlink(tempPath).catch(() => undefined);
     }
     return { ok: true, canceled: false, path: result.filePath };
   });
@@ -3072,19 +3180,30 @@ function registerIpc() {
     return app.getLocale();
   });
   trustedHandle('app:renderer-initial-state-ready', () => {
-    markRendererInitialStateReady();
+    if (!rendererRecovery.isReady(rendererDocumentId)) {
+      rendererRecovery.ready(rendererDocumentId);
+      revealMainWindowIfReady();
+      try { restoreUpdateStateOnLaunch(); } catch (error) {
+        logFatal('restore-update-state', error);
+      }
+    }
     return { ok: true };
+  });
+  ipcMain.on('renderer:heartbeat', (event) => {
+    try { assertTrustedRenderer(event); } catch { return; }
+    rendererRecovery.heartbeat(rendererDocumentId);
   });
   trustedHandle('security:get-strict-security', () => ({
     strictSecurityEnabled: isStrictSecurityEnabled(),
   }));
-  trustedHandle('security:set-strict-security', async (_e, enabled: unknown) => {
+  trustedHandle('security:set-strict-security', async (event, enabled: unknown) => {
     if (typeof enabled !== 'boolean') {
       throw new Error(
         `${IPC_ARG_VALIDATION_FAILED}: security:set-strict-security expected boolean`,
       );
     }
-    if (!enabled && !await confirmStrictSecurityDisable(mainWindow)) {
+    const documentIsCurrent = rendererDocumentLease(event);
+    if ((!enabled && !await confirmStrictSecurityDisable(mainWindow)) || !documentIsCurrent()) {
       return { strictSecurityEnabled: isStrictSecurityEnabled() };
     }
     const saved = saveStrictSecurityPreference(enabled);
@@ -3228,7 +3347,9 @@ function registerIpc() {
     return result;
   });
 
-  trustedHandle('gateway:fetch', async (_e, raw: unknown) => {
+  trustedHandle('gateway:fetch', async (event, raw: unknown) => {
+    const documentIsCurrent = rendererDocumentLease(event);
+    const owner = currentBrowserOwnerId();
     const args = parseOrThrow(GatewayFetchArgs.parse(raw), 'gateway:fetch');
     const usesRemoteAuth = usesGatewayRemoteAuth();
     const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
@@ -3295,9 +3416,11 @@ function registerIpc() {
     const proofPath = targetUrl.pathname;
     const proofBody = typeof args.init?.body === 'string' ? args.init.body : '';
     const cuaAuthority = classifyCuaSetupAuthorityRequest(proofMethod, proofPath, proofBody);
-    if (cuaAuthority === 'install') {
-      const confirmed = await confirmCuaDriverInstall(mainWindow);
-      if (!confirmed) {
+    if (cuaAuthority !== null) {
+      const generation = gatewayGeneration;
+      const isCurrent = () => documentIsCurrent() && owner === currentBrowserOwnerId() && generation === gatewayGeneration;
+      const confirmed = isCurrent() && (cuaAuthority !== 'install' || await confirmCuaDriverInstall(mainWindow));
+      if (!confirmed || !isCurrent()) {
         return {
           ok: false,
           status: 403,
@@ -3306,8 +3429,6 @@ function registerIpc() {
           headers: { 'content-type': 'application/json' },
         };
       }
-    }
-    if (cuaAuthority !== null) {
       fetchInit.headers = {
         ...(fetchInit.headers as Record<string, string> | undefined),
         'X-Crew-Security-Proof': createActiveGatewaySecurityProof(proofMethod, proofPath, proofBody),
@@ -3324,8 +3445,6 @@ function registerIpc() {
     };
   });
 
-  const gatewayStreamControllers = new Map<string, AbortController>();
-
   trustedHandle('gateway:stream-start', async (event, raw: unknown) => {
     const rawRequest = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     const requestId = typeof rawRequest.request_id === 'string' ? rawRequest.request_id : '';
@@ -3333,43 +3452,50 @@ function registerIpc() {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid gateway stream request id`);
     }
     const args = parseOrThrow(GatewayFetchArgs.parse(raw), 'gateway:stream-start');
-    const streamKey = `${event.sender.id}:${requestId}`;
+    const senderId = event.sender.id;
+    const documentIsCurrent = rendererDocumentLease(event);
+    if (!documentIsCurrent()) return { ok: false };
+    const streams = gatewayStreamControllers.get(senderId) ?? new Map<string, AbortController>();
+    gatewayStreamControllers.set(senderId, streams);
+    const controller = new AbortController();
+    const previous = streams.get(requestId);
+    streams.set(requestId, controller);
+    previous?.abort();
+    const isActive = () => documentIsCurrent() && !controller.signal.aborted
+      && streams.get(requestId) === controller;
     const send = (payload: Record<string, unknown>) => {
-      if (!event.sender.isDestroyed()) {
+      if (isActive()) {
         event.sender.send('gateway:stream-event', { request_id: requestId, ...payload });
       }
     };
-    const usesRemoteAuth = usesGatewayRemoteAuth();
-    const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
-    const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
-    if (usesRemoteAuth && (!jwt || !identityHeaders)) {
-      send({ type: 'error', error: '未登录或登录用户缺少身份信息' });
-      return { ok: false };
-    }
-
-    const ensured = await ensureGateway();
-    const targetUrl = new URL(args.url);
-    const ensuredUrl = new URL(ensured.baseUrl);
-    targetUrl.protocol = ensuredUrl.protocol;
-    targetUrl.hostname = ensuredUrl.hostname;
-    targetUrl.port = ensuredUrl.port;
-    const headers: Record<string, string> = {};
-    const denylist = new Set([
-      'host', 'connection', 'cookie', 'authorization',
-      'origin', 'referer', 'content-length',
-    ]);
-    for (const [key, value] of Object.entries(args.init?.headers || {})) {
-      if (!denylist.has(key.toLowerCase())) headers[key] = value;
-    }
-    if (usesRemoteAuth && jwt && identityHeaders) {
-      headers.Authorization = `Bearer ${jwt}`;
-      Object.assign(headers, identityHeaders);
-    }
-    Object.assign(headers, gatewayAccessHeaders(targetUrl.pathname));
-    const controller = new AbortController();
-    gatewayStreamControllers.get(streamKey)?.abort();
-    gatewayStreamControllers.set(streamKey, controller);
     try {
+      const usesRemoteAuth = usesGatewayRemoteAuth();
+      const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
+      const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
+      if (usesRemoteAuth && (!jwt || !identityHeaders)) {
+        send({ type: 'error', error: '未登录或登录用户缺少身份信息' });
+        return { ok: false };
+      }
+      const ensured = await ensureGateway();
+      if (!isActive()) return { ok: false };
+      const targetUrl = new URL(args.url);
+      const ensuredUrl = new URL(ensured.baseUrl);
+      targetUrl.protocol = ensuredUrl.protocol;
+      targetUrl.hostname = ensuredUrl.hostname;
+      targetUrl.port = ensuredUrl.port;
+      const headers: Record<string, string> = {};
+      const denylist = new Set([
+        'host', 'connection', 'cookie', 'authorization',
+        'origin', 'referer', 'content-length',
+      ]);
+      for (const [key, value] of Object.entries(args.init?.headers || {})) {
+        if (!denylist.has(key.toLowerCase())) headers[key] = value;
+      }
+      if (usesRemoteAuth && jwt && identityHeaders) {
+        headers.Authorization = `Bearer ${jwt}`;
+        Object.assign(headers, identityHeaders);
+      }
+      Object.assign(headers, gatewayAccessHeaders(targetUrl.pathname));
       const response = await fetchGatewayWithStartupRetry(targetUrl.toString(), {
         method: args.init?.method || 'GET',
         headers,
@@ -3386,15 +3512,19 @@ function registerIpc() {
         return { ok: response.ok };
       }
       const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const text = decoder.decode(value, { stream: true });
-        if (text) send({ type: 'chunk', text });
+      try {
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value, { stream: true });
+          if (text) send({ type: 'chunk', text });
+        }
+        const tail = decoder.decode();
+        if (tail) send({ type: 'chunk', text: tail });
+      } finally {
+        reader.releaseLock();
       }
-      const tail = decoder.decode();
-      if (tail) send({ type: 'chunk', text: tail });
       send({ type: 'end' });
       return { ok: response.ok };
     } catch (error) {
@@ -3403,8 +3533,9 @@ function registerIpc() {
       }
       return { ok: false };
     } finally {
-      if (gatewayStreamControllers.get(streamKey) === controller) {
-        gatewayStreamControllers.delete(streamKey);
+      if (streams.get(requestId) === controller) streams.delete(requestId);
+      if (streams.size === 0 && gatewayStreamControllers.get(senderId) === streams) {
+        gatewayStreamControllers.delete(senderId);
       }
     }
   });
@@ -3418,9 +3549,14 @@ function registerIpc() {
     if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(requestId)) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid gateway stream request id`);
     }
-    const streamKey = `${event.sender.id}:${requestId}`;
-    gatewayStreamControllers.get(streamKey)?.abort();
-    gatewayStreamControllers.delete(streamKey);
+    const senderId = event.sender.id;
+    const streams = gatewayStreamControllers.get(senderId);
+    const controller = streams?.get(requestId);
+    if (streams && controller) {
+      streams.delete(requestId);
+      if (streams.size === 0) gatewayStreamControllers.delete(senderId);
+      controller.abort();
+    }
     return { ok: true };
   });
 
@@ -3669,18 +3805,41 @@ function registerIpc() {
     return { scope, entries };
   });
 
-  trustedHandle('chat-outbox:put', (_event, scope, entry) => {
+  trustedHandle('chat-outbox:put', async (_event, scope, entry) => {
     if (typeof scope !== 'string') throw new Error('Invalid chat outbox scope');
-    return chatOutbox().put(requireChatOutboxScope(scope), entry);
+    const current = requireChatOutboxScope(scope);
+    await chatOutbox().put(current, entry);
+    await consumeSentCheckpoint(current, entry as DesktopChatOutboxEntry).catch(() => {
+      // The send is already durable. Keep the journal as the source for draft
+      // deduplication and retry the checkpoint update before retiring it.
+      console.warn('[renderer-recovery] checkpoint-consume-deferred');
+    });
   });
 
   trustedHandle('chat-outbox:remove', (_event, scope, requestId) => {
     if (typeof scope !== 'string') throw new Error('Invalid chat outbox scope');
-    return chatOutbox().remove(requireChatOutboxScope(scope), requestId);
+    const current = requireChatOutboxScope(scope);
+    return chatOutbox().remove(current, requestId, (entry) => consumeSentCheckpoint(current, entry));
+  });
+
+  trustedHandle('renderer-checkpoint:get', async (event) => {
+    const currentDocument = rendererDocumentLease(event);
+    const scope = requireChatOutboxScope();
+    const checkpoint = await rendererCheckpoint().get(scope);
+    requireChatOutboxScope(scope);
+    if (!currentDocument()) throw new Error('Renderer document changed');
+    return { scope, checkpoint };
+  });
+
+  trustedHandle('renderer-checkpoint:put', (_event, scope, checkpoint) => {
+    if (typeof scope !== 'string') throw new Error('Invalid renderer checkpoint scope');
+    return rendererCheckpoint().put(requireChatOutboxScope(scope), checkpoint);
   });
 
   trustedHandle('gateway-ws:connect', async (event) => {
     const senderId = event.sender.id;
+    const documentIsCurrent = rendererDocumentLease(event);
+    if (!documentIsCurrent()) return { ok: false, error: 'WebSocket 连接已取消' };
     const previous = gatewaySockets.get(senderId);
     const previousChat = previous ? gatewaySocketChat.get(previous) : undefined;
     const scope = currentChatOutboxScope();
@@ -3698,10 +3857,10 @@ function registerIpc() {
     if (previous?.readyState === WebSocket.CONNECTING && previousChat?.scope === scope) return { ok: true };
     const gatewayAttempt = gatewayGeneration;
     const primaryTransport = event.sender === mainWindow?.webContents;
-    const generation = (gatewaySocketGenerations.get(senderId) ?? 0) + 1;
+    const generation = ++rendererSocketAttempt;
     gatewaySocketGenerations.set(senderId, generation);
     const currentAttempt = () => !isQuitting && gatewayAttempt === gatewayGeneration
-      && gatewaySocketGenerations.get(senderId) === generation && !event.sender.isDestroyed();
+      && documentIsCurrent() && gatewaySocketGenerations.get(senderId) === generation;
     const setTransport = (state: BackendTransportState) => {
       if (primaryTransport && currentAttempt()) setBackendTransportState(state);
     };
@@ -3765,7 +3924,7 @@ function registerIpc() {
     const handleRendererDestroyed = (): void => {
       if (gatewaySocketGenerations.get(senderId) === generation) {
         setTransport('disconnected');
-        gatewaySocketGenerations.set(senderId, generation + 1);
+        gatewaySocketGenerations.delete(senderId);
       }
       if (gatewaySockets.get(senderId) === socket) gatewaySockets.delete(senderId);
       try {
@@ -3825,6 +3984,7 @@ function registerIpc() {
         code,
         reason: reason.toString(),
       });
+      if (gatewaySocketGenerations.get(senderId) === generation) gatewaySocketGenerations.delete(senderId);
       if (gatewaySockets.get(senderId) === socket) gatewaySockets.delete(senderId);
     });
     socket.on('error', (err) => {
@@ -3868,7 +4028,7 @@ function registerIpc() {
 
   trustedHandle('gateway-ws:close', (event) => {
     const senderId = event.sender.id;
-    gatewaySocketGenerations.set(senderId, (gatewaySocketGenerations.get(senderId) ?? 0) + 1);
+    gatewaySocketGenerations.delete(senderId);
     const socket = gatewaySockets.get(senderId);
     if (socket) {
       gatewaySockets.delete(senderId);
@@ -3883,7 +4043,9 @@ function registerIpc() {
   trustedHandle('browser-ws:connect', async (event, rawSessionId: unknown) => {
     const sessionId = validateBrowserSessionId(rawSessionId);
     const senderId = event.sender.id;
-    const generation = (browserSocketGenerations.get(senderId) ?? 0) + 1;
+    const documentIsCurrent = rendererDocumentLease(event);
+    if (!documentIsCurrent()) return { ok: false, error: '浏览器状态连接已取消' };
+    const generation = ++rendererSocketAttempt;
     browserSocketGenerations.set(senderId, generation);
     const previous = browserSockets.get(senderId);
     if (previous) {
@@ -3895,7 +4057,7 @@ function registerIpc() {
       return { ok: false, status: 401, error: '未登录' };
     }
     const ensured = await ensureGateway();
-    if (browserSocketGenerations.get(senderId) !== generation || event.sender.isDestroyed()) {
+    if (browserSocketGenerations.get(senderId) !== generation || !documentIsCurrent()) {
       return { ok: false, error: '浏览器状态连接已取消' };
     }
     const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
@@ -3917,13 +4079,13 @@ function registerIpc() {
       if (
         browserSocketGenerations.get(senderId) !== generation
         || browserSockets.get(senderId) !== socket
-        || event.sender.isDestroyed()
+        || !documentIsCurrent()
       ) return;
       event.sender.send('browser-ws:event', payload);
     };
     const handleRendererDestroyed = (): void => {
       if (browserSocketGenerations.get(senderId) === generation) {
-        browserSocketGenerations.set(senderId, generation + 1);
+        browserSocketGenerations.delete(senderId);
       }
       if (browserSockets.get(senderId) === socket) browserSockets.delete(senderId);
       try { socket.close(1000, 'renderer-destroyed'); } catch { /* best effort */ }
@@ -3934,6 +4096,7 @@ function registerIpc() {
       event.sender.removeListener('destroyed', handleRendererDestroyed);
       if (browserSockets.get(senderId) !== socket) return;
       sendEvent({ type: 'close', sessionId, code, reason: reason.toString() });
+      if (browserSocketGenerations.get(senderId) === generation) browserSocketGenerations.delete(senderId);
       browserSockets.delete(senderId);
     });
     socket.on('error', (error) => sendEvent({ type: 'error', sessionId, error: error.message }));
@@ -3942,7 +4105,7 @@ function registerIpc() {
   });
   trustedHandle('browser-ws:close', (event) => {
     const senderId = event.sender.id;
-    browserSocketGenerations.set(senderId, (browserSocketGenerations.get(senderId) ?? 0) + 1);
+    browserSocketGenerations.delete(senderId);
     const socket = browserSockets.get(senderId);
     if (socket) {
       browserSockets.delete(senderId);
@@ -4090,9 +4253,6 @@ async function bootstrap() {
   configureUpdateController(sendVersionUpdateDownloadProgress, isStrictSecurityEnabled);
   sweepUpdatePartials();
   startUpdateCleanupMonitor();
-  if (mainWindow) {
-    mainWindow.webContents.once('did-finish-load', () => restoreUpdateStateOnLaunch());
-  }
 
   // 注入卸载模块依赖（托盘「卸载」功能需要访问主进程内部状态）
   setUninstallDeps({

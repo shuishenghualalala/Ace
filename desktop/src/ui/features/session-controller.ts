@@ -16,7 +16,7 @@ import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './board-hooks';
 import { refreshCronJobs } from './cron-page';
 import { findChannelSession, loadChannelSessions } from './channel-sessions';
-import { discardDraft, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';
+import { discardDraft, getHistoryLoadError, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';
 import { loadConfig } from './model-picker';
 import { externalAgentsEnabled, isExternalAgentOrTeamSession } from './external-agents-feature';
 import { resetToAgentMode } from './session-mode';
@@ -85,6 +85,7 @@ import { authStore, messageStore, sessionStore, uiStore } from '../stores/stores
 import { hydrateTurnFoldFromStorage } from './fold-state';
 import { canSendToBackend, setBackendTransportState } from './backend-status-guard';
 import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge } from './chat-outbox';
+import { restoreRendererCheckpointNavigation } from './renderer-checkpoint';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
 let setTabFn: (tab: TabKey) => void = () => {};
@@ -879,6 +880,8 @@ export async function hydrateBackendState(): Promise<void> {
     renderChat();
   }
   await loadChannelSessions().catch((err) => notify(`加载渠道会话失败：${(err as Error).message}`));
+  const { sessions: sessionLoadError, workspaces: workspaceLoadError } = getHistoryLoadError();
+  if (!sessionLoadError && !workspaceLoadError) await restoreRendererCheckpointNavigation(openSession);
   updateGatewayDot();
   refreshSidebarAfterHydrate(openSession);
 }

@@ -13,6 +13,7 @@ import type {
 } from '../shared/types';
 import type { SecurityAuditArgs } from '../shared/ipc-schemas';
 import type { DesktopChatOutboxEntry, DesktopChatOutboxSnapshot } from '../shared/chat-outbox';
+import type { RendererCheckpoint, RendererCheckpointSnapshot } from '../shared/renderer-checkpoint';
 import type { DesktopGatewayReadiness } from './gateway-readiness';
 
 interface BackendStatusSnapshot {
@@ -27,6 +28,16 @@ interface BackendStatusSnapshot {
   loopLagMs?: number;
   failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
   since?: number;
+}
+
+let rendererHeartbeat: ReturnType<typeof setInterval> | undefined;
+
+async function rendererInitialStateReady(): Promise<{ ok: true }> {
+  const ready = await ipcRenderer.invoke('app:renderer-initial-state-ready') as { ok: true };
+  rendererHeartbeat ??= setInterval(() => {
+    if (document.visibilityState === 'visible') ipcRenderer.send('renderer:heartbeat');
+  }, 2_500);
+  return ready;
 }
 
 const api = {
@@ -127,8 +138,10 @@ const api = {
     return () => ipcRenderer.removeListener('tray:notifications-mark-all-read', listener);
   },
   getSystemLocale: () => ipcRenderer.invoke('app:get-system-locale') as Promise<string>,
-  rendererInitialStateReady: (): Promise<{ ok: true }> =>
-    ipcRenderer.invoke('app:renderer-initial-state-ready'),
+  rendererInitialStateReady,
+  rendererCheckpointGet: (): Promise<RendererCheckpointSnapshot> => ipcRenderer.invoke('renderer-checkpoint:get'),
+  rendererCheckpointPut: (scope: string, checkpoint: RendererCheckpoint): Promise<void> =>
+    ipcRenderer.invoke('renderer-checkpoint:put', scope, checkpoint),
   getStrictSecurityEnabled: () => ipcRenderer.invoke('security:get-strict-security'),
   setStrictSecurityEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('security:set-strict-security', enabled),

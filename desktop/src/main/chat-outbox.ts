@@ -98,10 +98,19 @@ export class DesktopChatOutbox {
     });
   }
 
-  remove(scope: string, requestId: unknown): Promise<void> {
+  remove(
+    scope: string,
+    requestId: unknown,
+    beforeRemove?: (entry: DesktopChatOutboxEntry) => Promise<void>,
+  ): Promise<void> {
     return this.serialize(async () => {
       if (!isRequestId(requestId)) throw new Error('Invalid chat outbox request id');
-      await fs.rm(this.file(scope, requestId), { force: true });
+      const file = this.file(scope, requestId);
+      if (beforeRemove) {
+        const stored = await this.read(file);
+        if (stored) await beforeRemove(stored.entry);
+      }
+      await fs.rm(file, { force: true });
     });
   }
 

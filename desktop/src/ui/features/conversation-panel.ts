@@ -100,14 +100,14 @@ export function createMainComposerActions(
   isCompletionOpen?: () => boolean,
 ): ConversationPanelActions {
   return {
-    submit: async (text, userMentions) => {
+    submit: async (text, userMentions, composerCheckpoint) => {
       if (!requireRendererLogin()) return false;
       const sessionId = state.activeSessionId;
       const editFrom = sessionId ? state.editFromIdx[sessionId] : null;
       const replaced = sessionId && editFrom != null
         ? new Set((state.messages[sessionId] ?? []).slice(editFrom).map(({ id }) => id))
         : null;
-      if (!await sendMessage(text, userMentions)) return false;
+      if (!await sendMessage(text, userMentions, composerCheckpoint)) return false;
       if (sessionId && replaced) {
         replaceSessionMessages(sessionId, (state.messages[sessionId] ?? []).filter(({ id }) => !replaced.has(id)));
         for (const id of replaced) {
@@ -149,7 +149,7 @@ export function mountConversationPanel(
   if (messagesEl) host.append(messagesEl, composerHost);
   else if (ownComposerHost) host.append(composerHost);
   const composer: ComposerView = createComposerView(composerHost, {
-    submit: (text, userMentions) => opts.actions.submit(text, userMentions),
+    submit: opts.actions.submit,
     stop: () => opts.actions.stop(),
     cancelEdit: () => opts.actions.cancelEdit(),
     editQueueItem: opts.actions.editQueueItem,

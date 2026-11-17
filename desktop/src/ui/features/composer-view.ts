@@ -1,4 +1,5 @@
 import { createIcon } from '../components/icon';
+import type { ComposerCheckpointRef } from '../../shared/renderer-checkpoint';
 import {
   getPendingQueue,
   isDynamicKanbanSession,
@@ -24,11 +25,12 @@ import { registerPrimaryComposerRoot } from './composer-scope';
 import { registerRunningIntroTarget } from './running-intro';
 import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge } from './chat-outbox';
 import type { PanelAttachments } from './attachments';
+import { bindPrimaryRendererCheckpoint } from './renderer-checkpoint';
 
 const MAX_INPUT_HEIGHT = 180;
 
 export interface ComposerViewOptions {
-  submit(text: string, userMentions?: UserAgentMention[]): boolean | Promise<boolean>;
+  submit(text: string, userMentions?: UserAgentMention[], composerCheckpoint?: ComposerCheckpointRef): boolean | Promise<boolean>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -237,6 +239,7 @@ export function createComposerView(
   let queueSignature = '';
   const imeState = createComposerImeState();
   const unbindIme = bindComposerIme(input, imeState);
+  const checkpoint = options.primary ? bindPrimaryRendererCheckpoint(input) : null;
 
   const renderQueue = (): void => {
     if (disposed) return;
@@ -356,10 +359,10 @@ export function createComposerView(
     submitError = '';
     refresh();
     try {
-      const submitted = await options.submit(
-        serializeMentionInput(draft),
-        getUserAgentMentions(draft),
-      );
+      const text = serializeMentionInput(draft);
+      const mentions = getUserAgentMentions(draft);
+      const reference = checkpoint?.capture();
+      const submitted = reference ? await options.submit(text, mentions, reference) : await options.submit(text, mentions);
       if (!submitted) {
         submitError = '发送未完成，草稿已保留';
       } else if (!disposed && revision === draftRevision && draft === input.value) {
@@ -441,6 +444,7 @@ export function createComposerView(
       if (disposed) return;
       disposed = true;
       if (options.primary) registerPrimaryComposerRoot(null);
+      checkpoint?.dispose();
       controller.abort();
       unbindIme();
       unsubscribeAuth();

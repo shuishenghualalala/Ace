@@ -9,6 +9,7 @@
  *   把 HTTP 状态码 + 后端错误信息合成人类可读消息抛给 UI 层。
  */
 import type { DesktopChatOutboxEntry, DesktopChatOutboxSnapshot } from '../../shared/chat-outbox';
+import type { RendererCheckpoint, RendererCheckpointSnapshot } from '../../shared/renderer-checkpoint';
 // BackendNotification 在 feature-work 中定义；此处仅用于 ChatChunk 类型引用。
 import type { BackendNotification } from './feature-work';
 
@@ -143,6 +144,8 @@ export type CrewBridge = {
   chatOutboxList?: () => Promise<DesktopChatOutboxSnapshot>;
   chatOutboxPut?: (scope: string, entry: DesktopChatOutboxEntry) => Promise<void>;
   chatOutboxRemove?: (scope: string, requestId: string) => Promise<void>;
+  rendererCheckpointGet?: () => Promise<RendererCheckpointSnapshot>;
+  rendererCheckpointPut?: (scope: string, checkpoint: RendererCheckpoint) => Promise<void>;
 };
 
 export function CrewBridge(): CrewBridge | undefined {

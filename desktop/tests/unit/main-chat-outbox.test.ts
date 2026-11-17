@@ -63,6 +63,19 @@ describe('desktop chat outbox', () => {
     expect(await store.list(scope)).toEqual([item('req_1', 'submitted')]);
   });
 
+  it('keeps a settled send available for draft deduplication until its checkpoint update succeeds', async () => {
+    const sent = item('req_1', 'accepted');
+    await store.put(scope, sent);
+    const settleDraft = vi.fn<(entry: DesktopChatOutboxEntry) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('checkpoint write failed')).mockResolvedValueOnce(undefined);
+    await expect(store.remove(scope, sent.requestId, settleDraft)).rejects.toThrow('checkpoint write failed');
+    expect(await store.list(scope)).toEqual([sent]);
+
+    await store.remove(scope, sent.requestId, settleDraft);
+    expect(settleDraft).toHaveBeenCalledTimes(2);
+    expect(await store.list(scope)).toEqual([]);
+  });
+
   it('rejects malformed keys and attempts to move a request to another session', async () => {
     await store.put(scope, item('req_1'));
     await expect(store.put(scope, { ...item('req_1'), sessionId: 'session-2' })).rejects.toThrow('different session');

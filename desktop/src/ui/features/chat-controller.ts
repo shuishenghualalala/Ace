@@ -140,6 +140,7 @@ import { renderAttachmentPreview } from './attachments';
 import { messageStore, sessionStore } from '../stores/stores';
 import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge, outboxQueueItem, outboxTurn, type OutboxObserver } from './chat-outbox';
 import { MAX_CHAT_FRAME_BYTES } from '../../shared/chat-outbox';
+import type { ComposerCheckpointRef } from '../../shared/renderer-checkpoint';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
@@ -168,6 +169,7 @@ interface DispatchOptions {
   workDisabledPreferenceIds?: string[];
   userMentions?: UserAgentMention[];
   queuedItem?: PendingMessage;
+  composerCheckpoint?: ComposerCheckpointRef;
 }
 /**
  * index.ts init 时调用，把 openSession / setTab 等顶层入口注入本模块。
@@ -1512,7 +1514,11 @@ export function sendQueueItemNow(sessionId: string, id: string): void {
   if (item && !isBusy(sessionId)) dispatchPendingItem(sessionId, item);
 }
 
-export async function queueChatMessage(sessionId: string, item: PendingMessage): Promise<boolean> {
+export async function queueChatMessage(
+  sessionId: string,
+  item: PendingMessage,
+  composerCheckpoint?: ComposerCheckpointRef,
+): Promise<boolean> {
   if (!canSubmitDesktopChat()) return false;
   let pending = item;
   if (desktopOutboxBridge()) {
@@ -1525,7 +1531,7 @@ export async function queueChatMessage(sessionId: string, item: PendingMessage):
       ...(wikiExtras ? { wikiKbId: wikiExtras.wikiKbId } : {}),
     };
     try {
-      if (!await chatOutbox.queue(sessionId, durableItem)) return false;
+      if (!await chatOutbox.queue(sessionId, durableItem, composerCheckpoint)) return false;
     } catch {
       notify('无法保存待发消息，草稿已保留');
       return false;
@@ -1775,6 +1781,7 @@ export async function dispatchWs(
           ? { userMessageId: optimisticUserMessage?.id ?? optimisticUserMessageId! }
           : {}),
         ...(dispatchOptions.queuedItem ? { queuedItem: dispatchOptions.queuedItem } : {}),
+        ...(dispatchOptions.composerCheckpoint ? { composerCheckpoint: dispatchOptions.composerCheckpoint } : {}),
       });
       ok = delivery === 'accepted';
       failure = delivery === 'rejected' ? 'Gateway 未受理消息，内容已保留。' : '发送已取消，内容已保留。';
@@ -1825,7 +1832,11 @@ export async function sendNativeVisualMessage(sessionId: string, text: string): 
   return dispatchWs(sessionId, text, [], { subScenario: '', workDisabledPreferenceIds: [] });
 }
 
-export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<boolean> {
+export async function sendMessage(
+  text: string,
+  userMentions: UserAgentMention[] = [],
+  composerCheckpoint?: ComposerCheckpointRef,
+): Promise<boolean> {
   if (!requireRendererLogin() || !canSubmitDesktopChat()) return false;
   const plainContent = text.trim();
   const attachments = [...state.attachments];
@@ -1875,7 +1886,7 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
       ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
       ...(userMentions.length > 0 ? { userMentions } : {}),
     };
-    if (!await queueChatMessage(sessionId, pendingItem)) return false;
+    if (!await queueChatMessage(sessionId, pendingItem, composerCheckpoint)) return false;
     settleDraft();
     setQueueHintWithUi(sessionId, '正在排队…');
     setStatusWithUi(sessionId, 'queued');
@@ -1894,6 +1905,7 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
 
   const sent = await dispatchWs(sessionId, content, attachments, {
     subScenario,
+    ...(composerCheckpoint ? { composerCheckpoint } : {}),
     ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
     ...(userMentions.length > 0 ? { userMentions } : {}),
   });

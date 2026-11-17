@@ -1,4 +1,5 @@
 import type { DesktopChatOutboxEntry, DesktopChatOutboxSnapshot } from '../../shared/chat-outbox';
+import type { ComposerCheckpointRef } from '../../shared/renderer-checkpoint';
 import { CrewBridge, type ChatChunk, type ReceiptedSendPayload, type SendReceiptAction } from '../api/transport';
 import type { PendingMessage } from '../chat-render';
 import { uiStore } from '../stores/ui-store';
@@ -17,6 +18,7 @@ export interface OutboxTurn {
   payload: ReceiptedSendPayload;
   userMessageId?: string;
   queuedItem?: PendingMessage;
+  composerCheckpoint?: ComposerCheckpointRef;
 }
 
 interface StoredOutboxTurn extends OutboxTurn {
@@ -170,11 +172,16 @@ export class ChatOutbox {
     return next;
   }
 
-  async queue(sessionId: string, item: PendingMessage & { requestId: string }): Promise<boolean> {
+  async queue(
+    sessionId: string,
+    item: PendingMessage & { requestId: string },
+    composerCheckpoint?: ComposerCheckpointRef,
+  ): Promise<boolean> {
     const binding = this.binding;
     if (!binding || !this.storeId || !this.send) return false;
     const entry: DesktopChatOutboxEntry = {
-      requestId: item.requestId, sessionId, phase: 'queued', value: { item: structuredClone(item) },
+      requestId: item.requestId, sessionId, phase: 'queued',
+      value: { item: structuredClone(item), ...(composerCheckpoint ? { composerCheckpoint } : {}) },
     };
     const tracked: Tracked = { entry, writes: Promise.resolve(), staging: true };
     this.entries.set(item.requestId, tracked);
@@ -194,7 +201,7 @@ export class ChatOutbox {
     const tracked = this.entries.get(item.requestId);
     if (!binding || !tracked || tracked.entry.sessionId !== sessionId
       || tracked.entry.phase !== 'queued' || tracked.staging || tracked.removing) return false;
-    const updated = { ...tracked.entry, value: { item: structuredClone(item) } };
+    const updated = { ...tracked.entry, value: { ...tracked.entry.value, item: structuredClone(item) } };
     tracked.staging = true;
     try {
       await this.write(tracked, updated, binding);
@@ -209,7 +216,12 @@ export class ChatOutbox {
   async submit(turn: OutboxTurn): Promise<Delivery> {
     const { binding, storeId } = this;
     if (!binding || !storeId || !this.send) return 'rejected';
-    const storedTurn = { ...structuredClone(turn), storeId };
+    const queuedCheckpoint = this.entries.get(turn.payload.request_id)?.entry.value.composerCheckpoint;
+    const storedTurn = {
+      ...(queuedCheckpoint ? { composerCheckpoint: queuedCheckpoint } : {}),
+      ...structuredClone(turn),
+      storeId,
+    };
     const { payload } = storedTurn;
     const entry: DesktopChatOutboxEntry = {
       requestId: payload.request_id, sessionId: payload.session_id, phase: 'submitted', value: storedTurn,
@@ -345,7 +357,11 @@ export class ChatOutbox {
           workspaceId: turn.payload.workspace_id,
         };
         delete item.optimisticUserMessageId;
-        const held = { ...entry, phase: 'queued', value: { item } } as const;
+        const held = {
+          ...entry,
+          phase: 'queued',
+          value: { item, ...(turn.composerCheckpoint ? { composerCheckpoint: turn.composerCheckpoint } : {}) },
+        } as const;
         tracked.entry = held;
         try {
           await this.write(tracked, held, binding);

@@ -280,7 +280,6 @@ async function refreshAuthSnapshot(): Promise<void> {
 export async function initAuthFlow(): Promise<boolean> {
   bind();
   await refreshAuthSnapshot();
-  await window.Crew.rendererInitialStateReady();
   return currentState.isLoggedIn;
 }
 

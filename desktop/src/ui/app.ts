@@ -672,6 +672,7 @@ async function init(
   }));
   void safe('initSkillsPage', initSkillsPage);
   await safe('bindBackendAuth', () => { registerDispose(bindBackendAuth()); });
+  await window.Crew.rendererInitialStateReady();
   await safe('refreshTracingGate', refreshTracingGateAvailability);
 }
 
