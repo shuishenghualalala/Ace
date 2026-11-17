@@ -161,6 +161,8 @@ const zh: Record<string, string> = {
 
   // == 对话过程时间线 ==
   'chat.turn.working': '已工作 {duration}',
+  'chat.terminal.liveOutput': '实时输出',
+  'chat.terminal.liveOutputClipped': '实时输出（早期输出已省略）',
   'chat.thinking.brief': '思考 · 持续了几秒',
   'chat.thinking.measured': '思考 · 持续了 {seconds} 秒',
 
@@ -303,6 +305,8 @@ const en: Record<string, string> = {
 
   // == Chat process timeline ==
   'chat.turn.working': 'Worked {duration}',
+  'chat.terminal.liveOutput': 'Live output',
+  'chat.terminal.liveOutputClipped': 'Live output (earlier output omitted)',
   'chat.thinking.brief': 'Thinking · a few seconds',
   'chat.thinking.measured': 'Thinking · {seconds}s',
 

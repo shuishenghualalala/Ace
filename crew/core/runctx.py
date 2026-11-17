@@ -103,19 +103,25 @@ ToolProgressFn = Callable[[str], Coroutine[Any, Any, None]]
 current_tool_progress_fn: ContextVar[ToolProgressFn | None] = ContextVar(
     "current_tool_progress_fn", default=None
 )
+current_tool_progress_metadata: ContextVar[dict[str, Any] | None] = ContextVar(
+    "current_tool_progress_metadata", default=None
+)
 
 
-async def emit_tool_progress(text: str) -> None:
-    """工具 handler 调用：发射一段进度文本。无 sink 或无文本时静默。"""
-    if not text:
+async def emit_tool_progress(text: str, *, metadata: dict[str, Any] | None = None) -> None:
+    """Emit progress and optional metadata without changing the sink signature."""
+    if not text and metadata is None:
         return
     fn = current_tool_progress_fn.get()
     if fn is None:
         return
+    token = current_tool_progress_metadata.set(metadata)
     try:
         await fn(text)
     except Exception:  # noqa: BLE001 - 进度发射失败不得影响工具执行
         pass
+    finally:
+        current_tool_progress_metadata.reset(token)
 
 # 当前执行上下文下可用的「向前端推事件」函数；gateway 注入，CLI 等无 UI 场景为 None。
 # 签名：async push_fn(session_id: str, chunk: dict) -> None

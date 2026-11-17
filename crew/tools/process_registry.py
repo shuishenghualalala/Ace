@@ -45,6 +45,8 @@ from crew.security.launch import (
 from crew.security.models import serialize_additional_permissions
 from crew.security.process_lifecycle import (
     ProcessOwner,
+    WINDOWS_CREATE_SUSPENDED,
+    WindowsProcessJob,
     register_live,
     release_live,
     scope_alive,
@@ -52,6 +54,7 @@ from crew.security.process_lifecycle import (
 )
 from crew.tools.child_env import build_spawn_env
 from crew.tools.output_filters import strip_ansi
+from crew.tools.process_output import MAX_PAGE_BYTES, OutputSnapshot, ProcessOutput
 from crew.tools.registry import tool_error
 
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -85,6 +88,7 @@ FINISHED_TTL_SECONDS = 1800     # 已结束进程保留 30 分钟
 MAX_PROCESSES = 64              # 最大并发跟踪进程数（超出按最旧 LRU 淘汰）
 MAX_PENDING_PER_SESSION = 20    # 每 session 待注入通知上限，防无限堆积
 _MAX_STDIN_WRITE_CHARS = 1_000_000  # 单次 stdin 批量写入上限（半交互喂入）
+_OUTPUT_ACTIVITY_INTERVAL = 0.25
 
 # ---- watch_patterns 限流（单 session）----
 # 硬规则：每 WATCH_MIN_INTERVAL_SECONDS 至多发一条 watch 命中通知。冷却窗口内到达的
@@ -195,9 +199,8 @@ class ProcessSession:
     started_at: float = 0.0
     exited: bool = False
     exit_code: int | None = None
-    output_buffer: str = ""
     max_output_chars: int = MAX_OUTPUT_CHARS
-    detached: bool = False                        # 崩溃恢复认领的进程：可查状态/可 kill，但无输出历史
+    detached: bool = False                        # 重启后认领，无 Popen 句柄，可引用已保存的日志
     notify_on_complete: bool = False
     watch_patterns: list[str] = field(default_factory=list)
     # watch 限流状态（单 session）
@@ -221,6 +224,13 @@ class ProcessSession:
     _security_result_nonce: str = field(default="", repr=False)
     stable_error_code: str = ""
     sandbox_backend: str = ""
+    termination_reason: str = ""
+    _output: ProcessOutput = field(default_factory=ProcessOutput, repr=False)
+    _last_output_activity: float = 0.0
+
+    @property
+    def output_buffer(self) -> str:
+        return self._output.tail
 
 
 class ProcessRegistry:
@@ -370,12 +380,13 @@ class ProcessRegistry:
             preexec_fn=None if _IS_WINDOWS else os.setsid,  # 自成进程组，便于整树 kill
             # Windows 进程组仍共享父控制台；taskkill /T /F 可能把控制信号回传给
             # Gateway。后台 shell 无交互控制台需求，创建无窗口独立进程组才能安全整树终止。
-            creationflags=_WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0,
+            creationflags=(_WINDOWS_PROCESS_FLAGS | WINDOWS_CREATE_SUSPENDED) if _IS_WINDOWS else 0,
         )
+        job = WindowsProcessJob.attach(proc) if _IS_WINDOWS else None
         session.process = proc
         session.pid = proc.pid
         session.scope_unit = scope_unit
-        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
+        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None, windows_job=job)
         register_live(session._owner)
 
         with self._lock:
@@ -519,7 +530,7 @@ class ProcessRegistry:
             _security_launch=security_launch, _security_action=security_action,
             _security_result_path=result_path, _security_result_nonce=result_nonce,
         )
-        flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
+        flags = (_WINDOWS_PROCESS_FLAGS | WINDOWS_CREATE_SUSPENDED) if _IS_WINDOWS else 0
         scope_unit = ""
         bridge_argv = [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER]
         bridge_env = build_spawn_env({"PYTHONUNBUFFERED": "1"})
@@ -533,6 +544,7 @@ class ProcessRegistry:
                 env=bridge_env,
                 preexec_fn=None if _IS_WINDOWS else os.setsid, creationflags=flags,
             )
+            job = WindowsProcessJob.attach(proc) if _IS_WINDOWS else None
         except Exception:
             result_path.unlink(missing_ok=True)
             raise
@@ -542,7 +554,7 @@ class ProcessRegistry:
         session.process = proc
         session.pid = proc.pid
         session.scope_unit = scope_unit
-        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None)
+        session._owner = ProcessOwner.capture(proc, scope_unit=scope_unit or None, windows_job=job)
         register_live(session._owner)
         with self._lock:
             self._prune_if_needed()
@@ -599,33 +611,31 @@ class ProcessRegistry:
 
     def _publish_output(self, session: ProcessSession, chunk: str) -> None:
         """Publish already-safe output to every observer of a process session."""
+        now = time.monotonic()
         with session._lock:
-            session.output_buffer += chunk
-            if len(session.output_buffer) > session.max_output_chars:
-                session.output_buffer = session.output_buffer[-session.max_output_chars:]
-            output_chars = len(session.output_buffer)
-            output_tail = strip_ansi(session.output_buffer[-1000:])
-        if session.output_ref:
-            try:
-                path = Path(session.output_ref)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as output_file:
-                    output_file.write(chunk)
-            except OSError:
-                pass
+            session._output.append(chunk, max_chars=session.max_output_chars, output_ref=session.output_ref)
+            due = now - session._last_output_activity >= _OUTPUT_ACTIVITY_INTERVAL
+            if due and self._task_runtime is not None and session.task_id:
+                session._last_output_activity = now
+                activity = {
+                    "pid": session.pid,
+                    "process_session_id": session.id,
+                    "output_chars": session._output.characters,
+                    "output_tail": strip_ansi(session.output_buffer[-1000:]),
+                    **session._output.snapshot(session.output_ref).metadata(),
+                }
+            else:
+                activity = None
+        if activity is not None:
+            self._task_activity(session, activity)
+        self._check_watch_patterns(session, chunk)
+
+    def _task_activity(self, session: ProcessSession, activity: dict[str, Any]) -> None:
         if self._task_runtime is not None and session.task_id:
             try:
-                self._task_runtime.touch_activity(
-                    session.task_id,
-                    {
-                        "pid": session.pid,
-                        "output_chars": output_chars,
-                        "output_tail": output_tail,
-                    },
-                )
+                self._task_runtime.touch_activity(session.task_id, activity)
             except Exception:
                 pass
-        self._check_watch_patterns(session, chunk)
 
     def _reader_loop(self, session: ProcessSession) -> None:
         """daemon 线程：持续读取 Popen stdout 到滚动缓冲。
@@ -638,6 +648,7 @@ class ProcessRegistry:
         """
         import codecs
 
+        self._task_activity(session, {"pid": session.pid, "process_session_id": session.id})
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         private_output = ""
         private_output_truncated = False
@@ -699,6 +710,8 @@ class ProcessRegistry:
                     truncated=private_output_truncated,
                     max_output_chars=session.max_output_chars,
                 )
+                with session._lock:
+                    session._output.capture_truncated = private_output_truncated
                 if safe_output:
                     self._publish_output(session, safe_output)
             try:
@@ -716,9 +729,13 @@ class ProcessRegistry:
                         session.process.wait(timeout=5)
                     except Exception:  # noqa: BLE001
                         pass
-            session.exited = True
-            session.exit_code = session.process.returncode
+            with session._lock:
+                session.exited = True
+                session.exit_code = session.process.returncode
             self._audit_process_result(session)
+            if session.stable_error_code == "output_truncated":
+                with session._lock:
+                    session._output.capture_truncated = True
             self._move_to_finished(session)
             # 句柄完全结算（输出落地 + 审计 + 归档）后才移出 live set、唤醒 wait()
             release_live(session._owner)
@@ -862,18 +879,23 @@ class ProcessRegistry:
             })
         if was_running and self._task_runtime is not None and session.task_id:
             try:
-                status = "completed" if session.exit_code == 0 else "failed"
+                status = self._settled_status(session)
                 self._task_runtime.finish(
                     session.task_id,
                     owner_account_id=session.owner_account_id,
                     status=status,
                     result=strip_ansi(session.output_buffer[-2000:]),
-                    error="" if status == "completed" else f"进程退出码 {session.exit_code}",
+                    error={"completed": "", "cancelled": "进程已取消", "timed_out": "命令超时"}.get(
+                        status, f"进程退出码 {session.exit_code}",
+                    ),
                     progress={
                         "pid": session.pid,
+                        "process_session_id": session.id,
                         "exit_code": session.exit_code,
-                        "output_chars": len(session.output_buffer),
+                        "output_settled": True,
+                        "output_chars": session._output.characters,
                         "output_tail": strip_ansi(session.output_buffer[-1000:]),
+                        **self.output_metadata(session),
                     },
                 )
             except Exception:
@@ -884,10 +906,49 @@ class ProcessRegistry:
     def get(self, session_id: str, owner_account_id: str) -> ProcessSession | None:
         with self._lock:
             session = self._running.get(session_id) or self._finished.get(session_id)
-        session = self._refresh_detached(session)
         if session is None or not _owner_matches(session, owner_account_id):
             return None
-        return session
+        return self._refresh_detached(session)
+
+    def _find_task_session(self, task_id: str, owner_account_id: str) -> ProcessSession | None:
+        with self._lock:
+            for group in (self._running, self._finished):
+                for session in group.values():
+                    if session.task_id == task_id and _owner_matches(session, owner_account_id):
+                        return session
+        return None
+
+    @staticmethod
+    def _task_log_path(task_id: str, owner_account_id: str, output_ref: str) -> str:
+        from crew.state.home import get_owner_runtime_home
+
+        if not output_ref or not task_id.startswith("task_") or not task_id.removeprefix("task_").isalnum():
+            return ""
+        expected = get_owner_runtime_home(owner_account_id, create=False) / "tasks" / f"{task_id}.log"
+        return str(expected) if expected.absolute() == Path(output_ref).absolute() else ""
+
+    def _snapshot(self, session: ProcessSession) -> OutputSnapshot:
+        if session.detached:
+            ref = self._task_log_path(session.task_id, session.owner_account_id, session.output_ref)
+            return OutputSnapshot.archived(ref)
+        with session._lock:
+            return session._output.snapshot(session.output_ref)
+
+    def output_metadata(self, session: ProcessSession) -> dict[str, Any]:
+        return self._snapshot(session).metadata()
+
+    @staticmethod
+    def _settled_status(session: ProcessSession) -> str:
+        if session.termination_reason:
+            return session.termination_reason
+        if session.stable_error_code == "timeout":
+            return "timed_out"
+        return "completed" if session.exit_code == 0 and not session.stable_error_code else "failed"
+
+    def read_output(
+        self, session: ProcessSession, cursor: int, *, max_bytes: int = 16384, end_offset: int | None = None,
+    ) -> dict[str, Any]:
+        return self._snapshot(session).page(cursor, max_bytes=max(4, min(max_bytes, MAX_PAGE_BYTES)), end_offset=end_offset)
 
     def _refresh_detached(self, session: ProcessSession | None) -> ProcessSession | None:
         """崩溃恢复认领的进程没有 Popen 句柄，靠存活检测判定是否已退出。"""
@@ -920,44 +981,86 @@ class ProcessRegistry:
             "task_id": session.task_id,
             "uptime_seconds": int(time.time() - session.started_at),
             "output_preview": preview,
+            **self.output_metadata(session),
         }
         if session.exited:
             result["exit_code"] = session.exit_code
         if session.detached:
             result["detached"] = True
-            result["note"] = "进程为重启后认领，无输出历史，仅能查状态/kill"
+            if result["output_ref"]:
+                result["note"] = "进程为重启后认领，可读取已保存的日志。"
+            else:
+                result["note"] = "进程为重启后认领，无输出历史，可查询状态或停止。"
         return result
 
     def read_log(
         self,
-        session_id: str,
-        offset: int = 0,
+        session_id: str = "",
+        offset: int | None = None,
         limit: int = 200,
         *,
         owner_account_id: str,
+        task_id: str = "",
+        cursor: int | None = None,
+        max_bytes: int = 12 * 1024,
     ) -> dict[str, Any]:
-        """读取完整输出日志（按行分页）。"""
-        session = self.get(session_id, owner_account_id=owner_account_id)
-        if session is None:
-            return {"status": "not_found", "error": f"无此进程: {session_id}"}
-        with session._lock:
-            full_output = strip_ansi(session.output_buffer)
-        lines = full_output.splitlines()
-        if offset == 0 and limit > 0:
-            selected = lines[-limit:]
+        """Read the same published stream during execution or from the owner archive."""
+        session = self.get(session_id, owner_account_id=owner_account_id) if session_id else None
+        if session is not None and task_id and task_id != session.task_id:
+            return {"status": "not_found", "error": "进程和任务不匹配"}
+        if session is None and not session_id and task_id:
+            session = self._refresh_detached(self._find_task_session(task_id, owner_account_id))
+        if session is not None:
+            snapshot = self._snapshot(session)
+            running = not session.exited
+            task_state = "running" if running else self._settled_status(session)
+            identifiers: dict[str, Any] = {
+                "session_id": session.id, "task_id": session.task_id,
+                "status": "running" if running else "exited", "task_status": task_state,
+            }
+            if not running:
+                identifiers["exit_code"] = session.exit_code
         else:
-            selected = lines[offset:offset + limit]
-        result: dict[str, Any] = {
-            "session_id": session.id,
-            "task_id": session.task_id,
-            "status": "exited" if session.exited else "running",
-            "output": "\n".join(selected),
-            "total_lines": len(lines),
-            "showing": f"{len(selected)} lines",
+            archived = self._archived_task_log(task_id, owner_account_id, session_id=session_id) if task_id else None
+            if archived is None:
+                return {"status": "not_found", "error": f"无此进程或任务: {session_id or task_id}"}
+            snapshot, identifiers = archived
+            running = identifiers["status"] == "running"
+        if cursor is not None:
+            page = snapshot.page(cursor, max_bytes=max(4, min(max_bytes, MAX_PAGE_BYTES)), tool_budget=True)
+        else:
+            page = snapshot.lines(offset, limit=max(1, min(limit, 2000)), running=running)
+        return {**identifiers, **page}
+
+    def _archived_task_log(
+        self, task_id: str, owner_account_id: str, *, session_id: str,
+    ) -> tuple[OutputSnapshot, dict[str, Any]] | None:
+        if self._task_runtime is None:
+            return None
+        try:
+            record = self._task_runtime.get(task_id, owner_account_id=owner_account_id)
+        except KeyError:
+            return None
+        if record.get("kind") != "shell":
+            return None
+        progress = record.get("progress") or {}
+        recorded_session = progress.get("process_session_id") or ""
+        if session_id and recorded_session != session_id:
+            return None
+        ref = self._task_log_path(task_id, owner_account_id, record.get("output_ref") or "")
+        snapshot = OutputSnapshot.archived(
+            ref, known_end=int(progress.get("total_output_bytes") or 0),
+            confirmed_bytes=progress.get("persisted_output_bytes") if progress.get("output_settled") else None,
+            total_lines=progress.get("total_lines"),
+            capture_truncated=bool(progress.get("capture_truncated")),
+        )
+        status = record["status"]
+        running = status in {"pending", "running"}
+        return snapshot, {
+            "session_id": recorded_session, "task_id": task_id,
+            "status": "running" if running else "exited", "task_status": status,
+            "exit_code": progress.get("exit_code"), "archived": True,
         }
-        if session.exited:
-            result["exit_code"] = session.exit_code
-        return result
 
     def wait(self, session_id: str, timeout: int | None = None, *, owner_account_id: str) -> dict[str, Any]:
         """阻塞直到进程完全结算或超时（per-session 事件条件唤醒，无轮询）。"""
@@ -975,35 +1078,42 @@ class ProcessRegistry:
             "status": "exited",
             "exit_code": session.exit_code,
             "output": strip_ansi(session.output_buffer[-2000:]),
+            "task_status": self._settled_status(session),
+            **self.output_metadata(session),
         }
 
-    def kill_process(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
+    def kill_process(self, session_id: str, owner_account_id: str, *, reason: str = "cancelled") -> dict[str, Any]:
         """杀掉一个后台进程（含子进程树），统一走 security 的 ProcessOwner。"""
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
             return {"status": "not_found", "error": f"无此进程: {session_id}"}
-        if session.exited:
+        with session._lock:
+            has_job = session._owner is not None and session._owner.windows_job is not None
+            exiting = session.exited or (not has_job and session.process is not None and session.process.poll() is not None)
+            if not exiting:
+                session.termination_reason = session.termination_reason or reason
+        if exiting:
+            session._done_event.wait(2)
             return {"status": "already_exited", "exit_code": session.exit_code}
         try:
-            if session.detached and not _session_alive(session):
-                # 崩溃恢复认领的进程已死：按退出结算
-                session.exited = True
-                session.exit_code = None
-                release_live(session._owner)
-                session._done_event.set()
-                self._move_to_finished(session)
-                return {"status": "already_exited", "exit_code": None}
             owner = session._owner or ProcessOwner.for_pid(
                 session.pid or 0,
                 scope_unit=session.scope_unit or None,
             )
-            owner.signal(signal.SIGTERM)
-            session.exited = True
-            # Windows 没有信号：终止走 TerminateProcess，退出码固定为 1；POSIX 才是 -SIGTERM。
-            session.exit_code = 1 if os.name == "nt" else -int(signal.SIGTERM)
-            self._move_to_finished(session)
-            session._done_event.set()
-            return {"status": "killed", "session_id": session.id}
+            signalled = owner.signal(signal.SIGTERM)
+            if session.detached:
+                if not owner.wait_for_exit_sync(2):
+                    signalled |= owner.signal(_SIGKILL)
+                    owner.wait_for_exit_sync(2)
+                self._refresh_detached(session)
+            elif not session._done_event.wait(2):
+                signalled |= owner.signal(_SIGKILL)
+                session._done_event.wait(2)
+            if not signalled and not session._done_event.is_set():
+                return {"status": "error", "error": "进程树终止未确认", "session_id": session.id}
+            settled = session._done_event.is_set()
+            return {"status": "killed" if settled else "terminating", "session_id": session.id, "settled": settled,
+                    "task_status": session.termination_reason, "exit_code": session.exit_code}
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "error": str(exc)}
 
@@ -1281,7 +1391,11 @@ PROCESS_SCHEMA = {
             },
             "session_id": {
                 "type": "string",
-                "description": "后台进程的 session_id（来自 terminal 后台返回）。除 list 外均必填。",
+                "description": "terminal 返回的进程 session_id。log 也可以使用 task_id。",
+            },
+            "task_id": {
+                "type": "string",
+                "description": "log 可使用 terminal 返回的 task_id。重启后按 task_id 读取已保存的日志。",
             },
             "timeout": {
                 "type": "integer",
@@ -1290,12 +1404,22 @@ PROCESS_SCHEMA = {
             },
             "offset": {
                 "type": "integer",
-                "description": "log 操作的行偏移（默认取最后 200 行）",
+                "minimum": 0,
+                "description": "log 行偏移，0 表示从头。省略时取最后 200 行。按字节续读请使用 cursor。",
+            },
+            "cursor": {
+                "type": "integer", "minimum": 0,
+                "description": "log 的 UTF-8 字节偏移。0 从头，之后使用上一次返回的 next_offset。",
+            },
+            "max_bytes": {
+                "type": "integer", "minimum": 4, "maximum": MAX_PAGE_BYTES,
+                "description": "cursor 模式的单页字节上限，默认 12288。",
             },
             "limit": {
                 "type": "integer",
                 "description": "log 操作最多返回行数",
                 "minimum": 1,
+                "maximum": 2000,
             },
             "input": {
                 "description": "stdin 操作写入的内容：字符串或按序写入的字符串数组",
@@ -1328,21 +1452,29 @@ def _handle_process(args: dict[str, Any]) -> str:
         )
     if action not in {"poll", "log", "wait", "kill", "stdin"}:
         return tool_error(f"未知 action: {action}。可用: list, poll, log, wait, kill, stdin")
+    if action == "log":
+        task_id = str(args.get("task_id") or "")
+        if not session_id and not task_id:
+            return tool_error("log 需要 session_id 或 task_id")
+        if "cursor" in args and "offset" in args:
+            return tool_error("log 只接受一个定位参数。使用 cursor 按字节续读，或 offset 按行读取。")
+        return json.dumps(
+            process_registry.read_log(
+                session_id,
+                offset=args.get("offset"),
+                limit=args.get("limit", 200),
+                owner_account_id=owner_account_id,
+                task_id=task_id,
+                cursor=args.get("cursor"),
+                max_bytes=args.get("max_bytes", 12 * 1024),
+            ),
+            ensure_ascii=False,
+        )
     if not session_id:
         return tool_error(f"{action} 需要 session_id")
     if action == "poll":
         return json.dumps(
             process_registry.poll(session_id, owner_account_id=owner_account_id),
-            ensure_ascii=False,
-        )
-    if action == "log":
-        return json.dumps(
-            process_registry.read_log(
-                session_id,
-                offset=args.get("offset", 0),
-                limit=args.get("limit", 200),
-                owner_account_id=owner_account_id,
-            ),
             ensure_ascii=False,
         )
     if action == "wait":

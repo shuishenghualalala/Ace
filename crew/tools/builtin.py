@@ -149,13 +149,21 @@ def _check_terminal_command(command: str) -> tuple[bool, str | None, str | None]
 
 TERMINAL_SCHEMA = {
     "name": "terminal",
-    "description": "执行 shell 命令。受管模式下 HOME 指向宿主用户目录，但沙箱仍单独限制读写；工作区外写入应使用宿主绝对路径申请精确权限，删除单个文件优先使用 file_delete。",
+    "description": (
+        "执行 shell 命令，返回运行状态及退出码；后台返回表示已接收任务。"
+        "用 process(action='log', task_id=..., cursor=0) 从头读取日志，再用返回的 next_offset 续读。"
+        "受管模式下 HOME 指向宿主用户目录，但沙箱仍单独限制读写；"
+        "工作区外写入应使用宿主绝对路径申请精确权限，删除单个文件优先使用 file_delete。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "command": {"type": "string", "description": "要执行的 shell 命令"},
             "timeout": {"type": "number", "description": "超时秒数，默认 30，最大 600"},
-            "background": {"type": "boolean", "description": "是否后台执行（立即返回 session_id，用 process 工具查询）"},
+            "background": {
+                "type": "boolean",
+                "description": "是否后台执行。返回的 session_id、task_id 可供 process 查询。",
+            },
             "watch_patterns": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -485,6 +493,27 @@ def _parse_additional_permissions(
     )
 
 
+def _terminal_result_json(result: dict[str, Any], *, log_hint: str) -> str:
+    """Keep exit and log metadata inline, including when the preview needs escaping."""
+    encoded = json.dumps(result, ensure_ascii=False)
+    output = result.get("output")
+    if len(encoded) <= DEFAULT_MAX_RESULT_SIZE_CHARS or not output:
+        return encoded
+
+    result.update(output="", truncated=True, hint=log_hint)
+    budget = DEFAULT_MAX_RESULT_SIZE_CHARS - len(json.dumps(result, ensure_ascii=False))
+    low, high = 1, min(len(output), budget)
+    while low <= high:
+        width = (low + high) // 2
+        preview, _ = truncate_output(output, width)
+        if len(json.dumps(preview, ensure_ascii=False)) - 2 <= budget:
+            result["output"] = preview
+            low = width + 1
+        else:
+            high = width - 1
+    return json.dumps(result, ensure_ascii=False)
+
+
 async def handle_terminal(
     args: dict[str, Any],
     *,
@@ -786,7 +815,6 @@ async def handle_terminal(
             parent_task_id=current_parent_task_id.get(),
             title=command[:120],
             detail=command,
-            output_ref=str(output_dir / "pending.log"),
             execution_timeout=(
                 effective_timeout
                 if timeout_explicit
@@ -801,138 +829,146 @@ async def handle_terminal(
         output_ref = str(output_dir / f"{task_id}.log")
         await runtime.update_async(task_id, owner_account_id=owner, output_ref=output_ref)
 
-    if background:
-        watch_patterns = args.get("watch_patterns") or []
-        if not isinstance(watch_patterns, list):
-            watch_patterns = [str(watch_patterns)]
-        notify_on_complete = bool(args.get("notify_on_complete", False))
-        try:
-            if runtime is not None and task_id:
-                await runtime.mark_running_async(task_id)
-            # launch 恒非 None：走到这里必然经过了上面的授权路径。
-            session = process_registry.spawn_security(
-                command,
-                launch=launch,
-                cwd=cwd,
-                session_key=current_session_id.get(),
-                owner_account_id=owner,
-                watch_patterns=[str(p) for p in watch_patterns],
-                notify_on_complete=notify_on_complete,
-                task_id=task_id,
-                output_ref=output_ref,
-            )
-            if runtime is not None and task_id:
-                current = await runtime.get_async(task_id, owner_account_id=owner)
-                if current["status"] == "running":
-                    await runtime.touch_activity_async(task_id, {"pid": session.pid, "process_session_id": session.id})
-                    runtime.attach_worker(
-                        task_id,
-                        None,
-                        cancel=lambda reason, pid=session.pid: runtime.kill_process_group(int(pid or 0), reason),
-                    )
-            return json.dumps({
-                "success": True,
-                "background": True,
-                "session_id": session.id,
-                "task_id": task_id or session.id,
-                "pid": session.pid,
-                "command": command,
-                "cwd": cwd,
-                **terminal_metadata,
-                "hint": "后台运行中。用 process(action='poll'|'log'|'wait'|'kill', session_id=...) 查询。",
-            }, ensure_ascii=False)
-        except Exception as exc:
-            raise ToolError(f"后台启动失败: {exc}") from exc
-
-    # Foreground and background share one managed process. A long-running
-    # foreground command is reclassified in place; it is never restarted.
     if runtime is not None and task_id:
         await runtime.mark_running_async(task_id)
-    session = process_registry.spawn_security(
-        command,
-        launch=launch,
-        cwd=cwd,
-        session_key=current_session_id.get(),
-        owner_account_id=owner,
-        notify_on_complete=False,
-        task_id=task_id,
-        output_ref=output_ref,
-    )
-    if runtime is not None and task_id:
-        current = await runtime.get_async(task_id, owner_account_id=owner)
-        if current["status"] == "running":
-            await runtime.touch_activity_async(task_id, {"pid": session.pid, "process_session_id": session.id})
-            runtime.attach_worker(
-                task_id,
-                None,
-                cancel=lambda reason, pid=session.pid: runtime.kill_process_group(int(pid or 0), reason),
-            )
-
-    auto_after = 15.0
-    if runtime is not None:
-        auto_after = float(getattr(runtime, "auto_background_after", auto_after))
-    wait_budget = min(effective_timeout, auto_after) if auto_after > 0 else effective_timeout
-    started = time.monotonic()
-    # OCC Stage 5 onProgress：前台阻塞期按已累计输出增量推给前端，让用户实时看到命令输出。
-    # 事件驱动等完全结算事件（reader 收尾 set），零状态轮询；0.5s 仅是进度节流的
-    # 上限节拍，进程一结算立即唤醒。
-    emitted_len = 0
-    exited_waiter = asyncio.ensure_future(asyncio.to_thread(session._done_event.wait))
+    watch_patterns = (args.get("watch_patterns") or []) if background else []
+    if not isinstance(watch_patterns, list):
+        watch_patterns = [watch_patterns]
     try:
-        while True:
-            remaining_budget = wait_budget - (time.monotonic() - started)
-            if remaining_budget <= 0:
-                break
-            done, _ = await asyncio.wait(
-                {exited_waiter}, timeout=min(0.5, remaining_budget)
+        session = process_registry.spawn_security(
+            command,
+            launch=launch,
+            cwd=cwd,
+            session_key=current_session_id.get(),
+            owner_account_id=owner,
+            watch_patterns=[str(pattern) for pattern in watch_patterns],
+            notify_on_complete=background and bool(args.get("notify_on_complete")),
+            task_id=task_id,
+            output_ref=output_ref,
+        )
+    except Exception as exc:
+        error = f"命令启动失败: {exc}"
+        if runtime is not None and task_id:
+            await runtime.finish_async(task_id, owner_account_id=owner, status="failed", error=error)
+        raise ToolError(error) from exc
+
+    process_identity = {
+        "session_id": session.id,
+        "task_id": task_id or session.id,
+        "pid": session.pid,
+        "command": command,
+        "cwd": cwd,
+        **terminal_metadata,
+    }
+    log_identity = f"task_id={task_id!r}" if task_id else f"session_id={session.id!r}"
+    log_hint = f"用 process(action='log', {log_identity}, cursor=0) 读取日志。"
+
+    async def terminate(reason: str) -> None:
+        await asyncio.to_thread(
+            process_registry.kill_process, session.id, owner_account_id=owner, reason=reason,
+        )
+
+    async def cancel_worker(_reason: str) -> None:
+        intent = runtime.pending_termination(task_id)
+        await terminate(intent[0] if intent else "cancelled")
+
+    async def background_result(*, automatic: bool = False) -> str:
+        output_metadata = await asyncio.to_thread(process_registry.output_metadata, session)
+        result = {
+            **process_identity,
+            **output_metadata,
+            "success": True,
+            "status": "backgrounded",
+            "background": True,
+            "exit_code": None,
+            "hint": f"后台任务已接收。{log_hint} 用 process(action='poll', session_id=...) 查状态。",
+        }
+        if automatic:
+            result["auto_backgrounded"] = True
+        return json.dumps(result, ensure_ascii=False)
+
+    async def drain_progress(cursor: int) -> int:
+        end_offset = None
+        for _ in range(4):
+            page = await asyncio.to_thread(
+                process_registry.read_output, session, cursor, end_offset=end_offset,
             )
-            buf = session.output_buffer
-            if len(buf) > emitted_len:
-                await emit_tool_progress(buf[emitted_len:])
-                emitted_len = len(buf)
+            end_offset = page["total_output_bytes"] if end_offset is None else end_offset
+            next_offset = page["next_offset"]
+            if next_offset <= cursor:
+                break
+            metadata = {
+                key: page[key]
+                for key in ("offset_unit", "offset", "next_offset", "total_output_bytes", "gap")
+            }
+            metadata["has_more"] = next_offset < page["total_output_bytes"]
+            await emit_tool_progress(page["output"], metadata=metadata)
+            cursor = next_offset
+            if not page["has_more"]:
+                break
+        return cursor
+
+    try:
+        if runtime is not None and task_id:
+            with session._lock:
+                if not session.exited:
+                    runtime.attach_worker(task_id, None, cancel=cancel_worker)
+        if background:
+            return await background_result()
+
+        auto_after = 0.0 if timeout_explicit and runtime is None else float(
+            getattr(runtime, "auto_background_after", 15.0)
+        )
+        wait_budget = min(effective_timeout, auto_after) if auto_after > 0 else effective_timeout
+        deadline = time.monotonic() + wait_budget
+        cursor = 0
+        while not session._done_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done = await asyncio.to_thread(session._done_event.wait, min(0.5, remaining))
             if done:
                 break
-    finally:
-        if not exited_waiter.done():
-            exited_waiter.cancel()
+            cursor = await drain_progress(cursor)
 
-    if not session.exited:
-        elapsed = time.monotonic() - started
-        if timeout_explicit and effective_timeout <= auto_after and elapsed >= effective_timeout:
-            process_registry.kill_process(session.id, owner_account_id=session.owner_account_id)
-            if runtime is not None and task_id:
-                await runtime.finish_async(
-                    task_id,
-                    owner_account_id=owner,
-                    status="timed_out",
-                    error=f"命令超时（>{effective_timeout}s）",
-                )
-            raise ToolError(f"命令超时（>{effective_timeout}s）")
-        if runtime is not None and task_id:
-            await runtime.set_backgrounded_async(task_id, automatic=True)
-        return json.dumps({
-            "success": True,
-            "background": True,
-            "auto_backgrounded": True,
-            "session_id": session.id,
-            "task_id": task_id or session.id,
-            "pid": session.pid,
-            "command": command,
-            "cwd": cwd,
-            **terminal_metadata,
-            "output_ref": output_ref,
-            "hint": "命令超过前台阻塞预算，已原地转为后台任务；完成后会自动通知。",
-        }, ensure_ascii=False)
+        if not session._done_event.is_set():
+            if timeout_explicit and (auto_after <= 0 or effective_timeout <= auto_after):
+                await terminate("timed_out")
+            else:
+                if runtime is not None and task_id:
+                    await runtime.set_backgrounded_async(task_id, automatic=True)
+                if not session._done_event.is_set():
+                    return await background_result(automatic=True)
 
-    text = session.output_buffer
-    # 输出后处理：去 ANSI → 头尾截断 → 脱敏（对齐 Hermes）
-    text = strip_ansi(text)
-    text, truncated = truncate_output(text)
-    # 输出后处理：去 ANSI → 头尾截断 → 脱敏（对齐 Hermes）。force=True：安全边界
-    # 输出脱敏不可由 CREW_REDACT_SECRETS=false 关闭（spec §109）。
-    text = redact_sensitive_text(text, force=True)
+        await drain_progress(cursor)
+        output_metadata = await asyncio.to_thread(process_registry.output_metadata, session)
+    except asyncio.CancelledError:
+        await asyncio.shield(terminate("cancelled"))
+        raise
 
-    if session.stable_error_code:
+    raw_output = session.output_buffer
+    text, truncated = truncate_output(redact_sensitive_text(strip_ansi(raw_output), force=True))
+    result = {
+        **process_identity,
+        **output_metadata,
+        "success": session.exit_code == 0,
+        "status": "completed" if session.exit_code == 0 else "failed",
+        "exit_code": session.exit_code,
+        "output": text,
+        "truncated": (
+            truncated or output_metadata["output_truncated"]
+            or len(raw_output.encode("utf-8")) < output_metadata["total_output_bytes"]
+        ),
+    }
+    if session.termination_reason:
+        timed_out = session.termination_reason == "timed_out"
+        result.update(
+            success=False,
+            status=session.termination_reason,
+            error_code="timeout" if timed_out else "cancelled",
+            error="命令执行超时" if timed_out else "命令已取消",
+        )
+    elif session.stable_error_code:
         runtime_messages = {
             "runtime_crashed": "安全运行时异常退出，命令未执行",
             "runtime_protocol_mismatch": "安全运行时协议不匹配，命令未执行",
@@ -943,41 +979,31 @@ async def handle_terminal(
             "timeout": "安全运行时执行超时",
             "output_truncated": "安全运行时输出超过限制",
         }
-        return json.dumps(
-            {
-                "success": False,
-                "error": runtime_messages.get(
-                    session.stable_error_code,
-                    "安全运行时失败，命令未执行",
-                ),
-                "error_code": session.stable_error_code,
-                "cwd": cwd,
-                "command": command,
-                "output": text,
-                "retryable": session.stable_error_code == "sandbox_denied",
-                "retry_hint": (
-                    "请根据错误输出申请精确的 additional_permissions 后重试；"
-                    "若仍需宿主用户权限，使用 require_escalated 并明确说明原因。"
-                    if session.stable_error_code == "sandbox_denied"
-                    else ""
-                ),
-                **terminal_metadata,
-            },
-            ensure_ascii=False,
+        result.update(
+            success=False,
+            status="timed_out" if session.stable_error_code == "timeout" else "failed",
+            error=runtime_messages.get(session.stable_error_code, "安全运行时失败，命令未执行"),
+            error_code=session.stable_error_code,
+            retryable=session.stable_error_code == "sandbox_denied",
+            retry_hint=(
+                "请根据错误输出申请精确的 additional_permissions 后重试；"
+                "若仍需宿主用户权限，使用 require_escalated 并明确说明原因。"
+                if session.stable_error_code == "sandbox_denied"
+                else ""
+            ),
         )
-
-    result = {
-        "success": True,
-        "cwd": cwd,
-        "command": command,
-        "exit_code": session.exit_code,
-        "output": text,
-        "truncated": truncated,
-        **terminal_metadata,
-    }
-    if task_id:
-        result["task_id"] = task_id
-    return json.dumps(result, ensure_ascii=False)
+    elif session.exit_code != 0:
+        result.update(
+            error_code="nonzero_exit" if session.exit_code is not None else "unknown_exit",
+            error=(
+                f"命令退出，退出码 {session.exit_code}"
+                if session.exit_code is not None
+                else "命令结束，退出码不可用"
+            ),
+        )
+    if result["truncated"]:
+        result["hint"] = log_hint
+    return _terminal_result_json(result, log_hint=log_hint)
 
 
 def _assert_no_symlink_component(path: Path) -> None:

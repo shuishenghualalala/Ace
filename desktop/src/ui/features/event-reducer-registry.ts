@@ -35,6 +35,7 @@ export interface ToolUpsert {
   duration?: number;
   progressText?: string;
   progressHistory?: string[];
+  terminalProgress?: ToolCallInfo['terminalProgress'];
 }
 
 export type StatusHint = 'running' | 'queued' | 'idle' | 'error';

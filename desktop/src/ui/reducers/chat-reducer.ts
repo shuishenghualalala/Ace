@@ -70,8 +70,15 @@ export interface ToolChunk {
     ui_label?: string;
     args?: string;
     detail?: string;
-    /** phase=progress 时的阶段进度文案。 */
+    /** phase=progress 时的阶段进度文案或终端输出。 */
     text?: string;
+    progress_metadata?: {
+      offset?: number;
+      next_offset?: number;
+      total_output_bytes?: number;
+      gap?: boolean;
+      has_more?: boolean;
+    };
   };
   sequence: number;
   session_id?: string;
@@ -744,6 +751,50 @@ export function thinkingReducer(chunk: ThinkingChunk, snapshot: ReducerSnapshot)
   };
 }
 
+const TERMINAL_PROGRESS_LIMIT = 4096;
+
+function appendTerminalProgress(
+  previous: ToolCallInfo['terminalProgress'],
+  body: ToolChunk['body'],
+): ToolCallInfo['terminalProgress'] {
+  if (typeof body.text !== 'string' || !body.text) return previous;
+  let text = body.text;
+  let tail = previous?.text ?? '';
+  let clipped = previous?.clipped ?? false;
+  const metadata = body.progress_metadata;
+  if (metadata) {
+    const { offset, next_offset: nextOffset } = metadata;
+    if (typeof offset !== 'number' || typeof nextOffset !== 'number'
+        || !Number.isSafeInteger(offset) || !Number.isSafeInteger(nextOffset)
+        || offset < 0 || nextOffset <= offset) return previous;
+    const cursor = previous?.nextOffset ?? 0;
+    if (nextOffset <= cursor) return previous;
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.length !== nextOffset - offset) return previous;
+    if (previous?.nextOffset == null || offset > cursor) {
+      tail = '';
+      clipped = offset > cursor;
+    } else if (offset < cursor) {
+      try {
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(cursor - offset));
+      } catch {
+        return previous;
+      }
+    }
+    return capTerminalProgress(tail + text, clipped || metadata.gap === true, nextOffset);
+  }
+  // A range-aware stream already has an authoritative cursor.
+  if (previous?.nextOffset != null) return previous;
+  return capTerminalProgress(tail + text, clipped);
+}
+
+function capTerminalProgress(text: string, clipped: boolean, nextOffset?: number): ToolCallInfo['terminalProgress'] {
+  let start = Math.max(0, text.length - TERMINAL_PROGRESS_LIMIT);
+  const first = text.charCodeAt(start);
+  if (start > 0 && first >= 0xdc00 && first <= 0xdfff) start++;
+  return { text: text.slice(start), clipped: clipped || start > 0, ...(nextOffset == null ? {} : { nextOffset }) };
+}
+
 export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): ReducerResult {
   const book = { ...snapshot.book };
   const upserts: MessageUpsert[] = [];
@@ -768,14 +819,30 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
       toolUpsert.startedAt = existing.startedAt;
       if (existing.duration != null) toolUpsert.duration = existing.duration;
     }
-    const text = typeof chunk.body.text === 'string' ? chunk.body.text.trim() : '';
-    const history = existing?.progressHistory ? [...existing.progressHistory] : [];
-    if (text && history.at(-1) !== text) history.push(text);
-    if (text) toolUpsert.progressText = text;
-    else if (existing?.progressText) toolUpsert.progressText = existing.progressText;
-    toolUpsert.progressHistory = history;
+    if (toolUpsert.name === 'terminal') {
+      const previous = existing?.terminalProgress;
+      const progress = appendTerminalProgress(previous, chunk.body);
+      if (progress === previous || existing?.status === 'done' || existing?.status === 'error') {
+        return {
+          messageUpserts: [],
+          toolUpserts: [],
+          replaceBook: null,
+          statusHint: undefined,
+          queueHint: undefined,
+          finalize: false,
+        };
+      }
+      toolUpsert.terminalProgress = progress;
+    } else {
+      const text = typeof chunk.body.text === 'string' ? chunk.body.text.trim() : '';
+      const history = existing?.progressHistory ? [...existing.progressHistory] : [];
+      if (text && history.at(-1) !== text) history.push(text);
+      if (text) toolUpsert.progressText = text;
+      else if (existing?.progressText) toolUpsert.progressText = existing.progressText;
+      toolUpsert.progressHistory = history;
+    }
   } else if (phase === 'generating' || phase === 'start') {
-    // 新建
+    toolUpsert.terminalProgress = existing?.terminalProgress;
   } else {
     if (existing) {
       toolUpsert.status = phase === 'error' ? 'error' : 'done';
@@ -822,6 +889,7 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
     duration: toolUpsert.duration,
     progressText: toolUpsert.progressText,
     progressHistory: toolUpsert.progressHistory ?? existing?.progressHistory,
+    terminalProgress: toolUpsert.terminalProgress,
   });
   book.toolMap = newToolMap;
 
@@ -1064,6 +1132,7 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
             ...tool,
             status: 'done',
             duration: snapshot.now - tool.startedAt,
+            terminalProgress: undefined,
           });
         }
       }

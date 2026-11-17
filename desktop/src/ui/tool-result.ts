@@ -13,15 +13,27 @@ function clip(text: string, maxLen: number): string {
 function terminalDetail(content: string, maxLen: number): string {
   try {
     const data = JSON.parse(content) as Record<string, unknown>;
+    const status = data.status;
+    const sessionId = typeof data.session_id === 'string' ? data.session_id : '';
+    const legacyBackground = status == null && data.background == null && data.exit_code == null && Boolean(sessionId);
+    if (status === 'backgrounded' || data.background === true || legacyBackground) {
+      return clip(sessionId ? `Background process started: ${sessionId}` : 'Background process started', maxLen);
+    }
     const output = typeof data.output === 'string' ? data.output.trim() : '';
-    if (output) {
-      return output.length > maxLen ? output.slice(-maxLen) : output;
+    let error = typeof data.error === 'string' ? data.error.trim() : '';
+    if (!error) {
+      if (status === 'timed_out') error = 'terminal timed out';
+      else if (status === 'cancelled') error = 'terminal cancelled';
+      else if (typeof data.exit_code === 'number' && data.exit_code !== 0) {
+        error = `terminal exited with code ${data.exit_code}`;
+      }
     }
-    if (typeof data.session_id === 'string' && data.session_id) {
-      return `Background process started: ${data.session_id}`;
+    if (error) {
+      const tailBudget = maxLen - error.length - 2;
+      return output && tailBudget > 0 ? `${error}\n\n${output.slice(-tailBudget)}` : clip(error, maxLen);
     }
-    const err = typeof data.error === 'string' ? data.error.trim() : '';
-    if (err) return clip(err, maxLen);
+    if (output) return output.slice(-maxLen);
+    if (status === 'completed' || data.exit_code === 0) return 'terminal completed';
   } catch {
     // fall through
   }

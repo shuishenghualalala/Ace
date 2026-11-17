@@ -68,10 +68,13 @@
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>terminal</code></td><td>执行 shell 命令；支持前台/后台、超时、精确权限申请与沙箱策略。</td></tr>
-      <tr><td><code>process</code></td><td>管理 <code>terminal(background=true)</code> 启动的后台进程：list / poll / log / wait / kill。</td></tr>
+      <tr><td><code>terminal</code></td><td>执行 shell 命令。前台输出按 UTF-8 字节位置发送，转后台时保留进程和任务标识。执行结果区分完成、非零退出、超时、取消和后台接收。</td></tr>
+      <tr><td><code>process</code></td><td>管理终端进程，支持 <code>list</code>、<code>poll</code>、<code>log</code>、<code>wait</code>、<code>kill</code> 和 <code>stdin</code>。</td></tr>
     </tbody>
   </table>
+
+  <p>终端日志合并 stdout 和 stderr。<code>process(action='log', task_id=..., cursor=0)</code> 从头读取，后续把返回的 <code>next_offset</code> 传给 <code>cursor</code>。字节页保持有效 UTF-8。<code>gap</code> 标记请求范围的缺失或游标未对齐。按行读取时，省略 <code>offset</code> 获取尾页，指定 <code>offset=0</code> 从第一行读取。</p>
+  <p>每个进程保留有界内存尾窗，任务日志最多落盘 64 MiB。<code>output_retention</code> 标记保留状态，<code>output_truncated</code> 标记内容缺失。Gateway 重启后可按同账号的 <code>task_id</code> 查询已落盘的日志。Windows 终端优先在开始执行前进入 Job Object，停止后等待输出和任务状态结算。</p>
 
   <h3>2.3 网络与搜索</h3>
   <table>

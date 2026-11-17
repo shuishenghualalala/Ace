@@ -57,6 +57,7 @@ export interface ToolCallInfo {
   progressText?: string | undefined;
   /** 按到达顺序保留的阶段进度行，供过程时间线逐行渲染。 */
   progressHistory?: string[] | undefined;
+  terminalProgress?: { text: string; clipped: boolean; nextOffset?: number } | undefined;
 }
 
 /** 同回合内 assistant 段的语义角色：过程（进折叠区）vs 最终答案（折叠外可见）。 */
@@ -616,15 +617,13 @@ function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement 
 const PROGRESS_FOLD_LINES = 2;
 const PROGRESS_FOLD_CHARS = 160;
 
-/** 命令行工具的 progress 不是可读进度，而是原始 stdout 增量（builtin.py 执行期实时透传），
- *  渲染出来是整段命令输出，直接不渲染；最终结果仍由 Response 块承载。 */
+/** 原始命令输出使用工具详情区，阶段进度只渲染普通工具的状态文案。 */
 const STDOUT_PROGRESS_TOOLS = new Set(['bash', 'terminal', 'process']);
 
 /**
  * 将工具阶段进度按产生顺序渲染成独立行，不把最新状态挤进工具标题行。
  * 运行中平铺实时输出；工具结束后长输出默认折叠成「实时输出 · N 行」，
  * 避免 terminal 等命令的调试输出在完成后仍常驻占屏（展开选择经 fold-state 持久化）。
- * 注意 terminal 进度按 ~0.5s 增量整块推送，一个 entry 可含多行，须按实际行数判定。
  */
 function appendToolProgressLines(
   parent: HTMLElement,
@@ -679,12 +678,13 @@ function appendToolProgressLines(
   parent.appendChild(details);
 }
 
-function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
+function renderToolCard(tool: ToolCallInfo, messageId: string, isLive: boolean): HTMLElement {
   if (SUBAGENT_CARD_TOOLS.has(tool.name)) return renderSubagentCard(tool, messageId);
   const isActive = tool.status === 'running' || tool.status === 'generating';
   const iconClass =
     tool.status === 'error' ? 'process-timeline__icon--error' : isActive ? 'process-timeline__icon--running' : '';
-  const hasDetail = Boolean(tool.args || tool.result);
+  const terminalProgress = isLive && isActive ? tool.terminalProgress : undefined;
+  const hasDetail = Boolean(tool.args || tool.result || terminalProgress);
 
   // 工具项折叠键：跨重启持久化（fold-state.ts）。
   // 默认行为：折叠（仅展示标题与耗时）；用户手动操作过则尊重用户选择。
@@ -736,6 +736,20 @@ function renderToolCard(tool: ToolCallInfo, messageId: string): HTMLElement {
     if (tool.result) {
       resultSection.querySelector('pre')!.textContent = formatToolResultDisplay(tool.name, tool.result);
     } else resultSection.remove();
+    if (terminalProgress) {
+      const section = document.createElement('section');
+      section.className = 'process-code-block';
+      const heading = document.createElement('div');
+      heading.className = 'process-code-block__title';
+      heading.textContent = terminalProgress.clipped
+        ? t('chat.terminal.liveOutputClipped')
+        : t('chat.terminal.liveOutput');
+      const output = document.createElement('pre');
+      output.dataset.terminalLiveOutput = '';
+      output.textContent = terminalProgress.text;
+      section.append(heading, output);
+      details.querySelector('.process-timeline__detail')!.appendChild(section);
+    }
     // browser_use 导出的页面截图：在时间线项内容列直接内联展示（details 默认折叠，
     // 图片放 details 外，保证"截图给你看"所见即所得）。
     const shotPath = screenshotResultPath(tool);
@@ -1288,7 +1302,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
 
     if (m.toolCalls && m.toolCalls.length > 0) {
       // 把当前 message id 传给 renderToolCard，用于生成跨重启稳定的 foldKey。
-      for (const t of m.toolCalls) processParts.push(renderToolCard(t, m.id));
+      for (const t of m.toolCalls) processParts.push(renderToolCard(t, m.id, isLive));
       for (const t of m.toolCalls) {
         const confirmation = parseWikiConfirmation(t);
         if (confirmation) textParts.push(renderWikiConfirmationCard(confirmation));

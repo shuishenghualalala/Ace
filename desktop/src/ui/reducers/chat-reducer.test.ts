@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Bookkeeping } from '../state';
-import { toolReducer } from './chat-reducer';
+import { toolReducer, type ToolChunk } from './chat-reducer';
 
 function emptyBook(): Bookkeeping {
   return {
@@ -88,5 +88,54 @@ describe('toolReducer', () => {
     const t = result.replaceBook!.toolMap.get('t1')!;
     expect(t.status).toBe('error');
     expect(t.duration).toBe(200);
+  });
+
+  describe('terminal progress', () => {
+    function progress(book: Bookkeeping, text: string, offset?: number, gap = false) {
+      const body: ToolChunk['body'] = { name: 'terminal', phase: 'progress', tool_call_id: 't1', text };
+      if (offset != null) body.progress_metadata = {
+        offset,
+        next_offset: offset + new TextEncoder().encode(text).length,
+        gap,
+      };
+      return toolReducer({ kind: 'tool', body, sequence: 2 }, snapshot(book, 1100));
+    }
+
+    it('preserves bytes and whitespace, skips retransmissions, and appends only the unseen part of an overlap', () => {
+      const marker = ' 雪𠮷\n';
+      const byteLength = new TextEncoder().encode(marker).length;
+      let book = progress(emptyBook(), marker, 0).replaceBook!;
+      expect(progress(book, marker, 0).replaceBook).toBeNull();
+      book = progress(book, marker + marker, 0).replaceBook!;
+      expect(book.toolMap.get('t1')?.terminalProgress).toEqual({
+        text: marker + marker,
+        clipped: false,
+        nextOffset: byteLength * 2,
+      });
+      expect(book.toolMap.get('t1')?.progressHistory).toBeUndefined();
+    });
+
+    it('does not join separated output across a missing range, and clears the preview on a result', () => {
+      let book = progress(emptyBook(), 'first', 0).replaceBook!;
+      book = progress(book, '新行', 600, true).replaceBook!;
+      expect(book.toolMap.get('t1')?.terminalProgress).toEqual({ text: '新行', nextOffset: 606, clipped: true });
+      book = toolReducer({
+        kind: 'tool', body: { tool_call_id: 't1', phase: 'result', detail: 'done' }, sequence: 3,
+      }, snapshot(book, 1200)).replaceBook!;
+      expect(book.toolMap.get('t1')).toMatchObject({ status: 'done', result: 'done' });
+      expect(book.toolMap.get('t1')?.terminalProgress).toBeUndefined();
+      expect(progress(book, 'late', 606).replaceBook).toBeNull();
+    });
+
+    it('bounds legacy progress at a Unicode code point boundary and retains valid repeat text', () => {
+      const tail = 'a'.repeat(4095);
+      let book = progress(emptyBook(), 'x😀' + tail).replaceBook!;
+      expect(book.toolMap.get('t1')?.terminalProgress).toEqual({ text: tail, clipped: true });
+      book = progress(book, ' 尾\n').replaceBook!;
+      book = progress(book, ' 尾\n').replaceBook!;
+      const output = book.toolMap.get('t1')!.terminalProgress!;
+      expect(output.text.endsWith(' 尾\n 尾\n')).toBe(true);
+      expect(output.text.length).toBeLessThanOrEqual(4096);
+    });
   });
 });

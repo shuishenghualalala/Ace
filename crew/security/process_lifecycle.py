@@ -9,7 +9,7 @@ ProcessOwner 三操作（signal / wait_for_exit / terminate_for_host_exit），
   SIGKILL 也不留孤儿）；探测失败回退进程组（setsid + killpg）。
 - macOS：进程组 + 启动时显式警告一次（无持久进程组属主，setsid 逃逸的孙进程
   不保证回收）。
-- Windows：``CREATE_NEW_PROCESS_GROUP`` + ``taskkill /T /F``。
+- Windows：注册表启动的终端使用 Job Object，旧进程恢复等场景用 ``taskkill /T /F``。
 
 PID 复用防御：spawn 后现读进程启动时刻建立 ``ProcessIdentity`` 围栏，发信号
 前重新读取比对，围栏失效即拒绝发信号。
@@ -38,6 +38,7 @@ _WINDOWS_CREATE_FLAGS = (
     getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     | getattr(subprocess, "CREATE_NO_WINDOW", 0)
 )
+WINDOWS_CREATE_SUSPENDED = 0x00000004 if os.name == "nt" else 0
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 # 统一宽限（毫秒）：一个配置项两个语义——exit 后输出管道 drain 宽限 ==
@@ -209,8 +210,15 @@ def wrap_argv_for_containment(
 # ---- 平台原语 ----
 
 def _taskkill_tree(pid: int) -> bool:
-    """Windows 整树强杀；taskkill 退出码不检查（等价 POSIX 对 ESRCH 的容忍）。"""
+    """Stop the owned Windows tree and verify the processes known before signalling."""
     if pid <= 0:
+        return False
+    import psutil
+
+    try:
+        owner = psutil.Process(pid)
+        children = owner.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
     try:
         subprocess.run(
@@ -220,9 +228,19 @@ def _taskkill_tree(pid: int) -> bool:
             timeout=10,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # A launcher can disappear before taskkill reaches its descendants. Use the
+    # process identities captured from the owned parent to finish cleanup.
+    tree = [*reversed(children), owner]
+    for process in tree:
+        try:
+            if process.is_running():
+                process.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    _, remaining = psutil.wait_procs(tree, timeout=1)
+    return not remaining
 
 
 def _scope_signal(scope_unit: str, sig: int) -> bool:
@@ -257,6 +275,76 @@ def scope_alive(scope_unit: str) -> bool:
         return False
 
 
+class WindowsProcessJob:
+    """Own one Windows terminal process and all of its descendants."""
+
+    def __init__(self, kernel: Any, handle: int) -> None:
+        self._kernel = kernel
+        self._handle = handle
+        self._lock = threading.Lock()
+
+    @classmethod
+    def attach(cls, process: subprocess.Popen) -> WindowsProcessJob | None:
+        """Assign the suspended process before letting it start any children."""
+        import ctypes
+        from ctypes import wintypes
+
+        import psutil
+
+        size_t = ctypes.c_size_t
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                ("flags", wintypes.DWORD), ("working_min", size_t), ("working_max", size_t),
+                ("active_processes", wintypes.DWORD), ("affinity", size_t),
+                ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [("basic", BasicLimits), ("io", ctypes.c_ulonglong * 6), ("memory", size_t * 4)]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        handle = kernel.CreateJobObjectW(None, None)
+        job = cls(kernel, handle) if handle else None
+        if job is not None:
+            limits = ExtendedLimits()
+            limits.basic.flags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not (kernel.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits))
+                    and kernel.AssignProcessToJobObject(handle, int(process._handle))):
+                job.close()
+                job = None
+        try:
+            psutil.Process(process.pid).resume()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            if job is not None:
+                job.close()
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise
+        return job
+
+    def terminate(self) -> bool:
+        with self._lock:
+            return bool(self._handle and self._kernel.TerminateJobObject(self._handle, 1))
+
+    def close(self) -> None:
+        with self._lock:
+            if self._handle:
+                self._kernel.CloseHandle(self._handle)
+                self._handle = 0
+
+
 class ProcessOwner:
     """一个受管进程树的唯一属主。
 
@@ -273,12 +361,14 @@ class ProcessOwner:
         process: Any = None,
         identity: ProcessIdentity | None = None,
         scope_unit: str | None = None,
+        windows_job: WindowsProcessJob | None = None,
     ) -> None:
         self.pid = pid
         self.pgid = pgid if pgid is not None else pid
         self.process = process
         self.identity = identity
         self.scope_unit = scope_unit
+        self.windows_job = windows_job
 
     @classmethod
     def capture(
@@ -287,6 +377,7 @@ class ProcessOwner:
         *,
         pgid: int | None = None,
         scope_unit: str | None = None,
+        windows_job: WindowsProcessJob | None = None,
     ) -> ProcessOwner:
         """spawn 后立即调用：现读启动时刻建立 PID 复用围栏。"""
         return cls(
@@ -295,6 +386,7 @@ class ProcessOwner:
             process=process,
             identity=ProcessIdentity(process.pid, read_process_start_time(process.pid)),
             scope_unit=scope_unit,
+            windows_job=windows_job,
         )
 
     @classmethod
@@ -327,6 +419,8 @@ class ProcessOwner:
 
     def signal(self, sig: int) -> bool:
         """向整树发信号；PID 已被复用（围栏失效）或已退出时拒绝。"""
+        if self.windows_job is not None:
+            return self.windows_job.terminate()
         if self.scope_unit:
             return _scope_signal(self.scope_unit, sig)
         if self.exited():
@@ -386,6 +480,9 @@ class ProcessOwner:
 
     def terminate_for_host_exit(self) -> None:
         """宿主可观察退出点的同步强杀：不启动计时器、不 await、逐个容错。"""
+        if self.windows_job is not None:
+            self.windows_job.terminate()
+            return
         if self.pid <= 0 and not self.scope_unit:
             return
         if self.scope_unit:
@@ -509,6 +606,8 @@ def release_live(owner: ProcessOwner | None) -> None:
         return
     with _live_lock:
         _live_owners.discard(owner)
+    if owner.windows_job is not None:
+        owner.windows_job.close()
 
 
 def live_owner_count() -> int:

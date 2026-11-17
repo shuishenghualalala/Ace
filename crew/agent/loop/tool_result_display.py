@@ -108,23 +108,32 @@ def _terminal_detail(content: str, *, max_len: int) -> str:
     if not isinstance(data, dict):
         return _clip(content, max_len)
 
+    if max_len <= 0:
+        return ""
+    status = data.get("status")
+    error = str(data.get("error") or "").strip()
     output = str(data.get("output") or "").strip()
+    if status == "backgrounded" or data.get("background") is True:
+        label = "Background process started"
+        if session_id := data.get("session_id"):
+            label = f"{label}: {session_id}"
+        return _clip(label, max_len)
+    if not error:
+        if status == "timed_out":
+            error = "terminal timed out"
+        elif status == "cancelled":
+            error = "terminal cancelled"
+        elif (exit_code := data.get("exit_code")) not in (None, 0):
+            error = f"terminal exited with code {exit_code}"
+    if error:
+        tail_budget = max_len - len(error) - 2
+        if output and tail_budget > 0:
+            return f"{error}\n\n{output[-tail_budget:]}"
+        return _clip(error, max_len)
     if output:
-        # 长输出保留尾部：日志/搜索结果的有效信息常在末尾。
-        return output[-max_len:] if len(output) > max_len else output
-
-    session_id = data.get("session_id")
-    if session_id:
-        return f"Background process started: {session_id}"
-
-    exit_code = data.get("exit_code")
-    if exit_code is not None and not data.get("success", True):
-        return f"terminal exited with code {exit_code}"
-
-    err = str(data.get("error") or "").strip()
-    if err:
-        return _clip(err, max_len)
-
+        return output[-max_len:]
+    if status == "completed":
+        return _clip("terminal completed", max_len)
     return _clip(content, max_len)
 
 

@@ -733,6 +733,7 @@ class ToolRunner:
             current_push_fn,
             current_request_id,
             current_tool_progress_fn,
+            current_tool_progress_metadata,
             touch_current_task_activity,
         )
 
@@ -754,17 +755,21 @@ class ToolRunner:
 
         async def _sink(text: str) -> None:
             _touch_activity(text)
+            body = {
+                "tool_call_id": tc.id,
+                "name": tc.name,
+                "phase": "progress",
+                "text": text,
+            }
+            metadata = current_tool_progress_metadata.get()
+            if metadata is not None:
+                body["progress_metadata"] = dict(metadata)
             try:
                 # 与常规工具帧同用 kind="tool"（gateway/桌面端只认这个 kind；
                 # 历史上用 "tool_event" 的进度帧在 normalize 阶段就被丢弃了）。
                 await push(sid, {
                     "kind": "tool",
-                    "body": {
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "phase": "progress",
-                        "text": text,
-                    },
+                    "body": body,
                     "is_final": False,
                     "sequence": 0,
                     "request_id": rid,
@@ -1577,7 +1582,9 @@ class ToolRunner:
             payload = json.loads(result.content)
         except (json.JSONDecodeError, TypeError):
             return None
-        if not isinstance(payload, dict) or not payload.get("success") or payload.get("background"):
+        if not isinstance(payload, dict) or payload.get("background"):
+            return None
+        if not payload.get("success") and payload.get("error_code") != "nonzero_exit":
             return None
 
         root, before = before_state

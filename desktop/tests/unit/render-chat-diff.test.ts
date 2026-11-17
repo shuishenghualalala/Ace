@@ -325,6 +325,30 @@ describe('conversation-renderer 双实例隔离', () => {
     expect(panel.querySelector('.inline-widget')).toBeNull();
   });
 
+  it('updates live terminal output on a cached turn and replaces it with the completed response', () => {
+    const panel = document.getElementById('panel-a')!;
+    const tool = { toolCallId: 'terminal-1', name: 'terminal', status: 'running' as const, startedAt: 1 };
+    const message: ChatMessage = {
+      id: 'terminal-turn', role: 'assistant', content: '', timestamp: 1, streaming: true,
+    };
+    const render = (tools: ChatMessage['toolCalls'], streaming = true) => {
+      replaceSessionMessages('sid-terminal', [{ ...message, toolCalls: tools, streaming }]);
+      renderConversation(panel, 'panel-a', 'sid-terminal');
+    };
+    render([{ ...tool, terminalProgress: { text: ' 雪𠮷 ', clipped: false } }]);
+    expect(panel.querySelector('[data-terminal-live-output]')?.textContent).toBe(' 雪𠮷 ');
+    render([{ ...tool, terminalProgress: { text: ' 雪𠮷 <child>\n', clipped: true } }]);
+    const live = panel.querySelector('[data-terminal-live-output]')!;
+    expect(live.textContent).toBe(' 雪𠮷 <child>\n');
+    expect(live.querySelector('child')).toBeNull();
+    expect(live.parentElement?.textContent).toMatch(/早期输出已省略|earlier output omitted/);
+    expect(panel.querySelector('[data-section="result"]')).toBeNull();
+
+    render([{ ...tool, status: 'done', result: '雪𠮷 finished' }], false);
+    expect(panel.querySelector('[data-terminal-live-output]')).toBeNull();
+    expect(panel.querySelector('[data-section="result"] pre')?.textContent).toBe('雪𠮷 finished');
+  });
+
   it('keeps native controls and their values while the answer streams', () => {
     const panel = document.getElementById('panel-a')!;
     appendSessionMessage('sid-a', { id: 'native-answer', role: 'assistant', content: '解释', timestamp: 1,
