@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -114,15 +115,21 @@ def _summarize_tool_result(
         written = args.get("content", "")
         written_lines = written.count("\n") + 1 if written else "?"
         body = f"[file_write] wrote to {path} ({written_lines} lines)"
-    elif tool_name == "glob":
+    elif tool_name in {"glob", "grep"}:
         pattern = args.get("pattern", "?")
         path = args.get("path", ".")
-        body = f"[glob] find '{pattern}' in {path} -> ~{line_count} entries"
-    elif tool_name == "grep":
-        pattern = args.get("pattern", "?")
-        path = args.get("path", ".")
-        output_mode = args.get("output_mode", "files_with_matches")
-        body = f"[grep] search '{pattern}' in {path} ({output_mode}) -> ~{line_count} lines"
+        mode = args.get("output_mode", "files_with_matches")
+        body = (f"[glob] find '{pattern}' in {path} -> ~{line_count} entries" if tool_name == "glob"
+                else f"[grep] search '{pattern}' in {path} ({mode}) -> ~{line_count} lines")
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            result = None
+        if isinstance(result, dict) and "scan_complete" in result:
+            count = result.get("count", result.get("num_files", result.get("num_lines", 0)))
+            body = f"[{tool_name}] search '{pattern}' in {path} -> {count} entries returned"
+            if result.get("search_notice"):
+                body += f". {result['search_notice']}"
     elif tool_name == "patch":
         path = args.get("path", "?")
         mode = args.get("mode", "replace")

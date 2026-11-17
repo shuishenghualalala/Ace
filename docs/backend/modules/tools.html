@@ -56,10 +56,12 @@
       <tr><td><code>file_write</code></td><td>写入文件（覆盖或追加），自动创建父目录；保留原文件行尾符与 BOM；拒绝敏感系统路径。</td></tr>
       <tr><td><code>file_delete</code></td><td>删除明确指定的文件，不递归删除目录；工作区外路径需精确授权。</td></tr>
       <tr><td><code>patch</code></td><td>对文本文件执行替换补丁（old → new），保留行尾符与 BOM。</td></tr>
-      <tr><td><code>glob</code></td><td>按 glob 模式查找文件（如 <code>**/*.py</code>），优先使用托管 rg，Python 兜底。</td></tr>
-      <tr><td><code>grep</code></td><td>按 ripgrep 正则搜索文件内容，优先使用托管 rg，Python 兜底。</td></tr>
+      <tr><td><code>glob</code></td><td>按 glob 模式查找文件（如 <code>**/*.py</code>），按修改时间从旧到新排序。支持 <code>limit</code> 和 <code>offset</code>。</td></tr>
+      <tr><td><code>grep</code></td><td>按正则搜索文件内容，支持文件列表、内容和匹配计数。<code>head_limit=0</code> 取消条数限制，输出仍受体积上限约束。</td></tr>
     </tbody>
   </table>
+  <p>搜索结果用 <code>scan_complete</code> 标记扫描是否完成，用 <code>truncated</code> 标记分页或预览截断。未完成时保留已匹配的结果，通过 <code>partial_reasons</code> 和 <code>search_notice</code> 报告原因，例如超时、目录读取失败或文件超限。Python 路径提供已扫描和跳过计数。结果提供 <code>next_offset</code> 时，使用相同搜索条件在文件集合未变的情况下续查。扫描未完成时缩小路径或过滤条件重新搜索。</p>
+  <p>托管安全模式用 Python 搜索并保留验证式文件读取和链接剪枝。停止时会在下一次检查退出，当前的系统调用或正则匹配需要先返回。使用原生 ripgrep 时，超时、缓冲超限和取消均会终止本次拥有的子进程。</p>
 
   <h3>2.2 终端与进程</h3>
   <table>

@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import heapq
+import json
 import logging
 import os
 import re
 import stat
 import subprocess
+import threading
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -61,6 +66,23 @@ _GLOB_DEADLINE_SECONDS = 10
 _GREP_DEADLINE_SECONDS = 15
 _DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024  # 兜底跳过 10MB 以上文件
 _DEFAULT_HEAD_LIMIT = 250
+_RG_DEADLINE_SECONDS = 30
+_SEARCH_BUFFER_BYTES = 8 * 1024 * 1024
+_SEARCH_PATH_PAGE_CHARS = 40_000
+_SEARCH_TEXT_PAGE_CHARS = 12_000
+_MAX_GLOB_LIMIT = 1000
+_MAX_GLOB_OFFSET = 10_000
+
+_PARTIAL_LABELS = {
+    "timeout": "扫描超时",
+    "file_size_limit": "部分文件超过大小上限",
+    "unsupported_encoding": "部分文件不是受支持的 UTF-8 文本",
+    "unreadable_files": "部分文件无法读取或已变更",
+    "unreadable_directories": "部分目录无法读取",
+    "result_buffer_limit": "达到搜索缓冲上限",
+    "ripgrep_error": "部分路径无法被 ripgrep 搜索",
+    "file_order_unavailable": "部分文件的排序信息无法读取",
+}
 
 _WCGLOB_FLAGS = wcglob.BRACE | wcglob.GLOBSTAR
 
@@ -105,22 +127,63 @@ def _noise_glob_args() -> list[str]:
     return args
 
 
-def _run_rg(args: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str, str]:
-    """跑 rg 子进程。exit 1 = 无匹配，视为正常；其他非零退出抛错。"""
+class _AsyncRipgrepUnavailable(Exception):
+    pass
+
+
+async def _run_rg(
+    args: list[str], cwd: Path, scan: _SearchScan, *, delimiter: bytes = b"\n",
+) -> tuple[int, str, str]:
+    """Read bounded output and retire the owned child on timeout or cancellation."""
     try:
-        proc = subprocess.run(
-            args,
+        proc = await asyncio.create_subprocess_exec(
+            *args,
             cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            errors="replace",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except subprocess.TimeoutExpired as exc:
-        raise ToolError(f"ripgrep 搜索超时（>{timeout}s）") from exc
     except FileNotFoundError as exc:
         raise ToolError(f"ripgrep 不可用: {exc}") from exc
-    return proc.returncode, proc.stdout, proc.stderr
+    except NotImplementedError as exc:
+        raise _AsyncRipgrepUnavailable from exc
+
+    assert proc.stdout is not None and proc.stderr is not None
+    output, diagnostics = bytearray(), bytearray()
+    stderr_task = asyncio.create_task(_drain_stream(proc.stderr, diagnostics, 4096))
+    try:
+        async with asyncio.timeout(max(0, scan.deadline - time.monotonic())):
+            while chunk := await proc.stdout.read(64 * 1024):
+                room = _SEARCH_BUFFER_BYTES - len(output)
+                output.extend(chunk[:room])
+                if len(chunk) > room:
+                    scan.partial_reasons.add("result_buffer_limit")
+                    break
+            else:
+                await proc.wait()
+    except TimeoutError:
+        scan.partial_reasons.add("timeout")
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        cleanup = asyncio.gather(_drain_stream(proc.stdout), stderr_task, proc.wait())
+        _, _, returncode = await asyncio.shield(cleanup)
+
+    if scan.partial_reasons and not output.endswith(delimiter):
+        # A killed process may leave an incomplete last record.
+        del output[output.rfind(delimiter) + 1:]
+    return returncode, output.decode("utf-8", "replace"), diagnostics.decode("utf-8", "replace")
+
+
+async def _drain_stream(
+    stream: asyncio.StreamReader, buffer: bytearray | None = None, limit: int = 0,
+) -> None:
+    while chunk := await stream.read(64 * 1024):
+        if buffer is not None and len(buffer) < limit:
+            buffer.extend(chunk[:limit - len(buffer)])
 
 
 def _split_glob_filter(glob_str: str) -> list[str]:
@@ -159,24 +222,33 @@ def _compile_grep_include(pattern: str) -> Callable[[str], bool]:
     return matcher
 
 
-def _sort_files_by_mtime(base: Path, rel_paths: list[str]) -> list[str]:
-    """按 mtime 倒序排（最新在前，对齐 OCC GrepTool），mtime 相同按路径升序 tiebreaker。stat 失败 mtime=0。"""
-    def mtime(rel: str) -> float:
+def _sort_files_by_mtime(rel_paths: list[str], newest_first: bool = True, *, scan: _SearchScan) -> list[str]:
+    direction = -1 if newest_first else 1
+    known: list[tuple[float, str]] = []
+    for index, rel in enumerate(rel_paths):
+        if scan.checkpoint():
+            # Already-discovered paths remain useful; a partial scan has no continuation offset.
+            return [path for _, path in sorted(known)] + sorted(rel_paths[index:])
         try:
-            return stat_verified_file(base / rel).st_mtime
-        except (FileConflictError, OSError):
-            return 0.0
-    return sorted(rel_paths, key=lambda r: (-mtime(r), r))
+            modified = (scan.root / rel).stat(follow_symlinks=False).st_mtime
+        except OSError:
+            scan.partial_reasons.add("file_order_unavailable")
+            modified = 0.0
+        known.append((direction * modified, rel))
+    scan.checkpoint()
+    return [path for _, path in sorted(known)]
 
 
-def _prune_linked_directories(dirpath: str, dirnames: list[str]) -> None:
+def _prune_linked_directories(dirpath: str, dirnames: list[str]) -> int:
     """Prevent os.walk from traversing symlinks and Windows reparse directories."""
     kept: list[str] = []
+    unreadable = 0
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     for name in dirnames:
         try:
             metadata = os.lstat(Path(dirpath) / name)
         except OSError:
+            unreadable += 1
             continue
         if stat.S_ISLNK(metadata.st_mode):
             continue
@@ -184,15 +256,115 @@ def _prune_linked_directories(dirpath: str, dirnames: list[str]) -> None:
             continue
         kept.append(name)
     dirnames[:] = kept
+    return unreadable
 
 
-def _apply_pagination(items: list[str], head_limit: int, offset: int) -> tuple[list[str], bool]:
-    """OCC applyHeadLimit 语义：head_limit=0 不限；否则 slice(offset, offset+limit)。"""
-    if head_limit == 0:
-        return items[offset:], False
-    page = items[offset:offset + head_limit]
-    truncated = len(items) > offset + head_limit
-    return page, truncated
+@dataclass
+class _SearchScan:
+    root: Path
+    timeout: float
+    native: bool = False
+    started: float = field(default_factory=lambda: time.monotonic())
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    partial_reasons: set[str] = field(default_factory=set)
+    scanned_files: int = 0
+    skipped_files: int = 0
+    skipped_directories: int = 0
+    line_preview_clipped: bool = False
+
+    @property
+    def deadline(self) -> float:
+        return self.started + self.timeout
+
+    def checkpoint(self) -> bool:
+        if self.cancelled.is_set() or "timeout" in self.partial_reasons:
+            return True
+        if time.monotonic() >= self.deadline:
+            self.partial_reasons.add("timeout")
+            return True
+        return False
+
+    def skip_file(self, reason: str) -> None:
+        self.skipped_files += 1
+        self.partial_reasons.add(reason)
+
+    def skip_directories(self, count: int) -> None:
+        if count:
+            self.skipped_directories += count
+            self.partial_reasons.add("unreadable_directories")
+
+
+async def _run_python_scan(scan: _SearchScan, search: Callable[..., Any], *args: Any) -> Any:
+    try:
+        return await asyncio.to_thread(search, *args, scan=scan)
+    except asyncio.CancelledError:
+        scan.cancelled.set()
+        raise
+
+
+def _search_files(scan: _SearchScan) -> Iterator[Path]:
+    if scan.checkpoint():
+        return
+    for dirpath, dirnames, filenames in os.walk(
+        scan.root, onerror=lambda _exc: scan.skip_directories(1), followlinks=False,
+    ):
+        if scan.checkpoint():
+            return
+        dirnames[:] = sorted(d for d in dirnames if d not in _NOISE_DIRS)
+        scan.skip_directories(_prune_linked_directories(dirpath, dirnames) or 0)
+        for name in sorted(filenames):
+            if scan.checkpoint():
+                return
+            yield Path(dirpath) / name
+
+
+def _search_page(
+    items: list[str], scan: _SearchScan, *, offset: int, limit: int,
+    paths: bool = False, max_offset: int | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    page: list[str] = []
+    remaining = _SEARCH_PATH_PAGE_CHARS if paths else _SEARCH_TEXT_PAGE_CHARS
+    text_clipped = False
+    end = min(len(items), offset + limit) if limit else len(items)
+    for index in range(offset, end):
+        row = items[index]
+        size = len(json.dumps(row, ensure_ascii=False)) + 2 if paths else len(row) + 1
+        if size > remaining:
+            if not page and not paths:
+                page.append(_truncate(row, max(1, remaining - 32)))
+                text_clipped = True
+            break
+        page.append(row)
+        remaining -= size
+
+    complete = not scan.partial_reasons
+    next_index = offset + len(page)
+    more = len(items) > next_index
+    details: dict[str, Any] = {
+        "scan_complete": complete,
+        "partial_reasons": sorted(scan.partial_reasons),
+        "truncated": more or text_clipped or scan.line_preview_clipped,
+        "duration_ms": round((time.monotonic() - scan.started) * 1000),
+    }
+    if not scan.native:
+        details.update(scanned_files=scan.scanned_files, skipped_files=scan.skipped_files,
+                       skipped_directories=scan.skipped_directories)
+    if offset:
+        details["applied_offset"] = offset
+
+    if not complete:
+        reasons = "、".join(_PARTIAL_LABELS[reason] for reason in details["partial_reasons"])
+        details["search_notice"] = f"搜索未完成（{reasons}）。请缩小 path 或筛选范围后重新搜索。"
+    elif more and page and (max_offset is None or next_index <= max_offset):
+        details["next_offset"] = next_index
+        details["search_notice"] = f"结果还有下一页。使用相同搜索条件并设置 offset={next_index}。"
+    elif more:
+        details["search_notice"] = "达到结果分页上限。请缩小 path 或筛选范围。"
+    elif offset and not page:
+        details["search_notice"] = "所请求的偏移量之后没有更多结果。"
+    if text_clipped or scan.line_preview_clipped:
+        details["search_notice"] = (str(details.get("search_notice", "")) + "部分行内容过长，可用 file_read 查看原文。")
+    return page, details
 
 
 def _bool_arg(args: dict[str, Any], key: str, default: bool) -> bool:
@@ -207,9 +379,22 @@ def _bool_arg(args: dict[str, Any], key: str, default: bool) -> bool:
 
 def _int_arg(args: dict[str, Any], key: str, default: int) -> int:
     try:
-        return int(args.get(key) or default)
+        value = args.get(key)
+        return default if value is None else int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _rg_lines(returncode: int, output: str, diagnostics: str, scan: _SearchScan, *, paths: bool = False) -> list[str]:
+    if returncode not in (0, 1) and not scan.partial_reasons and not output:
+        raise ToolError(f"ripgrep 搜索失败 (exit {returncode}): {diagnostics[:300]}")
+    if not scan.partial_reasons and (returncode not in (0, 1) or diagnostics.strip()):
+        scan.partial_reasons.add("ripgrep_error")
+    if paths:
+        rows = output.split("\0")
+    else:
+        rows = [line.removesuffix("\r") for line in output.split("\n")]
+    return [line.removeprefix("./").removeprefix(".\\") for line in rows if line]
 
 
 # ---------------------------------------------------------------------------
@@ -225,13 +410,15 @@ GLOB_SCHEMA = {
         "结果按修改时间排序（最旧在前，对齐 OCC glob），"
         "自动排除 .git/__pycache__/node_modules/.venv 等噪音目录。"
         "底层优先用 ripgrep，不可用时退回 Python 实现。"
+        "scan_complete=false 表示扫描未完成，请缩小 path 或模式再搜。结果含 next_offset 时可用同一条件续查。"
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "description": "glob 模式"},
             "path": {"type": "string", "description": "搜索目录，默认当前目录"},
-            "limit": {"type": "integer", "description": "最多返回多少条，默认 100"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_GLOB_LIMIT, "description": "最多返回多少条，默认 100"},
+            "offset": {"type": "integer", "minimum": 0, "maximum": _MAX_GLOB_OFFSET, "description": "使用上次结果给出的 next_offset，默认 0"},
         },
         "required": ["pattern"],
     },
@@ -256,73 +443,69 @@ async def handle_glob(
     )
     if not root.exists() or not root.is_dir():
         raise ToolError(f"搜索目录不存在或不是目录: {root}")
-    limit = max(1, _int_arg(args, "limit", 100))
+    limit = min(_MAX_GLOB_LIMIT, max(1, _int_arg(args, "limit", 100)))
+    offset = max(0, _int_arg(args, "offset", 0))
+    if offset > _MAX_GLOB_OFFSET:
+        raise ToolError(f"glob offset 超过 {_MAX_GLOB_OFFSET}，请缩小搜索路径或模式。")
 
     rg = await _resolve_rg()
+    window = offset + limit + 1
     if rg:
-        files = await asyncio.to_thread(_glob_via_rg, rg, pattern, root, limit)
-    else:
-        files = await asyncio.to_thread(_glob_via_python, pattern, root)
+        scan = _SearchScan(root, _RG_DEADLINE_SECONDS, native=True)
+        try:
+            files = await _glob_via_rg(rg, pattern, scan)
+        except _AsyncRipgrepUnavailable:
+            rg = None
+    if not rg:
+        scan = _SearchScan(root, _GLOB_DEADLINE_SECONDS)
+        files = await _run_python_scan(scan, _glob_via_python, pattern, root, window)
 
-    truncated = len(files) > limit
-    page = files[:limit]
+    page, details = _search_page(files, scan, offset=offset, limit=limit, paths=True, max_offset=_MAX_GLOB_OFFSET)
     return tool_result(
         success=True,
+        **details,
         pattern=pattern,
         path=str(root),
         files=page,
         count=len(page),
-        truncated=truncated,
     )
 
 
-def _glob_via_rg(rg: str, pattern: str, root: Path, limit: int) -> list[str]:
-    """rg --files --glob <pattern> --sort=modified --hidden + 噪音排除。返回相对 root 路径。"""
-    collect = limit + 1  # 多取一个用于判断 truncated
-    cmd = [rg, "--files", "--sort=modified", "--hidden", "--glob", pattern]
+async def _glob_via_rg(rg: str, pattern: str, scan: _SearchScan) -> list[str]:
+    cmd = [rg, "--no-config", "--files", "--null", "--hidden", "--path-separator", "/", "--glob", pattern]
     cmd.extend(_noise_glob_args())
     cmd.extend(["--", "."])
-    rc, stdout, _stderr = _run_rg(cmd, root)
-    if rc not in (0, 1):
-        raise ToolError(f"ripgrep glob 失败 (exit {rc})")
-    files: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if line:
-            files.append(line[2:] if line.startswith("./") else line)
-            if len(files) >= collect:
-                break
-    return files
+    rc, stdout, stderr = await _run_rg(cmd, scan.root, scan, delimiter=b"\0")
+    lines = _rg_lines(rc, stdout, stderr, scan, paths=True)
+    return await _run_python_scan(scan, _sort_files_by_mtime, lines, False)
 
 
-def _glob_via_python(pattern: str, root: Path) -> list[str]:
-    """纯 Python glob：os.walk + wcmatch 匹配 + 噪音剪枝 + mtime 倒序。"""
+def _glob_via_python(
+    pattern: str, root: Path, window: int = _MAX_GLOB_LIMIT + 1, *, scan: _SearchScan | None = None,
+) -> list[str]:
+    """Keep only the oldest files needed for this page and its lookahead."""
+    scan = scan if scan is not None else _SearchScan(root, _GLOB_DEADLINE_SECONDS)
     matcher = _compile_glob_pattern(pattern)
-    deadline = time.monotonic() + _GLOB_DEADLINE_SECONDS
-    found: list[tuple[float, str]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
-        _prune_linked_directories(dirpath, dirnames)
-        if time.monotonic() > deadline:
-            break
-        for fn in filenames:
-            if time.monotonic() > deadline:
-                break
-            full = Path(dirpath) / fn
-            try:
-                rel = full.relative_to(root).as_posix()
-            except ValueError:
-                continue
+
+    def matches() -> Iterator[tuple[float, str]]:
+        for full in _search_files(scan):
+            rel = full.relative_to(root).as_posix()
             if not matcher(rel):
+                scan.scanned_files += 1
                 continue
             try:
+                if full.is_symlink():
+                    continue
                 mtime = stat_verified_file(full).st_mtime
             except (FileConflictError, OSError):
+                scan.skip_file("unreadable_files")
                 continue
-            found.append((mtime, rel))
-    # mtime 升序（最旧在前，对齐 OCC GlobTool 的 --sort=modified），path 升序 tiebreaker
-    found.sort(key=lambda x: (x[0], x[1]))
-    return [rel for _, rel in found]
+            if scan.checkpoint():
+                return
+            scan.scanned_files += 1
+            yield mtime, rel
+
+    return [rel for _, rel in heapq.nsmallest(window, matches())]
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +521,7 @@ GREP_SCHEMA = {
         "output_mode: files_with_matches（默认，只列文件名，按修改时间倒序）/ content（带行号和内容）/ count（每文件匹配数）。"
         "自动排除 .git/__pycache__/node_modules/.venv 等噪音目录。"
         "底层优先用 ripgrep，不可用时退回 Python（re）。"
+        "scan_complete=false 时请缩小 path 或文件筛选后重试。结果含 next_offset 时可用同一条件续查。"
     ),
     "parameters": {
         "type": "object",
@@ -358,8 +542,8 @@ GREP_SCHEMA = {
             "context": {"type": "integer", "description": "-C 的别名"},
             "type": {"type": "string", "description": "ripgrep 文件类型，如 py/js/rust（兜底用扩展名映射）"},
             "multiline": {"type": "boolean", "description": "多行模式（. 匹配换行）"},
-            "head_limit": {"type": "integer", "description": "限制输出条数，默认 250；0 表示不限"},
-            "offset": {"type": "integer", "description": "跳过前 N 条，默认 0"},
+            "head_limit": {"type": "integer", "minimum": 0, "description": "限制输出条数，默认 250；0 只受输出体积限制"},
+            "offset": {"type": "integer", "minimum": 0, "description": "使用上次结果给出的 next_offset，默认 0"},
         },
         "required": ["pattern"],
     },
@@ -382,32 +566,36 @@ async def handle_grep(
         workspace_store=workspace_store,
         security_service=security_service,
     )
-    if not target.exists():
-        raise ToolError(f"搜索路径不存在: {target}")
+    if not target.is_dir() and not target.is_file():
+        raise ToolError(f"搜索路径必须是文件或目录: {target}")
     output_mode = str(args.get("output_mode") or "files_with_matches")
     if output_mode not in ("content", "files_with_matches", "count"):
         raise ToolError(f"output_mode 必须是 content/files_with_matches/count，得到 {output_mode!r}")
 
     rg = await _resolve_rg()
+    root = target if target.is_dir() else target.parent
     if rg:
-        return await asyncio.to_thread(_grep_via_rg, rg, args, target, output_mode)
-    return await asyncio.to_thread(_grep_via_python, args, target, output_mode)
+        scan = _SearchScan(root, _RG_DEADLINE_SECONDS, native=True)
+        try:
+            return await _grep_via_rg(rg, args, target, output_mode, scan)
+        except _AsyncRipgrepUnavailable:
+            pass
+    scan = _SearchScan(root, _GREP_DEADLINE_SECONDS)
+    return await _run_python_scan(scan, _grep_via_python, args, target, output_mode)
 
 
 def _grep_context_params(args: dict[str, Any]) -> tuple[int, int]:
     """解析 context：context > -C > (-B, -A)。返回 (before, after)。"""
-    ctx = args.get("context")
-    if ctx is None:
-        ctx = args.get("-C")
-    if ctx is not None:
-        n = max(0, int(ctx))
+    key = "context" if args.get("context") is not None else "-C"
+    if args.get(key) is not None:
+        n = max(0, _int_arg(args, key, 0))
         return n, n
-    before = _int_arg(args, "-B", 0)
-    after = _int_arg(args, "-A", 0)
+    before = max(0, _int_arg(args, "-B", 0))
+    after = max(0, _int_arg(args, "-A", 0))
     return before, after
 
 
-def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str) -> str:
+async def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str, scan: _SearchScan) -> str:
     """对齐 OCC GrepTool 的 rg 参数组装与输出格式化。"""
     pattern = str(args.get("pattern", ""))
     case_insensitive = _bool_arg(args, "-i", False)
@@ -415,21 +603,20 @@ def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str) 
     glob_filter = str(args.get("glob") or "").strip()
     file_type = str(args.get("type") or "").strip()
     multiline = _bool_arg(args, "multiline", False)
-    head_limit = _int_arg(args, "head_limit", _DEFAULT_HEAD_LIMIT)
-    offset = _int_arg(args, "offset", 0)
     before, after = _grep_context_params(args)
 
-    cmd: list[str] = [rg, "--hidden", "--max-columns", "500"]
+    cmd: list[str] = [rg, "--no-config", "--hidden", "--path-separator", "/"]
     cmd.extend(_noise_glob_args())
     if multiline:
         cmd.extend(["-U", "--multiline-dotall"])
     if case_insensitive:
         cmd.append("-i")
     if output_mode == "files_with_matches":
-        cmd.append("-l")
+        cmd.extend(["-l", "--null"])
     elif output_mode == "count":
-        cmd.append("-c")
+        cmd.extend(["-H", "-c", "--sort", "path"])
     else:  # content
+        cmd.extend(["-H", "--sort", "path", "--max-columns", "500", "--max-columns-preview"])
         if show_line_numbers:
             cmd.append("-n")
         if before or after:
@@ -444,64 +631,22 @@ def _grep_via_rg(rg: str, args: dict[str, Any], target: Path, output_mode: str) 
         for g in _split_glob_filter(glob_filter):
             cmd.extend(["--glob", g])
 
-    if target.is_dir():
-        cwd = target
-        cmd.extend(["--", "."])
-    else:
-        cwd = target.parent
-        cmd.extend(["--", target.name])
-
-    rc, stdout, stderr = _run_rg(cmd, cwd)
-    if rc not in (0, 1):
-        raise ToolError(f"ripgrep 失败 (exit {rc}): {stderr[:300]}")
-
-    lines = [line[2:] if line.startswith("./") else line for line in stdout.splitlines() if line]
-    if output_mode == "files_with_matches":
-        page, truncated = _apply_pagination(lines, head_limit, offset)
-        if not page:
-            return tool_result(success=True, output_mode=output_mode, files=[], num_files=0,
-                               content="No files found")
-        page = _sort_files_by_mtime(target, page)
-        payload: dict[str, Any] = {"success": True, "output_mode": output_mode,
-                                   "files": page, "num_files": len(page)}
-        if truncated:
-            payload["applied_limit"] = head_limit
-        if offset:
-            payload["applied_offset"] = offset
-        return tool_result(**payload)
-    if output_mode == "count":
-        page, truncated = _apply_pagination(lines, head_limit, offset)
-        if not page:
-            return tool_result(success=True, output_mode=output_mode, content="No matches found",
-                               num_matches=0, num_files=0)
-        total = 0
-        for line in page:
-            idx = line.rfind(":")
-            try:
-                total += int(line[idx + 1:] if idx > 0 else line)
-            except ValueError:
-                pass
-        payload = {"success": True, "output_mode": output_mode,
-                   "content": _truncate("\n".join(page)), "num_matches": total, "num_files": len(page)}
-        if truncated:
-            payload["applied_limit"] = head_limit
-        if offset:
-            payload["applied_offset"] = offset
-        return tool_result(**payload)
-    # content
-    page, truncated = _apply_pagination(lines, head_limit, offset)
-    if not page:
-        return tool_result(success=True, output_mode=output_mode, content="No matches found", num_lines=0)
-    payload = {"success": True, "output_mode": output_mode,
-               "content": _truncate("\n".join(page)), "num_lines": len(page)}
-    if truncated:
-        payload["applied_limit"] = head_limit
-    if offset:
-        payload["applied_offset"] = offset
-    return tool_result(**payload)
+    cmd.extend(["--", "." if target == scan.root else target.name])
+    paths = output_mode == "files_with_matches"
+    rc, stdout, stderr = await _run_rg(cmd, scan.root, scan, delimiter=b"\0" if paths else b"\n")
+    lines = _rg_lines(rc, stdout, stderr, scan, paths=paths)
+    if paths:
+        lines = await _run_python_scan(scan, _sort_files_by_mtime, lines)
+    elif output_mode == "content":
+        scan.line_preview_clipped = any(line.endswith(" [... omitted end of long line]") for line in lines)
+        if before or after:
+            lines = [line for line in lines if line != "--"]
+    return _render_grep(args, output_mode, lines, scan)
 
 
-def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> str:
+def _grep_via_python(
+    args: dict[str, Any], target: Path, output_mode: str, *, scan: _SearchScan | None = None,
+) -> str:
     """纯 Python grep 兜底：os.walk + wcmatch 过滤 + re.search。"""
     pattern = str(args.get("pattern", ""))
     case_insensitive = _bool_arg(args, "-i", False)
@@ -509,8 +654,6 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
     glob_filter = str(args.get("glob") or "").strip()
     file_type = str(args.get("type") or "").strip()
     multiline = _bool_arg(args, "multiline", False)
-    head_limit = _int_arg(args, "head_limit", _DEFAULT_HEAD_LIMIT)
-    offset = _int_arg(args, "offset", 0)
     before, after = _grep_context_params(args)
 
     flags = re.MULTILINE
@@ -523,132 +666,126 @@ def _grep_via_python(args: dict[str, Any], target: Path, output_mode: str) -> st
     except re.error as exc:
         raise ToolError(f"正则编译失败: {exc}") from exc
 
-    include_matchers: list[Callable[[str], bool]] = []
-    if glob_filter:
-        include_matchers.extend(_compile_grep_include(g) for g in _split_glob_filter(glob_filter))
-    if file_type:
-        for g in _RG_TYPE_MAP.get(file_type, []):
-            include_matchers.append(_compile_grep_include(g))
+    if file_type and file_type not in _RG_TYPE_MAP:
+        raise ToolError(f"托管搜索不支持文件类型 {file_type!r}，请改用 glob 过滤。")
+    filters = _split_glob_filter(glob_filter) + _RG_TYPE_MAP.get(file_type, [])
+    include_matchers = [_compile_grep_include(value) for value in filters]
 
-    root = target if target.is_dir() else target.parent
-    deadline = time.monotonic() + _GREP_DEADLINE_SECONDS
-    file_matches: dict[str, list[tuple[int, str]]] = {}  # rel -> [(line_num, line)]
-    file_lines: dict[str, list[str]] = {}  # 只有有匹配的文件存全部行（content 上下文用）
-    file_counts: dict[str, int] = {}
-
-    def search_file(full: Path, *, follow_symlink: bool = False) -> None:
-        try:
-            rel = full.relative_to(root).as_posix()
-        except ValueError:
-            return
+    single_file = target.is_file()
+    scan = scan if scan is not None else _SearchScan(target.parent if single_file else target, _GREP_DEADLINE_SECONDS)
+    retained: dict[str, list[str]] = {}
+    remaining = _SEARCH_BUFFER_BYTES
+    for full in (target,) if single_file else _search_files(scan):
+        if scan.checkpoint():
+            break
+        rel = full.relative_to(scan.root).as_posix()
         if include_matchers and not any(m(rel) for m in include_matchers):
-            return
+            continue
         if _has_binary_extension(full):
-            return
-        # 拒绝遍历到的符号链接：工作区内的文件 symlink 可能指向授权根外，跟随它读取
-        # 会绕过文件读取审批与 native sandbox（H-4）。os.walk 已 followlinks=False
-        # 不递归目录 symlink；这里在 open 前按 lstat 拒绝文件 symlink。单文件 target
-        # 由上层授权层 canonicalize 后授权，显式 follow_symlink=True 放行。
-        if not follow_symlink:
-            try:
-                if full.is_symlink():
-                    return
-            except OSError:
-                return
-        try:
-            # 读前按大小拒绝，不再整读后再判断。
-            content = read_verified_bytes(full, max_bytes=_DEFAULT_MAX_FILE_BYTES)
-            lines_list = content.decode("utf-8", errors="strict").splitlines(keepends=True)
-        except (FileConflictError, UnicodeDecodeError, OSError, ValueError):
-            return
-        if multiline:
-            # 整文件 search：DOTALL 让 . 匹配换行，定位匹配起始行号（兜底不完美，但跨行能命中）
-            whole = "".join(lines_list)
-            for m in regex.finditer(whole):
-                start_line = whole.count("\n", 0, m.start()) + 1
-                first_line = m.group(0).splitlines()[0] if m.group(0) else ""
-                file_matches.setdefault(rel, []).append((start_line, first_line))
-                file_counts[rel] = file_counts.get(rel, 0) + 1
-                if rel not in file_lines:
-                    file_lines[rel] = lines_list
-        else:
-            for i, line in enumerate(lines_list, 1):
-                if regex.search(line):
-                    file_matches.setdefault(rel, []).append((i, line.rstrip("\n")))
-                    file_counts[rel] = file_counts.get(rel, 0) + 1
-                    if rel not in file_lines:
-                        file_lines[rel] = lines_list
-
-    if target.is_file():
-        search_file(target, follow_symlink=True)
-    else:
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            dirnames[:] = [d for d in dirnames if d not in _NOISE_DIRS]
-            _prune_linked_directories(dirpath, dirnames)
-            if time.monotonic() > deadline:
+            continue
+        text = _read_grep_file(full, scan)
+        if text is None:
+            continue
+        lines = text.splitlines(keepends=True)
+        indices = _grep_line_indices(regex, text, lines, multiline=multiline, scan=scan)
+        rows: list[str] = []
+        for row in _grep_file_rows(rel, lines, indices, output_mode, before, after, show_line_numbers, scan):
+            size = len(row.encode("utf-8")) + 1
+            if size > remaining:
+                scan.partial_reasons.add("result_buffer_limit")
                 break
-            for fn in filenames:
-                if time.monotonic() > deadline:
-                    break
-                search_file(Path(dirpath) / fn)
+            rows.append(row)
+            remaining -= size
+        if rows:
+            retained[rel] = rows
+        if scan.checkpoint() or "result_buffer_limit" in scan.partial_reasons:
+            break
+        scan.scanned_files += 1
 
     if output_mode == "files_with_matches":
-        files = _sort_files_by_mtime(root, list(file_matches.keys()))
-        page, truncated = _apply_pagination(files, head_limit, offset)
-        if not page:
-            return tool_result(success=True, output_mode=output_mode, files=[], num_files=0,
-                               content="No files found")
-        payload: dict[str, Any] = {"success": True, "output_mode": output_mode,
-                                   "files": page, "num_files": len(page)}
-        if truncated:
-            payload["applied_limit"] = head_limit
-        if offset:
-            payload["applied_offset"] = offset
-        return tool_result(**payload)
+        items = _sort_files_by_mtime(list(retained), scan=scan)
+    else:
+        items = [row for path in sorted(retained) for row in retained[path]]
+    return _render_grep(args, output_mode, items, scan)
 
+
+def _read_grep_file(path: Path, scan: _SearchScan) -> str | None:
+    try:
+        if path.is_symlink():
+            return None
+        return read_verified_bytes(path, max_bytes=_DEFAULT_MAX_FILE_BYTES).decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        scan.skip_file("unsupported_encoding")
+    except ValueError:
+        scan.skip_file("file_size_limit")
+    except (FileConflictError, OSError):
+        scan.skip_file("unreadable_files")
+    return None
+
+
+def _grep_line_indices(
+    regex: re.Pattern[str], text: str, lines: list[str], *, multiline: bool, scan: _SearchScan,
+) -> Iterator[int]:
+    if multiline:
+        previous = index = 0
+        for match in regex.finditer(text):
+            if scan.checkpoint():
+                return
+            index += text.count("\n", previous, match.start())
+            previous = match.start()
+            yield index
+        return
+    for index, line in enumerate(lines):
+        if scan.checkpoint():
+            return
+        if regex.search(line):
+            yield index
+
+
+def _grep_file_rows(
+    rel: str, lines: list[str], indices: Iterator[int], mode: str,
+    before: int, after: int, numbers: bool, scan: _SearchScan,
+) -> Iterator[str]:
+    if mode == "files_with_matches":
+        if next(indices, None) is not None:
+            yield rel
+        return
+    if mode == "count":
+        count = sum(1 for _ in indices)
+        if count and not scan.checkpoint():
+            yield f"{rel}:{count}"
+        return
+
+    end = 0
+    for index in indices:
+        start = max(end, index - before)
+        end = min(len(lines), index + after + 1)
+        for pos in range(start, end):
+            if scan.checkpoint():
+                return
+            text = lines[pos].rstrip("\r\n")
+            yield f"{rel}:{pos + 1}:{text}" if numbers else f"{rel}:{text}"
+
+
+def _render_grep(args: dict[str, Any], output_mode: str, items: list[str], scan: _SearchScan) -> str:
+    limit = max(0, _int_arg(args, "head_limit", _DEFAULT_HEAD_LIMIT))
+    offset = max(0, _int_arg(args, "offset", 0))
+    paths = output_mode == "files_with_matches"
+    page, details = _search_page(items, scan, offset=offset, limit=limit, paths=paths)
+    payload: dict[str, Any] = {"success": True, **details, "output_mode": output_mode}
+    if limit and len(page) == limit and offset + len(page) < len(items):
+        payload["applied_limit"] = limit
+    if paths:
+        payload.update(files=page, num_files=len(page))
+    else:
+        payload["content"] = "\n".join(page)
     if output_mode == "count":
-        items = [f"{rel}:{file_counts[rel]}" for rel in sorted(file_counts.keys())]
-        page, truncated = _apply_pagination(items, head_limit, offset)
-        if not page:
-            return tool_result(success=True, output_mode=output_mode, content="No matches found",
-                               num_matches=0, num_files=0)
-        # num_matches 只算 page 内（对齐 OCC/rg 路径：applyHeadLimit 先分页再累加）
-        total = 0
-        for line in page:
-            idx = line.rfind(":")
-            try:
-                total += int(line[idx + 1:] if idx > 0 else line)
-            except ValueError:
-                pass
-        payload = {"success": True, "output_mode": output_mode,
-                   "content": _truncate("\n".join(page)),
-                   "num_matches": total, "num_files": len(page)}
-        if truncated:
-            payload["applied_limit"] = head_limit
-        if offset:
-            payload["applied_offset"] = offset
-        return tool_result(**payload)
-
-    # content
-    out_lines: list[str] = []
-    for rel in sorted(file_matches.keys()):
-        full_lines = file_lines.get(rel, [])
-        for line_num, _text in file_matches[rel]:
-            start = max(0, line_num - 1 - before)
-            end = min(len(full_lines), line_num + after)
-            for j in range(start, end):
-                ln = j + 1
-                text = full_lines[j].rstrip("\n")
-                out_lines.append(f"{rel}:{ln}:{text}" if show_line_numbers else f"{rel}:{text}")
-    page, truncated = _apply_pagination(out_lines, head_limit, offset)
-    if not page:
-        return tool_result(success=True, output_mode=output_mode, content="No matches found", num_lines=0)
-    payload = {"success": True, "output_mode": output_mode,
-               "content": _truncate("\n".join(page)), "num_lines": len(page)}
-    if truncated:
-        payload["applied_limit"] = head_limit
-    if offset:
-        payload["applied_offset"] = offset
+        counts = (row.rpartition(":")[2] for row in page)
+        payload.update(num_matches=sum(int(count) for count in counts if count.isdecimal()), num_files=len(page))
+    elif output_mode == "content":
+        payload["num_lines"] = len(page)
+    if not page and details["scan_complete"] and not offset:
+        payload["content"] = "No files found" if paths else "No matches found"
     return tool_result(**payload)
 
 

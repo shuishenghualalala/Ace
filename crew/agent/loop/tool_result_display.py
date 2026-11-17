@@ -49,6 +49,12 @@ def tool_result_detail_for_ui(name: str, content: str, *, max_len: int = 1200) -
         return _clip(text, max_len)
 
     if isinstance(data, dict):
+        if name in {"glob", "grep"} and isinstance(data.get("search_notice"), str):
+            detail = data.get("content")
+            if not detail and isinstance(data.get("files"), list):
+                detail = "\n".join(path for path in data["files"] if isinstance(path, str))
+            notice = data["search_notice"]
+            return _clip(f"{notice}\n\n{detail}" if detail else notice, max_len)
         if name in WIKI_SOURCE_ID_TOOLS:
             data = _redact_wiki_internal_result(data)
             return _clip(json.dumps(data, ensure_ascii=False), max_len)
