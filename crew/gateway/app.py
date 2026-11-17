@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -302,6 +303,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         try:
             yield
         finally:
+            dispatcher.begin_shutdown()
             health_sentinel.cancel()
             await asyncio.gather(health_sentinel, return_exceptions=True)
             if not startup_task.done():
@@ -525,12 +527,19 @@ def _write_gateway_discovery_file(host: str, port: int) -> None:
 
 
 class _DesktopLeaseServer(uvicorn.Server):
-    def __init__(self, config: uvicorn.Config, parent_lease: DesktopParentLease) -> None:
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        parent_lease: DesktopParentLease,
+        begin_shutdown: Callable[[], object],
+    ) -> None:
         super().__init__(config)
         self._parent_lease = parent_lease
+        self._begin_shutdown = begin_shutdown
 
     async def on_tick(self, counter: int) -> bool:
-        if self._parent_lease.closed:
+        if self._parent_lease.closed and not self.should_exit:
+            self._begin_shutdown()
             self.should_exit = True
         return await super().on_tick(counter)
 
@@ -566,4 +575,6 @@ def run(*, parent_lease: DesktopParentLease | None = None) -> None:
         config = uvicorn.Config(
             api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning", timeout_graceful_shutdown=5,
         )
-        _DesktopLeaseServer(config, parent_lease).run()
+        _DesktopLeaseServer(config, parent_lease, crew.dispatcher.begin_shutdown).run()
+        if crew.dispatcher.shutdown_timed_out:
+            raise SystemExit(1)

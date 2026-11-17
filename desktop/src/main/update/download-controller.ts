@@ -53,6 +53,7 @@ interface Inflight {
 }
 
 let inflight: Inflight | null = null;
+const downloading = new Set<Promise<void>>();
 let progressSender: ((p: VersionUpdateDownloadProgressPayload) => void) | null = null;
 let strictSecurityEnabled = (): boolean => true;
 
@@ -103,7 +104,9 @@ function safeUnlink(p: string): void {
   }
 }
 
-async function downloadAndVerifySignature(packageUrl: string, packagePath: string): Promise<void> {
+async function downloadAndVerifySignature(
+  packageUrl: string, packagePath: string, signal: AbortSignal,
+): Promise<void> {
   const publicKey = configuredUpdatePublicKey();
   if (!publicKey) {
     throw new Error('严格安全约束已阻止更新：未配置 ACE_UPDATE_PUBLIC_KEY');
@@ -111,7 +114,7 @@ async function downloadAndVerifySignature(packageUrl: string, packagePath: strin
   const signaturePath = `${packagePath}.sig`;
   const temporaryPath = `${signaturePath}.part`;
   safeUnlink(temporaryPath);
-  const response = await fetch(`${packageUrl}.sig`, { redirect: 'follow' });
+  const response = await fetch(`${packageUrl}.sig`, { redirect: 'follow', signal });
   if (!response.ok || !response.body || new URL(response.url).protocol !== 'https:') {
     throw new Error(`更新包签名下载失败（HTTP ${response.status}）`);
   }
@@ -128,6 +131,7 @@ async function downloadAndVerifySignature(packageUrl: string, packagePath: strin
     if (received > 16 * 1024) throw new Error('更新包签名响应过大');
     chunks.push(Buffer.from(value));
   }
+  signal.throwIfAborted();
   fs.writeFileSync(temporaryPath, Buffer.concat(chunks), { mode: 0o600 });
   fs.renameSync(temporaryPath, signaturePath);
   const verified = verifyPackageSignature(packagePath, signaturePath, publicKey);
@@ -168,15 +172,16 @@ function resetNoProgressTimer(inf: Inflight): void {
   }, NO_PROGRESS_TIMEOUT_MS);
 }
 
-function safeEndStream(inf: Inflight): Promise<void> {
+function safeEndStream(inf: Inflight, destroy = false): Promise<void> {
   const stream = inf.writeStream;
   inf.writeStream = null;
-  if (!stream) return Promise.resolve();
+  if (!stream || stream.closed) return Promise.resolve();
   return new Promise((resolve) => {
-    stream.once('error', () => resolve());
-    stream.once('finish', () => resolve());
+    stream.once('error', () => { /* close still owns the file descriptor */ });
+    stream.once('close', resolve);
     try {
-      stream.end();
+      if (destroy) stream.destroy();
+      else stream.end();
     } catch {
       resolve();
     }
@@ -187,6 +192,8 @@ async function runDownload(inf: Inflight): Promise<void> {
   console.log('[Download] runDownload url:', inf.url, 'resumeFrom:', inf.receivedBytes);
   try {
     const resumeFrom = inf.receivedBytes;
+    const signal = inf.abort.signal;
+    signal.throwIfAborted();
 
     await new Promise<void>((resolve, reject) => {
       const urlObj = new URL(inf.url);
@@ -202,9 +209,15 @@ async function runDownload(inf: Inflight): Promise<void> {
         path: urlObj.pathname + urlObj.search,
         method: 'GET',
         headers: reqHeaders,
+        signal,
       };
 
       const req = requestLib.request(reqOpts, (res) => {
+        if (signal.aborted) {
+          res.destroy();
+          reject(signal.reason);
+          return;
+        }
         const statusCode = res.statusCode ?? 0;
 
         // 处理重定向
@@ -237,6 +250,10 @@ async function runDownload(inf: Inflight): Promise<void> {
 
         fs.mkdirSync(path.dirname(inf.targetPath), { recursive: true });
         inf.writeStream = fs.createWriteStream(inf.partPath, { flags: startOffset > 0 ? 'a' : 'w' });
+        inf.writeStream.on('error', (error) => {
+          res.destroy();
+          reject(error);
+        });
 
         inf.status = 'downloading';
         inf.lastEmittedPercent = null;
@@ -255,34 +272,8 @@ async function runDownload(inf: Inflight): Promise<void> {
           emitProgress(inf);
         });
 
-        res.on('end', async () => {
-          clearNoProgressTimer(inf);
-          await safeEndStream(inf);
-
-          fs.renameSync(inf.partPath, inf.targetPath);
-          // 严格安全：完成后校验更新包签名；失败则删除包与签名，不留未验证产物
-          if (strictSecurityEnabled()) {
-            try {
-              await downloadAndVerifySignature(inf.url, inf.targetPath);
-            } catch (error) {
-              safeUnlink(inf.targetPath);
-              safeUnlink(`${inf.targetPath}.sig`);
-              reject(error);
-              return;
-            }
-          }
-          const size = fs.statSync(inf.targetPath).size;
-          const record: DownloadedUpdateRecord = {
-            filePath: inf.targetPath,
-            version: inf.version,
-            size,
-            type: inf.type,
-            ...(inf.message ? { message: inf.message } : {}),
-          };
-          setDownloadedRecord(record);
-          inf.status = 'completed';
-          send({ phase: 'downloaded', percent: 100, receivedBytes: size, totalBytes: size });
-          resolve();
+        res.on('end', () => {
+          resolve(completeDownload(inf, signal));
         });
 
         res.on('error', (err) => reject(err));
@@ -294,15 +285,53 @@ async function runDownload(inf: Inflight): Promise<void> {
 
       req.on('error', (err) => reject(err));
 
-      // 支持 abort
-      const abortHandler = () => req.destroy();
-      inf.abort.signal.addEventListener('abort', abortHandler, { once: true });
-
       req.end();
     });
   } catch (err) {
     await handleRunError(inf, err);
   }
+}
+
+async function completeDownload(inf: Inflight, signal: AbortSignal): Promise<void> {
+  clearNoProgressTimer(inf);
+  const stream = inf.writeStream;
+  await safeEndStream(inf);
+  if (stream?.errored) throw stream.errored;
+  signal.throwIfAborted();
+  fs.renameSync(inf.partPath, inf.targetPath);
+  if (strictSecurityEnabled()) {
+    try {
+      await downloadAndVerifySignature(inf.url, inf.targetPath, signal);
+      signal.throwIfAborted();
+    } catch (error) {
+      if (inf.abortReason === 'quit' || inf.abortReason === 'pause') {
+        fs.renameSync(inf.targetPath, inf.partPath);
+      } else {
+        safeUnlink(inf.targetPath);
+      }
+      safeUnlink(`${inf.targetPath}.sig`);
+      safeUnlink(`${inf.targetPath}.sig.part`);
+      throw error;
+    }
+  }
+  const size = fs.statSync(inf.targetPath).size;
+  const record: DownloadedUpdateRecord = {
+    filePath: inf.targetPath,
+    version: inf.version,
+    size,
+    type: inf.type,
+    ...(inf.message ? { message: inf.message } : {}),
+  };
+  setDownloadedRecord(record);
+  inf.status = 'completed';
+  send({ phase: 'downloaded', percent: 100, receivedBytes: size, totalBytes: size });
+}
+
+function launchDownload(inf: Inflight): void {
+  const task = runDownload(inf).catch((error: unknown) => {
+    console.error('[update-download] unhandled:', error);
+  }).finally(() => downloading.delete(task));
+  downloading.add(task);
 }
 
 async function handleRunError(inf: Inflight, err: unknown): Promise<void> {
@@ -312,12 +341,7 @@ async function handleRunError(inf: Inflight, err: unknown): Promise<void> {
   const reason = inf.abortReason;
 
   if (reason === 'supersede' || reason === 'cancel') {
-    try {
-      inf.writeStream?.destroy();
-    } catch {
-      /* ignore */
-    }
-    inf.writeStream = null;
+    await safeEndStream(inf, true);
     safeUnlink(inf.partPath);
     return; // 不 emit；由 startDownload 的新下载接管
   }
@@ -438,10 +462,7 @@ export function startDownload(args: StartArgs): { success: boolean; message?: st
     noProgressTimer: null,
     lastEmittedPercent: null,
   };
-  const inf = inflight;
-  runDownload(inf).catch((e) => {
-    console.error('[update-download] unhandled:', (e as Error)?.message);
-  });
+  launchDownload(inflight);
   return { success: true };
 }
 
@@ -463,10 +484,7 @@ export function resumeDownload(): { success: boolean } {
   inflight.abort = new AbortController();
   inflight.abortReason = null;
   inflight.status = 'downloading';
-  const inf = inflight;
-  runDownload(inf).catch((e) => {
-    console.error('[update-download] resume unhandled:', (e as Error)?.message);
-  });
+  launchDownload(inflight);
   return { success: true };
 }
 
@@ -480,12 +498,11 @@ export function retryDownload(args: StartArgs): { success: boolean; message?: st
 }
 
 /** before-quit：中止当前下载（.part 留盘，下次启动 sweep 清理；不 emit）。 */
-export function disposeForQuit(): void {
-  if (!inflight) return;
-  inflight.abortReason = 'quit';
-  try {
+export async function disposeForQuit(): Promise<void> {
+  if (inflight?.status === 'downloading') {
+    inflight.status = 'paused';
+    inflight.abortReason = 'quit';
     inflight.abort.abort();
-  } catch {
-    /* ignore */
   }
+  await Promise.all(downloading);
 }

@@ -122,17 +122,44 @@ def test_standalone_gateway_runs_without_managed_lease(monkeypatch):
     assert calls == [(gateway, {"host": "127.0.0.1", "port": 28180, "log_level": "warning"})]
 
 
+@pytest.mark.parametrize("drain_timed_out", [False, True])
+def test_managed_exit_code_reflects_dispatcher_drain_after_server_returns(monkeypatch, drain_timed_out):
+    config = SimpleNamespace(gateway_host="127.0.0.1", gateway_port=28180)
+    dispatcher = SimpleNamespace(begin_shutdown=lambda: None, shutdown_timed_out=False)
+
+    def run_server(_server):
+        # Simulate the server running the lifespan cleanup before returning.
+        dispatcher.shutdown_timed_out = drain_timed_out
+
+    monkeypatch.setattr(gateway_app, "build_app", lambda: SimpleNamespace(config=config, dispatcher=dispatcher))
+    monkeypatch.setattr(gateway_app, "create_app", lambda _crew: lambda: None)
+    monkeypatch.setattr(gateway_app, "_write_gateway_discovery_file", lambda _host, _port: None)
+    monkeypatch.setattr(gateway_app._DesktopLeaseServer, "run", run_server)
+    lease = SimpleNamespace(closed=False)
+    if drain_timed_out:
+        with pytest.raises(SystemExit) as exc_info:
+            gateway_app.run(parent_lease=lease)
+        assert exc_info.value.code == 1
+    else:
+        assert gateway_app.run(parent_lease=lease) is None
+
+
 async def test_eof_signals_managed_uvicorn_main_loop():
     read_fd, write_fd = os.pipe()
     with os.fdopen(read_fd, "rb") as read_pipe, os.fdopen(write_fd, "wb") as write_pipe:
         lease = DesktopParentLease(b"test" * 8, read_pipe.fileno())
         try:
-            server = gateway_app._DesktopLeaseServer(uvicorn.Config(lambda: None), lease)
+            pre_stop_states = []
+            server = gateway_app._DesktopLeaseServer(
+                uvicorn.Config(lambda: None), lease, lambda: pre_stop_states.append(server.should_exit),
+            )
             assert not await server.on_tick(1)
             write_pipe.close()
             assert lease._closed.wait(2)
             assert await server.on_tick(1)
             assert server.should_exit
+            assert await server.on_tick(1)
+            assert pre_stop_states == [False]
         finally:
             lease.finish()
 

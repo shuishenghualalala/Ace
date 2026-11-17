@@ -1054,7 +1054,7 @@ class SingleAgent(Agent):
                 interrupted = True
                 terminal_outcome = "interrupted"
                 terminal_error_summary = ""
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             # 硬停（dispatcher.stop → task.cancel）：标记中断，仍在 finally 里落库后再抛出，
             # 否则这一轮的 user 消息与工具调用永不持久化——刷新即丢、下一轮无上下文。
             interrupted = True

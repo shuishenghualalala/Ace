@@ -62,6 +62,7 @@ import type {
 } from './backend-health-monitor';
 import { GatewayRestartController } from './gateway-restart-controller';
 import { GatewayProcessRetirement, GatewayStopTimeoutError } from './gateway-process-retirement';
+import { DesktopShutdown, waitForShutdownTask, type ShutdownReason } from './desktop-shutdown';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
   VersionUpdateDownloadProgressPayload,
@@ -148,6 +149,7 @@ import {
   resolveGithubReleaseTarget,
 } from './update/github-release';
 import { evaluateVersionUpdate } from './version-compare';
+import { launchUpdateInstaller } from './update/installer-handoff';
 import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
 import { commitDownloadedExport } from './tracing-export-file';
@@ -220,6 +222,13 @@ let rendererReadyFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 const RENDERER_READY_FALLBACK_MS = 15_000;
 
 let isQuitting = false;
+const GATEWAY_APP_QUIT_GRACE_MS = 33_000;
+const desktopShutdown = new DesktopShutdown({
+  prepare: prepareAppShutdown,
+  exit: exitPreparedApp,
+  resume: resumeAfterHandoffFailure,
+  report: (error) => console.error('[shutdown] cleanup incomplete:', error),
+});
 // Gateway 重建代际：每次主动重试/重建递增。在途 ensureGateway 流程启动时记下
 // 自己的代际，health wait 每轮校验——代际变了说明用户点了重试，立即中止让位，
 // 避免「旧 wait 无超时挂着、新重建又被排队」的假死。
@@ -479,6 +488,7 @@ function sendBrowserHostFrame(
 }
 
 function ensureBrowserHost(): BrowserHost {
+  if (isQuitting) throw new Error('Desktop is shutting down');
   if (!browserHost) {
     browserHost = new BrowserHost(() => mainWindow);
     browserHost.on('debug', (event: unknown) => {
@@ -678,9 +688,9 @@ async function connectBrowserHost(): Promise<void> {
         // the manager owner state while preserving the on-disk Profile.
         const staleHost = browserHost;
         browserHost = null;
-        const disposal = staleHost?.dispose().catch(() => undefined) ?? Promise.resolve();
+        const disposal = staleHost?.dispose() ?? Promise.resolve();
         browserHostDisposePromise = disposal;
-        void disposal.then(() => {
+        const finish = () => {
           if (browserHostDisposePromise === disposal) browserHostDisposePromise = null;
           if (
             generation !== browserHostConnectionGeneration
@@ -688,6 +698,10 @@ async function connectBrowserHost(): Promise<void> {
             || isQuitting
           ) return;
           scheduleBrowserHostConnection(1500);
+        };
+        void disposal.then(finish, (error: unknown) => {
+          console.error('[browser-host] cleanup after disconnect failed:', error);
+          finish();
         });
       }
     });
@@ -707,8 +721,17 @@ async function resetBrowserHost(reason: string): Promise<void> {
   const pendingDisposal = browserHostDisposePromise;
   const host = browserHost;
   browserHost = null;
-  if (pendingDisposal) await pendingDisposal.catch(() => undefined);
-  if (host) await host.dispose().catch(() => undefined);
+  if (!host) return pendingDisposal ?? undefined;
+  const disposal = Promise.allSettled([pendingDisposal, host.dispose()]).then((results) => {
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  });
+  browserHostDisposePromise = disposal;
+  try {
+    await disposal;
+  } finally {
+    if (browserHostDisposePromise === disposal) browserHostDisposePromise = null;
+  }
 }
 
 interface DesktopPrefs {
@@ -899,6 +922,7 @@ function markRendererInitialStateReady(): void {
 }
 
 function showMainWindow(): void {
+  if (isQuitting) return;
   if (!mainWindow) return;
   mainWindow.setSkipTaskbar(false);
   if (!mainWindow.isVisible()) mainWindow.show();
@@ -946,11 +970,8 @@ function createTray(): void {
       showMainWindow();
       mainWindow?.webContents.send('tray:activated');
     },
-    onUninstall: () => { void handleUninstall(); },
-    onQuit: () => {
-      isQuitting = true;
-      app.quit();
-    },
+    onUninstall: () => { if (!isQuitting) void handleUninstall(); },
+    onQuit: () => app.quit(),
     onNotificationSelected: (id: string) => {
       showMainWindow();
       mainWindow?.webContents.send('tray:notification-selected', id);
@@ -982,7 +1003,8 @@ function pushSessionState(): void {
   mainWindow?.webContents.send('auth:session-state', loginNewServiceInstance.getState());
 }
 
-function closeGatewaySockets(reason = 'auth-state-changed'): void {
+function closeGatewaySockets(reason = 'auth-state-changed'): WebSocket[] {
+  const closing: WebSocket[] = [];
   for (const [id, generation] of gatewaySocketGenerations) {
     gatewaySocketGenerations.set(id, generation + 1);
   }
@@ -990,6 +1012,7 @@ function closeGatewaySockets(reason = 'auth-state-changed'): void {
     browserSocketGenerations.set(id, generation + 1);
   }
   for (const [id, socket] of gatewaySockets.entries()) {
+    closing.push(socket);
     try {
       socket.close(1000, reason);
     } catch {
@@ -998,6 +1021,7 @@ function closeGatewaySockets(reason = 'auth-state-changed'): void {
     gatewaySockets.delete(id);
   }
   for (const [id, socket] of browserSockets.entries()) {
+    closing.push(socket);
     try {
       socket.close(1000, reason);
     } catch {
@@ -1005,6 +1029,7 @@ function closeGatewaySockets(reason = 'auth-state-changed'): void {
     }
     browserSockets.delete(id);
   }
+  return closing;
 }
 
 /**
@@ -1231,22 +1256,24 @@ function createWindow() {
     mainWindow = null;
   });
   mainWindow.on('close', (event) => {
-    if (isQuitting) return;
-    if (!mainWindow) return;
-    if (!loginNewServiceInstance.getSessionInfo().isLoggedIn) {
-      isQuitting = true;
-      return;
-    }
-    if (!mainWindow.isVisible()) return;
-    if (shouldPreventClose()) {
+    if (desktopShutdown.canCloseWindows) return;
+    if (isQuitting) {
       event.preventDefault();
       return;
     }
-    // AutomationHost owns a hidden BrowserWindow, so closing the visible main
-    // window no longer makes Electron emit window-all-closed. A user-selected
-    // "quit" must explicitly enter the app quit path and dispose hidden hosts.
-    isQuitting = true;
-    app.quit();
+    if (!mainWindow) return;
+    if (loginNewServiceInstance.getSessionInfo().isLoggedIn && mainWindow.isVisible()) {
+      if (shouldPreventClose()) {
+        event.preventDefault();
+        return;
+      }
+    } else if (process.platform === 'darwin') {
+      return;
+    }
+    // A separate native quit lets Electron finish this close event before
+    // the shutdown gate later replays app.quit().
+    event.preventDefault();
+    setImmediate(() => app.quit());
   });
 }
 
@@ -2208,6 +2235,7 @@ const rawIpcHandle = ipcMain.handle.bind(ipcMain);
 function trustedHandle(channel: string, listener: TrustedIpcHandler): void {
   rawIpcHandle(channel, (event, ...args) => {
     assertTrustedRenderer(event);
+    if (isQuitting && channel !== 'app:quit') throw new Error('Desktop is shutting down');
     return listener(event, ...args);
   });
 }
@@ -2376,103 +2404,41 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
     setDownloadedRecord(null);
     return { success: false, message: integrity.message };
   }
-  if (isStrictSecurityEnabled()) {
-    const publicKey = configuredUpdatePublicKey();
-    const signature = publicKey
-      ? verifyPackageSignature(
-          downloaded.filePath,
-          `${downloaded.filePath}.sig`,
-          publicKey,
-        )
-      : { ok: false, message: '严格安全约束已阻止安装：未配置更新签名公钥' };
-    if (!signature.ok) {
-      sendVersionUpdateDownloadProgress({ phase: 'error', message: signature.message });
-      return { success: false, message: signature.message };
-    }
-  }
-
-  const targetPath = path.resolve(downloaded.filePath);
-  const quitAfterLaunch = () => {
-    setTimeout(() => {
-      isQuitting = true;
-      app.quit();
-    }, 500);
-  };
-
+  const preparation = desktopShutdown.beginHandoff('update');
+  if (!preparation) return { success: false, message: '应用正在退出或安装更新' };
+  let launched = false;
   sendVersionUpdateDownloadProgress({ phase: 'installing', percent: 100 });
   try {
-    const ext = path.extname(targetPath).toLowerCase();
-    if (process.platform === 'win32' && ext === '.exe') {
-      // Inno Setup 静默安装（见 deb-package/pack_exe.ps1）；/NORESTART 避免安装器替我们重启
-      const child = spawn(targetPath, ['/SILENT', '/NORESTART'], { detached: true, stdio: 'ignore', windowsHide: true });
-      child.unref();
-      setDownloadedRecord(null); // 包已消费
-      sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
-      quitAfterLaunch();
-      return { success: true, message: '安装程序已启动' };
+    await preparation;
+    const current = readUpdateState().downloaded;
+    if (!current || current.filePath !== downloaded.filePath || current.version !== downloaded.version
+      || current.size !== downloaded.size) {
+      throw new Error('待安装的更新包已经变更，请重试');
     }
-
-    if (process.platform === 'linux' && ext === '.deb') {
-      await fs.promises.chmod(targetPath, 0o644);
-      const usePkexec = typeof process.getuid === 'function' && process.getuid() !== 0;
-      const command = usePkexec ? 'pkexec' : 'dpkg';
-      const args = usePkexec ? ['dpkg', '-i', targetPath] : ['-i', targetPath];
-      const child = spawn(command, args, { detached: true, stdio: 'ignore' });
-      child.unref();
-
-      // 装完自动重启 GUI（对标 Windows 的 Inno postinstall）。
-      // 必须用独立 helper、不能放 deb postinst：postinst 以 root 跑，缺 DISPLAY / XAUTHORITY /
-      // DBUS_SESSION_BUS_ADDRESS，拉不起用户会话 GUI；helper 继承当前 app 的用户会话 env。
-      //
-      // gateway 不再用 systemd user service（改由 desktop 子进程托管），故此处不
-      // systemctl restart。等旧 app 退出后重启 desktop，它会启动自己的新 Gateway；
-      // 旧 Gateway 随原桌面实例的父进程管道关闭而退出。
-      // ponytail 边界（出问题先查这里）：
-      //   1. pkexec 被取消 / dpkg 失败 → deb 没装上，但 helper 仍会重启 GUI。兜底：GUI 起来后
-      //      心跳重新比对版本，forceLock 再次阻断 / reminder 再次提示，不会“假装更新成功”。
-      //   2. crew-desktop 须在 PATH 上（继承自 app 的用户会话 PATH）；若不全则改绝对路径。
-      // helper 参数：$1 = 安装进程 pid（pkexec/dpkg），$2 = 当前 app 主进程 pid。
-      const installPid = child.pid;
-      if (installPid) {
-        const restarter = [
-          'n=0; while kill -0 "$1" 2>/dev/null && [ $n -lt 120 ]; do sleep 0.5; n=$((n+1)); done', // 等安装流程结束（≤60s）
-          'n=0; while kill -0 "$2" 2>/dev/null && [ $n -lt 40 ]; do sleep 0.3; n=$((n+1)); done',  // 等旧 app 退出（≤12s）
-          'sleep 1', // dpkg 换完文件后收尾
-          'exec crew-desktop',
-        ].join('; ');
-        spawn(
-          'sh',
-          ['-c', restarter, 'crew-restarter', String(installPid), String(process.pid)],
-          { detached: true, stdio: 'ignore' },
-        ).unref();
-      }
-
-      setDownloadedRecord(null);
-      sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
-      quitAfterLaunch();
-      return { success: true, message: '安装程序已启动' };
+    const finalIntegrity = verifyPackageIntegrity(current.filePath, current.size);
+    if (!finalIntegrity.ok) throw new Error(finalIntegrity.message);
+    if (isStrictSecurityEnabled()) {
+      const publicKey = configuredUpdatePublicKey();
+      if (!publicKey) throw new Error('严格安全约束已阻止安装：未配置更新签名公钥');
+      const signature = verifyPackageSignature(current.filePath, `${current.filePath}.sig`, publicKey);
+      if (!signature.ok) throw new Error(signature.message);
     }
-
-    if (process.platform === 'darwin' && ext === '.dmg') {
-      const child = spawn('open', [targetPath], { detached: true, stdio: 'ignore' });
-      child.unref();
-      sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
-      quitAfterLaunch();
-      return { success: true, message: '安装包已打开' };
-    }
-
-    const openError = await shell.openPath(targetPath);
-    if (openError) {
-      sendVersionUpdateDownloadProgress({ phase: 'error', message: openError });
-      return { success: false, message: openError };
-    }
+    const handoff = await launchUpdateInstaller(path.resolve(downloaded.filePath), {
+      openPath: (filePath) => shell.openPath(filePath),
+    });
+    launched = true;
+    if (handoff.kind === 'installer-started') setDownloadedRecord(null);
     sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
-    quitAfterLaunch();
-    return { success: true, message: '安装包已打开' };
+    const message = handoff.kind === 'package-opened' ? '安装包已打开'
+      : handoff.restartScheduled === false ? '安装程序已启动，安装后请手动打开应用'
+        : '安装程序已启动';
+    return { success: true, message };
   } catch (error) {
-    // 安装启动失败：保留 downloaded，用户可再次点击安装（复用已下载包）
-    sendVersionUpdateDownloadProgress({ phase: 'error', message: (error as Error).message });
-    return { success: false, message: (error as Error).message || '启动安装失败' };
+    const message = (error as Error).message || '启动安装失败';
+    sendVersionUpdateDownloadProgress({ phase: 'error', message });
+    return { success: false, message };
+  } finally {
+    desktopShutdown.finishHandoff(launched);
   }
 }
 
@@ -2573,10 +2539,7 @@ function registerIpc() {
     );
     if (entry) closeInspirationWindow(entry[0]);
   });
-  trustedHandle('app:quit', () => {
-    isQuitting = true;
-    app.quit();
-  });
+  trustedHandle('app:quit', () => app.quit());
   trustedHandle('app:get-version', () => ({
     version: currentAppVersion(app),
     label: currentAppVersionLabel(app),
@@ -3158,7 +3121,7 @@ function registerIpc() {
       : await loginNewServiceInstance.login(baseUrl, identifier, code);
     if (result.ok) {
       closeGatewaySockets('login-changed');
-      await resetBrowserHost('login-changed');
+      await resetBrowserHost('login-changed').catch((error: unknown) => console.warn('[browser-host]', error));
       pushSessionState();
       scheduleBrowserHostConnection();
     }
@@ -3170,7 +3133,7 @@ function registerIpc() {
     const result = await loginNewServiceInstance.logout(baseUrl);
     if (result.ok) {
       closeGatewaySockets('logout');
-      await resetBrowserHost('logout');
+      await resetBrowserHost('logout').catch((error: unknown) => console.warn('[browser-host]', error));
     }
     pushSessionState();
     return result;
@@ -3879,13 +3842,14 @@ function registerIpc() {
   });
   loginNewServiceInstance.setSessionExpiredHandler(async () => {
     closeGatewaySockets('session-expired');
-    await resetBrowserHost('session-expired');
+    await resetBrowserHost('session-expired').catch((error: unknown) => console.warn('[browser-host]', error));
     pushSessionState();
   });
 }
 
 async function bootstrap() {
   await app.whenReady();
+  if (isQuitting) return;
   loginNewServiceInstance.setStrictSecurityEnabled(isStrictSecurityEnabled());
 
   // 普通启动使用本地 Gateway 身份；只有显式 `--dev` 才使用隔离的开发身份。
@@ -3964,18 +3928,8 @@ async function bootstrap() {
   // 注入卸载模块依赖（托盘「卸载」功能需要访问主进程内部状态）
   setUninstallDeps({
     getMainWindow: () => mainWindow,
-    // 与 before-quit 共用父进程管道和有界的子进程回收。
-    stopManagedGateway: (timeoutMs) => stopManagedGateway('uninstall', timeoutMs),
-    setQuittingFlag: () => {
-      isQuitting = true;
-      gatewayGeneration += 1;
-      ensureGatewayPromise = null;
-    },
-    resetQuittingFlag: () => {
-      isQuitting = false;
-      startBackendHealthMonitor();
-    },
-    stopBackendHealthMonitor,
+    beginHandoff: () => desktopShutdown.beginHandoff('uninstall'),
+    finishHandoff: (launched) => desktopShutdown.finishHandoff(launched),
     suppressBackendOverlay: () => {
       try {
         mainWindow?.webContents.send('backend:suppress-overlay');
@@ -3986,13 +3940,10 @@ async function bootstrap() {
   });
 
   app.on('activate', () => {
+    if (isQuitting) return;
     // Hidden AutomationHost windows are implementation details and must not
     // suppress recreation of the user-facing window on macOS.
     if (!mainWindow || mainWindow.isDestroyed()) {
-      // 重建窗口 = 应用继续存活：复位退出闩锁。此前 darwin 上「登出后关窗」会把
-      // isQuitting 置真且无人复位——自动重启 / browser-host 重连 / 启动重试窗口
-      // 全部被永久禁用，app 悄悄变成「活着的僵尸」。
-      isQuitting = false;
       createWindow();
     }
     else showMainWindow();
@@ -4000,36 +3951,88 @@ async function bootstrap() {
 }
 
 app.on('window-all-closed', () => {
-  loginNewServiceInstance.stopHeartbeat();
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform !== 'darwin' && !isQuitting) app.quit();
 });
 
-// 优雅关闭：包含网络释放以及后台猎杀
-app.on('before-quit', () => {
+async function prepareAppShutdown(reason: ShutdownReason): Promise<void> {
   isQuitting = true;
+  gatewayGeneration += 1;
+  ensureGatewayPromise = null;
+  loginNewServiceInstance.stopHeartbeat();
+  stopBackendHealthMonitor();
+  stopUpdateCleanupMonitor();
+  const sockets = closeGatewaySockets(reason);
+  if (browserHostSocket) sockets.push(browserHostSocket);
+  const child = managedGateway ?? gatewayRetirement.child;
+  requireOwnedGateway ||= Boolean(child);
+  console.log('[shutdown] preparing:', reason);
+
+  const tasks = {
+    sockets: settleClosingSockets(sockets),
+    browser: waitForShutdownTask(resetBrowserHost(reason), 'Browser host', 3_000),
+    download: waitForShutdownTask(disposeUpdateDownload(), 'Update download', 3_000),
+    gateway: (async () => {
+      await stopManagedGateway(reason, GATEWAY_APP_QUIT_GRACE_MS);
+      if (child && child.exitCode !== 0) throw new Error('Gateway did not complete a graceful shutdown');
+    })(),
+  };
+  const results = await Promise.allSettled(Object.values(tasks));
+  const failed: string[] = [];
+  for (const [index, task] of Object.keys(tasks).entries()) {
+    const result = results[index];
+    if (result.status === 'rejected') {
+      failed.push(task);
+      console.error(`[shutdown] ${task} failed:`, result.reason);
+    }
+  }
+  console.log('[shutdown] prepared', { reason, failed });
+  if (failed.length) throw new Error(`未确认应用资源已关闭（${failed.join(', ')}）`);
+}
+
+async function settleClosingSockets(sockets: WebSocket[]): Promise<void> {
+  const closing = sockets.filter((socket) => socket.readyState !== WebSocket.CLOSED);
+  try {
+    await waitForShutdownTask(Promise.all(closing.map((socket) =>
+      new Promise<void>((resolve) => { socket.once('close', () => resolve()); }),
+    )), 'Gateway sockets', 500);
+  } catch {
+    for (const socket of closing) {
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    }
+  }
+}
+
+function resumeAfterHandoffFailure(): void {
+  isQuitting = false;
+  startBackendHealthMonitor();
+  startUpdateCleanupMonitor();
+  gatewayRestartController.reset();
+  if (gatewayRetirement.child) {
+    gatewayRetirement.child.once('exit', () => gatewayRestartController.schedule());
+  } else {
+    gatewayRestartController.schedule();
+  }
+  scheduleBrowserHostConnection();
+}
+
+function exitPreparedApp(): void {
+  gatewayRestartController.stop();
+  trayService?.dispose();
   for (const win of inspirationWindows.values()) {
     if (!win.isDestroyed()) win.destroy();
   }
   inspirationWindows.clear();
-  gatewayRestartController.stop();
-  void resetBrowserHost('app-quit');
-  closeGatewaySockets('app-quit');
-  stopBackendHealthMonitor();
-  stopUpdateCleanupMonitor();
-  // 中止进行中的更新下载（.part 留盘，下次启动 sweep 清理；已下载完整包保留）
-  try {
-    disposeUpdateDownload();
-  } catch (err) {
-    console.warn('[main] disposeUpdateDownload failed:', (err as Error).message);
+  if (BrowserWindow.getAllWindows().length === 0) {
+    app.exit(0);
+    return;
   }
-  // 关闭当前子进程的父进程管道。即使 Electron 先退出，Gateway 也会收到 EOF。
-  if (managedGateway || gatewayRetirement.child) {
-    console.log('[main] Stopping managed gateway before quit...');
-    void stopManagedGateway('app-quit').catch((error: unknown) => {
-      console.error('[gateway] shutdown stop failed:', error);
-    });
-  }
-});
+  // Fall back if a native window ignores the replayed quit.
+  const timeout = setTimeout(() => app.exit(0), 1_000);
+  app.once('will-quit', () => clearTimeout(timeout));
+  app.quit();
+}
+
+app.on('before-quit', (event) => desktopShutdown.beforeQuit(event));
 
 // 打包流水线的最小启动探针：真正加载 Electron 与主进程并等到 ready，
 // 但不创建窗口、启动 Gateway 或碰单实例锁。它能拦住仅靠 codesign --verify

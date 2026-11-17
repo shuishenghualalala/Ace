@@ -1,30 +1,14 @@
 /**
  * Electron 主进程 – 托盘「卸载 Crew」完整流程。
  *
- * 流程：
- *   1. confirmUninstall()        → 弹窗确认是否卸载
- *   2. askKeepUserData()         → 弹窗确认是否保留用户数据
- *   3. stopManagedGateway()      → 停止 gateway 子进程，释放文件句柄
- *   4. 收集 postQuitDirs（~/.Crew + userData），交给延迟脚本 app 退出后删
- *   5. launchPlatformUninstaller() → Windows: Inno Setup unins000.exe /SILENT
- *                                      Linux:  pkexec apt remove -y crew-desktop
- *   6. app.quit() → 延迟脚本在 app 退出后 rm -rf postQuitDirs
- *
- * 关键设计决策：
- *   • 不弹「正在准备卸载」loading 窗口——早期版本加过，但 loading 窗口偶现不消失
- *     （app.quit 被卡时进度窗口残留）。改回无 loading 流程：确认后直接走停 gateway
- *     → 启动卸载器 → app.quit，主窗口短暂静止后随 app 退出。
- *   • 用户数据目录（~/.Crew + userData）不在主流程同步删除——同步 fs.rmSync
- *     删大目录会阻塞主线程数秒。改由延迟脚本在 app 退出后删除，此时所有文件句柄
- *     已释放，删得干净且不卡 UI。
- *   • 用户数据删除在 Electron 侧完成（而非 Inno Setup [UninstallDelete]），
- *     因为 Inno Setup 静态配置无法感知用户在弹窗中的「保留 / 删除」选择。
+ * 用户确认后由主进程排空资源，再启动平台卸载程序。按用户选择保留或清理数据，
+ * 清理由退出后执行的脚本负责。
  */
 import { app, BrowserWindow, dialog, nativeImage, type NativeImage } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { spawn } from 'child_process';
+import { launchDetachedInstaller } from './update/installer-handoff';
 
 // ─── 可注入的依赖接口 ────────────────────────────────────────────────────────
 // 通过 setUninstallDeps() 从 index.ts 注入，解耦对主模块内部状态的直接依赖。
@@ -32,14 +16,10 @@ import { spawn } from 'child_process';
 export interface UninstallDeps {
   /** 获取主窗口引用（用于弹窗父窗口） */
   getMainWindow(): BrowserWindow | null;
-  /** 停止 Electron 管理的 gateway 子进程并等待退出 */
-  stopManagedGateway(timeoutMs?: number): Promise<void>;
-  /** 标记正在退出（防止 close 事件拦截） */
-  setQuittingFlag(): void;
-  /** 重置退出标记（卸载失败回退时恢复，允许用户继续操作主窗口） */
-  resetQuittingFlag?(): void;
-  /** 停止后端健康检查定时器（防止杀 gateway 后触发断连遮罩） */
-  stopBackendHealthMonitor(): void;
+  /** 取得卸载交接并等待资源关闭；已有退出流程时返回 null。 */
+  beginHandoff(): Promise<void> | null;
+  /** 卸载器已启动时退出，否则恢复桌面资源。 */
+  finishHandoff(launched: boolean): void;
   /** 向渲染进程发送指令隐藏后端断连遮罩（卸载期间不应弹出） */
   suppressBackendOverlay(): void;
   /** Remove Windows sandbox accounts/WFP before the application binary disappears. */
@@ -124,7 +104,7 @@ function askKeepUserData(win: BrowserWindow): boolean {
 // ─── 错误弹窗 ────────────────────────────────────────────────────────────────
 
 function showUninstallError(win: BrowserWindow | null, title: string, message: string, detail: string): void {
-  if (!win) return;
+  if (!win || win.isDestroyed()) return;
   dialog.showMessageBoxSync(win, {
     type: 'error',
     buttons: ['确定'],
@@ -136,7 +116,7 @@ function showUninstallError(win: BrowserWindow | null, title: string, message: s
 }
 
 function showUnsupportedPlatform(win: BrowserWindow | null): void {
-  if (!win) return;
+  if (!win || win.isDestroyed()) return;
   dialog.showMessageBoxSync(win, {
     type: 'error',
     buttons: ['确定'],
@@ -150,7 +130,7 @@ function showUnsupportedPlatform(win: BrowserWindow | null): void {
 // ─── 用户数据清理 ────────────────────────────────────────────────────────────
 //
 // 用户数据目录（~/.Crew + userData）的删除统一交给平台延迟卸载脚本在
-// app 退出后执行（见 handleUninstall 第 6 步收集 postQuitDirs）。不在主流程同步删除：
+// app 退出后执行。不在主流程同步删除：
 //   • userData 被 Electron 主进程持有句柄，运行时删不掉
 //   • ~/.Crew 含 db/缓存，同步 fs.rmSync 阻塞主线程导致 UI 卡死。
 // app 退出后所有句柄释放，延迟脚本 rm -rf 删得干净且不卡 UI。
@@ -160,33 +140,24 @@ function showUnsupportedPlatform(win: BrowserWindow | null): void {
 /**
  * 启动平台特定的卸载程序。
  *
- * Windows: Inno Setup 生成的 unins000.exe（位于安装根目录）。
- *          process.execPath → .../Crew/crew-desktop/crew-desktop.exe
- *          unins000.exe 在 .../Crew/
- *
- * Linux:   通过临时 shell 脚本延迟执行 pkexec apt remove -y crew-desktop。
- *          pkexec 会弹出密码输入框。脚本在卸载完成后自删除。
- *
-/**
- * 启动平台特定的卸载程序。
- *
  * @param postQuitDirs Electron 退出后需删除的目录（如 userData）。
  *   这些目录在 app 运行时被 Electron 持有句柄，无法在 cleanupUserData 中安全删除，
  *   故交给延迟脚本在 app 完全退出后清理。
  * @returns true 表示卸载器已成功启动，false 表示启动失败。
  */
-function launchPlatformUninstaller(win: BrowserWindow | null, postQuitDirs: string[] = []): boolean {
+async function launchPlatformUninstaller(win: BrowserWindow, postQuitDirs: string[]): Promise<boolean> {
   if (process.platform === 'win32') {
     return launchWindowsUninstaller(win, postQuitDirs);
   }
   if (process.platform === 'linux') {
-    launchLinuxUninstaller(postQuitDirs);
+    await launchLinuxUninstaller(postQuitDirs);
     return true;
   }
   if (process.platform === 'darwin') {
-    launchMacOSUninstaller(postQuitDirs);
+    await launchMacOSUninstaller(postQuitDirs);
     return true;
   }
+  showUnsupportedPlatform(win);
   return false;
 }
 
@@ -198,7 +169,7 @@ function launchPlatformUninstaller(win: BrowserWindow | null, postQuitDirs: stri
  * _internal/runtimes 等目录残留。改用延迟脚本：等 Electron 完全退出后再执行
  * 卸载，确保所有文件句柄已释放。
  */
-function launchWindowsUninstaller(win: BrowserWindow | null, postQuitDirs: string[] = []): boolean {
+async function launchWindowsUninstaller(win: BrowserWindow, postQuitDirs: string[]): Promise<boolean> {
   const appDir = path.dirname(path.dirname(process.execPath));
   const uninstaller = path.join(appDir, 'unins000.exe');
 
@@ -231,22 +202,9 @@ function launchWindowsUninstaller(win: BrowserWindow | null, postQuitDirs: strin
   lines.push(`del "%~f0"`);
   const scriptContent = lines.join('\r\n');
 
-  try {
-    fs.writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
-    console.log('[uninstall] 启动延迟卸载脚本:', scriptPath);
-    spawn('cmd.exe', ['/c', scriptPath], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-    return true;
-  } catch (err) {
-    console.error('[uninstall] 创建延迟卸载脚本失败:', err);
-    // 兜底：直接启动卸载器（旧行为，可能残留文件但总比无法卸载好）
-    console.log('[uninstall] 兜底：直接启动 Inno Setup 卸载器');
-    spawn(uninstaller, ['/SILENT'], { detached: true, stdio: 'ignore' });
-    return true;
-  }
+  fs.writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
+  await launchDetachedInstaller('cmd.exe', ['/c', scriptPath], { windowsHide: true });
+  return true;
 }
 
 /**
@@ -254,7 +212,7 @@ function launchWindowsUninstaller(win: BrowserWindow | null, postQuitDirs: strin
  * 延迟是为了确保 Electron 完全退出，避免 dpkg 锁冲突。
  * 脚本最后自删除（rm -f）。
  */
-function launchLinuxUninstaller(postQuitDirs: string[] = []): void {
+async function launchLinuxUninstaller(postQuitDirs: string[]): Promise<void> {
   const tmpScript = path.join(os.tmpdir(), `crew-uninstall-${Date.now()}.sh`);
   const lines = [
     '#!/bin/sh',
@@ -272,7 +230,7 @@ function launchLinuxUninstaller(postQuitDirs: string[] = []): void {
   const scriptContent = lines.join('\n');
 
   fs.writeFileSync(tmpScript, scriptContent, { mode: 0o755 });
-  spawn(tmpScript, [], { detached: true, stdio: 'ignore' });
+  await launchDetachedInstaller(tmpScript, []);
   console.log('[uninstall] Linux 卸载脚本已生成:', tmpScript);
 }
 
@@ -281,7 +239,7 @@ function launchLinuxUninstaller(postQuitDirs: string[] = []): void {
  * macOS 无系统级卸载机制，DMG 安装的应用只需删除 .app 目录即可。
  * 脚本最后自删除。
  */
-function launchMacOSUninstaller(postQuitDirs: string[] = []): void {
+async function launchMacOSUninstaller(postQuitDirs: string[]): Promise<void> {
   // macOS .app 结构: Crew.app/Contents/MacOS/crew-desktop (process.execPath)
   // appDir 指向 .app 根目录
   const appDir = path.dirname(path.dirname(app.getPath('exe')));
@@ -301,7 +259,7 @@ function launchMacOSUninstaller(postQuitDirs: string[] = []): void {
   const scriptContent = lines.join('\n');
 
   fs.writeFileSync(tmpScript, scriptContent, { mode: 0o755 });
-  spawn('bash', [tmpScript], { detached: true, stdio: 'ignore' });
+  await launchDetachedInstaller('bash', [tmpScript]);
   console.log('[uninstall] macOS 卸载脚本已生成:', tmpScript);
 }
 
@@ -313,87 +271,61 @@ function launchMacOSUninstaller(postQuitDirs: string[] = []): void {
  * 前置条件：setUninstallDeps() 已被调用。
  */
 export async function handleUninstall(): Promise<void> {
-  if (!deps) {
+  const shutdown = deps;
+  if (!shutdown) {
     console.error('[uninstall] 依赖未注入，请先调用 setUninstallDeps()');
     return;
   }
 
-  const win = deps.getMainWindow();
-  if (!win) {
+  const win = shutdown.getMainWindow();
+  if (!win || win.isDestroyed()) {
     console.error('[uninstall] 主窗口不存在，无法执行卸载');
     return;
   }
 
-  // ── 第 1 步：确认卸载 ─────────────────────────────────────────────────
   if (!confirmUninstall(win)) return;
-
-  // ── 第 2 步：确认是否保留用户数据 ─────────────────────────────────────
   const keepUserData = askKeepUserData(win);
   console.log(`[uninstall] 用户选择: ${keepUserData ? '保留用户数据' : '删除所有数据'}`);
 
-  // ── 标记退出，防止 close 事件拦截 ─────────────────────────────────────
-  deps.setQuittingFlag();
-
-  // ── 停止健康检查 + 隐藏断连遮罩（必须在杀 gateway 之前执行）─────────
-  // 健康检查每 3s 轮询 /api/health，一旦 gateway 被杀就会推送
-  // backend:status { connected: false }，导致渲染进程弹出
-  // "智能体运行环境准备中，请稍等" 全局遮罩，阻断卸载流程。
-  deps.stopBackendHealthMonitor();
-  deps.suppressBackendOverlay();
-
-  // ── 第 3 步：停止 gateway 子进程，释放 ~/.Crew 文件句柄 ────────
-  console.log('[uninstall] 停止 managed gateway...');
+  const preparation = shutdown.beginHandoff();
+  if (!preparation) return;
+  let launched = false;
   try {
-    await deps.stopManagedGateway();
-  } catch (error) {
-    console.error('[uninstall] 停止 managed gateway 失败:', error);
-    deps.resetQuittingFlag?.();
-    showUninstallError(win, '后台进程未退出', '未继续卸载 Crew', '请关闭应用后再重试。');
-    return;
-  }
-  // Other Gateway processes are independent of this Desktop, even when they
-  // use the same Python module name. Do not enumerate or terminate them.
+    // Drain rejection is still handled if the overlay notification fails.
+    try {
+      shutdown.suppressBackendOverlay();
+    } catch (error) {
+      console.warn('[uninstall] 无法隐藏后端遮罩:', error);
+    }
+    try {
+      await preparation;
+    } catch (error) {
+      console.error('[uninstall] 关闭后台资源失败:', error);
+      showUninstallError(win, '后台资源未关闭', '未继续卸载 Crew', '请关闭应用后再重试。');
+      return;
+    }
 
-  if (deps.cleanupSecurity && !await deps.cleanupSecurity()) {
+    if (shutdown.cleanupSecurity && !await shutdown.cleanupSecurity()) {
+      showUninstallError(
+        win,
+        '安全组件清理失败',
+        '未继续卸载 Crew',
+        'Windows UAC 被拒绝或安全组件清理失败。请重新启动应用后再试，避免遗留技术账号和网络规则。',
+      );
+      return;
+    }
+
+    const postQuitDirs = keepUserData ? [] : [getCrewHome(), app.getPath('userData')];
+    launched = await launchPlatformUninstaller(win, postQuitDirs);
+  } catch (error) {
+    console.error('[uninstall] 卸载交接失败:', error);
     showUninstallError(
       win,
-      '安全组件清理失败',
+      '卸载失败',
       '未继续卸载 Crew',
-      'Windows UAC 被拒绝或安全组件清理失败。请重新启动应用后再试，避免遗留技术账号和网络规则。',
+      error instanceof Error ? error.message : String(error),
     );
-    deps.resetQuittingFlag?.();
-    return;
+  } finally {
+    shutdown.finishHandoff(launched);
   }
-
-  // ── 第 6 步：按用户选择清理用户数据 ───────────────────────────────────
-  // 用户数据目录（~/.Crew + userData）都交给延迟脚本在 app 退出后删除：
-  //   • userData 被 Electron 主进程持有句柄，运行时删不掉
-  //   • ~/.Crew 虽 gateway 已停，但同步 fs.rmSync 删大目录（含 db/缓存）会
-  //     阻塞主线程数秒，导致进度窗口动画卡死、app.quit() 迟迟不执行（用户感知"卡住"）。
-  // 改为 app 退出后由延迟脚本 rm -rf，此时所有句柄释放，删得干净且不卡 UI。
-  const postQuitDirs: string[] = [];
-  if (!keepUserData) {
-    postQuitDirs.push(getCrewHome());
-    postQuitDirs.push(app.getPath('userData'));
-  } else {
-    console.log('[uninstall] 用户选择保留数据，跳过清理');
-  }
-
-  // ── 第 7 步：启动平台卸载器 ──────────────────────────────────────────
-  const launched = launchPlatformUninstaller(win, postQuitDirs);
-  if (!launched) {
-    // 卸载器启动失败：恢复主窗口、重置退出标记，让用户可重试
-    try { win.show(); } catch { /* ignore */ }
-    deps.resetQuittingFlag?.();
-    if (process.platform !== 'win32' && process.platform !== 'linux' && process.platform !== 'darwin') {
-      showUnsupportedPlatform(win);
-    }
-    // Windows 场景下 launchWindowsUninstaller 已弹出错误提示
-    // 不退出应用，让用户手动通过系统卸载
-    return;
-  }
-
-  // ── 第 8 步：退出 Electron ───────────────────────────────────────────
-  console.log('[uninstall] 卸载流程完成，退出 Electron');
-  app.quit();
 }

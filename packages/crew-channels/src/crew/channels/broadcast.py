@@ -18,6 +18,7 @@ dispatch 不改写 user_id）可显式传入鉴权账号，语义等价。
 from __future__ import annotations
 
 import time
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
@@ -55,32 +56,33 @@ async def _broadcast_stream(
     first_push_logged = False
     if owner is not None:
         connections.clear_buffer(envelope.session_id, owner_account_id=owner)
-    async for chunk in crew.dispatch(envelope):
-        if not first_chunk_seen:
-            first_chunk_seen = True
-            log.info(
-                "[PERF] gateway_first_chunk request_id=%s session=%s elapsed=%.3fs kind=%s",
-                envelope.request_id,
-                envelope.session_id,
-                time.perf_counter() - stream_started_at,
-                chunk.kind,
-            )
-        if owner is None:
-            owner = normalize_owner_account_id(envelope.user_id)
-            connections.clear_buffer(envelope.session_id, owner_account_id=owner)
-        payload = format_outbound_payload(chunk, session_id=envelope.session_id, context=render_context)
-        if payload is not None:
-            await connections.push_payload(envelope.session_id, payload, owner_account_id=owner)
-            if not first_push_logged:
-                first_push_logged = True
+    async with aclosing(crew.dispatch(envelope)) as stream:
+        async for chunk in stream:
+            if not first_chunk_seen:
+                first_chunk_seen = True
                 log.info(
-                    "[PERF] gateway_first_push request_id=%s session=%s elapsed=%.3fs kind=%s",
+                    "[PERF] gateway_first_chunk request_id=%s session=%s elapsed=%.3fs kind=%s",
                     envelope.request_id,
                     envelope.session_id,
                     time.perf_counter() - stream_started_at,
-                    payload.get("kind"),
+                    chunk.kind,
                 )
-        yield chunk
+            if owner is None:
+                owner = normalize_owner_account_id(envelope.user_id)
+                connections.clear_buffer(envelope.session_id, owner_account_id=owner)
+            payload = format_outbound_payload(chunk, session_id=envelope.session_id, context=render_context)
+            if payload is not None:
+                await connections.push_payload(envelope.session_id, payload, owner_account_id=owner)
+                if not first_push_logged:
+                    first_push_logged = True
+                    log.info(
+                        "[PERF] gateway_first_push request_id=%s session=%s elapsed=%.3fs kind=%s",
+                        envelope.request_id,
+                        envelope.session_id,
+                        time.perf_counter() - stream_started_at,
+                        payload.get("kind"),
+                    )
+            yield chunk
 
 
 async def stream_and_broadcast(

@@ -22,6 +22,7 @@ import asyncio
 import enum
 import json
 import time
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -37,6 +38,7 @@ from crew.state.logging import get_logger
 log = get_logger("gateway.dispatcher")
 SessionKey = tuple[str, str]
 _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS = 1.0
+_SHUTDOWN_REASON = "已停止：Gateway 正在关闭"
 
 
 def _schedule_runtime_activity_touch(
@@ -116,6 +118,9 @@ class SessionDispatcher:
         self._owner_epochs: dict[str, int] = {}
         self._blocked_owners: set[str] = set()
         self._closed = False
+        self._shutdown_drain: asyncio.Task[None] | None = None
+        self._settling_tasks: set[asyncio.Task] = set()
+        self.shutdown_timed_out = False
         # 已触发过 session:start 的会话（每个会话生命周期内只发一次「新会话开始」）。
         self._sessions_started: set[SessionKey] = set()
         # session:end 时回收本会话的 start 标记与 task 集合，避免：
@@ -289,24 +294,42 @@ class SessionDispatcher:
             if not task.done()
         }
 
-    async def shutdown(self, *, timeout: float = 10.0) -> None:
-        """Stop new admissions, cancel every admitted turn, and wait for cleanup."""
+    def begin_shutdown(self, *, timeout: float = 10.0) -> asyncio.Task[None]:
+        """Fence admission immediately and start a single drain."""
+        if self._shutdown_drain is not None:
+            return self._shutdown_drain
         self._closed = True
         # hook_registry 是全局单例：实例销毁前必须注销，否则跨实例累积，
         # 之后每次 session:end 都会扇出到所有已失效 dispatcher
         hook_registry.unregister("session:end", self._on_session_end)
         tasks = self.active_tasks_snapshot()
-        for task in tasks:
-            task.cancel()
-        if not tasks:
-            return
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=max(0.1, float(timeout)),
-            )
-        except asyncio.TimeoutError:
-            log.warning("Dispatcher shutdown 等待任务退出超时 count=%d", len(tasks))
+        for key, owned in self._tasks.items():
+            if tasks.intersection(owned):
+                self._stop_reasons.setdefault(key, _SHUTDOWN_REASON)
+        for task in tasks - self._settling_tasks:
+            if not task.cancelling():
+                task.cancel()
+        self._shutdown_drain = asyncio.create_task(
+            self._wait_for_shutdown(tasks, timeout), name="gateway-dispatcher-drain",
+        )
+        return self._shutdown_drain
+
+    async def shutdown(self, *, timeout: float = 10.0) -> None:
+        """Wait for the shared drain without cancelling it or its writers."""
+        await asyncio.shield(self.begin_shutdown(timeout=timeout))
+
+    async def _wait_for_shutdown(self, tasks: set[asyncio.Task], timeout: float) -> None:
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=max(0, float(timeout)))
+            if pending:
+                self.shutdown_timed_out = True
+                log.warning("Dispatcher shutdown 等待任务退出超时 count=%d", len(pending))
+
+    @staticmethod
+    def _shutdown_error(request_id: str) -> ResponseChunk:
+        return ResponseChunk.error(
+            request_id, _SHUTDOWN_REASON, code="gateway_shutting_down", retryable=True,
+        )
 
     def _active_children_snapshot(
         self,
@@ -528,15 +551,16 @@ class SessionDispatcher:
         """Run one turn under the causally verified Owner logging context."""
         token = current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
         try:
-            async for chunk in self._run_owned(envelope):
-                yield chunk
+            async with aclosing(self._run_owned(envelope)) as stream:
+                async for chunk in stream:
+                    yield chunk
         finally:
             current_owner_account_id.reset(token)
 
     async def _run_owned(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """串行执行一轮对话；忙时根据策略处理。透传内核产出的 ResponseChunk。"""
         if self._closed:
-            log.info("Dispatcher 已关闭，拒绝新调度 session=%s", envelope.session_id)
+            yield self._shutdown_error(envelope.request_id)
             return
         sid = envelope.session_id
         rid = envelope.request_id
@@ -548,8 +572,6 @@ class SessionDispatcher:
         key = self._key(sid, owner)
         lock = self._lock_for(key)
         current_task = asyncio.current_task()
-        if current_task is not None:
-            self._tasks.setdefault(key, set()).add(current_task)
 
         def _runtime_termination_intent(task_id: str) -> tuple[str, str] | None:
             if not task_id or self._task_runtime is None:
@@ -583,16 +605,11 @@ class SessionDispatcher:
         busy = lock.locked()
         effective_mode = self._busy_mode
         demoted_for_children = False
+        queued_status = ""
         if busy and effective_mode == BusyMode.STEER:
             steered = self.steer(sid, envelope.query, owner_account_id=owner)
             if steered:
                 yield ResponseChunk.status_event(rid, "补充指令已注入当前回复")
-                if current_task is not None:
-                    tasks = self._tasks.get(key)
-                    if tasks is not None:
-                        tasks.discard(current_task)
-                        if not tasks:
-                            self._tasks.pop(key, None)
                 self._cleanup_if_idle(key)
                 return
             # steer 失败，降级为 queue
@@ -605,7 +622,7 @@ class SessionDispatcher:
 
         if busy and effective_mode == BusyMode.INTERRUPT:
             self.interrupt(sid, "被新消息中断", owner_account_id=owner)
-            yield ResponseChunk.status_event(rid, "已请求中断当前回复，新消息将在当前回复停止后开始执行")
+            queued_status = "已请求中断当前回复，新消息将在当前回复停止后开始执行"
 
         # ---- 排队计数 ----
         if busy:
@@ -622,11 +639,11 @@ class SessionDispatcher:
             self._waiting_request_ids.setdefault(key, []).append(rid)
             if effective_mode == BusyMode.QUEUE:
                 if demoted_for_children:
-                    yield ResponseChunk.status_event(rid, f"子 agent 正在运行，已排队（前面 {prior + 1} 条）")
+                    queued_status = f"子 agent 正在运行，已排队（前面 {prior + 1} 条）"
                 else:
-                    yield ResponseChunk.status_event(rid, f"排队中（前面 {prior + 1} 条）")
+                    queued_status = f"排队中（前面 {prior + 1} 条）"
 
-        dequeued = False
+        dequeued = not busy
 
         def _dequeue_once() -> None:
             nonlocal dequeued
@@ -634,8 +651,8 @@ class SessionDispatcher:
                 dequeued = True
                 self._waiting[key] = max(0, self._waiting.get(key, 1) - 1)
                 queued_ids = self._waiting_request_ids.get(key)
-                if queued_ids:
-                    queued_ids.pop(0)
+                if queued_ids and rid in queued_ids:
+                    queued_ids.remove(rid)
                     if not queued_ids:
                         self._waiting_request_ids.pop(key, None)
 
@@ -648,10 +665,16 @@ class SessionDispatcher:
         runtime_activity_interval = _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS
         runtime_activity_touch: Callable[[dict[str, Any] | None], None] | None = None
 
+        if current_task is not None:
+            self._tasks.setdefault(key, set()).add(current_task)
         try:
             try:
+                if queued_status:
+                    yield ResponseChunk.status_event(rid, queued_status)
                 async with lock:
                     _dequeue_once()
+                    if self._closed:
+                        raise asyncio.CancelledError
                     # 出队即视为已受理：等待全局并发槽是内部调度细节，对外 live 应为
                     # running 而非 queued，否则「当前消息等槽」会被误显示为排队。
                     self._running.add(key)
@@ -660,6 +683,9 @@ class SessionDispatcher:
                     global_slot = False
                     try:
                         global_slot = await self._acquire_global_slot(key)
+                        if self._closed:
+                            self._release_global_slot(key, global_slot)
+                            raise asyncio.CancelledError
                     except asyncio.CancelledError:
                         # 等槽期间被取消：回滚已受理标记，行为与「进入 running 前取消」一致。
                         self._running_counts.pop(key, None)
@@ -668,6 +694,8 @@ class SessionDispatcher:
                         raise
                     if current_task is not None:
                         self._running_task[key] = current_task
+                        # Finish preparing durable state before interrupting the turn.
+                        self._settling_tasks.add(current_task)
                     runtime_task_id = ""
                     if self._task_runtime is not None:
                         try:
@@ -825,10 +853,12 @@ class SessionDispatcher:
                     # mid-turn background transition safe: new foreground
                     # messages never share the same Agent/history object.
                     exec_envelope = envelope
+                    sidechain_base_len = 0
                     if sidechain_id:
                         # 回合起点的 load + 两次 save 与会话历史成正比（blob 双写 + 事件
                         # 批次 + busy-retry sleep），异步门面离开事件循环。
                         base_history = await self._store_load(sid, owner)
+                        sidechain_base_len = len(base_history)
                         await self._store_save(
                             sidechain_id,
                             list(base_history),
@@ -869,12 +899,18 @@ class SessionDispatcher:
                             is_stream=envelope.is_stream,
                             attachments=list(envelope.attachments),
                         )
+                    stream = None
                     try:
+                        if self._closed:
+                            raise asyncio.CancelledError
+                        if current_task is not None:
+                            self._settling_tasks.discard(current_task)
                         capture = self.capture_turn_history
                         if not sidechain_id or envelope.mode == "team" or envelope.params.get("internal_task_resume"):
                             capture = None
                         started_at = time.time()
-                        async for chunk in self._inner(exec_envelope):
+                        stream = self._inner(exec_envelope)
+                        async for chunk in stream:
                             if capture is not None and chunk.kind in {"delta", "thinking", "tool", "todo_updated", "file_changes"}:
                                 # The executor has now committed the canonical user row,
                                 # including attachment references. Do not freeze the earlier
@@ -909,6 +945,8 @@ class SessionDispatcher:
                                 final_text = chunk.body.get("text", "")
                             if is_terminal:
                                 deferred_terminal = chunk
+                                if current_task is not None:
+                                    self._settling_tasks.add(current_task)
                             elif self._owner_epochs.get(owner, 0) == owner_epoch:
                                 yield chunk
                     except asyncio.CancelledError:
@@ -917,6 +955,11 @@ class SessionDispatcher:
                         err = intent[1] if intent is not None else self._stop_reasons.get(key, "已停止当前回复")
                         log.info("会话已停止 session=%s", sid)
                         deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
+                    except GeneratorExit:
+                        failed = True
+                        err = self._stop_reasons.get(key, "已停止当前回复")
+                        deferred_terminal = None
+                        raise
                     except ProviderError as exc:
                         failed, err = True, str(exc)
                         log.exception("Provider 异常 session=%s", sid)
@@ -954,6 +997,14 @@ class SessionDispatcher:
                         log.exception("会话执行异常 session=%s", sid)
                         deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, str(exc)), exc)
                     finally:
+                        if current_task is not None:
+                            self._settling_tasks.add(current_task)
+                        close = getattr(stream, "aclose", None)
+                        if callable(close):
+                            try:
+                                await close()
+                            except Exception:
+                                log.exception("收尾时关闭回合流失败 session=%s", sid)
                         activity_live = False
                         if sidechain_id:
                             try:
@@ -974,7 +1025,11 @@ class SessionDispatcher:
                                     backgrounded = bool(
                                         (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("backgrounded")
                                     )
-                                if not backgrounded:
+                                # If shutdown stopped the turn before the sidechain gained
+                                # any messages, keep the user row already committed to sid.
+                                if not backgrounded and (
+                                    err != _SHUTDOWN_REASON or len(sidechain_history) > sidechain_base_len
+                                ):
                                     await self._store_save(
                                         sid,
                                         sidechain_history,
@@ -1005,6 +1060,8 @@ class SessionDispatcher:
                                     intent = _runtime_termination_intent(runtime_task_id)
                                     finish_status = "failed" if failed else "completed"
                                     finish_error = err
+                                    if err == _SHUTDOWN_REASON:
+                                        finish_status = "cancelled"
                                     if intent is not None:
                                         finish_status, finish_error = intent
                                         failed = True
@@ -1104,13 +1161,16 @@ class SessionDispatcher:
                                 "running_depth": remaining,
                             })
             except asyncio.CancelledError:
-                err = self._stop_reasons.get(key, "已停止当前回复")
-                log.info("排队中的会话请求已停止 session=%s", sid)
-                try:
-                    await self._store_set_status(sid, "stopped", owner=owner, error=err)
-                except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，取消分支中不得掩盖已 yield 的停止错误
-                    log.exception("写入会话状态失败 session=%s", sid)
-                deferred_terminal = ResponseChunk.error(rid, err)
+                if self._closed:
+                    deferred_terminal = self._shutdown_error(rid)
+                else:
+                    err = self._stop_reasons.get(key, "已停止当前回复")
+                    log.info("排队中的会话请求已停止 session=%s", sid)
+                    try:
+                        await self._store_set_status(sid, "stopped", owner=owner, error=err)
+                    except Exception:  # noqa: BLE001 — 会话状态写入失败不应覆盖停止错误。
+                        log.exception("写入会话状态失败 session=%s", sid)
+                    deferred_terminal = ResponseChunk.error(rid, err)
         finally:
             activity_live = False
             if rt_id_token is not None or rt_token is not None or rt_activity_token is not None:
@@ -1137,6 +1197,7 @@ class SessionDispatcher:
                         pass
             _dequeue_once()
             if current_task is not None:
+                self._settling_tasks.discard(current_task)
                 tasks = self._tasks.get(key)
                 if tasks is not None:
                     tasks.discard(current_task)

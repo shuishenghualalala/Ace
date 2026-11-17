@@ -16,7 +16,7 @@ import os
 import re
 import time
 from collections import OrderedDict
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, nullcontext, suppress
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Coroutine
 
@@ -2284,8 +2284,9 @@ class CrewApp:
 
             token = current_push_fn.set(_push_for_owner)
         try:
-            async for chunk in self.dispatcher.run(envelope):
-                yield chunk
+            async with aclosing(self.dispatcher.run(envelope)) as stream:
+                async for chunk in stream:
+                    yield chunk
         finally:
             if token is not None:
                 current_push_fn.reset(token)
@@ -3772,8 +3773,10 @@ class CrewApp:
                 agent_config,
                 owner_account_id=envelope.user_id,
             ) as agent:
-                async for chunk in agent.run(envelope):
-                    yield chunk
+                stream = agent.run(envelope)
+                async with (aclosing(stream) if hasattr(stream, "aclose") else nullcontext(stream)):
+                    async for chunk in stream:
+                        yield chunk
 
     async def _structured_path_context(
         self,
@@ -3841,8 +3844,9 @@ class CrewApp:
                         "capture_state": submitted.capture_state,
                     },
                 )
-                async for chunk in self._handle_inner(envelope):
-                    yield chunk
+                async with aclosing(self._handle_inner(envelope)) as stream:
+                    async for chunk in stream:
+                        yield chunk
 
     async def _handle_inner(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """统一入口：完成公共前处理后解析可插拔执行 Driver。"""
@@ -3925,8 +3929,9 @@ class CrewApp:
                     )
                     return
             if self.execution_drivers.get(envelope.mode) is not None:
-                async for chunk in self.execution_drivers.dispatch(envelope):
-                    yield chunk
+                async with aclosing(self.execution_drivers.dispatch(envelope)) as stream:
+                    async for chunk in stream:
+                        yield chunk
                 return
             yield ResponseChunk.error(
                 envelope.request_id,

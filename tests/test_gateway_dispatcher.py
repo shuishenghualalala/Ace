@@ -11,6 +11,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -22,6 +23,7 @@ from crew.core.mocks import InMemorySessionStore
 from crew.core.runctx import current_owner_account_id, LOCAL_OWNER_ACCOUNT_ID
 from crew.core.types import Message
 from crew.channels.channel_manager import ChannelManager
+from crew.channels.broadcast import stream_and_broadcast
 from crew.gateway.connections import ConnectionManager, _MAX_CONSECUTIVE_FAILURES
 from crew.channels.delivery import DeliveryRouter
 from crew.gateway.dispatcher import BusyMode, SessionDispatcher
@@ -197,10 +199,13 @@ async def test_terminal_chunk_waits_until_session_lock_is_released():
 async def test_different_sessions_run_concurrently():
     store = InMemorySessionStore()
     gate = asyncio.Event()
+    both_started = asyncio.Event()
     running: set[str] = set()
 
     async def inner(env):
         running.add(env.session_id)
+        if running == {"a", "b"}:
+            both_started.set()
         yield ResponseChunk.delta(env.request_id, "x")
         await gate.wait()
         yield ResponseChunk.final(env.request_id, "done")
@@ -208,11 +213,11 @@ async def test_different_sessions_run_concurrently():
     disp = SessionDispatcher(inner, store)
     t1 = asyncio.create_task(_drain(disp.run(_env("a"))))
     t2 = asyncio.create_task(_drain(disp.run(_env("b"))))
-    await asyncio.sleep(0.02)
-    assert running == {"a", "b"}  # 不同会话互不阻塞，同时运行
-    gate.set()
-    await t1
-    await t2
+    try:
+        await asyncio.wait_for(both_started.wait(), timeout=5)
+    finally:
+        gate.set()
+        await asyncio.gather(t1, t2)
 
 
 async def test_same_session_id_different_owners_run_concurrently():
@@ -1569,19 +1574,177 @@ async def test_global_slot_released_when_run_cancelled():
 async def test_dispatcher_shutdown_cancels_active_turns_and_rejects_new_admission():
     store = InMemorySessionStore()
     started = asyncio.Event()
+    queued = asyncio.Event()
+    seen = []
 
     async def inner(env):
+        seen.append(env.query)
         started.set()
         await asyncio.Event().wait()
         yield ResponseChunk.final(env.request_id, "unreachable")
 
-    disp = SessionDispatcher(inner, store)
-    active = asyncio.create_task(_drain(disp.run(_env("shutdown-active"))))
+    async def observe_queue(stream):
+        output = []
+        async for chunk in stream:
+            output.append(chunk)
+            if chunk.kind == "status":
+                queued.set()
+        return output
+
+    disp = SessionDispatcher(inner, store, busy_mode=BusyMode.QUEUE)
+    active = asyncio.create_task(_drain(disp.run(_env("shutdown-active", "active"))))
     await started.wait()
+    waiting = asyncio.create_task(observe_queue(disp.run(_env("shutdown-active", "queued"))))
+    await queued.wait()
 
     snapshot = disp.active_tasks_snapshot()
-    assert active in snapshot
+    assert {active, waiting} <= snapshot
     await disp.shutdown()
 
-    assert active.done()
-    assert await _drain(disp.run(_env("shutdown-late"))) == []
+    assert seen == ["active"]
+    assert (await active)[-1].body["message"].startswith("已停止")
+    late = await _drain(disp.run(_env("shutdown-late")))
+    for reply in [(await waiting)[-1], late[0]]:
+        assert reply.is_final and reply.body["code"] == "gateway_shutting_down"
+        assert reply.body["retryable"]
+
+
+async def test_dispatcher_shutdown_wait_is_shared_and_never_recancels_slow_cleanup():
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    finish = asyncio.Event()
+    cancellations = []
+
+    async def inner(env):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellations.append("execution")
+            cleaning.set()
+            try:
+                await finish.wait()
+            except asyncio.CancelledError:
+                cancellations.append("cleanup")
+                await finish.wait()
+            raise
+        yield ResponseChunk.final(env.request_id, "unreachable")
+
+    dispatcher = SessionDispatcher(inner, InMemorySessionStore())
+    active = asyncio.create_task(_drain(dispatcher.run(_env("shutdown-slow"))))
+    await started.wait()
+    try:
+        drain = dispatcher.begin_shutdown(timeout=0.02)
+        assert dispatcher.begin_shutdown() is drain
+        await asyncio.wait_for(cleaning.wait(), timeout=1)
+        await asyncio.wait_for(dispatcher.shutdown(), timeout=1)
+        assert dispatcher.shutdown_timed_out
+        assert cancellations == ["execution"]
+        assert not active.done()
+    finally:
+        finish.set()
+        await active
+
+
+async def test_shutdown_does_not_cancel_turn_already_committing_final_result():
+    store = InMemorySessionStore()
+    committing = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def inner(env):
+        yield ResponseChunk.final(env.request_id, "complete")
+        committing.set()
+        await finish.wait()
+        await store.save_async(
+            env.session_id, [Message.assistant("complete")], owner_account_id=env.user_id,
+        )
+
+    dispatcher = SessionDispatcher(inner, store)
+    active = asyncio.create_task(_drain(dispatcher.run(_env("shutdown-committing"))))
+    await committing.wait()
+    try:
+        await dispatcher.shutdown(timeout=0.02)
+        assert not active.done() and not active.cancelling()
+    finally:
+        finish.set()
+        eventually = await active
+    assert eventually[-1].body["text"] == "complete"
+    assert store.load("shutdown-committing", owner_account_id=OWNER)[-1].content == "complete"
+
+
+async def test_shutdown_during_sidechain_preparation_keeps_parent_input(tmp_path, monkeypatch):
+    store = InMemorySessionStore()
+    preparing = asyncio.Event()
+    finish_save = asyncio.Event()
+    runtime = _DummyTaskRuntime(tmp_path)
+
+    async def inner(env):
+        pytest.fail("shutdown must not start a prepared turn")
+        yield ResponseChunk.final(env.request_id, "unreachable")
+
+    dispatcher = SessionDispatcher(inner, store, task_runtime=runtime)
+    original_save = dispatcher._store_save
+
+    async def park_parent_save(session_id, messages, **kwargs):
+        if session_id == "shutdown-preparing":
+            preparing.set()
+            await finish_save.wait()
+        await original_save(session_id, messages, **kwargs)
+
+    monkeypatch.setattr(dispatcher, "_store_save", park_parent_save)
+    active = asyncio.create_task(_drain(dispatcher.run(_env("shutdown-preparing", "keep me"))))
+    await preparing.wait()
+    try:
+        drain = dispatcher.begin_shutdown()
+        assert not active.cancelling()
+    finally:
+        finish_save.set()
+    await drain
+
+    reply = (await active)[-1]
+    assert reply.is_final and reply.body["message"].startswith("已停止")
+    assert store.load("shutdown-preparing", owner_account_id=OWNER)[-1].content == "keep me"
+    assert {task["status"] for task in runtime._tasks.values()} == {"cancelled"}
+
+
+async def test_shutdown_waits_for_turn_persistence_when_socket_send_is_suspended():
+    from crew.app import CrewApp
+
+    store = InMemorySessionStore()
+    sending = asyncio.Event()
+    persistence_started = asyncio.Event()
+    save = asyncio.Event()
+    persistence_task = None
+
+    async def inner(env):
+        nonlocal persistence_task
+        try:
+            yield ResponseChunk.delta(env.request_id, "partial")
+        finally:
+            persistence_task = asyncio.current_task()
+            persistence_started.set()
+            await save.wait()
+            store.save(env.session_id, [Message.assistant("committed")], owner_account_id=OWNER)
+
+    async def push(session_id, payload, *, owner_account_id):
+        sending.set()
+        await asyncio.Event().wait()
+
+    dispatcher = SessionDispatcher(inner, store)
+    crew = SimpleNamespace(dispatcher=dispatcher, _push_payload_fn=None)
+    crew.dispatch = lambda envelope: CrewApp.dispatch(crew, envelope)
+    connection = SimpleNamespace(clear_buffer=lambda *_args, **_kwargs: None, push_payload=push)
+    envelope = _env("shutdown-stalled-send")
+    active = asyncio.create_task(stream_and_broadcast(crew, connection, envelope, OWNER))
+    await asyncio.wait_for(sending.wait(), timeout=5)
+    try:
+        shutdown = dispatcher.begin_shutdown()
+        await asyncio.wait_for(persistence_started.wait(), timeout=5)
+        assert persistence_task is active
+        assert not shutdown.done()
+    finally:
+        save.set()
+        await asyncio.gather(active, return_exceptions=True)
+    await shutdown
+    assert not dispatcher.shutdown_timed_out
+    assert store.load(envelope.session_id, owner_account_id=OWNER)[-1].content == "committed"
