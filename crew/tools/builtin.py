@@ -33,6 +33,7 @@ from crew.tools.file_utils import (
     read_file_window,
     validate_read_window_args,
     MAX_READ_FILE_BYTES,
+    ReadControl,
 )
 from crew.tools.output_filters import strip_ansi, truncate_output
 from crew.tools.pipeline import DEFAULT_MAX_RESULT_SIZE_CHARS
@@ -55,6 +56,7 @@ FILE_READ_SCHEMA = {
         "UTF-16（含无 BOM）自动转码显示，其他编码需先转为 UTF-8；"
         "单行超过 2000 字符会截断。可把结果的 file_version 作为 patch 或 file_write 的 expected_version。"
         "当有 next_offset 时用它续读。read_complete 表示本次返回了文件全部行。"
+        "重复读取同一版本和行窗时，unchanged 与 source_tool_call_id 表示正文仍在相应的较早工具结果中。"
     ),
     "parameters": {
         "type": "object",
@@ -67,6 +69,10 @@ FILE_READ_SCHEMA = {
             "limit": {
                 "type": "integer",
                 "description": "最多返回行数，默认 2000，上限 2000。尾读时从尾窗口头部截取。",
+            },
+            "force_refresh": {
+                "type": "boolean",
+                "description": "即使之前读过同一版本和行窗，也在本次结果中返回正文。默认 false。",
             },
         },
         "required": ["path"],
@@ -1049,12 +1055,18 @@ async def handle_file_read(
         raise ToolError(binary_reject_message(path))
 
     offset, limit = validate_read_window_args(args.get("offset"), args.get("limit"))
+    force_refresh = args.get("force_refresh") is True
+    control = ReadControl(path)
 
     # 阻塞 I/O（stat/嗅探/流式窗口）丢线程池，避免卡住事件循环（拖垮网关心跳）
     try:
         outcome = await asyncio.to_thread(
             read_file_window, path, offset=offset, limit=limit, max_result_chars=DEFAULT_MAX_RESULT_SIZE_CHARS,
+            force_refresh=force_refresh, control=control,
         )
+    except asyncio.CancelledError:
+        control.cancelled.set()
+        raise
     except ToolError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -1077,6 +1089,8 @@ async def handle_file_read(
         read_complete=outcome.complete,
         next_offset=outcome.last_line + 1 if 0 < outcome.last_line < outcome.total_lines else None,
         editable=outcome.editable,
+        path=outcome.version.path,
+        force_refresh=force_refresh,
     )
 
 

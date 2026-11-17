@@ -13,14 +13,18 @@ import json
 import os
 import secrets
 import stat
-from collections import deque
+from bisect import bisect_right
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
+from itertools import chain
 from pathlib import Path
+from threading import Event, Lock
 from typing import BinaryIO, Callable, Iterable, Iterator, Optional
 
 from crew.core.errors import ToolError
-from crew.core.runctx import current_agent_workdir
+from crew.core.runctx import current_agent_workdir, current_owner_account_id
 
 
 # 统一整读上限：单次整读超过该值直接抛 ValueError，
@@ -820,6 +824,8 @@ def _format_read_result(
     read_complete: bool | None = None,
     next_offset: int | None = None,
     editable: bool | None = None,
+    path: Path | None = None,
+    force_refresh: bool = False,
 ) -> str:
     """把读取结果格式化为 JSON，与 Hermes 返回结构接近。"""
     if shown_lines is None:
@@ -845,6 +851,10 @@ def _format_read_result(
         payload["next_offset"] = next_offset
     if editable is not None:
         payload["editable"] = editable
+    if path is not None:
+        payload["path"] = str(path)
+    if force_refresh:
+        payload["force_refresh"] = True
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -857,10 +867,10 @@ def _format_read_result(
 
 #: 单次读取默认且最大的返回行数（tools.file.read_max_lines 可覆盖默认值）。
 FILE_READ_MAX_LINES = 2000
-#: 单行渲染上限；行缓冲封顶为该值 +1 字符，巨型单行内存恒定。
+#: 单行渲染上限；行缓冲封顶为该值 +2 字符，巨型单行内存恒定。
 FILE_READ_LINE_LENGTH = 2000
-#: 文件达到该大小改走流式读取（不整读进内存）。
-FILE_READ_STREAM_MIN_BYTES = 10 * 1024 * 1024
+#: 大文件使用稀疏行索引定位已验证版本的后续窗口。
+_READ_INDEX_MIN_BYTES = 10 * 1024 * 1024
 #: 头部嗅探的采样字节数。
 TEXT_SAMPLE_BYTES = 8192
 #: UTF-16 自动转码的大小上限，超过要求先 iconv 转换。
@@ -942,6 +952,41 @@ class FileReadOutcome:
         return not self.truncated
 
 
+class _ReadCancelled(Exception):
+    pass
+
+
+@dataclass
+class ReadControl:
+    path: Path
+    cancelled: Event = field(default_factory=Event)
+
+    def checkpoint(self) -> None:
+        if self.cancelled.is_set():
+            raise _ReadCancelled()
+
+
+_ReadStamp = tuple[int, int, int, int, int, int]
+_ReadWindowKey = tuple[int, int, int, int | None]
+
+
+@dataclass
+class _ReadRevision:
+    stamp: _ReadStamp
+    digest: str
+    encoding: str
+    total_lines: int
+    checkpoints: tuple[tuple[int, int], ...]
+    windows: OrderedDict[_ReadWindowKey, FileReadOutcome] = field(default_factory=OrderedDict)
+
+
+_READ_REVISIONS: OrderedDict[tuple[str, Path], _ReadRevision] = OrderedDict()
+_READ_CACHE_LOCK = Lock()
+_READ_MAX_REVISIONS = 24
+_READ_MAX_CACHED_WINDOWS = 4
+_READ_MAX_CACHED_CHARS = 50_000
+
+
 def _sniff_head(head: bytes) -> HeadSniff:
     """按 BOM → 魔数 → 无 BOM UTF-16 启发式 → NUL → 控制字符比例 判定头部。"""
     if head.startswith(b"\xff\xfe\x00\x00") or head.startswith(b"\x00\x00\xfe\xff"):
@@ -1002,11 +1047,11 @@ def binary_reject_message(path: Path) -> str:
 
 
 def _iter_capped_lines(chunks: Iterable[str], cap: int) -> Iterator[str]:
-    """把文本 chunk 流切成行；行缓冲封顶 cap+1 字符，巨型单行内存恒定。
+    """把文本 chunk 流切成行；多保留一个字符区分真正的 CRLF 和截断点处的 CR。
 
     行尾 \\r 剥离（CRLF 显示按 LF）；文件不以换行结尾时最后一段也作为一行。
     """
-    buffer_cap = cap + 1
+    buffer_cap = cap + 2
     buffer = ""
 
     def append(segment: str) -> None:
@@ -1047,16 +1092,22 @@ def build_text_window(
     max_line_length: int = FILE_READ_LINE_LENGTH,
     max_chars: int = 100_000,
     max_json_chars: int | None = None,
+    first_line: int = 1,
+    known_total: int | None = None,
+    finish_count: Callable[[], int] | None = None,
+    checkpoint: Callable[[], None] | None = None,
 ) -> TextWindow:
     """在文本 chunk 流上构建行窗口：offset≥1 为前向读取，offset<0 为尾读。"""
     if offset >= 1:
         return _build_window_forward(
             chunks, offset=offset, limit=limit, max_line_length=max_line_length,
-            max_chars=max_chars, max_json_chars=max_json_chars,
+            max_chars=max_chars, max_json_chars=max_json_chars, first_line=first_line,
+            known_total=known_total, finish_count=finish_count, checkpoint=checkpoint,
         )
     return _build_window_tail(
         chunks, offset=offset, limit=limit, max_line_length=max_line_length,
-        max_chars=max_chars, max_json_chars=max_json_chars,
+        max_chars=max_chars, max_json_chars=max_json_chars, first_line=first_line,
+        checkpoint=checkpoint,
     )
 
 
@@ -1073,32 +1124,43 @@ def _build_window_forward(
     max_line_length: int,
     max_chars: int,
     max_json_chars: int | None,
+    first_line: int,
+    known_total: int | None,
+    finish_count: Callable[[], int] | None,
+    checkpoint: Callable[[], None] | None,
 ) -> TextWindow:
     lines: list[WindowLine] = []
     truncated_line_numbers: list[int] = []
-    total = 0
+    total = first_line - 1
     used = 0
     json_used = 0
     capped = False
+    count_without_building_lines = known_total is not None or finish_count is not None
 
-    def consume(raw: str) -> None:
-        nonlocal total, used, json_used, capped
+    for raw in _iter_capped_lines(chunks, max_line_length):
         total += 1
+        if checkpoint is not None and total % 4096 == 0:
+            checkpoint()
         if capped or total < offset or len(lines) >= limit:
-            return
+            if count_without_building_lines and (capped or len(lines) >= limit):
+                break
+            continue
         text = _clip_line(raw, max_line_length, truncated_line_numbers, total)
         cost = len(text) + bool(lines)
         json_cost = _window_json_cost(total, text, max_json_chars)
         if used + cost > max_chars or (max_json_chars is not None and json_used + json_cost > max_json_chars):
             capped = True
-            return
+            if count_without_building_lines:
+                break
+            continue
         used += cost
         json_used += json_cost
         lines.append(WindowLine(number=total, text=text))
 
-    for line in _iter_capped_lines(chunks, max_line_length):
-        consume(line)
-
+    if known_total is not None:
+        total = known_total
+    elif finish_count is not None:
+        total = finish_count()
     if not capped and offset > total and not (total == 0 and offset == 1):
         raise ToolError(f"offset {offset} 超出文件范围（共 {total} 行）")
     shown = {line.number for line in lines}
@@ -1118,14 +1180,18 @@ def _build_window_tail(
     max_line_length: int,
     max_chars: int,
     max_json_chars: int | None,
+    first_line: int,
+    checkpoint: Callable[[], None] | None,
 ) -> TextWindow:
     tail_count = -offset
     truncated_line_numbers: list[int] = []
-    total = 0
-    window: deque[WindowLine] = deque(maxlen=tail_count)
+    total = first_line - 1
+    window: deque[str] = deque(maxlen=tail_count)
     for line in _iter_capped_lines(chunks, max_line_length):
         total += 1
-        window.append(WindowLine(number=total, text=_clip_line(line, max_line_length, truncated_line_numbers, total)))
+        if checkpoint is not None and total % 4096 == 0:
+            checkpoint()
+        window.append(line)
 
     # limit 从尾窗口头部截取；预算超限时从头部丢行，保留最接近文件末尾的内容。
     entries = list(window)[:limit]
@@ -1133,16 +1199,20 @@ def _build_window_tail(
     used = 0
     json_used = 0
     capped = False
-    for entry in reversed(entries):
-        cost = len(entry.text) + bool(kept)
-        json_cost = _window_json_cost(entry.number, entry.text, max_json_chars)
+    last_number = total - len(window) + len(entries)
+    for index, raw in enumerate(reversed(entries)):
+        number = last_number - index
+        text = _clip_line(raw, max_line_length, truncated_line_numbers, number)
+        cost = len(text) + bool(kept)
+        json_cost = _window_json_cost(number, text, max_json_chars)
         if used + cost > max_chars or (max_json_chars is not None and json_used + json_cost > max_json_chars):
             capped = True
             break
         used += cost
         json_used += json_cost
-        kept.append(entry)
+        kept.append(WindowLine(number=number, text=text))
     kept.reverse()
+    truncated_line_numbers.reverse()
     shown = {entry.number for entry in kept}
     return TextWindow(
         lines=kept,
@@ -1223,26 +1293,72 @@ def _get_max_read_lines() -> int:
     return FILE_READ_MAX_LINES
 
 
-def _stream_utf8_chunks(
-    handle: BinaryIO, *, strip_bom: bool, on_bytes: Callable[[bytes], None],
-) -> Iterator[str]:
-    """从已打开句柄流式产出严格解码的 UTF-8 文本块。"""
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
-    first = True
+def _read_blocks(
+    handle: BinaryIO, control: ReadControl, on_bytes: Callable[[bytes], None],
+) -> Iterator[bytes]:
     while True:
+        control.checkpoint()
         block = handle.read(_READ_CHUNK_BYTES)
+        control.checkpoint()
         if not block:
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                yield tail.removeprefix("\ufeff") if first and strip_bom else tail
             return
         on_bytes(block)
+        yield block
+
+
+@dataclass
+class _Utf8ReadIndex:
+    stride: int
+    checkpoints: list[tuple[int, int]] = field(default_factory=lambda: [(1, 0)])
+    total_lines: int = 0
+
+    def track(self, blocks: Iterable[bytes]) -> Iterator[bytes]:
+        position = 0
+        newlines = 0
+        for block in blocks:
+            newlines += block.count(b"\n")
+            newline = block.rfind(b"\n")
+            if newline >= 0:
+                next_line = position + newline + 1
+                if next_line - self.checkpoints[-1][1] >= self.stride:
+                    self.checkpoints.append((newlines + 1, next_line))
+            position += len(block)
+            self.total_lines = newlines + (bool(block) and newline != len(block) - 1)
+            yield block
+
+    def finish_count(self, decoded: Iterator[str]) -> int:
+        # Validate the full file even when the window has already been assembled.
+        for _ in decoded:
+            pass
+        return self.total_lines
+
+
+def _read_blocks_from(blocks: Iterator[bytes], start: int) -> Iterator[bytes]:
+    # Consume and hash the prefix with the same stream that supplies the window.
+    for block in blocks:
+        if start < len(block):
+            yield block[start:]
+            break
+        start -= len(block)
+    # Keep the shared input open if the caller has collected its page and stops decoding.
+    for block in blocks:
+        yield block
+
+
+def _decode_read_blocks(blocks: Iterable[bytes], encoding: str) -> Iterator[str]:
+    utf16 = encoding.startswith("utf-16")
+    decoder = codecs.getincrementaldecoder(encoding)(errors="replace" if utf16 else "strict")
+    first = True
+    for block in blocks:
         piece = decoder.decode(block)
         if piece:
-            if first and strip_bom:
+            if first and utf16:
                 piece = piece.removeprefix("\ufeff")
             first = False
             yield piece
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        yield tail
 
 
 @contextmanager
@@ -1277,88 +1393,155 @@ def _utf16_label(encoding: str) -> str:
     return "UTF-16 LE" if encoding == "utf-16-le" else "UTF-16 BE"
 
 
+def _read_stamp(info: os.stat_result) -> _ReadStamp:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode
+
+
+def _read_encoding(path: Path, head: bytes, file_size: int) -> str:
+    sniff = _sniff_head(head)
+    if sniff.encoding == "utf-32":
+        raise ToolError(
+            f'"{path}" 是 UTF-32 编码，file_read 不支持；请先用 terminal 执行 iconv 转为 UTF-8 后再读取。'
+        )
+    if sniff.media_kind == "image":
+        raise ToolError(f'"{path}" 是图片文件，file_read 仅读取文本；请改用 vision_analyze 分析图片。')
+    if sniff.media_kind == "video":
+        raise ToolError(f'"{path}" 是视频文件，file_read 仅读取文本。')
+    if sniff.media_kind == "binary":
+        raise ToolError(binary_reject_message(path))
+    if sniff.encoding.startswith("utf-16") and file_size > UTF16_TRANSCODE_MAX_BYTES:
+        raise ToolError(
+            f'"{path}" 是 {_utf16_label(sniff.encoding)} 文本但超过转码上限'
+            f"（{file_size} 字节 > {UTF16_TRANSCODE_MAX_BYTES}）；"
+            "请先用 terminal 执行 iconv 转为 UTF-8 后再读取。"
+        )
+    return sniff.encoding
+
+
 def read_file_window(
     path: Path,
     *,
     offset: int,
     limit: int,
     max_result_chars: int | None = None,
+    force_refresh: bool = False,
+    control: ReadControl | None = None,
 ) -> FileReadOutcome:
-    """file_read 主流程：嗅探 → 编码/流式路由 → 行窗口 → 行号渲染。
-
-    在同一个验证句柄上记录实际读取字节的摘要，流式路径不额外整读。
-    """
+    """Materialize a window on a verified handle, reusing only digest-verified text."""
     max_chars = _get_max_read_chars()
-    # Leave room for JSON metadata and the read window footer.
     max_json_chars = max(1, max_result_chars - 2048) if max_result_chars is not None else None
-    hints: list[str] = []
-    digest = hashlib.sha256()
+    path = _lexical_absolute(path)
+    control = control or ReadControl(path)
+    cache_key = current_owner_account_id.get(), path
+    window_key = offset, limit, max_chars, max_json_chars
+    control.checkpoint()
+
+    def build(
+        chunks: Iterable[str], *, first_line: int = 1, known_total: int | None = None,
+        finish_count: Callable[[], int] | None = None,
+    ) -> TextWindow:
+        return build_text_window(
+            chunks, offset=offset, limit=limit, max_chars=max_chars, max_json_chars=max_json_chars,
+            first_line=first_line, known_total=known_total, finish_count=finish_count, checkpoint=control.checkpoint,
+        )
 
     with open_verified_read(path) as (info, handle):
-        head = handle.read(TEXT_SAMPLE_BYTES)
-        handle.seek(0)
-        sniff = _sniff_head(head)
+        stamp = _read_stamp(info)
+        with _READ_CACHE_LOCK:
+            revision = None if force_refresh else _READ_REVISIONS.get(cache_key)
+            if revision is not None and revision.stamp != stamp:
+                revision = None
+            cached = revision.windows.get(window_key) if revision is not None else None
 
-        if sniff.encoding == "utf-32":
-            raise ToolError(
-                f'"{path}" 是 UTF-32 编码，file_read 不支持；请先用 terminal 执行 iconv 转为 UTF-8 后再读取。'
-            )
-        if sniff.media_kind == "image":
-            raise ToolError(f'"{path}" 是图片文件，file_read 仅读取文本；请改用 vision_analyze 分析图片。')
-        if sniff.media_kind == "video":
-            raise ToolError(f'"{path}" 是视频文件，file_read 仅读取文本。')
-        if sniff.media_kind == "binary":
-            raise ToolError(binary_reject_message(path))
-
-        def build(chunks: Iterable[str]) -> TextWindow:
-            return build_text_window(
-                chunks, offset=offset, limit=limit, max_chars=max_chars,
-                max_json_chars=max_json_chars,
-            )
-
-        if sniff.encoding == "utf-8-sig":
-            hints.append("文件包含 UTF-8 BOM，已自动剥离显示。")
-
-        try:
-            if sniff.encoding in ("utf-16-le", "utf-16-be"):
-                if info.st_size > UTF16_TRANSCODE_MAX_BYTES:
-                    raise ToolError(
-                        f'"{path}" 是 {_utf16_label(sniff.encoding)} 文本但超过转码上限'
-                        f"（{info.st_size} 字节 > {UTF16_TRANSCODE_MAX_BYTES}）；"
-                        "请先用 terminal 执行 iconv 转为 UTF-8 后再读取。"
+        window = None
+        digest = hashlib.sha256()
+        if revision is not None:
+            blocks = _read_blocks(handle, control, digest.update)
+            if cached is None:
+                target = offset if offset > 0 else max(1, revision.total_lines + offset + 1)
+                index = bisect_right(revision.checkpoints, (target, info.st_size)) - 1
+                first_line, start = revision.checkpoints[index]
+                encoding = "utf-8" if start else revision.encoding
+                try:
+                    window = build(
+                        _decode_read_blocks(_read_blocks_from(blocks, start), encoding),
+                        first_line=first_line, known_total=revision.total_lines,
                     )
-                data = handle.read()
-                digest.update(data)
-                text = data.decode(sniff.encoding, errors="replace")
-                window = build([text.removeprefix("\ufeff")])
-                hints.append(
-                    f"检测到 {_utf16_label(sniff.encoding)} 编码，已转码为 UTF-8 显示；"
-                    "编辑/写入要求 UTF-8，请先用 terminal 执行 iconv 转换文件编码。"
-                )
-            elif info.st_size >= FILE_READ_STREAM_MIN_BYTES:
-                window = build(_stream_utf8_chunks(
-                    handle, strip_bom=sniff.encoding == "utf-8-sig", on_bytes=digest.update,
-                ))
-            else:
-                data = handle.read()
-                digest.update(data)
-                text = data.decode("utf-8")
-                window = build([text.removeprefix("\ufeff") if sniff.encoding == "utf-8-sig" else text])
-        except UnicodeDecodeError as exc:
-            raise ToolError(
-                f'"{path}" 不是有效的 UTF-8 文本。'
-                "GBK 等其他编码请先用 terminal 执行 iconv 转换后再读取。"
-            ) from exc
+                except (UnicodeDecodeError, ToolError):
+                    # The old byte offset/window bounds may be invalid for the new bytes.
+                    revision = None
+            for _ in blocks:
+                pass
+            if revision is None or digest.hexdigest() != revision.digest:
+                revision = None
+                cached = None
+                window = None
+                handle.seek(0)
+                digest = hashlib.sha256()
 
-        after = os.fstat(handle.fileno())
-        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-        ):
+        if revision is None:
+            blocks = _read_blocks(handle, control, digest.update)
+            first_block = next(blocks, b"")
+            encoding = _read_encoding(path, first_block[:TEXT_SAMPLE_BYTES], info.st_size)
+            index = None
+            content_blocks: Iterable[bytes] = chain((first_block,), blocks)
+            if encoding.startswith("utf-8") and info.st_size >= _READ_INDEX_MIN_BYTES:
+                index = _Utf8ReadIndex(max(_READ_CHUNK_BYTES, info.st_size // 128))
+                content_blocks = index.track(content_blocks)
+            decoded = _decode_read_blocks(content_blocks, encoding)
+            finish_count = partial(index.finish_count, decoded) if index is not None and offset > 0 else None
+            try:
+                window = build(decoded, finish_count=finish_count)
+            except UnicodeDecodeError as exc:
+                raise ToolError(
+                    f'"{path}" 不是有效的 UTF-8 文本。'
+                    "GBK 等其他编码请先用 terminal 执行 iconv 转换后再读取。"
+                ) from exc
+            checkpoints = tuple(index.checkpoints) if index is not None else ((1, 0),)
+            revision = _ReadRevision(stamp, digest.hexdigest(), encoding, window.total_lines, checkpoints)
+
+        if stamp != _read_stamp(os.fstat(handle.fileno())) or handle.tell() != info.st_size:
             raise FileConflictError("文件在读取期间已变化，请重试")
 
+    if cached is None:
+        assert window is not None
+        outcome = _render_file_read(path, info, revision.encoding, revision.digest, window, offset)
+    else:
+        outcome = cached
+    with _READ_CACHE_LOCK:
+        control.checkpoint()
+        current = _READ_REVISIONS.get(cache_key)
+        if current is not None and current.stamp == stamp and current.digest == revision.digest:
+            revision = current
+        if len(outcome.content) <= _READ_MAX_CACHED_CHARS:
+            revision.windows[window_key] = outcome
+            revision.windows.move_to_end(window_key)
+            if len(revision.windows) > _READ_MAX_CACHED_WINDOWS:
+                revision.windows.popitem(last=False)
+        _READ_REVISIONS[cache_key] = revision
+        _READ_REVISIONS.move_to_end(cache_key)
+        if len(_READ_REVISIONS) > _READ_MAX_REVISIONS:
+            _READ_REVISIONS.popitem(last=False)
+    return outcome
+
+
+def _render_file_read(
+    path: Path,
+    info: os.stat_result,
+    encoding: str,
+    digest: str,
+    window: TextWindow,
+    offset: int,
+) -> FileReadOutcome:
+    hints: list[str] = []
+    editable = encoding.startswith("utf-8")
+    if encoding == "utf-8-sig":
+        hints.append("文件包含 UTF-8 BOM，已自动剥离显示。")
+    elif not editable:
+        hints.append(
+            f"检测到 {_utf16_label(encoding)} 编码，已转码为 UTF-8 显示；"
+            "编辑/写入要求 UTF-8，请先用 terminal 执行 iconv 转换文件编码。"
+        )
     if window.truncated_line_numbers:
         shown_numbers = "、".join(str(n) for n in window.truncated_line_numbers[:20])
         suffix = " 等" if len(window.truncated_line_numbers) > 20 else ""
@@ -1372,14 +1555,14 @@ def read_file_window(
     end = window.lines[-1].number if window.lines else 0
     truncated = start > 1 or end < window.total_lines or window.truncated_by_budget or bool(window.truncated_line_numbers)
     version = FileVersion(
-        path=_lexical_absolute(path),
+        path=path,
         exists=True,
-        device=after.st_dev,
-        inode=after.st_ino,
-        size=after.st_size,
-        mtime_ns=after.st_mtime_ns,
-        digest=digest.hexdigest(),
-        mode=after.st_mode,
+        device=info.st_dev,
+        inode=info.st_ino,
+        size=info.st_size,
+        mtime_ns=info.st_mtime_ns,
+        digest=digest,
+        mode=info.st_mode,
     )
     return FileReadOutcome(
         content=content,
@@ -1392,7 +1575,7 @@ def read_file_window(
         first_line=start,
         last_line=end,
         clipped_lines=tuple(window.truncated_line_numbers),
-        editable=sniff.encoding in ("utf-8", "utf-8-sig"),
+        editable=editable,
     )
 
 

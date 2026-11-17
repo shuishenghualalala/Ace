@@ -163,7 +163,7 @@ async def test_file_read_rejects_oversized_file_before_read(registry, tmp_path, 
 
     target = tmp_path / "big.txt"
     target.write_text("x" * 100, encoding="utf-8")
-    monkeypatch.setattr(file_utils, "FILE_READ_STREAM_MIN_BYTES", 10)
+    monkeypatch.setattr(file_utils, "_READ_CHUNK_BYTES", 16)
 
     result = await registry.execute(
         ToolCall("c1", "file_read", {"path": str(target), "offset": 1, "limit": 1})
@@ -735,10 +735,10 @@ async def test_file_read_utf16_too_large_rejected(registry, tmp_path, monkeypatc
 
 
 async def test_file_read_streaming_route_chunk_safety(registry, tmp_path, monkeypatch):
-    """超过流式阈值的文件走增量解码路径，窗口与整读一致。"""
+    """跨块的增量解码和行窗口能保留原有行号。"""
     from crew.tools import file_utils
 
-    monkeypatch.setattr(file_utils, "FILE_READ_STREAM_MIN_BYTES", 16)
+    monkeypatch.setattr(file_utils, "_READ_CHUNK_BYTES", 17)
     p = tmp_path / "stream.txt"
     p.write_text("".join(f"row-{i}\n" for i in range(1, 101)), encoding="utf-8")
 
@@ -782,6 +782,10 @@ def test_build_text_window_pure_engine():
     # CRLF 在 chunk 边界处剥离
     window = build_text_window(["a\r", "\nb\r\n"], offset=1, limit=10, max_chars=10_000)
     assert [w.text for w in window.lines] == ["a", "b"]
+
+    # A CR at the clipping boundary is part of this long line, not its delimiter.
+    window = build_text_window(["123\r5\n123\r\n"], offset=1, limit=10, max_line_length=3)
+    assert window.truncated_line_numbers == [1]
 
 
 def test_slice_text_window_tail_and_legacy_offsets():

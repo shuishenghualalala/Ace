@@ -21,6 +21,7 @@ from dataclasses import replace
 from typing import Any, AsyncIterator
 
 from crew.agent.executor.base import AgentExecutor, ExecutionContext, FinalRequestView
+from crew.agent.executor.file_read_projection import project_file_reads
 from crew.agent.compact.tokens import estimate_tokens
 from crew.agent.loop import (
     CONTINUATION_PROMPT,
@@ -1361,8 +1362,8 @@ class BuiltinExecutor(AgentExecutor):
                         base_url=_prov_base_url,
                         provider_index=prov_idx,
                     )
-                    sent_view_holder[0] = final_view
-                    messages_arg = list(final_view.messages)
+                    messages_arg = project_file_reads(final_view.messages)
+                    sent_view_holder[0] = final_view.with_messages(messages_arg)
                     tools_arg = list(final_view.tools) if final_view.tools is not None else None
                     max_tokens_arg = final_view.max_output_tokens
                     if max_tokens_arg is None:

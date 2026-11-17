@@ -24,6 +24,8 @@ def safe_json_loads(text: str, default: Any = None) -> Any:
         return default
 
 
+IDEMPOTENT_NO_PROGRESS_WARNING = "idempotent_no_progress_warning"
+
 IDEMPOTENT_TOOL_NAMES = frozenset(
     {
         # —— 内置只读工具 ——
@@ -387,7 +389,7 @@ class ToolCallGuardrailController:
         if self.config.warnings_enabled and repeat_count >= self.config.no_progress_warn_after:
             return ToolGuardrailDecision(
                 action="warn",
-                code="idempotent_no_progress_warning",
+                code=IDEMPOTENT_NO_PROGRESS_WARNING,
                 message=(
                     f"{tool_name} returned the same result {repeat_count} times. "
                     "Use the result already provided or change the query instead of "
@@ -441,6 +443,15 @@ def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> s
     """Append runtime guidance to the current tool result content."""
     if decision.action not in {"warn", "halt"} or not decision.message:
         return result
+    if decision.tool_name == "file_read" and decision.code == IDEMPOTENT_NO_PROGRESS_WARNING:
+        try:
+            payload = json.loads(result)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            if isinstance(payload, dict) and payload.get("success") is True and "guardrail" not in payload:
+                payload["guardrail"] = decision.to_metadata()
+                return json.dumps(payload, ensure_ascii=False)
     label = "Tool loop hard stop" if decision.action == "halt" else "Tool loop warning"
     suffix = (
         f"\n\n[{label}: "
