@@ -21,7 +21,7 @@ Do not call this tool in normal model turns. If the user did not explicitly acti
 ## What Happens in Plan Mode
 
 If plan mode is explicitly activated, you will:
-1. Gather the necessary context using only read-only tools (file_read, glob, grep).
+1. Gather the necessary context using the read-only tools available in the current turn.
 2. Clarify goals, constraints, risks, dependencies, and success criteria with ask_followup_question when needed.
 3. Design a concrete execution approach.
 4. Write your plan to the plan file using file_write (incrementally, after each discovery — do not wait until the end).
@@ -66,6 +66,8 @@ Ensure your plan is complete and unambiguous:
 # --------------------------------------------------------------------------- #
 PLAN_WORKFLOW_INSTRUCTIONS = """Plan mode is active. The user indicated that they do not want you to execute yet — you MUST NOT make any edits (with the exception of the plan file mentioned below), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
 
+Use the current turn's Plan tool list when following this workflow. If a required tool is unavailable, explain the limitation to the user.
+
 ## Core Principle (READ THIS FIRST)
 The ONLY correct way to present a plan for user review is a two-step sequence:
 1. Write the complete plan to {plan_file} using file_write.
@@ -84,7 +86,7 @@ Do NOT read or list {plan_file}, its parent directory, or any generic plans/plan
 
 Follow these steps in order. Do not loop forever on step 1.
 
-1. **Understand** — Quickly explore the codebase with file_read, glob, and grep. Read at most 3-5 key files to form an initial understanding.
+1. **Understand** — Briefly explore the codebase using the available read-only tools. Read at most 3-5 key files to form an initial understanding.
 2. **Design** — Converge on the best approach; consider trade-offs but aim for a single recommendation.
 3. **Review** — Re-read key files to verify understanding, if needed.
 4. **Write Plan** — Use the file_write tool to write the complete plan to {plan_file}. Update it incrementally as you learn, but never skip this step. Do NOT output the plan content in chat text; the user-reviewable plan must live in the plan file.
@@ -132,13 +134,7 @@ Plan mode is read-only. After you finish writing the plan to {plan_file}, call `
 # Sparse reminder：在两次 full reminder 之间注入，避免每轮 loop 重复完整 explore
 # 指令。
 # --------------------------------------------------------------------------- #
-# SPARSE_PLAN_WORKFLOW_INSTRUCTIONS = """Plan mode still active (see full instructions earlier in this conversation). Read-only except the current plan file {plan_file}. Use file_write to create or update the plan file. If you need user input to finish the plan, call ask_followup_question. When the plan is ready, call exit_plan_mode for approval.
-
-# Do NOT continue exploring — finish writing the plan now. Never ask about plan approval via text or ask_followup_question."""
-
-
-SPARSE_PLAN_WORKFLOW_INSTRUCTIONS = """Plan mode still active. You are in the READ-ONLY planning phase. Do NOT execute the task. Do NOT create deliverables. Do NOT edit files except the current plan file {plan_file}. Do NOT run mutating commands. Do NOT present the plan in chat text. The plan must be written to {plan_file} with file_write. When ready, call exit_plan_mode. If you need clarification, call ask_followup_question. Your next action should be file_write, ask_followup_question, or exit_plan_mode.
-"""
+SPARSE_PLAN_WORKFLOW_INSTRUCTIONS = """Plan mode still active. For tasks that require a plan, use the available tools to gather missing evidence or clarify requirements. Write the plan to {plan_file} with file_write, then call exit_plan_mode. Wait for approval before executing. For simple questions that need no execution plan, reply normally. If the current Plan tool scope prevents a required step, explain the limitation to the user."""
 
 
 
@@ -171,7 +167,7 @@ PLAN_EXIT_REMINDER = """Plan mode is no longer active. The read-only and plan-fi
 # 注入正文上限：避免长计划撑爆 context；超限时截断并指向 plan 文件。
 PLAN_APPROVED_CONTENT_MAX_CHARS = 12_000
 
-PLAN_APPROVED_REMINDER = """The user has approved your plan. Plan mode has exited, and you now have full tool permissions.
+PLAN_APPROVED_REMINDER = """The user has approved your plan. Plan mode has exited. Use the normal tools and permission rules for this session.
 
 The approved plan file is at {plan_file}. The authoritative plan content (including any user edits made in the plan board before approval) is:
 

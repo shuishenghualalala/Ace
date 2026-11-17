@@ -82,6 +82,7 @@ class ToolRunner:
         session_id: str = "",
         control: Any = None,
         plan_manager: Any = None,
+        plan_mode_at_start: bool = False,
         tool_execution_timeout_seconds: float = 600.0,
         tool_total_timeout_seconds: float | None = None,
         tool_search_schemas: list[dict[str, Any]] | None = None,
@@ -100,6 +101,7 @@ class ToolRunner:
         self.session_id = session_id
         self.control = control
         self.plan_manager = plan_manager
+        self.plan_mode_at_start = plan_mode_at_start
         # 执行段看门狗（秒）：超时合成 timed-out 输出回灌模型，0=关闭。
         self.tool_execution_timeout_seconds = max(0.0, float(tool_execution_timeout_seconds or 0.0))
         # 总预算覆盖 request/pre/执行/结果/post 全管线。未单独配置时与执行段预算一致，
@@ -921,6 +923,9 @@ class ToolRunner:
             # 0. plugin request middleware：工具参数脱敏/改写必须早于 guardrail、hook 与真实执行。
             resolved_from_bridge = False
             if is_bridge_tool(tc.name):
+                plan_block = self._plan_mode_block(tc)
+                if plan_block is not None:
+                    return ToolResult(tc.id, tc.name, plan_block, is_error=True)
                 bridge_name = tc.name
                 bridge_result = dispatch_bridge_tool(
                     tc,
@@ -1011,10 +1016,10 @@ class ToolRunner:
                 log.info("guardrail 拦截工具 %s：%s", tc.name, decision.code)
                 return ToolResult(tc.id, tc.name, toolguard_synthetic_result(decision), is_error=True)
 
-            # 1.5 plan 模式只读门控：仅放行对计划文件的写（落实 Crew「除计划文件外只读」）
+            # 1.5 Apply the Plan policy to the effective call before asking for permission.
             plan_block = self._plan_mode_block(tc)
             if plan_block is not None:
-                log.info("plan 模式拦截写操作 %s", tc.name)
+                log.info("plan 模式拦截工具 %s", tc.name)
                 return ToolResult(tc.id, tc.name, plan_block, is_error=True)
 
             # 2. plugin 前置拦截
@@ -1053,6 +1058,11 @@ class ToolRunner:
                             result=tc.result,
                             status=tc.status,
                         )
+                    # Permissions or execution middleware can await or rewrite
+                    # arguments. Recheck the call that will actually run.
+                    blocked = self._plan_mode_block(exec_tc)
+                    if blocked is not None:
+                        return ToolResult(exec_tc.id, exec_tc.name, blocked, is_error=True)
                     return await self.registry.execute(exec_tc)
 
                 with span(
@@ -1251,19 +1261,19 @@ class ToolRunner:
         )
 
     def _plan_mode_block(self, tc) -> str | None:
-        """Plan 模式下的写操作门控。返回拦截原因（JSON 字符串），放行则返回 None。
-
-        plan 激活时工具集已收窄到只读白名单（见 SingleAgent._effective_tool_filter），
-        这里再对 file_write 做硬约束：只允许写当前会话的计划文件，其余一律拒绝。
-        """
+        """Apply the same Plan scope before dispatch, including mid-turn entry."""
         from crew.core.runctx import current_owner_account_id
 
         owner = current_owner_account_id.get()
-        if (
-            self.plan_manager is None
-            or not self.plan_manager.is_active(self.session_id, owner_account_id=owner)
-        ):
+        active = self.plan_manager is not None and self.plan_manager.is_active(
+            self.session_id, owner_account_id=owner,
+        )
+        if not self.plan_mode_at_start and not active:
             return None
+        from crew.agent.plan.policy import PLAN_MODE_TOOLS
+
+        if tc.name not in PLAN_MODE_TOOLS:
+            return json.dumps({"error": f"Plan 模式为只读，当前不能使用 {tc.name}。"}, ensure_ascii=False)
         if tc.name != "file_write":
             return None
         from pathlib import Path
@@ -1279,8 +1289,8 @@ class ToolRunner:
         allowed = plan_path(self.session_id, owner_account_id=owner)
         try:
             same = target.resolve() == allowed.resolve()
-        except OSError:
-            same = str(target) == str(allowed)
+        except (OSError, RuntimeError):
+            same = False
         if same:
             return None
         return json.dumps(

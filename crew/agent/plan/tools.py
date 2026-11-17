@@ -12,28 +12,12 @@ from crew.core.runctx import current_owner_account_id, current_session_id
 from crew.tools.registry import Registry, tool_error, tool_result
 
 from .manager import PlanModeManager, plan_display_path, read_plan
+from .policy import PLAN_MODE_TOOLS as PLAN_MODE_TOOLS
 from .prompts import (
     ENTER_PLAN_MODE_PROMPT,
     EXIT_PLAN_MODE_PROMPT,
 )
 from .todo import TODO_SCHEMA, todo_tool
-
-# plan 模式下暴露给模型的只读工具白名单（+ 计划文件可写 + 退出/待办 + 澄清提问）。
-# file_write 由 ToolRunner 的 plan 门控限制为「只能写计划文件」。
-# ask_followup_question 复用全局已注册的交互工具（FollowupWaiter 异步挂起）
-# AskUserQuestion：plan 模式下用它澄清需求，turn 以 ask_followup_question 或 exit_plan_mode 结束。
-# terminal 保留在白名单内，但受 terminal_guard 只读/写门控约束；
-# 后续如需更严格的 permission policy，再整体重构。
-PLAN_MODE_TOOLS = [
-    "file_read",
-    "search_files",
-    "terminal",
-    "file_write",
-    "exit_plan_mode",
-    "todo",
-    "ask_followup_question",
-]
-
 
 ENTER_PLAN_MODE_SCHEMA = {
     "name": "enter_plan_mode",

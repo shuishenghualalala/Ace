@@ -48,6 +48,7 @@ class ExecutionContext:
     control: "TurnControl | None" = None
     # 只控制“已授权工具如何向模型披露”，不改变授权范围。
     tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE
+    plan_mode_at_start: bool = False
     # 回合内关键 durable boundary 的异步写入口；None 表示 CLI/轻量执行器不落盘。
     durable_event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
 

@@ -52,6 +52,7 @@
     <li>在上下文预算内执行分层压缩，保护已加载指令与不可重放的重要结论，并按 path 从磁盘重读最近文件。</li>
     <li>提供子 Agent、外部 Agent、Plan/Todo 和 Skill 索引等运行时能力；具体工具实现仍归所属 Feature。</li>
   </ul>
+  <p>Plan 模式从单一工具声明与当前 Agent 授权的交集构造当轮提示词和模型 schema，直接披露可用的 <code>file_read</code>、<code>glob</code>、<code>grep</code> 等工具。<code>file_write</code> 只允许写当前会话的计划文件，执行前会再次检查实际参数。审批后的新回合恢复会话原有的工具和权限规则。</p>
 
   <h2>2. 功能拆解</h2>
   <table>

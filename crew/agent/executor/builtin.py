@@ -627,6 +627,7 @@ class BuiltinExecutor(AgentExecutor):
             session_id=ctx.session_id,
             control=control,
             plan_manager=self.plan_manager,
+            plan_mode_at_start=ctx.plan_mode_at_start,
             tool_execution_timeout_seconds=self.tool_execution_timeout_seconds,
             tool_search_schemas=tool_search_assembly.original_tool_schemas,
             tool_search_config=tool_search_assembly.config,

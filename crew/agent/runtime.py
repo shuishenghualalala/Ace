@@ -47,9 +47,11 @@ from crew.agent.compact import ContextCompactor
 from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
 from crew.tools.file_utils import MAX_READ_FILE_BYTES, read_verified_bytes
 from crew.tools.policy import ToolDisclosureMode
+from crew.tools.tool_search import function_name
 from crew.agent.loop.control import TurnControl
 from crew.agent.loop.history_repair import repair_orphan_tool_calls
 from crew.agent.plan import get_plan_mode_attachment_messages
+from crew.agent.plan.policy import plan_tool_reminder
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
 from crew.plugins.manager import PluginManager, TerminalOutcome
 from crew.state.logging import get_logger, llm_trace
@@ -566,6 +568,15 @@ class SingleAgent(Agent):
         base = self.tool_filter if self.tool_filter is not None else self.registry.names()
         return [t for t in base if t not in {"enter_plan_mode", "exit_plan_mode"}]
 
+    def _request_tool_schemas(
+        self, session_id: str, owner_account_id: str, *, readonly: bool,
+    ) -> tuple[list[dict[str, Any]], list[str] | None, bool]:
+        plan_active = self.plan_manager is not None and self.plan_manager.is_active(
+            session_id, owner_account_id=owner_account_id,
+        )
+        names = [] if readonly else self._effective_tool_filter(session_id, owner_account_id)
+        return self.registry.list_schemas(names), names, plan_active
+
     def _resolve_agent_workdir(self, envelope: Envelope, *, task_session_id: str = "") -> str:
         """解析本轮 agent 的文件系统工作目录（Layer 3：backing workspace_id）。
 
@@ -681,19 +692,20 @@ class SingleAgent(Agent):
             # 计入打开会话预览，出现 190% 但发送前已降到低水位的假象。
             if self.compactor is not None:
                 view_messages = self.compactor.compact_preview_view(view_messages)
+            tool_schemas, _, plan_active = self._request_tool_schemas(
+                session_id, owner, readonly=envelope.params.get("collaboration_readonly") is True,
+            )
+            if plan_active:
+                guide = plan_tool_reminder(function_name(schema) for schema in tool_schemas)
+                user_reminder = f"{user_reminder}\n\n{guide}" if user_reminder else guide
             if user_reminder:
                 view_messages = [Message.system_reminder(user_reminder), *view_messages]
-
-            effective_tool_filter = [] if envelope.params.get("collaboration_readonly") is True else self._effective_tool_filter(
-                session_id, owner_account_id=owner
-            )
-            tool_schemas = self.registry.list_schemas(effective_tool_filter)
             request_view = self.executor.build_request_view(
                 system_static,
                 view_messages,
                 tool_schemas,
                 session_id,
-                self.tool_disclosure_mode,
+                ToolDisclosureMode.DIRECT if plan_active else self.tool_disclosure_mode,
                 consume_transient=False,
             )
             request_view, _ = await self.executor.finalize_request_view(
@@ -913,9 +925,12 @@ class SingleAgent(Agent):
         # 3. 上下文压缩：仅作用于「发给 LLM 的视图」llm_messages，
         #    不破坏 history（旧的详细历史仍完整持久化）。
         #    工具 schema 提前解析：摘要调用的 KV 前缀复用需要复放 tools 块。
-        effective_tool_filter = ([] if envelope.params.get("collaboration_readonly") is True
-                                 else self._effective_tool_filter(task_sid, owner_account_id=owner))
-        tool_schemas = self.registry.list_schemas(effective_tool_filter)
+        tool_schemas, effective_tool_filter, plan_active = self._request_tool_schemas(
+            task_sid, owner, readonly=envelope.params.get("collaboration_readonly") is True,
+        )
+        if plan_active:
+            guide = plan_tool_reminder(function_name(schema) for schema in tool_schemas)
+            user_reminder = f"{user_reminder}\n\n{guide}" if user_reminder else guide
         llm_messages = list(history)  # 拷贝，避免 executor 追加时污染 canonical
         if self.compactor is not None:
             t = time.perf_counter()
@@ -950,6 +965,8 @@ class SingleAgent(Agent):
         authorized_tool_names = frozenset(
             effective_tool_filter if effective_tool_filter is not None else self.registry.names()
         )
+        if plan_active:
+            authorized_tool_names = frozenset(function_name(schema) for schema in tool_schemas)
         from crew.core.runctx import current_authorized_tool_names
 
         current_authorized_tool_names.set(authorized_tool_names)
@@ -996,7 +1013,8 @@ class SingleAgent(Agent):
                 float(envelope.params.get("_turn_deadline_seconds") or 0.0),
             ),
             control=self.control,
-            tool_disclosure_mode=self.tool_disclosure_mode,
+            tool_disclosure_mode=ToolDisclosureMode.DIRECT if plan_active else self.tool_disclosure_mode,
+            plan_mode_at_start=plan_active,
             durable_event_sink=None if self.lightweight else _durable_event_sink,
         )
         t_exec = time.perf_counter()

@@ -672,6 +672,11 @@ def test_plan_mode_block_file_write(tmp_path, monkeypatch):
         # 只读工具不受门控影响
         tc_read = ToolCall("c3", "file_read", {"path": other})
         assert runner._plan_mode_block(tc_read) is None
+        for name in ("glob", "grep"):
+            assert runner._plan_mode_block(ToolCall("read", name, {})) is None
+        for name in ("patch", "file_delete", "terminal", "tool_search"):
+            result = runner._plan_mode_block(ToolCall("outside-plan", name, {}))
+            assert result is not None and "只读" in result
     finally:
         current_owner_account_id.reset(owner_token)
 
@@ -920,6 +925,74 @@ def _plan_agent(provider, mgr):
     )
 
 
+@pytest.mark.parametrize("restricted", [False, True])
+async def test_model_gets_exact_available_plan_tools_even_with_progressive_search(restricted, monkeypatch):
+    from crew.core.envelope import Envelope
+    from crew.tools.tool_search import ToolSearchConfig
+
+    monkeypatch.setattr(
+        "crew.tools.tool_search.load_config",
+        lambda: ToolSearchConfig(enabled="on", deferred_toolsets=frozenset({"file"})),
+    )
+    advertised: list[set[str]] = []
+
+    class RecordingProvider(FakeProvider):
+        async def chat(self, messages, tools=None, **kwargs):
+            advertised.append({schema["function"]["name"] for schema in tools or []})
+            return await super().chat(messages, tools, **kwargs)
+
+    manager = PlanModeManager()
+    owner, sid = "A:uid-a", "plan-direct-wire"
+    manager.enter(sid, owner_account_id=owner)
+    provider = RecordingProvider(script=[ChatResponse(text="Checked.")])
+    agent = _plan_agent(provider, manager)
+    if restricted:
+        agent.tool_filter = ["file_read", "glob", "grep", "terminal", "patch"]
+        agent.registry.unregister("glob")
+
+    async for _ in agent.run(Envelope.of("Inspect the project layout", session_id=sid, user_id=owner)):
+        pass
+
+    expected = {"file_read", "grep"} if restricted else set(PLAN_MODE_TOOLS) & set(agent.registry.names())
+    assert advertised == [expected]
+    assert "grep" in advertised[0]
+    if not restricted:
+        assert "glob" in advertised[0]
+    reminder, = [message.content for message in provider.calls[0] if "## Plan tools available in this turn" in message.content]
+    lines = reminder.split("## Plan tools available in this turn", 1)[1].splitlines()
+    assert {line.split("`")[1] for line in lines if line.startswith("- `")} == expected
+    assert ("the current tool scope cannot submit it" in reminder) == restricted
+
+
+@pytest.mark.parametrize("exit_before_execution", [False, True])
+async def test_plan_file_scope_is_rechecked_after_execution_middleware(tmp_path, monkeypatch, exit_before_execution):
+    from crew.core.envelope import Envelope
+
+    manager = PlanModeManager()
+    owner, sid = "A:uid-a", "plan-effective-arguments"
+    manager.enter(sid, owner_account_id=owner)
+    plan_file = plan_path(sid, owner_account_id=owner)
+    other = tmp_path / "ordinary.txt"
+    provider = FakeProvider(script=[
+        ChatResponse(tool_calls=[ToolCall("write", "file_write", {"path": str(plan_file), "content": "draft"})]),
+        ChatResponse(text="Done."),
+    ])
+    agent = _plan_agent(provider, manager)
+
+    async def rewrite(tool_name, args, next_call, **_):
+        assert tool_name == "file_write"
+        if exit_before_execution:
+            manager.exit(sid, owner_account_id=owner)
+        return await next_call({**args, "path": str(other)})
+
+    monkeypatch.setattr(agent.plugins, "run_tool_execution_middleware", rewrite)
+    async for _ in agent.run(Envelope.of("Write the plan", session_id=sid, user_id=owner)):
+        pass
+
+    assert not other.exists()
+    assert any(message.role == "tool" and "只能写计划文件" in message.content for message in provider.calls[-1])
+
+
 async def test_plan_mode_chitchat_reply_not_nudged(tmp_path, monkeypatch):
     """plan 模式下对「你好」直接 final，不生成 plan，不进审批。"""
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
@@ -1113,12 +1186,10 @@ def test_plan_attachment_metadata_survives_session_store_roundtrip(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Terminal 保留在 plan 白名单
+# Plan 工具范围
 # --------------------------------------------------------------------------- #
-def test_terminal_kept_in_plan_mode_tools():
-    """plan 模式下 terminal 仍保留在白名单内（受 terminal_guard 约束）。"""
+def test_plan_scope_uses_structured_search_tools():
     from crew.agent.plan.tools import PLAN_MODE_TOOLS
-    assert "terminal" in PLAN_MODE_TOOLS
-    assert "file_read" in PLAN_MODE_TOOLS
-    assert "file_write" in PLAN_MODE_TOOLS
-    assert "exit_plan_mode" in PLAN_MODE_TOOLS
+
+    assert {"file_read", "glob", "grep", "file_write", "exit_plan_mode"} <= set(PLAN_MODE_TOOLS)
+    assert {"search_files", "terminal", "patch", "file_delete"}.isdisjoint(PLAN_MODE_TOOLS)
