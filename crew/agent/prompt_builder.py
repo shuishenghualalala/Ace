@@ -60,6 +60,8 @@ DEFAULT_TOOL_GUIDELINE = (
     "  - 写入文件：用 file_write（不要用 echo > 或 cat <<EOF）\n"
     "  - 删除单个文件：用 file_delete（不要用 rm/Remove-Item）；必须传实际目标路径\n"
     "  - 输出信息：直接输出文本（不要用 echo/printf）\n"
+    "- 修改已有文件前先 file_read。局部修改使用实际读取到的原文做 patch；整文件覆盖需读完同一版本。"
+    "工具返回 stale_file 时，重新读取并根据新内容计算修改。\n"
     "- 可以在同一条消息中并行调用多个无依赖关系的工具，提高效率。\n"
     "- 有依赖关系的工具调用必须按顺序执行。"
 )

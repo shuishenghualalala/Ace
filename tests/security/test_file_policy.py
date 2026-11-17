@@ -136,6 +136,8 @@ async def test_once_external_file_write_approval_is_consumed_only_by_matching_ac
     outside.write_text("initial", encoding="utf-8")
     monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(project))
     with _security_context(project):
+        read = await app.registry.execute(ToolCall("read-before-write", "file_read", {"path": str(outside)}))
+        assert not read.is_error
         # r1 阻塞→批准 ONCE→本次调用消费 grant 并成功。
         first = await _drive(
             app,
@@ -269,6 +271,8 @@ async def test_patch_and_search_use_the_same_evaluator(secured_app, tmp_path):
     external.mkdir()
     (external / "outside.py").write_text("needle\n", encoding="utf-8")
     with _security_context(project):
+        read = await app.registry.execute(ToolCall("read-before-patch", "file_read", {"path": str(source)}))
+        assert not read.is_error
         patched = await app.registry.execute(
             ToolCall(
                 "p1",

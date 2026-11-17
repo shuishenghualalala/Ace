@@ -18,7 +18,6 @@ from typing import Any
 
 from crew.agent.file_mutation import (
     file_mutation,
-    guard_file_edit,
     record_file_observation,
 )
 from crew.core.errors import ToolError
@@ -36,6 +35,7 @@ from crew.tools.file_utils import (
     MAX_READ_FILE_BYTES,
 )
 from crew.tools.output_filters import strip_ansi, truncate_output
+from crew.tools.pipeline import DEFAULT_MAX_RESULT_SIZE_CHARS
 from crew.tools.process_registry import current_shell_kind
 from crew.tools.redact import redact_sensitive_text
 from crew.tools.registry import Registry
@@ -53,7 +53,8 @@ FILE_READ_SCHEMA = {
         "默认返回前 2000 行，用 offset/limit 分页；offset 为负数时从文件末尾读取"
         "（如 -100 读最后 100 行，绝对值不超过 2000）。"
         "UTF-16（含无 BOM）自动转码显示，其他编码需先转为 UTF-8；"
-        "单行超过 2000 字符会中段截断。"
+        "单行超过 2000 字符会截断。可把结果的 file_version 作为 patch 或 file_write 的 expected_version。"
+        "当有 next_offset 时用它续读。read_complete 表示本次返回了文件全部行。"
     ),
     "parameters": {
         "type": "object",
@@ -74,15 +75,21 @@ FILE_READ_SCHEMA = {
 
 FILE_WRITE_SCHEMA = {
     "name": "file_write",
-    "description": "把内容写入文件（覆盖）。会自动创建父目录；保留原文件行尾符和 UTF-8 BOM；写入敏感系统路径会被拒绝。",
+    "description": (
+        "创建 UTF-8 文件、覆盖或追加文本。创建时自动创建父目录。"
+        "修改已有文件前先 file_read。覆盖需要读完同一版本；追加允许局部读取。对已有文本做局部替换请用 patch。"
+        "可以传 file_read 返回的 file_version 作为 expected_version；文件变化后重读再计算修改。"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "目标文件路径"},
             "content": {"type": "string", "description": "要写入的文本内容"},
             "append": {"type": "boolean", "description": "是否追加写入，默认 false"},
+            "expected_version": {"type": "string", "minLength": 1, "description": "file_read 返回的 file_version，用于校验观察到的版本"},
         },
         "required": ["path", "content"],
+        "description": "传入 path 和 content。append 可选，expected_version 取自 file_read 的 file_version。",
     },
 }
 
@@ -1019,12 +1026,17 @@ async def handle_file_read(
 
     # 阻塞 I/O（stat/嗅探/流式窗口）丢线程池，避免卡住事件循环（拖垮网关心跳）
     try:
-        outcome = await asyncio.to_thread(read_file_window, path, offset=offset, limit=limit)
+        outcome = await asyncio.to_thread(
+            read_file_window, path, offset=offset, limit=limit, max_result_chars=DEFAULT_MAX_RESULT_SIZE_CHARS,
+        )
     except ToolError:
         raise
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"读取失败: {exc}") from exc
-    record_file_observation(path, outcome.version)
+    file_version = record_file_observation(
+        path, outcome.version, first_line=outcome.first_line, last_line=outcome.last_line,
+        total_lines=outcome.total_lines, clipped_lines=outcome.clipped_lines, editable=outcome.editable,
+    )
 
     return _format_read_result(
         outcome.content,
@@ -1035,6 +1047,10 @@ async def handle_file_read(
         shown_lines=outcome.shown_lines,
         truncated=outcome.truncated,
         hint=outcome.hint,
+        file_version=file_version,
+        read_complete=outcome.complete,
+        next_offset=outcome.last_line + 1 if 0 < outcome.last_line < outcome.total_lines else None,
+        editable=outcome.editable,
     )
 
 
@@ -1064,7 +1080,8 @@ async def handle_file_write(
             path,
             content,
             append=append,
-            expected=guard_file_edit(path),
+            expected_version=args.get("expected_version"),
+            guard=True,
             max_bytes=MAX_READ_FILE_BYTES,
         )
     except ToolError:
@@ -1077,6 +1094,7 @@ async def handle_file_write(
             "path": str(path),
             "bytes_written": outcome.bytes_written,
             "append": append,
+            "file_version": outcome.file_version,
         },
         ensure_ascii=False,
     )
@@ -1189,6 +1207,7 @@ def register_builtin_tools(
         display_name="写入文件",
         ui_label_template="写入 {path}",
         always_load=True,
+        structured_argument_errors=True,
         search_hint="write file append create save text",
         result_retention=ToolResultRetention.TEMPORARY,
     )

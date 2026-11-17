@@ -33,9 +33,8 @@ import wcmatch.glob as wcglob
 from crew.agent.file_mutation import (
     EditOp,
     file_mutation,
-    guard_file_edit,
 )
-from crew.core.errors import ToolError
+from crew.core.errors import StructuredToolError, ToolError
 from crew.core.interfaces import ToolResultRetention
 from crew.tools.file_utils import (
     _check_sensitive_path,
@@ -800,62 +799,107 @@ PATCH_SCHEMA = {
         "（CRLF 文件写回时按原行尾还原），保留原文件 UTF-8 BOM；"
         "拒绝写入敏感系统路径。old 默认必须唯一匹配；精确失败时自动做模糊兜底"
         "（行尾空白/智能引号/Unicode 破折号归一化），命中方式与得分随结果上报；"
-        "匹配失败与多处歧义都会给出含行号的诊断。可用 edits 一次事务化应用多处编辑。"
+        "匹配失败与多处歧义都会给出含行号的诊断。"
+        "提供一对 old 和 new，或使用 edits 一次事务化应用多处编辑。"
     ),
     "parameters": {
         "type": "object",
+        "description": "提供 path，并同时提供非空 old 与字符串 new（可为空），或提供非空 edits 列表。两种形式不能混用。",
         "properties": {
-            "path": {"type": "string", "description": "要修改的文本文件"},
-            "old": {"type": "string", "description": "要被替换的原文本（与 new 二选一；使用 edits 时不必填）"},
-            "new": {"type": "string", "description": "替换后的新文本（与 old 二选一；使用 edits 时不必填）"},
-            "count": {"type": "integer", "description": "最多替换次数，默认 1（要求唯一）；0 表示全部"},
+            "path": {"type": "string", "minLength": 1, "description": "要修改的文本文件"},
+            "old": {"type": "string", "minLength": 1, "description": "单处编辑时，与 new 一起提供要被替换的非空文本"},
+            "new": {"type": "string", "description": "单处编辑时，与 old 一起提供替换文本。空字符串表示删除"},
+            "count": {
+                "type": "integer", "minimum": 0, "default": 1,
+                "description": "仅用于 old/new。默认 1（要求唯一）；0 表示全部；大于 1 时最多替换指定次数",
+            },
+            "expected_version": {
+                "type": "string", "minLength": 1,
+                "description": "可选。最近一次 file_read、file_write 或 patch 返回的 file_version，原样传入",
+            },
             "edits": {
                 "type": "array",
-                "description": "一次调用按序应用多处编辑（事务化：全部匹配成功才统一写入，"
+                "minItems": 1,
+                "description": "基于同一份原文匹配多处编辑（事务化：全部匹配成功才统一写入，"
                 "任一处失败文件保持原样）。每处 old 必须唯一匹配且与其它编辑互不重叠。",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "old": {"type": "string", "description": "要被替换的原文本"},
-                        "new": {"type": "string", "description": "替换后的新文本"},
+                        "old": {"type": "string", "minLength": 1, "description": "要被替换的非空文本"},
+                        "new": {"type": "string", "description": "替换后的新文本，空字符串表示删除"},
+                        "count": {"type": "integer", "const": 1, "description": "可省略，每处编辑必须唯一匹配"},
                     },
                     "required": ["old", "new"],
+                    "additionalProperties": False,
                 },
             },
         },
         "required": ["path"],
+        "additionalProperties": False,
+        "oneOf": [
+            {"required": ["old", "new"], "not": {"required": ["edits"]}},
+            {
+                "required": ["edits"],
+                "not": {"anyOf": [{"required": ["old"]}, {"required": ["new"]}, {"required": ["count"]}]},
+            },
+        ],
     },
 }
 
 
+def _invalid_patch_arguments(message: str) -> StructuredToolError:
+    return StructuredToolError(message, code="invalid_arguments", next_action="fix_arguments")
+
+
 def _parse_patch_ops(args: dict[str, Any]) -> list[EditOp]:
-    """把 patch 参数规整为编辑操作列表：edits[] 优先，否则 old/new/count。"""
-    edits = args.get("edits")
-    if isinstance(edits, list) and edits:
+    """Validate either patch shape and normalize it to a list of operations."""
+    unexpected = args.keys() - PATCH_SCHEMA["parameters"]["properties"].keys()
+    if unexpected:
+        raise _invalid_patch_arguments(f"不支持的 patch 参数: {', '.join(sorted(unexpected))}")
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        raise _invalid_patch_arguments("path 必须是非空字符串")
+    if "expected_version" in args:
+        version = args["expected_version"]
+        if not isinstance(version, str) or not version:
+            raise _invalid_patch_arguments("expected_version 必须是非空字符串")
+
+    if "edits" in args:
+        if {"old", "new", "count"} & args.keys():
+            raise _invalid_patch_arguments("edits 不能与 old、new 或 count 同时提供")
+        edits = args["edits"]
+        if not isinstance(edits, list) or not edits:
+            raise _invalid_patch_arguments("必须提供非空的 old/new，或非空的 edits 列表")
         ops: list[EditOp] = []
         for index, item in enumerate(edits):
             if not isinstance(item, dict):
-                raise ToolError(f"edits[{index}] 必须是对象")
+                raise _invalid_patch_arguments(f"edits[{index}] 必须是对象")
+            unexpected = item.keys() - {"old", "new", "count"}
+            if unexpected:
+                raise _invalid_patch_arguments(f"edits[{index}] 不支持参数: {', '.join(sorted(unexpected))}")
             old = item.get("old")
             new = item.get("new")
             if not isinstance(old, str) or not old:
-                raise ToolError(f"edits[{index}].old 必须是非空字符串")
+                raise _invalid_patch_arguments(f"edits[{index}].old 必须是非空字符串")
             if not isinstance(new, str):
-                raise ToolError(f"edits[{index}].new 必须是字符串")
-            if item.get("count") not in (None, 1):
-                raise ToolError("edits[] 模式要求每处编辑唯一匹配，不支持 count，请拆分调用")
+                raise _invalid_patch_arguments(f"edits[{index}].new 必须是字符串")
+            count = item.get("count", 1)
+            if isinstance(count, bool) or count != 1:
+                raise _invalid_patch_arguments("edits[] 模式要求每处编辑唯一匹配，不支持 count，值 1 可省略")
             ops.append(EditOp(old=old, new=new))
         return ops
+
     old = args.get("old")
     new = args.get("new")
     if not isinstance(old, str) or not old:
-        raise ToolError("必须提供非空的 old/new，或非空的 edits 列表")
+        raise _invalid_patch_arguments("必须提供非空的 old、新文本 new，或非空的 edits 列表")
     if not isinstance(new, str):
-        raise ToolError("new 必须是字符串")
-    try:
-        count = int(args.get("count", 1))
-    except (TypeError, ValueError) as exc:
-        raise ToolError(f"count 必须是整数，得到 {args.get('count')!r}") from exc
+        raise _invalid_patch_arguments("new 必须是字符串")
+    count = args.get("count", 1)
+    if isinstance(count, float) and count.is_integer():
+        count = int(count)
+    if type(count) is not int or count < 0:
+        raise _invalid_patch_arguments(f"count 必须是非负整数，得到 {count!r}")
     return [EditOp(old=old, new=new, count=count)]
 
 
@@ -865,6 +909,7 @@ async def handle_patch(
     workspace_store: Any | None = None,
     security_service: Any | None = None,
 ) -> str:
+    ops = _parse_patch_ops(args)
     path = await authorize_file_tool(
         args,
         operation="patch",
@@ -875,14 +920,12 @@ async def handle_patch(
     sensitive = _check_sensitive_path(str(args.get("path", "")))
     if sensitive:
         raise ToolError(sensitive)
-    if not path.is_file():
-        raise ToolError(f"文件不存在: {path}")
 
-    ops = _parse_patch_ops(args)
     outcome = await file_mutation.edit_text(
         path,
         ops,
-        expected=guard_file_edit(path),
+        expected_version=args.get("expected_version"),
+        guard=True,
         max_bytes=MAX_READ_FILE_BYTES,
     )
 
@@ -897,6 +940,7 @@ async def handle_patch(
     return tool_result(
         success=True,
         path=str(path),
+        file_version=outcome.file_version,
         replacements=len(outcome.plan.matches),
         matches=[match.__dict__ for match in outcome.plan.matches],
         diff=_truncate(diff, 4000),
@@ -955,6 +999,7 @@ ui_label_template="查找 {pattern}",
             security_service=security_service,
         ),
         is_async=True,
+        structured_argument_errors=True,
         display_name="修改文件",
         ui_label_template="修改 {path}",
         always_load=True,

@@ -5,24 +5,26 @@
 负责参数解析、授权与结果呈现。写入安全语义（快照 + 冲突检测 + 原子写 +
 BOM/CRLF 保真）由 crew.tools.file_utils 提供，这里只组合不另起炉灶。
 
-观察策略（read-before-edit）挂在同一模块：file_read 的观察版本记入
-session → {path → version} 映射，编辑/写入以观察版本为 CAS 基；未读即拒并附
-补救文案。策略由 tools.file.require_read_before_edit 开关控制，关闭时全部
-调用无条件放行。
+文件观察按账号、会话和路径隔离。已有观察与显式版本始终参与比较；兼容配置只放宽
+从未读取的文件。打开文件、检查、准备变更和提交在同一路径队列内执行。
 """
 
 from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
+import os
+import stat
+import threading
 import unicodedata
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence, TypeVar
 
-from crew.core.errors import ToolError
-from crew.core.runctx import current_session_id
+from crew.core.errors import StructuredToolError
+from crew.core.runctx import current_owner_account_id, current_session_id
 from crew.tools.file_utils import (
     FileConflictError,
     FileVersion,
@@ -31,7 +33,6 @@ from crew.tools.file_utils import (
     _strip_bom,
     atomic_replace_bytes,
     snapshot_file,
-    stat_verified_file,
     MAX_READ_FILE_BYTES,
 )
 
@@ -46,7 +47,6 @@ __all__ = [
     "WriteOutcome",
     "clear_file_observations",
     "file_mutation",
-    "guard_file_edit",
     "plan_edits",
     "record_file_observation",
 ]
@@ -54,24 +54,39 @@ __all__ = [
 _T = TypeVar("_T")
 
 
-class StaleFileError(ToolError):
+class StaleFileError(StructuredToolError):
     """文件在观察/读取之后被其他写者修改（版本 CAS 不符）。"""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="stale_file", next_action="file_read")
 
-class EditMatchError(ToolError):
+
+class EditMatchError(StructuredToolError):
     """编辑匹配失败：未找到、多处歧义或编辑间重叠。"""
 
+    def __init__(self, message: str, *, code: str = "patch_no_match", details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, code=code, next_action="file_read", details=details)
 
-class FileNotObservedError(ToolError):
+
+class FileNotObservedError(StructuredToolError):
     """read-before-edit 策略拒绝：目标文件在当前会话中未被读取过。"""
 
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f'cannot modify "{path}": file has not been read — 请先用 file_read 读取该文件，再重试。',
+            code="file_not_read", next_action="file_read",
+        )
 
-def _version_key(version: FileVersion) -> tuple[int, int, int, int]:
-    return (version.device, version.inode, version.size, version.mtime_ns)
+
+_VersionKey = tuple[int, int, int, str]
 
 
-def _stat_key(info: Any) -> tuple[int, int, int, int]:
-    return (int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns))
+def _version_key(version: FileVersion) -> _VersionKey:
+    return version.device, version.inode, version.size, version.digest
+
+
+def _version_token(version: FileVersion) -> str:
+    return hashlib.sha256(repr(_version_key(version)).encode("ascii")).hexdigest()[:32]
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +275,7 @@ def _ambiguous_message(
     )
 
 
-def plan_edits(original: str, ops: Sequence[EditOp]) -> EditPlan:
+def plan_edits(original: str, ops: Sequence[EditOp], *, allow_fuzzy: bool = True) -> EditPlan:
     """匹配阶梯：先在 LF 归一化域精确匹配；精确失败且要求唯一的编辑模糊兜底。
 
     模糊域只做定位与上报，写回时未触碰的行保持原文逐字节不变。匹配是纯计算：
@@ -270,14 +285,14 @@ def plan_edits(original: str, ops: Sequence[EditOp]) -> EditPlan:
     base = _normalize_lf(original)
     for op in ops:
         if not op.old:
-            raise EditMatchError("old 不能为空")
+            raise EditMatchError("old 不能为空", code="invalid_arguments")
         if op.count < 0:
-            raise EditMatchError("count 不能为负")
+            raise EditMatchError("count 不能为负", code="invalid_arguments")
 
     # 探测：任一编辑在模糊域命中，则整批切换到模糊域统一替换（单域偏移才稳定）。
     fuzzy_base: str | None = None
     fuzzy_needed = False
-    for op in ops:
+    for op in ops if allow_fuzzy else ():
         if _find_all(base, _normalize_lf(op.old)) or op.count != 1:
             continue
         if fuzzy_base is None:
@@ -294,7 +309,7 @@ def plan_edits(original: str, ops: Sequence[EditOp]) -> EditPlan:
         needle = old_lf
         starts = _find_all(domain, needle)
         mode = "exact"
-        if not starts:
+        if not starts and fuzzy_needed:
             needle = _normalize_for_fuzzy(old_lf)
             starts = _find_all(domain, needle)
             mode = "fuzzy"
@@ -303,10 +318,15 @@ def plan_edits(original: str, ops: Sequence[EditOp]) -> EditPlan:
             mode = "fuzzy"
         if not starts:
             raise EditMatchError(
-                _not_found_message(index, len(ops), tried_fuzzy=(op.count == 1))
+                _not_found_message(index, len(ops), tried_fuzzy=allow_fuzzy and op.count == 1),
+                details={"edit_index": index},
             )
         if op.count == 1 and len(starts) > 1:
-            raise EditMatchError(_ambiguous_message(domain, index, len(ops), starts))
+            raise EditMatchError(
+                _ambiguous_message(domain, index, len(ops), starts), code="patch_ambiguous",
+                details={"edit_index": index, "matches": len(starts),
+                         "lines": [_line_number_at(domain, start) for start in starts[:10]]},
+            )
         chosen = starts if op.count == 0 else starts[: max(op.count, 1)]
         for start in chosen:
             score = 1.0 if mode == "exact" else _fuzzy_score(base, domain, start, len(needle), old_lf)
@@ -337,7 +357,8 @@ def _check_overlap(matches: Sequence[EditMatch]) -> None:
         if prev.start + prev.length > cur.start:
             raise EditMatchError(
                 f"edits[{prev.edit_index}] 与 edits[{cur.edit_index}] 的匹配区域重叠，"
-                "请合并为一处编辑或改为互不重叠的片段，未修改文件"
+                "请合并为一处编辑或改为互不重叠的片段，未修改文件",
+                code="patch_overlap", details={"edit_indices": [prev.edit_index, cur.edit_index]},
             )
 
 
@@ -347,18 +368,14 @@ def _check_overlap(matches: Sequence[EditMatch]) -> None:
 
 
 class _PathLockTable:
-    """同一目标路径的操作按到达顺序串行执行（promise 链式尾任务）。
-
-    每条事件循环一张表，跨循环互不干扰；表中只存吞掉结果的尾任务，
-    真正的结果/异常由调用方 await 的业务任务承载。
-    """
+    """同一事件循环内的写入按目标路径排队，前一操作结束才放行后续操作。"""
 
     def __init__(self) -> None:
         self._tails: weakref.WeakKeyDictionary[
-            asyncio.AbstractEventLoop, dict[str, asyncio.Task[None]]
+            asyncio.AbstractEventLoop, dict[str, asyncio.Future[None]]
         ] = weakref.WeakKeyDictionary()
 
-    def _table(self, loop: asyncio.AbstractEventLoop) -> dict[str, asyncio.Task[None]]:
+    def _table(self, loop: asyncio.AbstractEventLoop) -> dict[str, asyncio.Future[None]]:
         table = self._tails.get(loop)
         if table is None:
             table = {}
@@ -369,39 +386,57 @@ class _PathLockTable:
         loop = asyncio.get_running_loop()
         table = self._table(loop)
         prior = table.get(key)
-        gate: asyncio.Future[None] = loop.create_future()
-        if prior is None:
-            gate.set_result(None)
-        else:
-            prior.add_done_callback(lambda _prior: gate.set_result(None))
+        finished: asyncio.Future[None] = loop.create_future()
+        table[key] = finished
+        abandoned = False
 
         async def _run() -> _T:
-            await gate
-            return await op()
+            try:
+                if prior is not None:
+                    await asyncio.shield(prior)
+                if abandoned:
+                    raise asyncio.CancelledError
+                return await op()
+            finally:
+                finished.set_result(None)
+                if table.get(key) is finished:
+                    del table[key]
 
         run_task = asyncio.create_task(_run())
-
-        async def _tail() -> None:
-            try:
-                await run_task
-            except BaseException:
-                pass
-
-        tail_task = asyncio.create_task(_tail())
-        table[key] = tail_task
         try:
-            return await run_task
-        finally:
-            if table.get(key) is tail_task:
-                del table[key]
+            # The worker owns the path until its disk operation finishes. A caller
+            # cancelled while waiting abandons its operation without releasing the queue.
+            return await asyncio.shield(run_task)
+        except asyncio.CancelledError:
+            abandoned = True
+            run_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+            raise
 
 
 # ---------------------------------------------------------------------------
 # 观察策略（read-before-edit）
 # ---------------------------------------------------------------------------
 
-_observed: dict[str, dict[str, tuple[int, int, int, int]]] = {}
+@dataclass(frozen=True)
+class _Observation:
+    version: _VersionKey
+    spans: tuple[tuple[int, int], ...]
+    complete: bool
+    editable: bool
+
+
+@dataclass(frozen=True)
+class _MutationGuard:
+    observation: _Observation | None
+    session_bound: bool
+    expected_version: str | None
+
+
+_observed: dict[tuple[str, str], dict[str, _Observation]] = {}
+_observed_lock = threading.Lock()
 _OBSERVED_SESSION_LIMIT = 500
+_OBSERVED_FILE_LIMIT = 128
+_OBSERVED_SPAN_LIMIT = 256
 
 
 def _read_before_edit_enabled() -> bool:
@@ -409,56 +444,92 @@ def _read_before_edit_enabled() -> bool:
         from crew.state.config import load_config
 
         cfg = load_config()
-        return bool(cfg.raw_config.get("tools", {}).get("file", {}).get("require_read_before_edit", False))
+        return bool(cfg.raw_config.get("tools", {}).get("file", {}).get("require_read_before_edit", True))
     except Exception:
-        return False
+        return True
 
 
-def _record_observation(path: Path, key: tuple[int, int, int, int]) -> None:
+def _observation_scope() -> tuple[str, str] | None:
     session = current_session_id.get()
-    if not session:
+    return (current_owner_account_id.get(), session) if session else None
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _combine_spans(spans: Sequence[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged[:_OBSERVED_SPAN_LIMIT])
+
+
+def _remember_observation(
+    path: Path, version: FileVersion, *, spans: tuple[tuple[int, int], ...] = (),
+    complete: bool, editable: bool = True, total_lines: int | None = None,
+) -> None:
+    scope = _observation_scope()
+    if scope is None:
         return
-    if len(_observed) >= _OBSERVED_SESSION_LIMIT and session not in _observed:
-        _observed.pop(next(iter(_observed)))
-    _observed.setdefault(session, {})[str(path)] = key
+    key = _path_key(path)
+    revision = _version_key(version)
+    with _observed_lock:
+        entries = _observed.pop(scope, {})
+        previous = entries.pop(key, None)
+        if previous is not None and previous.version == revision:
+            spans = _combine_spans((*previous.spans, *spans))
+            complete = complete or previous.complete
+        if total_lines is not None and spans == ((1, total_lines),):
+            complete = True
+        entries[key] = _Observation(revision, () if complete else spans, complete, editable)
+        _observed[scope] = entries
+        if len(entries) > _OBSERVED_FILE_LIMIT:
+            entries.pop(next(iter(entries)))
+        if len(_observed) > _OBSERVED_SESSION_LIMIT:
+            _observed.pop(next(iter(_observed)))
 
 
-def record_file_observation(path: Path, version: FileVersion) -> None:
-    """file_read 成功后记录观察版本；文件不存在时不记录（创建不受策略约束）。"""
-    if not version.exists:
-        return
-    _record_observation(Path(path), _version_key(version))
+def record_file_observation(
+    path: Path, version: FileVersion, *, first_line: int, last_line: int, total_lines: int,
+    clipped_lines: tuple[int, ...], editable: bool,
+) -> str:
+    """Record the revision and only the unabridged lines the tool exposed."""
+    spans: list[tuple[int, int]] = []
+    if first_line:
+        start = first_line
+        for clipped in clipped_lines:
+            if start < clipped:
+                spans.append((start, clipped - 1))
+            start = clipped + 1
+        if start <= last_line:
+            spans.append((start, last_line))
+    _remember_observation(
+        path, version, spans=tuple(spans), complete=total_lines == 0,
+        total_lines=total_lines, editable=editable,
+    )
+    return _version_token(version)
 
 
-def guard_file_edit(path: Path) -> tuple[int, int, int, int] | None:
-    """编辑/写入前的策略闸门：返回观察到的版本键作为 CAS 基。
-
-    策略关闭、无会话归属或文件未被观察过（策略开启时抛 FileNotObservedError）
-    三种情况语义分明；未读即拒的文案必须带补救动作。
-    """
-    if not _read_before_edit_enabled():
+def _capture_guard(path: Path, expected_version: str | None, guard: bool) -> _MutationGuard | None:
+    if not guard and expected_version is None:
         return None
-    session = current_session_id.get()
-    if not session:
-        return None
-    key = str(Path(path))
-    observed = _observed.get(session, {}).get(key)
-    if observed is None:
-        if not Path(path).exists():
-            return None  # 目标尚不存在 = 新建，不受先读策略约束
-        raise FileNotObservedError(
-            f'cannot modify "{path}": file has not been read — '
-            "read the file, then retry（请先用 file_read 读取该文件，再重新调用本工具）"
-        )
-    return observed
+    scope = _observation_scope()
+    with _observed_lock:
+        observed = _observed.get(scope, {}).get(_path_key(path)) if scope else None
+    return _MutationGuard(observed, scope is not None, expected_version)
 
 
 def clear_file_observations(session: str | None = None) -> None:
     """丢弃观察记录（会话结束/测试隔离用）。"""
-    if session is None:
-        _observed.clear()
-    else:
-        _observed.pop(session, None)
+    with _observed_lock:
+        if session is None:
+            _observed.clear()
+        else:
+            _observed.pop((current_owner_account_id.get(), session), None)
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +545,7 @@ class EditOutcome:
     plan: EditPlan
     had_bom: bool
     line_ending: str | None
+    file_version: str
 
 
 @dataclass(frozen=True)
@@ -482,6 +554,7 @@ class WriteOutcome:
     bytes_written: int
     append: bool
     existed: bool
+    file_version: str
 
 
 class FileMutationService:
@@ -496,14 +569,17 @@ class FileMutationService:
         ops: Sequence[EditOp],
         *,
         expected: tuple[int, int, int, int] | None = None,
+        expected_version: str | None = None,
+        guard: bool = False,
         max_bytes: int = MAX_READ_FILE_BYTES,
     ) -> EditOutcome:
         target = Path(path)
+        check = _capture_guard(target, expected_version, guard)
 
         async def _op() -> EditOutcome:
-            return await asyncio.to_thread(self._edit_text_sync, target, list(ops), expected, max_bytes)
+            return await asyncio.to_thread(self._edit_text_sync, target, list(ops), expected, check, max_bytes)
 
-        return await self._locks.run(str(target), _op)
+        return await self._locks.run(_path_key(target), _op)
 
     async def write_text(
         self,
@@ -512,41 +588,44 @@ class FileMutationService:
         *,
         append: bool = False,
         expected: tuple[int, int, int, int] | None = None,
+        expected_version: str | None = None,
+        guard: bool = False,
         max_bytes: int = MAX_READ_FILE_BYTES,
     ) -> WriteOutcome:
         target = Path(path)
+        check = _capture_guard(target, expected_version, guard)
 
         async def _op() -> WriteOutcome:
-            return await asyncio.to_thread(self._write_text_sync, target, content, append, expected, max_bytes)
+            return await asyncio.to_thread(self._write_text_sync, target, content, append, expected, check, max_bytes)
 
-        return await self._locks.run(str(target), _op)
+        return await self._locks.run(_path_key(target), _op)
 
     def _edit_text_sync(
         self,
         path: Path,
         ops: list[EditOp],
         expected: tuple[int, int, int, int] | None,
+        check: _MutationGuard | None,
         max_bytes: int,
     ) -> EditOutcome:
-        try:
-            version = snapshot_file(path, max_bytes=max_bytes)
-        except ValueError as exc:
-            raise ToolError(f"文件过大，无法整体读取做替换: {path}") from exc
+        version = self._snapshot(path, max_bytes)
+        observation = self._check_fresh(path, version, expected, check)
         if not version.exists:
-            raise ToolError(f"文件不存在: {path}")
-        self._check_fresh(path, version, expected)
+            raise StructuredToolError(f"文件不存在: {path}", code="file_not_found")
 
-        text = version.data.decode("utf-8", errors="replace")
-        text, had_bom = _strip_bom(text)
+        text, had_bom = self._editable_text(version)
         original_ending = _detect_line_ending(text)
 
-        plan = plan_edits(text, ops)
+        partial = observation is not None and not observation.complete
+        plan = plan_edits(text, ops, allow_fuzzy=not partial)
+        if partial:
+            self._verify_match_spans(plan, observation)
         updated = _normalize_line_endings(plan.after, original_ending) if original_ending else plan.after
         written = updated
         if had_bom and not written.startswith("﻿"):
             written = "﻿" + written
-        self._atomic_write(path, written.encode("utf-8"), version)
-        self._observe(path)
+        committed = self._atomic_write(path, written.encode("utf-8"), version)
+        _remember_observation(path, committed, complete=bool(observation and observation.complete))
         return EditOutcome(
             path=path,
             before=text,
@@ -554,6 +633,7 @@ class FileMutationService:
             plan=plan,
             had_bom=had_bom,
             line_ending=original_ending,
+            file_version=_version_token(committed),
         )
 
     def _write_text_sync(
@@ -562,60 +642,104 @@ class FileMutationService:
         content: str,
         append: bool,
         expected: tuple[int, int, int, int] | None,
+        check: _MutationGuard | None,
         max_bytes: int,
     ) -> WriteOutcome:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        version = snapshot_file(path, max_bytes=max_bytes)
-        if version.exists:
-            self._check_fresh(path, version, expected)
-
-        original_ending: str | None = None
+        version = self._snapshot(path, max_bytes)
+        observation = self._check_fresh(path, version, expected, check)
+        if not append and observation is not None and not observation.complete:
+            raise StructuredToolError(
+                "覆盖文件需要读取同一版本的全部内容。请继续 file_read 分页，或用 patch 修改已读的精确片段。",
+                code="incomplete_read", next_action="file_read",
+            )
+        original_ending = None
         had_bom = False
-        if version.exists and not append:
-            existing = version.data.decode("utf-8", errors="replace")
-            existing, had_bom = _strip_bom(existing)
+        if version.exists:
+            existing, had_bom = self._editable_text(version)
             original_ending = _detect_line_ending(existing)
 
         normalized = _normalize_line_endings(content, original_ending) if original_ending else content
-        if had_bom and not normalized.startswith("﻿"):
+        if had_bom and not append and not normalized.startswith("﻿"):
             normalized = "﻿" + normalized
         encoded = normalized.encode("utf-8")
         if append and version.exists:
             encoded = version.data + encoded
-        self._atomic_write(path, encoded, version)
-        self._observe(path)
+        committed = self._atomic_write(path, encoded, version)
+        complete = not append or not version.exists or bool(observation and observation.complete)
+        _remember_observation(path, committed, complete=complete)
         return WriteOutcome(
             path=path,
             bytes_written=len(encoded),
             append=append,
             existed=version.exists,
+            file_version=_version_token(committed),
         )
 
     @staticmethod
-    def _check_fresh(path: Path, version: FileVersion, expected: tuple[int, int, int, int] | None) -> None:
-        if expected is not None and _version_key(version) != expected:
-            raise StaleFileError(
-                f'cannot modify "{path}": file has changed since it was read — '
-                "re-read the file, then retry（文件在读取后已被修改，请重新读取后重试）"
-            )
+    def _snapshot(path: Path, max_bytes: int) -> FileVersion:
+        try:
+            return snapshot_file(path, max_bytes=max_bytes)
+        except ValueError as exc:
+            raise StructuredToolError(f"文件过大，超过编辑大小上限: {path}", code="file_too_large") from exc
+        except FileConflictError as exc:
+            raise StaleFileError(f"文件在检查期间发生变化，请重新读取: {path}") from exc
+        except OSError as exc:
+            raise StructuredToolError(f"无法读取编辑目标: {exc}", code="file_unavailable") from exc
 
     @staticmethod
-    def _atomic_write(path: Path, data: bytes, version: FileVersion) -> None:
+    def _check_fresh(
+        path: Path, version: FileVersion, expected: tuple[int, int, int, int] | None,
+        check: _MutationGuard | None,
+    ) -> _Observation | None:
+        stat_key = version.device, version.inode, version.size, version.mtime_ns
+        observed = check.observation if check else None
+        token = check.expected_version if check else None
+        if (expected is not None and (not version.exists or stat_key != expected)
+                or observed is not None and (not version.exists or observed.version != _version_key(version))
+                or token is not None and (not version.exists or token != _version_token(version))):
+            raise StaleFileError(f"文件在读取后已被修改或移除，请重新读取后重试: {path}")
+        if (version.exists and observed is None and check is not None and check.session_bound
+                and (token is not None or _read_before_edit_enabled())):
+            raise FileNotObservedError(path)
+        if observed is not None and not observed.editable:
+            raise StructuredToolError("编辑需要 UTF-8 文本。请先确认文件编码。", code="file_encoding_not_editable")
+        return observed
+
+    @staticmethod
+    def _verify_match_spans(plan: EditPlan, observation: _Observation) -> None:
+        for match in plan.matches:
+            end = match.line + plan.before.count("\n", match.start, match.start + match.length - 1)
+            if not any(start <= match.line and end <= last for start, last in observation.spans):
+                raise StructuredToolError(
+                    f"补丁匹配到的第 {match.line}–{end} 行尚未完整读取，请先用 file_read 读取这些行。",
+                    code="incomplete_read", next_action="file_read",
+                    details={"start_line": match.line, "end_line": end},
+                )
+
+    @staticmethod
+    def _editable_text(version: FileVersion) -> tuple[str, bool]:
         try:
-            atomic_replace_bytes(path, data, version)
+            text = version.data.decode("utf-8")
+            if "\0" not in text:
+                return _strip_bom(text)
+        except UnicodeDecodeError:
+            pass
+        raise StructuredToolError(
+            "编辑需要 UTF-8 文本。请先确认文件编码。", code="file_encoding_not_editable",
+        )
+
+    @staticmethod
+    def _atomic_write(path: Path, data: bytes, version: FileVersion) -> FileVersion:
+        if version.exists and not version.mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+            raise StructuredToolError(f"文件为只读，未写入: {path}", code="file_not_writable")
+        try:
+            return atomic_replace_bytes(path, data, version)
         except FileConflictError as exc:
             raise StaleFileError(
-                f'cannot modify "{path}": file changed during write — '
-                "re-read the file, then retry（文件在写入前被其他进程修改，请重新读取后重试）"
+                f"文件在写入前被其他进程修改，请重新读取后重试: {path}"
             ) from exc
-
-    @staticmethod
-    def _observe(path: Path) -> None:
-        try:
-            info = stat_verified_file(path)
-        except Exception:
-            return
-        _record_observation(Path(path), _stat_key(info))
+        except OSError as exc:
+            raise StructuredToolError(f"无法写入文件: {exc}", code="file_not_writable") from exc
 
 
 file_mutation = FileMutationService()

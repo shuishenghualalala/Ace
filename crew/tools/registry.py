@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any, Callable
 
-from crew.core.errors import ToolError, ToolNotFoundError
+from crew.core.errors import StructuredToolError, ToolError, ToolNotFoundError
 from crew.core.interfaces import (
     Tool,
     ToolRegistry,
@@ -45,6 +45,18 @@ def tool_result(data: Any | None = None, **kwargs: Any) -> str:
     return json.dumps(data if data is not None else kwargs, ensure_ascii=False)
 
 
+def _structured_error_result(call_id: str, name: str, error: StructuredToolError) -> ToolResult:
+    fields: dict[str, Any] = {"code": error.code}
+    if error.next_action is not None:
+        fields["next_action"] = error.next_action
+    if error.details:
+        fields["details"] = error.details
+    return ToolResult(
+        call_id, name, tool_error(str(error), **fields),
+        is_error=True, code=error.code, details=error.details,
+    )
+
+
 class FunctionTool(Tool):
     """把 Crew handler 包装成 Crew Tool。"""
 
@@ -69,6 +81,7 @@ class FunctionTool(Tool):
         is_mcp: bool = False,
         aliases: list[str] | None = None,
         validate_input: Callable[[dict[str, Any]], str | None] | None = None,
+        structured_argument_errors: bool = False,
         max_result_size_chars: int | None = None,
         on_progress: str | None = None,
         permission_resolver: Callable[[dict[str, Any]], ToolPermissionDecision | None] | None = None,
@@ -103,6 +116,7 @@ class FunctionTool(Tool):
         self.aliases = list(aliases or [])
         # 业务级 validate 钩子（如 FileEdit 检查文件是否已读过）
         self.validate_input = validate_input
+        self.structured_argument_errors = structured_argument_errors
         # Crew Stage 6：结果超过此字符数则落盘，模型收路径+预览（对齐 DEFAULT_MAX_RESULT_SIZE_CHARS）
         self.max_result_size_chars = (
             int(max_result_size_chars) if max_result_size_chars else DEFAULT_MAX_RESULT_SIZE_CHARS
@@ -219,6 +233,7 @@ class Registry(ToolRegistry):
                 is_mcp=bool(kwargs.get("is_mcp", False)),
                 aliases=kwargs.get("aliases"),
                 validate_input=kwargs.get("validate_input"),
+                structured_argument_errors=bool(kwargs.get("structured_argument_errors", False)),
                 max_result_size_chars=kwargs.get("max_result_size_chars"),
                 on_progress=kwargs.get("on_progress"),
                 permission_resolver=kwargs.get("permission_resolver"),
@@ -453,21 +468,20 @@ class Registry(ToolRegistry):
             if callable(current_parameters)
             else tool.parameters
         )
-        schema_err = validate_arguments(tool.name, parameters, args)
-        if schema_err:
-            return ToolResult(
-                tool_call.id, tool.name,
-                _wrap_tool_use_error(tool.name, schema_err, deprecation_note),
-                is_error=True,
-            )
-        # 业务级 validate 钩子
-        biz_err = validate_input_hook(tool, args if isinstance(args, dict) else {})
-        if biz_err:
-            return ToolResult(
-                tool_call.id, tool.name,
-                _wrap_tool_use_error(tool.name, biz_err, deprecation_note),
-                is_error=True,
-            )
+        argument_error = validate_arguments(tool.name, parameters, args) or validate_input_hook(tool, args)
+        if argument_error:
+            structured = getattr(tool, "structured_argument_errors", False)
+            if structured:
+                hint = parameters.get("description")
+                if isinstance(hint, str) and hint.strip():
+                    argument_error = f"{hint.strip()}\n{argument_error}"
+            message = _wrap_tool_use_error(tool.name, argument_error, deprecation_note)
+            if structured:
+                return _structured_error_result(
+                    tool_call.id, tool.name,
+                    StructuredToolError(message, code="invalid_arguments", next_action="fix_arguments"),
+                )
+            return ToolResult(tool_call.id, tool.name, message, is_error=True)
 
         try:
             output = await tool.run(args)
@@ -479,6 +493,8 @@ class Registry(ToolRegistry):
             if deprecation_note:
                 content = f"{deprecation_note}\n\n{content}"
             return ToolResult(tool_call.id, tool.name, content, is_error=False, media=media)
+        except StructuredToolError as exc:
+            return _structured_error_result(tool_call.id, tool.name, exc)
         except ToolError as exc:
             return ToolResult(tool_call.id, tool.name, f"工具执行失败: {exc}", is_error=True)
         except Exception as exc:  # noqa: BLE001 - 工具内部异常也回灌给模型而非崩溃

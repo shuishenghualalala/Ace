@@ -2,6 +2,10 @@
 
 import asyncio
 import json
+import os
+import stat
+import sys
+import threading
 
 import pytest
 
@@ -13,9 +17,10 @@ from crew.agent.file_mutation import (
     file_mutation,
     plan_edits,
 )
-from crew.core.runctx import current_session_id
+from crew.core.runctx import current_owner_account_id, current_session_id
 from crew.core.types import ToolCall
 from crew.tools.file_utils import snapshot_file
+from crew.tools import file_utils
 from crew.tools.registry import Registry, register_builtin_tools
 
 
@@ -519,3 +524,232 @@ async def test_observation_isolated_per_session(registry, tmp_path, policy_on):
         assert "has not been read" in result.content
     finally:
         current_session_id.reset(token_b)
+
+
+async def test_same_size_and_mtime_external_edit_is_rejected_with_legacy_policy_off(registry, tmp_path, monkeypatch):
+    monkeypatch.setattr("crew.state.config.load_config", lambda: _PolicyConfig(False))
+    target = tmp_path / "same-metadata.txt"
+    target.write_bytes(b"old\nkeep\n")
+    session = current_session_id.set("edit-metadata")
+    try:
+        read = await registry.execute(ToolCall("read", "file_read", {"path": str(target)}))
+        assert json.loads(read.content)["file_version"]
+        previous = target.stat()
+        target.write_bytes(b"old\npeer\n")
+        os.utime(target, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+        assert target.stat().st_mtime_ns == previous.st_mtime_ns
+        patch = await registry.execute(ToolCall("patch", "patch", {"path": str(target), "old": "old", "new": "new"}))
+        assert patch.is_error and patch.code == "stale_file"
+        assert json.loads(patch.content)["next_action"] == "file_read"
+        assert target.read_bytes() == b"old\npeer\n"
+    finally:
+        current_session_id.reset(session)
+
+
+async def test_file_version_is_scoped_to_account_and_commit_results_match_reads(registry, tmp_path):
+    target = tmp_path / "中文-🌙.txt"
+    path = {"path": str(target)}
+    session = current_session_id.set("shared-name")
+    owner = current_owner_account_id.set("A:owner-a")
+    try:
+        created = await registry.execute(ToolCall("create", "file_write", {**path, "content": "before\n"}))
+        assert not created.is_error, created.content
+        updated = await registry.execute(ToolCall("update-created", "file_write", {
+            **path, "content": "before\nknown\n", "expected_version": json.loads(created.content)["file_version"],
+        }))
+        assert not updated.is_error, updated.content
+        read = await registry.execute(ToolCall("read", "file_read", path))
+        assert not read.is_error, read.content
+        observed = json.loads(read.content)["file_version"]
+        assert observed == json.loads(updated.content)["file_version"]
+
+        different_owner = current_owner_account_id.set("A:owner-b")
+        try:
+            denied = await registry.execute(ToolCall("deny", "patch", {
+                **path, "old": "before", "new": "wrong", "expected_version": observed,
+            }))
+            assert denied.is_error and denied.code == "file_not_read"
+        finally:
+            current_owner_account_id.reset(different_owner)
+        patched = await registry.execute(ToolCall("patch", "patch", {
+            **path, "old": "before", "new": "after", "expected_version": observed,
+        }))
+        assert not patched.is_error, patched.content
+        read_again = await registry.execute(ToolCall("read-again", "file_read", path))
+        assert json.loads(patched.content)["file_version"] == json.loads(read_again.content)["file_version"] != observed
+        assert target.read_bytes() == b"after\nknown\n"
+    finally:
+        current_owner_account_id.reset(owner)
+        current_session_id.reset(session)
+
+
+async def test_complete_coverage_can_be_assembled_from_untruncated_read_pages(registry, tmp_path):
+    target = tmp_path / "paged.txt"
+    target.write_bytes(b"first\nsecond\nthird\n")
+    path = {"path": str(target)}
+    session = current_session_id.set("read-pages")
+    try:
+        tail = await registry.execute(ToolCall("tail", "file_read", {**path, "offset": -1}))
+        tail_data = json.loads(tail.content)
+        assert not tail_data["read_complete"] and tail_data["truncated"]
+        version = {"expected_version": tail_data["file_version"]}
+        wrong_range = await registry.execute(ToolCall("outside", "patch", {
+            **path, **version, "old": "first", "new": "wrong",
+        }))
+        assert wrong_range.is_error and wrong_range.code == "incomplete_read"
+        denied = await registry.execute(ToolCall("denied", "file_write", {**path, **version, "content": "wrong"}))
+        assert denied.is_error and denied.code == "incomplete_read"
+        head = await registry.execute(ToolCall("head", "file_read", {**path, "offset": 1, "limit": 2}))
+        head_data = json.loads(head.content)
+        assert not head_data["read_complete"] and head_data["next_offset"] == 3
+        assert head_data["file_version"] == version["expected_version"]
+        result = await registry.execute(ToolCall("overwrite", "file_write", {**path, **version, "content": "new\n"}))
+        assert not result.is_error, result.content
+        assert target.read_bytes() == b"new\n"
+    finally:
+        current_session_id.reset(session)
+
+
+async def test_read_payload_keeps_version_after_budgeting_json_escaped_lines(registry, tmp_path):
+    target = tmp_path / "escaped.txt"
+    target.write_text(('"\\' * 100 + "\n") * 420, encoding="utf-8")
+    session = current_session_id.set("escaped-content")
+    try:
+        result = await registry.execute(ToolCall("read", "file_read", {"path": str(target)}))
+        data = json.loads(result.content)
+        assert not data["read_complete"] and data["file_version"]
+        assert data["next_offset"] == data["shown_lines"] + 1
+        assert data["total_lines"] == 420 and data["shown_lines"] > 100
+    finally:
+        current_session_id.reset(session)
+
+
+async def test_new_file_never_replaces_a_late_external_creation(tmp_path, monkeypatch):
+    target = tmp_path / "late.txt"
+    compare = file_utils._file_version_matches
+    checked = 0
+
+    def insert_after_final_check(expected, descriptor=None):
+        nonlocal checked
+        matched = compare(expected, descriptor)
+        checked += 1
+        if checked == 2:
+            target.write_bytes(b"external")
+        return matched
+
+    monkeypatch.setattr(file_utils, "_file_version_matches", insert_after_final_check)
+    with pytest.raises(StaleFileError):
+        await file_mutation.write_text(target, "agent", guard=True)
+    assert checked == 2 and target.read_bytes() == b"external"
+    assert [file.name for file in tmp_path.iterdir()] == [target.name]
+
+
+async def test_cancelled_mutations_keep_the_path_queue_until_the_worker_exits(tmp_path, monkeypatch):
+    target = tmp_path / "cancel.txt"
+    worker_started, release = threading.Event(), threading.Event()
+    executed = []
+    write = file_mutation._write_text_sync
+
+    def blocked_write(path, content, *args):
+        executed.append(content)
+        if content == "first":
+            worker_started.set()
+            assert release.wait(5)
+        return write(path, content, *args)
+
+    monkeypatch.setattr(file_mutation, "_write_text_sync", blocked_write)
+    first = asyncio.create_task(file_mutation.write_text(target, "first"))
+    try:
+        assert await asyncio.to_thread(worker_started.wait, 5)
+        second = asyncio.create_task(file_mutation.write_text(target, "cancelled"))
+        await asyncio.sleep(0)
+        second.cancel()
+        first.cancel()
+        for task in (first, second):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        third = asyncio.create_task(file_mutation.write_text(target, "third"))
+        await asyncio.sleep(0)
+        assert executed == ["first"] and not third.done()
+    finally:
+        release.set()
+    await third
+    assert executed == ["first", "third"] and target.read_bytes() == b"third"
+
+
+async def test_readonly_file_returns_structured_error_and_stays_readable(registry, tmp_path):
+    directory = tmp_path / "observed"
+    directory.mkdir()
+    target = directory / "readonly.txt"
+    target.write_bytes(b"old\n")
+    target.chmod(stat.S_IREAD)
+    try:
+        result = await registry.execute(ToolCall("patch", "patch", {"path": str(target), "old": "old", "new": "new"}))
+        assert result.is_error and result.code == "file_not_writable"
+        read = await registry.execute(ToolCall("reread", "file_read", {"path": str(target)}))
+        assert "old" in json.loads(read.content)["content"]
+        assert list(directory.iterdir()) == [target]
+    finally:
+        target.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
+@pytest.mark.parametrize(("change", "code"), [
+    ({"old": "absent", "new": "replace"}, "patch_no_match"),
+    ({"old": "abc", "new": "replace"}, "patch_ambiguous"),
+    ({"edits": [{"old": "abcdef", "new": "one"}, {"old": "def", "new": "two"}]}, "patch_overlap"),
+])
+async def test_patch_reports_structured_matching_failures_without_writing(registry, tmp_path, change, code):
+    target = tmp_path / "matching.txt"
+    target.write_bytes(b"abcdef\nabc\n")
+    result = await registry.execute(ToolCall("patch", "patch", {"path": str(target), **change}))
+    payload = json.loads(result.content)
+    assert result.is_error and result.code == payload["code"] == code
+    assert payload["next_action"] == "file_read"
+    if code == "patch_ambiguous":
+        assert payload["details"]["lines"] == [1, 2]
+    assert target.read_bytes() == b"abcdef\nabc\n"
+
+
+async def test_transcoded_display_does_not_allow_utf8_edit_of_utf16_source(registry, tmp_path):
+    target = tmp_path / "wide.txt"
+    original = b"\xff\xfe" + "first\r\n".encode("utf-16-le")
+    target.write_bytes(original)
+    path = {"path": str(target)}
+    session = current_session_id.set("read-wide")
+    try:
+        read = await registry.execute(ToolCall("read", "file_read", path))
+        payload = json.loads(read.content)
+        assert payload["read_complete"] and not payload["editable"]
+        patch = await registry.execute(ToolCall("patch", "patch", {
+            **path, "old": "first", "new": "changed", "expected_version": payload["file_version"],
+        }))
+        assert patch.is_error and patch.code == "file_encoding_not_editable"
+        assert target.read_bytes() == original
+    finally:
+        current_session_id.reset(session)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file sharing flags")
+async def test_windows_file_open_without_delete_sharing_preserves_file_and_reports_busy(registry, tmp_path):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    target = tmp_path / "busy.txt"
+    target.write_bytes(b"old\r\n")
+    handle = create(str(target), 0x80000000, 0x0001 | 0x0002, None, 3, 0, None)
+    assert handle != ctypes.c_void_p(-1).value
+    try:
+        call = {"path": str(target), "old": "old", "new": "new"}
+        error = await registry.execute(ToolCall("busy", "patch", call))
+        assert error.is_error and error.code == "file_not_writable"
+        assert target.read_bytes() == b"old\r\n" and list(tmp_path.iterdir()) == [target]
+    finally:
+        kernel.CloseHandle(handle)
+    retry = await registry.execute(ToolCall("retry", "patch", call))
+    assert not retry.is_error and target.read_bytes() == b"new\r\n"

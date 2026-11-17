@@ -9,6 +9,7 @@ from __future__ import annotations
 import codecs
 import errno
 import hashlib
+import json
 import os
 import secrets
 import stat
@@ -16,7 +17,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO, Iterable, Iterator, Optional
+from typing import BinaryIO, Callable, Iterable, Iterator, Optional
 
 from crew.core.errors import ToolError
 from crew.core.runctx import current_agent_workdir
@@ -67,7 +68,7 @@ def snapshot_file(path: Path, *, max_bytes: int | None = None) -> FileVersion:
     )
 
 
-def atomic_replace_bytes(path: Path, data: bytes, expected: FileVersion) -> None:
+def atomic_replace_bytes(path: Path, data: bytes, expected: FileVersion) -> FileVersion:
     """Replace one file in-place only if path identity and content are unchanged."""
     canonical = _lexical_absolute(path)
     if canonical != expected.path:
@@ -78,9 +79,19 @@ def atomic_replace_bytes(path: Path, data: bytes, expected: FileVersion) -> None
         if not _file_version_matches(expected, match_descriptor):
             raise FileConflictError("文件在原子替换前已被修改或替换")
         if os.name == "nt":
-            _atomic_replace_windows(canonical, data, expected, parent_descriptor)
+            committed = _atomic_replace_windows(canonical, data, expected, parent_descriptor)
         else:
-            _atomic_replace_posix(canonical.name, data, expected, parent_descriptor)
+            committed = _atomic_replace_posix(canonical.name, data, expected, parent_descriptor)
+    return FileVersion(
+        path=canonical,
+        exists=True,
+        device=committed.st_dev,
+        inode=committed.st_ino,
+        size=committed.st_size,
+        mtime_ns=committed.st_mtime_ns,
+        digest=hashlib.sha256(data).hexdigest(),
+        mode=committed.st_mode,
+    )
 
 
 def _atomic_replace_windows(
@@ -88,7 +99,7 @@ def _atomic_replace_windows(
     data: bytes,
     expected: FileVersion,
     parent_handle: int,
-) -> None:
+) -> os.stat_result:
     import ctypes
     import msvcrt
     from ctypes import wintypes
@@ -139,28 +150,35 @@ def _atomic_replace_windows(
             os.fsync(stream.fileno())
         if expected.exists:
             os.chmod(temporary, stat.S_IMODE(expected.mode))
+        committed = os.fstat(descriptor)
         if not _file_version_matches(expected, None):
             raise FileConflictError("文件在原子替换前已被修改或替换")
-        _rename_windows_handle(descriptor, parent_handle, path.name)
+        _rename_windows_handle(descriptor, parent_handle, path.name, replace=expected.exists)
+        return committed
     finally:
         os.close(descriptor)
         try:
             temporary.unlink()
         except FileNotFoundError:
             pass
+        except PermissionError:
+            temporary.chmod(stat.S_IWRITE)
+            temporary.unlink()
 
 
-def _rename_windows_handle(descriptor: int, parent_handle: int, destination_name: str) -> None:
+def _rename_windows_handle(descriptor: int, parent_handle: int, destination_name: str, *, replace: bool) -> None:
     import ctypes
     import msvcrt
     from ctypes import wintypes
+
+    name_bytes = len(destination_name.encode("utf-16-le"))
 
     class FileRenameInformation(ctypes.Structure):
         _fields_ = [
             ("ReplaceIfExists", wintypes.BOOLEAN),
             ("RootDirectory", wintypes.HANDLE),
             ("FileNameLength", wintypes.DWORD),
-            ("FileName", wintypes.WCHAR * len(destination_name)),
+            ("FileName", wintypes.WCHAR * (name_bytes // 2)),
         ]
 
     class IoStatusBlock(ctypes.Structure):
@@ -170,9 +188,9 @@ def _rename_windows_handle(descriptor: int, parent_handle: int, destination_name
         ]
 
     information = FileRenameInformation()
-    information.ReplaceIfExists = True
+    information.ReplaceIfExists = replace
     information.RootDirectory = parent_handle
-    information.FileNameLength = len(destination_name.encode("utf-16-le"))
+    information.FileNameLength = name_bytes
     information.FileName = destination_name
     ntdll = ctypes.WinDLL("ntdll")
     set_information = ntdll.NtSetInformationFile
@@ -196,7 +214,10 @@ def _rename_windows_handle(descriptor: int, parent_handle: int, destination_name
         to_win_error = ntdll.RtlNtStatusToDosError
         to_win_error.argtypes = [ctypes.c_long]
         to_win_error.restype = wintypes.ULONG
-        raise OSError(to_win_error(status), "无法以父目录对象替换结构化文件")
+        error = to_win_error(status)
+        if not replace and error in {80, 183}:  # FILE_EXISTS / ALREADY_EXISTS
+            raise FileConflictError("文件在新建前已由其他进程创建")
+        raise ctypes.WinError(error)
 
 
 def _atomic_replace_posix(
@@ -204,7 +225,7 @@ def _atomic_replace_posix(
     data: bytes,
     expected: FileVersion,
     parent_descriptor: int,
-) -> None:
+) -> os.stat_result:
     temporary_name = f".{name}.{secrets.token_hex(8)}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_descriptor)
@@ -215,14 +236,18 @@ def _atomic_replace_posix(
             os.fsync(handle.fileno())
         if expected.exists:
             os.fchmod(descriptor, stat.S_IMODE(expected.mode))
+        committed = os.fstat(descriptor)
         if not _file_version_matches(expected, parent_descriptor):
             raise FileConflictError("文件在原子替换前已被修改或替换")
-        os.replace(
-            temporary_name,
-            name,
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
+        if expected.exists:
+            os.replace(temporary_name, name, src_dir_fd=parent_descriptor, dst_dir_fd=parent_descriptor)
+        else:
+            try:
+                os.link(temporary_name, name, src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise FileConflictError("文件在新建前已由其他进程创建") from exc
+        return committed
     finally:
         os.close(descriptor)
         try:
@@ -232,17 +257,24 @@ def _atomic_replace_posix(
 
 
 def _file_version_matches(expected: FileVersion, parent_descriptor: int | None = None) -> bool:
+    if not expected.exists:
+        try:
+            if parent_descriptor is None:
+                expected.path.lstat()
+            else:
+                os.stat(expected.path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
     try:
         info, data = (
-            _read_verified_path(expected.path)
+            _read_verified_path(expected.path, max_bytes=expected.size)
             if parent_descriptor is None
-            else _read_verified_at(parent_descriptor, expected.path.name)
+            else _read_verified_at(parent_descriptor, expected.path.name, max_bytes=expected.size)
         )
-    except FileNotFoundError:
-        return not expected.exists
-    except (FileConflictError, OSError):
-        return False
-    if not expected.exists:
+    except (FileConflictError, OSError, ValueError):
         return False
     if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
         expected.device,
@@ -784,10 +816,12 @@ def _format_read_result(
     shown_lines: int | None = None,
     truncated: bool = False,
     hint: str = "",
+    file_version: str | None = None,
+    read_complete: bool | None = None,
+    next_offset: int | None = None,
+    editable: bool | None = None,
 ) -> str:
     """把读取结果格式化为 JSON，与 Hermes 返回结构接近。"""
-    import json
-
     if shown_lines is None:
         shown_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
     payload: dict = {
@@ -803,6 +837,14 @@ def _format_read_result(
         payload["truncated"] = True
     if hint:
         payload["hint"] = hint
+    if file_version is not None:
+        payload["file_version"] = file_version
+    if read_complete is not None:
+        payload["read_complete"] = read_complete
+    if next_offset is not None:
+        payload["next_offset"] = next_offset
+    if editable is not None:
+        payload["editable"] = editable
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -889,7 +931,15 @@ class FileReadOutcome:
     shown_lines: int
     truncated: bool
     hint: str
-    version: FileVersion  # stat-only：观察记录只消费 (device, inode, size, mtime_ns)
+    version: FileVersion
+    first_line: int = 0
+    last_line: int = 0
+    clipped_lines: tuple[int, ...] = ()
+    editable: bool = True
+
+    @property
+    def complete(self) -> bool:
+        return not self.truncated
 
 
 def _sniff_head(head: bytes) -> HeadSniff:
@@ -996,15 +1046,23 @@ def build_text_window(
     limit: int,
     max_line_length: int = FILE_READ_LINE_LENGTH,
     max_chars: int = 100_000,
+    max_json_chars: int | None = None,
 ) -> TextWindow:
     """在文本 chunk 流上构建行窗口：offset≥1 为前向读取，offset<0 为尾读。"""
     if offset >= 1:
         return _build_window_forward(
-            chunks, offset=offset, limit=limit, max_line_length=max_line_length, max_chars=max_chars
+            chunks, offset=offset, limit=limit, max_line_length=max_line_length,
+            max_chars=max_chars, max_json_chars=max_json_chars,
         )
     return _build_window_tail(
-        chunks, offset=offset, limit=limit, max_line_length=max_line_length, max_chars=max_chars
+        chunks, offset=offset, limit=limit, max_line_length=max_line_length,
+        max_chars=max_chars, max_json_chars=max_json_chars,
     )
+
+
+def _window_json_cost(number: int, text: str, max_json_chars: int | None) -> int:
+    # Include the line prefix and escaped newline between rows.
+    return len(json.dumps(f"{number}: {text}", ensure_ascii=False)) if max_json_chars is not None else 0
 
 
 def _build_window_forward(
@@ -1014,24 +1072,28 @@ def _build_window_forward(
     limit: int,
     max_line_length: int,
     max_chars: int,
+    max_json_chars: int | None,
 ) -> TextWindow:
     lines: list[WindowLine] = []
     truncated_line_numbers: list[int] = []
     total = 0
     used = 0
+    json_used = 0
     capped = False
 
     def consume(raw: str) -> None:
-        nonlocal total, used, capped
+        nonlocal total, used, json_used, capped
         total += 1
         if capped or total < offset or len(lines) >= limit:
             return
         text = _clip_line(raw, max_line_length, truncated_line_numbers, total)
-        cost = len(text) + (1 if lines else 0)
-        if used + cost > max_chars:
+        cost = len(text) + bool(lines)
+        json_cost = _window_json_cost(total, text, max_json_chars)
+        if used + cost > max_chars or (max_json_chars is not None and json_used + json_cost > max_json_chars):
             capped = True
             return
         used += cost
+        json_used += json_cost
         lines.append(WindowLine(number=total, text=text))
 
     for line in _iter_capped_lines(chunks, max_line_length):
@@ -1055,6 +1117,7 @@ def _build_window_tail(
     limit: int,
     max_line_length: int,
     max_chars: int,
+    max_json_chars: int | None,
 ) -> TextWindow:
     tail_count = -offset
     truncated_line_numbers: list[int] = []
@@ -1068,13 +1131,16 @@ def _build_window_tail(
     entries = list(window)[:limit]
     kept: list[WindowLine] = []
     used = 0
+    json_used = 0
     capped = False
     for entry in reversed(entries):
-        cost = len(entry.text) + (1 if kept else 0)
-        if used + cost > max_chars:
+        cost = len(entry.text) + bool(kept)
+        json_cost = _window_json_cost(entry.number, entry.text, max_json_chars)
+        if used + cost > max_chars or (max_json_chars is not None and json_used + json_cost > max_json_chars):
             capped = True
             break
         used += cost
+        json_used += json_cost
         kept.append(entry)
     kept.reverse()
     shown = {entry.number for entry in kept}
@@ -1157,7 +1223,9 @@ def _get_max_read_lines() -> int:
     return FILE_READ_MAX_LINES
 
 
-def _stream_utf8_chunks(handle: BinaryIO, *, strip_bom: bool) -> Iterator[str]:
+def _stream_utf8_chunks(
+    handle: BinaryIO, *, strip_bom: bool, on_bytes: Callable[[bytes], None],
+) -> Iterator[str]:
     """从已打开句柄流式产出严格解码的 UTF-8 文本块。"""
     decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
     first = True
@@ -1168,6 +1236,7 @@ def _stream_utf8_chunks(handle: BinaryIO, *, strip_bom: bool) -> Iterator[str]:
             if tail:
                 yield tail.removeprefix("\ufeff") if first and strip_bom else tail
             return
+        on_bytes(block)
         piece = decoder.decode(block)
         if piece:
             if first and strip_bom:
@@ -1213,14 +1282,17 @@ def read_file_window(
     *,
     offset: int,
     limit: int,
+    max_result_chars: int | None = None,
 ) -> FileReadOutcome:
     """file_read 主流程：嗅探 → 编码/流式路由 → 行窗口 → 行号渲染。
 
-    成功返回带 stat-only FileVersion 的结果；写入侧的 stale 校验只消费
-    stat 四元组，因此这里不整读、不计算内容摘要。
+    在同一个验证句柄上记录实际读取字节的摘要，流式路径不额外整读。
     """
     max_chars = _get_max_read_chars()
+    # Leave room for JSON metadata and the read window footer.
+    max_json_chars = max(1, max_result_chars - 2048) if max_result_chars is not None else None
     hints: list[str] = []
+    digest = hashlib.sha256()
 
     with open_verified_read(path) as (info, handle):
         head = handle.read(TEXT_SAMPLE_BYTES)
@@ -1240,7 +1312,8 @@ def read_file_window(
 
         def build(chunks: Iterable[str]) -> TextWindow:
             return build_text_window(
-                chunks, offset=offset, limit=limit, max_chars=max_chars
+                chunks, offset=offset, limit=limit, max_chars=max_chars,
+                max_json_chars=max_json_chars,
             )
 
         if sniff.encoding == "utf-8-sig":
@@ -1254,16 +1327,22 @@ def read_file_window(
                         f"（{info.st_size} 字节 > {UTF16_TRANSCODE_MAX_BYTES}）；"
                         "请先用 terminal 执行 iconv 转为 UTF-8 后再读取。"
                     )
-                text = handle.read().decode(sniff.encoding, errors="replace")
+                data = handle.read()
+                digest.update(data)
+                text = data.decode(sniff.encoding, errors="replace")
                 window = build([text.removeprefix("\ufeff")])
                 hints.append(
                     f"检测到 {_utf16_label(sniff.encoding)} 编码，已转码为 UTF-8 显示；"
                     "编辑/写入要求 UTF-8，请先用 terminal 执行 iconv 转换文件编码。"
                 )
             elif info.st_size >= FILE_READ_STREAM_MIN_BYTES:
-                window = build(_stream_utf8_chunks(handle, strip_bom=sniff.encoding == "utf-8-sig"))
+                window = build(_stream_utf8_chunks(
+                    handle, strip_bom=sniff.encoding == "utf-8-sig", on_bytes=digest.update,
+                ))
             else:
-                text = handle.read().decode("utf-8")
+                data = handle.read()
+                digest.update(data)
+                text = data.decode("utf-8")
                 window = build([text.removeprefix("\ufeff") if sniff.encoding == "utf-8-sig" else text])
         except UnicodeDecodeError as exc:
             raise ToolError(
@@ -1289,8 +1368,9 @@ def read_file_window(
         )
 
     content = render_read_window(window, offset=offset)
+    start = window.lines[0].number if window.lines else 0
     end = window.lines[-1].number if window.lines else 0
-    truncated = end < window.total_lines or window.truncated_by_budget or bool(window.truncated_line_numbers)
+    truncated = start > 1 or end < window.total_lines or window.truncated_by_budget or bool(window.truncated_line_numbers)
     version = FileVersion(
         path=_lexical_absolute(path),
         exists=True,
@@ -1298,6 +1378,7 @@ def read_file_window(
         inode=after.st_ino,
         size=after.st_size,
         mtime_ns=after.st_mtime_ns,
+        digest=digest.hexdigest(),
         mode=after.st_mode,
     )
     return FileReadOutcome(
@@ -1308,6 +1389,10 @@ def read_file_window(
         truncated=truncated,
         hint="\n".join(hints),
         version=version,
+        first_line=start,
+        last_line=end,
+        clipped_lines=tuple(window.truncated_line_numbers),
+        editable=sniff.encoding in ("utf-8", "utf-8-sig"),
     )
 
 

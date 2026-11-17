@@ -214,6 +214,23 @@ class ToolError(CrewError):
     DEFAULT_KIND: ClassVar[CrewErrorKind] = CrewErrorKind.TOOL
 
 
+class StructuredToolError(ToolError):
+    """A tool failure with a stable code and optional recovery instructions."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        next_action: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.next_action = next_action
+        self.details = dict(details) if details is not None else {}
+
+
 class ToolNotFoundError(ToolError):
     """请求了未注册的工具。"""
 
