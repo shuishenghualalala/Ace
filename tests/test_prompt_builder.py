@@ -6,15 +6,19 @@ from pathlib import Path
 
 import pytest
 
-from crew.agent import prompt_builder
+from crew.agent import instructions, prompt_builder
 from crew.agent.prompt_builder import _clear_file_cache, _load_profile, build_prompt_parts
+from crew.core.runctx import current_owner_account_id
+from crew.state.home import get_owner_runtime_home
 
 
 @pytest.fixture(autouse=True)
 def _clean_cache():
     _clear_file_cache()
+    instructions._read_source.cache_clear()
     yield
     _clear_file_cache()
+    instructions._read_source.cache_clear()
 
 
 def _patch_counting_read_text(monkeypatch) -> tuple[dict[str, int], list[int]]:
@@ -50,15 +54,117 @@ def test_profile_read_is_cached_by_mtime(tmp_path, monkeypatch):
     assert counter["n"] == 2
 
 
-def test_crew_md_read_is_cached_by_mtime(tmp_path, monkeypatch):
-    """CREW.md 发现路径同样命中 mtime 缓存。"""
-    counter, _ = _patch_counting_read_text(monkeypatch)
-    (tmp_path / "CREW.md").write_text("项目规则", encoding="utf-8")
+async def test_project_rules_are_cached_off_loop_and_reloaded_after_replacement(tmp_path, monkeypatch):
+    path = tmp_path / "CREW.md"
+    path.write_text("规则甲", encoding="utf-8")
+    opens = []
+    real_open = instructions.open_verified_read
 
-    first = prompt_builder.build_context_files_prompt(cwd=str(tmp_path))
-    second = prompt_builder.build_context_files_prompt(cwd=str(tmp_path))
-    assert first == second == "## CREW.md\n\n项目规则"
-    assert counter["n"] == 1
+    def record_open(path):
+        opens.append(threading.get_ident())
+        return real_open(path)
+
+    monkeypatch.setattr(instructions, "open_verified_read", record_open)
+    for _ in range(2):
+        parts = await build_prompt_parts(cwd=str(tmp_path))
+        assert "## 项目规则（CREW.md）\n\n规则甲" in parts["user_reminder"]
+    assert len(opens) == 1
+
+    # Replace the file while preserving its size and modification time.
+    previous = path.stat()
+    replacement = tmp_path / "replacement.md"
+    replacement.write_text("规则乙", encoding="utf-8")
+    os.utime(replacement, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    replacement.replace(path)
+    parts = await build_prompt_parts(cwd=str(tmp_path))
+    assert "规则乙" in parts["user_reminder"] and "规则甲" not in parts["user_reminder"]
+    assert len(opens) == 2 and threading.get_ident() not in opens
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_project_rules_prefer_nearest_directory_then_filename(tmp_path, linked):
+    checkout = tmp_path / "checkout"
+    cwd = checkout / "packages" / "child"
+    cwd.mkdir(parents=True)
+    marker = checkout / ".git"
+    if linked:
+        marker.write_text("gitdir: ../primary/.git/worktrees/checkout\n", encoding="utf-8")
+    else:
+        marker.mkdir()
+    outside = tmp_path / "AGENTS.md"
+    outside.write_text("outer-project", encoding="utf-8")
+    root_rules = checkout / "AGENTS.md"
+    root_rules.write_text("root-rules", encoding="utf-8")
+
+    def load():
+        return prompt_builder.build_context_files_prompt(cwd=str(cwd))
+
+    assert "root-rules" in load()
+    for name in ("CREW.md", ".crew.md", "AGENTS.md"):
+        (cwd / name).write_text(f"nested-{name}", encoding="utf-8")
+        prompt = load()
+        assert f"## 项目规则（packages/child/{name}）\n\nnested-{name}" in prompt
+        assert "root-rules" not in prompt
+    for name in ("CREW.md", ".crew.md", "AGENTS.md"):
+        (cwd / name).unlink()
+    root_rules.unlink()
+    assert "outer-project" not in load()
+
+
+def test_non_git_and_managed_workspace_do_not_inherit_unrelated_ancestors(tmp_path, monkeypatch):
+    (tmp_path / "AGENTS.md").write_text("install-rules", encoding="utf-8")
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "app-data"))
+    managed = get_owner_runtime_home(create=False) / "task_workspaces" / "default"
+    managed.mkdir(parents=True)
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    assert "install-rules" not in prompt_builder.build_context_files_prompt(str(unrelated))
+
+    (tmp_path / ".git").mkdir()
+    assert "install-rules" not in prompt_builder.build_context_files_prompt(str(managed))
+    (managed / "AGENTS.md").write_text("managed-rules", encoding="utf-8")
+    assert "managed-rules" in prompt_builder.build_context_files_prompt(str(managed))
+
+
+async def test_owner_instructions_are_scoped_and_precede_workspace_settings_and_files(tmp_path):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text("checkout-scope", encoding="utf-8")
+    for owner in ("A:project-a", "A:project-b"):
+        (get_owner_runtime_home(owner) / "AGENTS.md").write_text(f"only-{owner}", encoding="utf-8")
+
+    for owner, other in (("A:project-a", "A:project-b"), ("A:project-b", "A:project-a")):
+        token = current_owner_account_id.set(owner)
+        try:
+            reminder = (await build_prompt_parts(cwd=str(workspace), workspace_instructions="ui-scope"))["user_reminder"]
+            assert reminder.index(f"only-{owner}") < reminder.index("ui-scope") < reminder.index("checkout-scope")
+            assert f"only-{other}" not in reminder
+            child = (await build_prompt_parts(cwd=str(workspace), lightweight=True))["user_reminder"]
+            assert f"only-{owner}" not in child and "checkout-scope" not in child
+        finally:
+            current_owner_account_id.reset(token)
+
+
+def test_project_instruction_read_has_utf8_safe_byte_limit(tmp_path, caplog):
+    prefix = b"a" * (instructions._MAX_SOURCE_BYTES - 1)
+    (tmp_path / "AGENTS.md").write_bytes(prefix + "中not-visible".encode())
+    with caplog.at_level("INFO", logger=instructions.__name__):
+        prompt = prompt_builder.build_context_files_prompt(str(tmp_path))
+        assert prompt_builder.build_context_files_prompt(str(tmp_path)) == prompt
+    assert "a" * len(prefix) in prompt
+    assert "中not-visible" not in prompt and "\ufffd" not in prompt
+    assert "只载入前 100 KiB" in prompt
+    assert caplog.text.count("agent_instruction_truncated") == 1
+    assert str(tmp_path) not in caplog.text
+
+
+def test_project_instruction_read_failure_leaves_workspace_prompt_usable(tmp_path, caplog):
+    (tmp_path / "AGENTS.md").write_bytes(b"private-instruction\xff")
+    prompt = prompt_builder.build_context_files_prompt(str(tmp_path), workspace_instructions="settings-rule")
+    assert "settings-rule" in prompt and "private-instruction" not in prompt
+    assert "agent_instruction_read_failed" in caplog.text
+    assert "file=AGENTS.md error=UnicodeDecodeError" in caplog.text
+    assert "private-instruction" not in caplog.text and str(tmp_path) not in caplog.text
 
 
 async def test_build_prompt_parts_reads_off_main_thread(tmp_path, monkeypatch):

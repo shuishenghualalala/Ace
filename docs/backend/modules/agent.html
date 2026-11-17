@@ -53,6 +53,7 @@
     <li>提供子 Agent、外部 Agent、Plan/Todo 和 Skill 索引等运行时能力；具体工具实现仍归所属 Feature。</li>
   </ul>
   <p>Plan 模式从单一工具声明与当前 Agent 授权的交集构造当轮提示词和模型 schema，直接披露可用的 <code>file_read</code>、<code>glob</code>、<code>grep</code> 等工具。<code>file_write</code> 只允许写当前会话的计划文件，执行前会再次检查实际参数。审批后的新回合恢复会话原有的工具和权限规则。</p>
+  <p>内置主 Agent 按当前账号运行时目录的 <code>AGENTS.md</code>、工作区设置中的提示词、最近的一份项目规则的顺序组装动态提示词。项目规则从实际工作目录向上找，限于当前 Git checkout（包括 linked worktree），无 Git 时只查工作目录。同一目录依次查找 <code>AGENTS.md</code>、<code>.crew.md</code>、<code>CREW.md</code>。账号托管工作区的搜索止于账号目录。文件有变更时下一轮重新加载，每份规则最多载入 100 KiB，截断时在提示词中标记。</p>
 
   <h2>2. 功能拆解</h2>
   <table>
@@ -71,7 +72,7 @@
       <tr><td>中断即时唤醒</td><td><code>TurnControl</code> 除协作式轮询标志外持有 <code>asyncio.Event</code>：<code>interrupt()</code> 时 set，等在工具/权限等待/compact 内部的执行侧任务经 <code>wait_interrupted()</code> 即时感知（跨线程 set 失败时按 50ms 轮询兜底）。</td><td>已落地</td></tr>
       <tr><td>interrupt_message 消费</td><td>回合收尾 <code>drain_interrupt_message()</code> 取出触发中断的消息：作为 <code>[回合中断] {message}</code> user 标记消息追加 canonical 历史（落库且下回合进入 LLM 视图），并经 status 帧透出一次；<code>reset()</code> 双保险不泄漏到下一回合。</td><td>已落地</td></tr>
       <tr><td>compact 段中断检查</td><td>溢出压缩前检查 interrupt；摘要 LLM 调用与 interrupt 事件竞争（task + FIRST_COMPLETED），interrupt 先到即取消在途摘要、放弃本次压缩走回合收尾；完成后到达的 interrupt 同样丢弃本次压缩结果。</td><td>已落地</td></tr>
-      <tr><td>热路径 I/O 治理</td><td>SOUL/CREW.md/profile 等 prompt 文件按 resolved 路径 + mtime 缓存（未变直接命中），<code>build_prompt_parts</code> 缓存全命中时事件循环内执行、未命中整体 <code>asyncio.to_thread</code>；owner env 热刷新（<code>refresh_owner_runtime_env_async</code>）、工具媒体读盘（base64 编码）、后台子任务 TaskManager 写库均挪到工作线程；每迭代内 <code>estimate_tokens</code> 全量估算合并为一次（key=消息数+末条长度，视图失配自然失效）。</td><td>已落地</td></tr>
+      <tr><td>热路径 I/O 治理</td><td><code>build_prompt_parts</code> 在线程中发现文件并组装提示词。指令内容按路径、文件身份、大小和修改时间复用有界缓存；profile 按路径和修改时间缓存。owner env 热刷新（<code>refresh_owner_runtime_env_async</code>）、工具媒体读盘（base64 编码）、后台子任务 TaskManager 写库均挪到工作线程；每迭代内 <code>estimate_tokens</code> 全量估算合并为一次（key=消息数+末条长度，视图失配自然失效）。</td><td>已落地</td></tr>
       <tr><td>附件注入（自描述截断）</td><td>文本附件经 <code>_read_attachment</code> 预读，超过 <code>_ATTACHMENT_MAX_CHARS</code>（8000 字符）注入前缀并在代码块外附【附件已截断】提示（完整总量 + <code>file_read</code> 分页续读指引），模型不会把截断前缀误当全文；二进制附件仍为路径摘要，图像走 Vision base64。</td><td>已落地</td></tr>
     </tbody>
   </table>
