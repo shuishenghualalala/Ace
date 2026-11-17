@@ -87,6 +87,11 @@
   line-height: 1.45;
 }
 
+.process-timeline__content--message {
+  padding-top: max(0px, calc((28px - 1.45em) / 2));
+  overflow-wrap: anywhere;
+}
+
 .process-timeline__narration {
   min-width: 0;
   padding: var(--mw-space-1) 0 var(--mw-space-1);

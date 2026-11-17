@@ -1240,7 +1240,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
     if (m.role === 'status') {
       if (m.activity && (!isLive || i !== lastActivityIdx)) return;
       const content = createTrustedElement<HTMLElement>(
-        `<div class="process-timeline__content"></div>`,
+        `<div class="process-timeline__content process-timeline__content--message"></div>`,
       );
       content.textContent = m.content; // escapeHtml 等价（textContent 自带转义语义）
       const item = renderTimelineItem(PROCESS_STATUS_ICON_SVG, '', content);
@@ -1250,7 +1250,7 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
     }
     if (m.role === 'error') {
       const content = createTrustedElement<HTMLElement>(
-        `<div class="process-timeline__content process-timeline__error"></div>`,
+        `<div class="process-timeline__content process-timeline__content--message process-timeline__error"></div>`,
       );
       content.textContent = m.content;
       const item = renderTimelineItem(PROCESS_ERROR_ICON_SVG, 'process-timeline__icon--error', content);
