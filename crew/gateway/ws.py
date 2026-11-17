@@ -358,16 +358,20 @@ def create_ws_router(
                             continue
                         # 允许订阅任意 session_id：后台推送（如 Wiki ingest 进度）可能指向前端
                         # 生成但尚未落库的会话。注册按 (owner, session_id) 索引，不会跨账号泄露。
-                        _register_session(sid)
                         if _session_owned(sid):
                             after = last_seqs.get(sid, 0)
-                            await connections.replay(
+                            if not await connections.replay(
                                 sid,
                                 socket,
                                 after_gateway_sequence=after,
                                 filter_fn=_replay_filter,
                                 owner_account_id=owner,
-                            )
+                                register_for_live=True,
+                            ):
+                                return
+                            registered_sessions.add(sid)
+                        else:
+                            _register_session(sid)
                     continue
 
                 if data.get("action") == "stop":

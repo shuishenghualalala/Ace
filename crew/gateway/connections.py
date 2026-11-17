@@ -246,24 +246,28 @@ class ConnectionManager:
             "session_id": session_id,
         }
 
-    async def _do_push(self, key: tuple[str, str], payload: dict) -> bool:
+    async def _do_push(
+        self, key: tuple[str, str], payload: dict, *, skip_socket: WebSocket | None = None
+    ) -> bool:
         """实际推送。返回 True 表示至少一个连接推送成功。
 
-        调用方只在存在活跃连接时进入这里；因此 False 表示尝试发送但全部失败。
         同一 WebSocket 可能同时收到多个 session 的后台推送，按 socket 加锁避免并发
         send_json 交错破坏 ASGI WebSocket 状态机。
         """
+        replay_lock = self._replay_locks[key]
         sockets = list(self._conns.get(key, set()))
         dead: list[WebSocket] = []
         any_ok = False
         for ws in sockets:
+            if ws is skip_socket:
+                continue
             try:
-                lock = self._send_locks.setdefault(ws, asyncio.Lock())
-                async with lock:
-                    await ws.send_json(payload)
+                await self.send_socket(ws, payload)
                 any_ok = True
             except Exception:
                 dead.append(ws)
+            if self._replay_locks.get(key) is not replay_lock:
+                return False
         for ws in dead:
             self._conns[key].discard(ws)
             sessions = self._ws_to_sessions.get(ws)
@@ -283,17 +287,24 @@ class ConnectionManager:
 
     async def _flush_pending(self, key: tuple[str, str]) -> None:
         """延迟推送：等 min_interval 后把缓存的帧一次性推送。"""
-        async with self._replay_locks[key]:
-            await self._flush_pending_locked(key)
+        lock = self._replay_locks[key]
+        async with lock:
+            if self._replay_locks.get(key) is lock:
+                await self._flush_pending_locked(key)
 
-    async def _flush_pending_locked(self, key: tuple[str, str]) -> None:
+    async def _flush_pending_locked(
+        self, key: tuple[str, str], *, skip_socket: WebSocket | None = None
+    ) -> None:
         """在 replay lock 保护下刷新限流缓存帧。"""
         payloads = self._pending_payloads.pop(key, [])
         self._flush_tasks.pop(key, None)
         if not payloads or not self._conns.get(key):
             return
+        lock = self._replay_locks[key]
         for payload in self._merge_pending_payloads(payloads):
-            await self._do_push(key, payload)
+            await self._do_push(key, payload, skip_socket=skip_socket)
+            if self._replay_locks.get(key) is not lock:
+                return
         self._last_push_ts[key] = time.monotonic()
 
     def _merge_pending_payloads(self, payloads: list[dict]) -> list[dict]:
@@ -436,28 +447,26 @@ class ConnectionManager:
         供断线重连后的 subscribe/resume 回放。
         """
         key = self._key(session_id, owner_account_id)
+        lock = self._replay_locks[key]
+        async with lock:
+            # Logout can retire this lock while a producer is waiting for it.
+            if self._replay_locks.get(key) is not lock:
+                return
 
-        # 分配 gateway_sequence 并入回放缓存（无论当前是否有连接）
-        self._gateway_seq[key] += 1
-        payload["gateway_sequence"] = self._gateway_seq[key]
-        self._chunk_buffers[key].append(dict(payload))
+            self._gateway_seq[key] += 1
+            payload["gateway_sequence"] = self._gateway_seq[key]
+            self._chunk_buffers[key].append(dict(payload))
 
-        # 连续失败过多，降级为静默（只落库，不推送）
-        if self._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES:
-            log.debug("推送降级（连续失败过多）session=%s", self._label(key))
-            return
-
-        # 无活跃连接不是发送失败：断线期间后台任务继续跑，但不应累计失败导致
-        # 新连接注册后仍被静默降级。
-        if not self._conns.get(key):
-            return
-
-        # 持 replay lock 推送，避免与 replay() 交错导致乱序
-        async with self._replay_locks[key]:
-            await self._push_under_lock(key, payload)
+            if self._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES:
+                log.debug("推送降级（连续失败过多）session=%s", self._label(key))
+                return
+            # Keep journaling while disconnected without recording a push failure.
+            if self._conns.get(key):
+                await self._push_under_lock(key, payload)
 
     async def _push_under_lock(self, key: tuple[str, str], payload: dict) -> None:
         """在 replay lock 保护下执行限流判断与推送。"""
+        lock = self._replay_locks[key]
         now = time.monotonic()
         last_ts = self._last_push_ts.get(key, 0)
         elapsed = now - last_ts
@@ -471,9 +480,13 @@ class ConnectionManager:
             if flush_task is not None and not flush_task.done():
                 flush_task.cancel()
             await self._flush_pending_locked(key)
+            if self._replay_locks.get(key) is not lock:
+                return
 
         if is_priority and not is_final:
             ok = await self._do_push(key, payload)
+            if self._replay_locks.get(key) is not lock:
+                return
             self._last_push_ts[key] = time.monotonic()
             if ok:
                 self._consecutive_failures[key] = 0
@@ -510,6 +523,8 @@ class ConnectionManager:
 
         # 立即推送
         ok = await self._do_push(key, payload)
+        if self._replay_locks.get(key) is not lock:
+            return
         self._last_push_ts[key] = time.monotonic()
 
         if ok:
@@ -528,35 +543,59 @@ class ConnectionManager:
         after_gateway_sequence: int = 0,
         filter_fn: Callable[[dict], bool] | None = None,
         owner_account_id: str,
-    ) -> None:
+        register_for_live: bool = False,
+    ) -> bool:
         """向指定 socket 回放该 session 缓存中 gateway_sequence > after 的帧。
 
-        回放与实时推送共享 replay lock，避免乱序。发送失败则停止回放。
+        register_for_live 在同一个锁内接续实时订阅，避免新帧越过回放。
+        仅在所选帧发送成功且账号仍连接时返回 True。
         filter_fn 为可选过滤函数，返回 False 时跳过该帧（用于跳过已失效的
         临时交互帧，如已被回答的 followup_question）。
         """
         key = self._key(session_id, owner_account_id)
-        async with self._replay_locks[key]:
-            buffer = self._chunk_buffers.get(key)
-            if not buffer:
-                return
-            # 先拍快照再逐帧发送：send_json 会让出事件循环，而 push_payload 在
-            # replay lock 外向同一个 deque append，直接迭代会抛
-            # "deque mutated during iteration" 并拆掉整条 WS 连接。
-            # 回放期间新入缓存的帧不在快照里，但 push_payload 会等回放结束
-            # 拿到锁后实时补发，顺序与完整性都不受影响。
-            for payload in list(buffer):
-                if payload.get("gateway_sequence", 0) <= after_gateway_sequence:
-                    continue
-                if filter_fn is not None and not filter_fn(payload):
+        lock = self._replay_locks[key]
+        async with lock:
+            if self._replay_locks.get(key) is not lock:
+                return False
+            frames = {
+                payload["gateway_sequence"]: payload
+                for payload in self._chunk_buffers.get(key, ())
+                if payload["gateway_sequence"] > after_gateway_sequence
+            }
+            pending = self._pending_payloads.get(key)
+            live_sequences: set[int] = set()
+            if register_for_live and pending:
+                # The pending batch is already journaled. A re-subscribing socket
+                # still needs pending live frames that fell out of the journal.
+                if ws in self._conns.get(key, ()):
+                    for payload in pending:
+                        seq = payload["gateway_sequence"]
+                        frames[seq] = payload
+                        live_sequences.add(seq)
+                flush_task = self._flush_tasks.pop(key, None)
+                if flush_task is not None:
+                    flush_task.cancel()
+                await self._flush_pending_locked(key, skip_socket=ws)
+
+            sent = False
+            for seq, payload in sorted(frames.items()):
+                if self._replay_locks.get(key) is not lock:
+                    return False
+                if seq not in live_sequences and filter_fn is not None and not filter_fn(payload):
                     continue
                 try:
-                    lock = self._send_locks.setdefault(ws, asyncio.Lock())
-                    async with lock:
-                        await ws.send_json(payload)
+                    await self.send_socket(ws, payload)
                 except Exception:  # noqa: BLE001
-                    # socket 已死，停止回放；外层 WS handler 会清理死连接
-                    break
+                    return False
+                sent = True
+
+            if self._replay_locks.get(key) is not lock:
+                return False
+            if register_for_live and sent:
+                self._consecutive_failures.pop(key, None)
+            if register_for_live:
+                self.register(session_id, ws, owner_account_id=owner_account_id)
+            return True
 
     def clear_buffer(self, session_id: str, *, owner_account_id: str) -> None:
         """新一轮请求开始时清空回放缓存，但保持 gateway_sequence 会话级单调递增。

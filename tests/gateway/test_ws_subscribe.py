@@ -75,7 +75,10 @@ class _ReplayConnections:
         for socket in self.sockets.get(session_id, []):
             await socket.send_json(payload)
 
-    async def replay(self, session_id: str, socket, *, after_gateway_sequence: int = 0, filter_fn=None, **_kwargs) -> None:
+    async def replay(
+        self, session_id: str, socket, *, after_gateway_sequence: int = 0,
+        filter_fn=None, register_for_live: bool = False, **_kwargs,
+    ) -> bool:
         self.replays.append((session_id, after_gateway_sequence))
         await socket.send_json({
             "kind": "delta",
@@ -85,6 +88,9 @@ class _ReplayConnections:
             "session_id": session_id,
             "gateway_sequence": after_gateway_sequence + 1,
         })
+        if register_for_live:
+            self.register(session_id, socket)
+        return True
 
 
 class _ActiveOwnerStub:

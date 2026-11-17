@@ -88,35 +88,119 @@ async def test_replay_respects_after_sequence(conn: ConnectionManager):
 
 
 @pytest.mark.asyncio
-async def test_replay_survives_concurrent_push_append(conn: ConnectionManager):
-    """回放持锁逐帧 await send 期间，push_payload 在锁外向同一 deque append。
+async def test_subscribe_replays_before_queued_live_push(conn: ConnectionManager):
+    sending = asyncio.Event()
+    release = asyncio.Event()
 
-    直接迭代 deque 会抛 'deque mutated during iteration' 并拆掉整条 WS；
-    快照迭代免疫，且回放期间新到的帧应由 push_payload 在回放结束后实时补发。
-    """
-    ws = _FakeWS()
-    conn.register("s1", ws, owner_account_id="")
-    for i in range(3):
-        await conn.push_payload("s1", {"kind": "delta", "body": {"text": str(i)}}, owner_account_id="")
-
-    class _SlowWS(_FakeWS):
+    class SlowObserver(_FakeWS):
         async def send_json(self, data: dict) -> None:
-            await asyncio.sleep(0)  # 让出事件循环，制造并发 append 窗口
+            sending.set()
+            await release.wait()
             await super().send_json(data)
 
-    ws2 = _SlowWS()
-    conn.register("s1", ws2, owner_account_id="")
+    observer = SlowObserver()
+    subscriber = _FakeWS()
+    conn.register("s1", observer, owner_account_id="")
+    first = asyncio.create_task(conn.push_payload("s1", {"kind": "delta"}, owner_account_id=""))
+    await asyncio.wait_for(sending.wait(), timeout=1)
+    replay = asyncio.create_task(conn.replay("s1", subscriber, owner_account_id="", register_for_live=True))
+    await asyncio.sleep(0)
+    live = asyncio.create_task(conn.push_payload("s1", {"kind": "final", "is_final": True}, owner_account_id=""))
+    await asyncio.sleep(0)
+    assert subscriber.sent == []
+    release.set()
 
-    async def _concurrent_push() -> None:
-        await asyncio.sleep(0)
-        await conn.push_payload("s1", {"kind": "delta", "body": {"text": "late"}}, owner_account_id="")
+    await asyncio.wait_for(asyncio.gather(first, replay, live), timeout=1)
+    assert replay.result() is True
+    for socket in (observer, subscriber):
+        assert [frame["gateway_sequence"] for frame in socket.sent] == [1, 2]
 
-    await asyncio.gather(
-        conn.replay("s1", ws2, after_gateway_sequence=0, owner_account_id=""),
-        _concurrent_push(),
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_socket", [False, True])
+async def test_subscribe_delivers_rate_limited_frames_once(same_socket: bool):
+    conn = ConnectionManager(min_interval=60)
+    observer = _FakeWS()
+    subscriber = _FakeWS()
+    conn.register("s1", observer, owner_account_id="")
+    if same_socket:
+        conn.register("s1", subscriber, owner_account_id="")
+
+    await conn.push_payload("s1", {"kind": "status"}, owner_account_id="")
+    await conn.push_payload("s1", {"kind": "status"}, owner_account_id="")
+    conn.clear_buffer("s1", owner_account_id="")
+    await conn.push_payload("s1", {"kind": "delta"}, owner_account_id="")
+    timer = conn._flush_tasks[("", "s1")]
+
+    assert await conn.replay(
+        "s1", subscriber, owner_account_id="", register_for_live=True,
+        after_gateway_sequence=1, filter_fn=lambda frame: frame["kind"] != "status",
     )
+    await asyncio.gather(timer, return_exceptions=True)
+    await conn.push_payload("s1", {"kind": "final", "is_final": True}, owner_account_id="")
+    assert [frame["gateway_sequence"] for frame in observer.sent] == [1, 2, 3, 4]
+    assert [frame["gateway_sequence"] for frame in subscriber.sent] == ([1, 2, 3, 4] if same_socket else [3, 4])
 
-    assert [p["body"]["text"] for p in ws2.sent] == ["0", "1", "2", "late"]
+
+@pytest.mark.asyncio
+async def test_logout_during_replay_does_not_restore_subscription(conn: ConnectionManager):
+    sending = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowSubscriber(_FakeWS):
+        async def send_json(self, data: dict) -> None:
+            sending.set()
+            await release.wait()
+            await super().send_json(data)
+
+    socket = SlowSubscriber()
+    conn.register_owner("owner", socket)
+    await conn.push_payload("s1", {"kind": "delta"}, owner_account_id="owner")
+    replay = asyncio.create_task(conn.replay("s1", socket, owner_account_id="owner", register_for_live=True))
+    await asyncio.wait_for(sending.wait(), timeout=1)
+    push = asyncio.create_task(conn.push_payload("s1", {"kind": "final"}, owner_account_id="owner"))
+    await asyncio.sleep(0)
+    assert await conn.close_owner("owner") == 1
+    release.set()
+
+    await asyncio.wait_for(asyncio.gather(replay, push), timeout=1)
+    assert replay.result() is False
+    assert not conn.has_connection("s1", owner_account_id="owner")
+    assert ("owner", "s1") not in conn._chunk_buffers
+
+
+@pytest.mark.asyncio
+async def test_logout_during_flush_does_not_deliver_old_frames_to_new_login():
+    conn = ConnectionManager(min_interval=60)
+    sending = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowObserver(_FakeWS):
+        async def send_json(self, data: dict) -> None:
+            if data["gateway_sequence"] == 2:
+                sending.set()
+                await release.wait()
+            await super().send_json(data)
+
+    observer = SlowObserver()
+    conn.register_owner("owner", observer)
+    conn.register("s1", observer, owner_account_id="owner")
+    for kind in ("delta", "status", "tool"):
+        await conn.push_payload("s1", {"kind": kind}, owner_account_id="owner")
+    final = asyncio.create_task(conn.push_payload(
+        "s1", {"kind": "final", "is_final": True}, owner_account_id="owner",
+    ))
+    await asyncio.wait_for(sending.wait(), timeout=1)
+    assert await conn.close_owner("owner") == 1
+    new_socket = _FakeWS()
+    conn.register_owner("owner", new_socket)
+    assert await conn.replay("s1", new_socket, owner_account_id="owner", register_for_live=True)
+    release.set()
+
+    await asyncio.wait_for(final, timeout=1)
+    assert new_socket.sent == []
+    await conn.push_payload("s1", {"kind": "final", "is_final": True}, owner_account_id="owner")
+    assert [frame["gateway_sequence"] for frame in new_socket.sent] == [1]
 
 
 @pytest.mark.asyncio
@@ -268,10 +352,11 @@ async def test_replay_stops_on_dead_socket(conn: ConnectionManager):
 
     dead = _FakeWS()
     dead.closed = True
-    await conn.replay("s1", dead, after_gateway_sequence=0, owner_account_id="")
+    assert not await conn.replay("s1", dead, owner_account_id="", register_for_live=True)
 
     # 遇到死 socket 应立即停止，不抛异常
     assert dead.sent == []
+    assert dead not in conn._conns[("", "s1")]
 
 
 @pytest.mark.asyncio
