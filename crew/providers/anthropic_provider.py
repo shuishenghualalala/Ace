@@ -17,7 +17,7 @@ from crew.core.errors import (
 from crew.core.interfaces import LLMProvider
 from crew.core.observability import capture_payload, event
 from crew.providers.classify import classify_provider_error
-from crew.providers.keying import ApiKeyResolver
+from crew.providers.keying import ApiKeyResolver, require_api_key
 from crew.core.types import (
     IMAGE_INPUT_UNAVAILABLE_NOTICE,
     ChatResponse,
@@ -217,7 +217,7 @@ class AnthropicProvider(LLMProvider):
         """
         if self._api_key_resolver is None:
             return
-        key = self._api_key_resolver()
+        key = require_api_key(self._api_key_resolver)
         if key != self._current_api_key:
             self._current_api_key = key
             self._headers = {**self._headers, "x-api-key": key}

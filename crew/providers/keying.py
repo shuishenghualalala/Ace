@@ -10,5 +10,15 @@ from __future__ import annotations
 
 from typing import Callable
 
+from crew.core.errors import CrewErrorKind, ProviderError
+
 #: 每次调用返回当前应使用的 api_key；实现自身须无缓存，解析失败允许抛异常。
 ApiKeyResolver = Callable[[], str]
+
+
+def require_api_key(resolve: ApiKeyResolver) -> str:
+    """Reject a missing request credential before handing it to an SDK."""
+    key = resolve()
+    if not key.strip():
+        raise ProviderError("模型 API Key 未配置或已移除", kind=CrewErrorKind.AUTH)
+    return key

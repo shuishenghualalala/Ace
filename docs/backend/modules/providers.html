@@ -73,6 +73,7 @@
       <tr><td><code>crew/providers/anthropic_provider.py</code></td><td>Anthropic Messages Provider（含 prompt cache_control 标注）。</td></tr>
       <tr><td><code>crew/providers/vendors.py</code></td><td>厂商档案表 + 解析函数（<code>resolve_vendor</code> / <code>match_vendor</code> / <code>compat_for_model</code>）。</td></tr>
       <tr><td><code>crew/providers/ssl_context.py</code></td><td>共享 SSLContext 单例。</td></tr>
+      <tr><td><code>crew/providers/keying.py</code></td><td>每次调用重新解析密钥。密钥缺失时，在发起网络请求前返回认证错误。</td></tr>
       <tr><td><code>crew/providers/classify.py</code></td><td>provider 异常统一分类（kind/status/retryable/retry_delay），Retry-After 解析。</td></tr>
       <tr><td><code>tests/test_provider_error_classification.py</code></td><td>分类矩阵、Retry-After 解析、category↔kind 兼容映射、resilience 类型化判定的单测。</td></tr>
       <tr><td><code>tests/test_vendor_profiles.py</code></td><td>档案表、compat 翻译、payload 组装、装配默认值的离线单测。</td></tr>
@@ -89,10 +90,12 @@ VendorCompat:   thinking_format("none"|"deepseek"|"zai"|"qwen")
 
 resolve_vendor(provider_id, base_url, model)   # id 精确匹配 > host 匹配 > 模型 id 匹配
 compat_for_model(vendor, model_id)             # 填入等级映射；不支持思考的模型收掉思考参数</code></pre>
-  <p>装配（<code>crew/app.py</code>）：<code>provider_id</code> 写厂商 id（如 <code>deepseek</code>）即按档案装配——base_url / API key（档案默认环境变量，如 <code>DEEPSEEK_API_KEY</code>）/ vision（模型目录标记）取档案默认值，用户显式配置优先。通用 <code>openai</code>/<code>anthropic</code> 配置按 base_url host / 模型 id 兜底识别厂商（host 匹配不受协议过滤，URL 即端点身份；模型 id 匹配仅在同名协议厂商内，避免协议劫持）；未知 id 仍抛 <code>ValueError</code>。key 解析按 owner 作用域：凭证库按 owner 隔离存储，owner 私有 key 写 owner overlay <code>.env</code>（<code>accounts/&lt;hash&gt;/.env</code>），不同步进程环境；全局/内置模型走共享层（共享 config.yaml + 系统 env）。</p>
-  <pre><code># config.yaml 示例：env 里放 DEEPSEEK_API_KEY 即可，无需填 base_url
+  <p><code>crew/app.py</code> 按 <code>provider_id</code>、端点 host 或模型 id 选择厂商档案。档案为协议、默认端点和视觉能力提供配置。通用 <code>openai</code>/<code>anthropic</code> 配置可通过 host 识别厂商，按模型 id 匹配时则限定在所选协议内。未知 provider id 抛出 <code>ValueError</code>。</p>
+  <p>账号模型的可用状态与实际调用共用配置层的密钥解析。先读该账号的凭据库，再读该账号的 <code>.env</code>。共享内置模型允许本地账号和已启用的指定开发账号回退到进程环境。账号私有模型与其他账号保持在各自的凭据作用域。无账号的全局入口仍支持厂商默认环境变量。</p>
+  <pre><code># 本地内置模型的 config.yaml 示例
 provider: deepseek
-model: deepseek-reasoner</code></pre>
+model: deepseek-reasoner
+api_key_env: DEEPSEEK_API_KEY</code></pre>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">

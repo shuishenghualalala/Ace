@@ -30,7 +30,7 @@ from crew.core.types import (
     coerce_tool_arguments,
 )
 from crew.providers.classify import classify_provider_error
-from crew.providers.keying import ApiKeyResolver
+from crew.providers.keying import ApiKeyResolver, require_api_key
 from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
 
@@ -378,7 +378,7 @@ class OpenAIProvider(LLMProvider):
         """
         if self._api_key_resolver is None:
             return None
-        return {"Authorization": f"Bearer {self._api_key_resolver()}"}
+        return {"Authorization": f"Bearer {require_api_key(self._api_key_resolver)}"}
 
     async def aclose(self) -> None:
         """Close the owned SDK client exactly once, including concurrent callers."""
@@ -429,9 +429,10 @@ class OpenAIProvider(LLMProvider):
             "tools": [t.get("function", {}).get("name") for t in (tools or [])],
         })
 
+        headers = self._auth_headers()
         try:
             resp = await self._client.chat.completions.create(
-                **payload, extra_headers=self._auth_headers()
+                **payload, extra_headers=headers
             )
         except Exception as exc:  # noqa: BLE001 - 统一包装成 ProviderError
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})
@@ -537,9 +538,10 @@ class OpenAIProvider(LLMProvider):
             "tools": [t.get("function", {}).get("name") for t in (tools or [])],
         })
 
+        headers = self._auth_headers()
         try:
             stream = await self._client.chat.completions.create(
-                **payload, extra_headers=self._auth_headers()
+                **payload, extra_headers=headers
             )
         except Exception as exc:
             llm_trace("error", {"session_id": session, "model": self.model, "error": str(exc)})

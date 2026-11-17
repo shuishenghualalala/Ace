@@ -499,6 +499,25 @@ class Config:
         dev_account = str(self.gateway_dev_account or "").strip()
         return bool(owner and dev_account and owner == dev_account)
 
+    def resolve_owner_model_api_key(
+        self,
+        profile: ModelProfile,
+        owner_account_id: str | None = None,
+        *,
+        env_map: dict[str, str] | None = None,
+    ) -> str:
+        """Resolve the current credential for both model availability and requests."""
+        owner = str(owner_account_id or "").strip()
+        if env_map is None:
+            env_map = self.owner_env_map(owner)
+        return resolve_profile_api_key(
+            profile.id,
+            profile.api_key_env,
+            env_map=env_map,
+            fallback_global=profile.builtin and self._owner_builtin_allows_global_key_fallback(owner),
+            owner_account_id=owner,
+        )
+
     def owner_model_profiles(self, owner_account_id: str | None = None) -> dict[str, ModelProfile]:
         """返回 owner 可见的模型视图：全局共享模型 + owner 私有模型。
 
@@ -510,20 +529,12 @@ class Config:
         与 dev 开发 owner也可读取进程环境，方便通过环境变量直接配置开源版。
         """
         env_map = self.owner_env_map(owner_account_id)
-        fallback_global = self._owner_builtin_allows_global_key_fallback(owner_account_id)
         profiles: dict[str, ModelProfile] = {}
         for model_id, profile in self.model_profiles.items():
             if not profile.builtin:
                 continue
             builtin = replace(profile)
-            # 内置模型是全局共享层：key 解析走全局凭证库 + owner .env / 进程环境兜底
-            builtin.api_key = resolve_profile_api_key(
-                model_id,
-                builtin.api_key_env,
-                env_map=env_map,
-                fallback_global=fallback_global,
-                owner_account_id=owner_account_id,
-            )
+            builtin.api_key = self.resolve_owner_model_api_key(builtin, owner_account_id, env_map=env_map)
             profiles[model_id] = builtin
 
         overlay = self.owner_overlay_data(owner_account_id)
@@ -532,7 +543,8 @@ class Config:
             for model_id, raw in models.items():
                 if not isinstance(raw, dict):
                     continue
-                profile = _build_owner_model_profile(str(model_id), raw, env_map, owner_account_id or "")
+                profile = _build_owner_model_profile(str(model_id), raw)
+                profile.api_key = self.resolve_owner_model_api_key(profile, owner_account_id, env_map=env_map)
                 profiles[str(model_id)] = profile
         return profiles
 
@@ -1306,22 +1318,12 @@ def _build_model_profile(model_id: str, raw: dict[str, Any]) -> ModelProfile:
 def _build_owner_model_profile(
     model_id: str,
     raw: dict[str, Any],
-    env_map: dict[str, str],
-    owner_account_id: str,
 ) -> ModelProfile:
     api_key_env = str(raw.get("api_key_env") or "CREW_API_KEY")
-    api_key = resolve_profile_api_key(
-        model_id,
-        api_key_env,
-        env_map=env_map,
-        fallback_global=False,
-        owner_account_id=owner_account_id,
-    )
     capabilities = _model_capabilities(raw)
     return ModelProfile(
         id=model_id,
         name=str(raw.get("name") or model_id),
-        api_key=api_key,
         api_key_env=api_key_env,
         provider=str(raw.get("provider") or "openai").strip().lower() or "openai",
         base_url=str(raw.get("base_url") or ""),

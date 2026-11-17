@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from crew.app import build_provider, build_provider_for_profile
+from crew.core.errors import CrewErrorKind, ProviderError
 from crew.core.types import Message
 from crew.providers.anthropic_provider import AnthropicProvider
 from crew.providers.openai_provider import OpenAIProvider
@@ -132,3 +133,28 @@ def test_build_provider_for_profile_resolver_rereads_key_chain(monkeypatch):
     assert provider._api_key_resolver() == "fresh-1"
     monkeypatch.setenv("B5_TEST_KEY", "fresh-2")
     assert provider._api_key_resolver() == "fresh-2"
+
+
+@pytest.mark.parametrize("provider_type", [OpenAIProvider, AnthropicProvider])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_missing_live_key_fails_before_model_transport(monkeypatch, provider_type, streaming):
+    def unexpected_request(*_args, **_kwargs):
+        raise AssertionError("revoked credentials must not reach model transport")
+
+    provider = provider_type(api_key="old-key", api_key_resolver=lambda: "")
+    try:
+        if isinstance(provider, OpenAIProvider):
+            monkeypatch.setattr(type(provider._client.chat.completions), "create", unexpected_request)
+        else:
+            monkeypatch.setattr(provider._client, "post", unexpected_request)
+            monkeypatch.setattr(provider._client, "stream", unexpected_request)
+        messages = [Message.user("hi")]
+        with pytest.raises(ProviderError) as error:
+            if streaming:
+                await anext(provider.stream_chat(messages))
+            else:
+                await provider.chat(messages)
+        assert error.value.kind is CrewErrorKind.AUTH
+        assert not error.value.is_retryable()
+    finally:
+        await provider.aclose()
