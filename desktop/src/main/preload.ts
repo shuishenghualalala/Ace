@@ -12,6 +12,21 @@ import type {
   TrayStatus,
 } from '../shared/types';
 import type { SecurityAuditArgs } from '../shared/ipc-schemas';
+import type { DesktopGatewayReadiness } from './gateway-readiness';
+
+interface BackendStatusSnapshot {
+  connected: boolean;
+  baseUrl?: string;
+  logPath?: string;
+  components?: Record<string, { status: string; message?: string }>;
+  processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
+  healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
+  transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+  readiness: DesktopGatewayReadiness;
+  loopLagMs?: number;
+  failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+  since?: number;
+}
 
 const api = {
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
@@ -136,18 +151,7 @@ const api = {
   // Gateway REST 桥接（webSecurity:true 下 renderer 不直连 127.0.0.1）
   // path 必须在主进程白名单内（/api/ 前缀），不允许指向外部主机
   ensureGateway: () => ipcRenderer.invoke('gateway:ensure'),
-  getBackendStatus: (): Promise<{
-    connected: boolean;
-    baseUrl?: string;
-    logPath?: string;
-    components?: Record<string, { status: string; message?: string }>;
-    processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
-    healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
-    transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
-    loopLagMs?: number;
-    failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
-    since?: number;
-  }> => ipcRenderer.invoke('gateway:get-status'),
+  getBackendStatus: (): Promise<BackendStatusSnapshot> => ipcRenderer.invoke('gateway:get-status'),
   retryGateway: () => ipcRenderer.invoke('gateway:retry'),
   gatewayFetch: (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
     ipcRenderer.invoke('gateway:fetch', { url, init: init || {} }),
@@ -345,32 +349,10 @@ const api = {
   },
 
   // 后端服务健康状态（主进程周期探测 /api/health）：
-  // connected=true 表示 Gateway 已就绪可用，false 表示未连接/启动中。
+  // connected 表示 Gateway 的活性；readiness 和 transportState 独立更新。
   // logPath 为托管 gateway 启动日志路径，供「查看日志」诊断冷启动卡顿。
-  onBackendStatus: (cb: (status: {
-    connected: boolean;
-    baseUrl?: string;
-    logPath?: string;
-    components?: Record<string, { status: string; message?: string }>;
-    processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
-    healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
-    transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
-    loopLagMs?: number;
-    failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
-    since?: number;
-  }) => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, status: {
-      connected: boolean;
-      baseUrl?: string;
-      logPath?: string;
-      components?: Record<string, { status: string; message?: string }>;
-      processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
-      healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
-      transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
-      loopLagMs?: number;
-      failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
-      since?: number;
-    }) => cb(status);
+  onBackendStatus: (cb: (status: BackendStatusSnapshot) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, status: BackendStatusSnapshot) => cb(status);
     ipcRenderer.on('backend:status', listener);
     return () => ipcRenderer.removeListener('backend:status', listener);
   },

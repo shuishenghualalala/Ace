@@ -31,7 +31,7 @@ beforeEach(() => {
       ],
     },
   });
-  uiStore.set({ backendConnected: true });
+  uiStore.set({ backendConnected: true, backendCanSend: true });
   document.body.innerHTML = `
     <button type="button" id="settings-btn">设置</button>
     <div id="chat-model-picker-inline">

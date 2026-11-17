@@ -77,12 +77,12 @@ import {
   getSessionStreamRecovery,
 } from './session-stream-recovery';
 import { syncSessionLiveFromBackend } from './session-busy';
-import { startStreamWatchdog } from './stream-watchdog';
+import { startStreamWatchdog, stopStreamWatchdog } from './stream-watchdog';
 import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { logStream } from '../stream-debug';
-import { messageStore, sessionStore } from '../stores/stores';
+import { authStore, messageStore, sessionStore, uiStore } from '../stores/stores';
 import { hydrateTurnFoldFromStorage } from './fold-state';
-import { setBackendTransportState } from './backend-status-guard';
+import { canSendToBackend, setBackendTransportState } from './backend-status-guard';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
 let setTabFn: (tab: TabKey) => void = () => {};
@@ -723,11 +723,13 @@ export function bootstrapBackend(): void {
   bindChannelSessionListener();
   if (!isRendererLoggedIn()) return;
   state.socket?.dispose();
+  setBackendTransportState('unknown');
   recoveryConnection = null;
   let transportVersion = 0;
   const socket = new BackendChatSocket(
     handleGatewayChunk,
     (open, meta) => {
+      if (state.socket !== socket) return;
       transportVersion += 1;
       if (!open) recoveryConnection = null;
       logStream('ws-renderer', open ? 'socket-open' : 'socket-close', {
@@ -737,6 +739,7 @@ export function bootstrapBackend(): void {
       });
       setBackendTransportState(
         open ? 'connected' : meta?.transient ? 'reconnecting' : 'disconnected',
+        meta?.gatewayGeneration,
       );
       updateGatewayDot();
       // The Gateway can keep generating after this socket closes. Keep the
@@ -762,14 +765,42 @@ export function bootstrapBackend(): void {
     },
   );
   state.socket = socket;
+  const startup = uiStore.get().backendReadiness;
+  if (startup) socket.setGatewayGeneration(startup.generation);
   socket.bindLastGatewaySequences(getLastGatewaySequences, getGatewayCursors);
   socket.connect();
   startStreamWatchdog();
   installHistoryPagingScroll();
 }
 
+/** Activate chat for a verified auth session once the renderer is mounted. */
+export function bindBackendAuth(): () => void {
+  const sync = (loggedIn: boolean): void => {
+    if (loggedIn) {
+      if (state.socket) return;
+      bootstrapBackend();
+      if (!uiStore.get().backendReadiness) void hydrateBackendState().catch(() => {});
+      return;
+    }
+    const socket = state.socket;
+    state.socket = null;
+    socket?.dispose();
+    stopStreamWatchdog();
+    setBackendTransportState('unknown');
+    recoveryConnection = null;
+  };
+  const unsubscribe = authStore.subscribe((next, previous) => {
+    if (next.isLoggedIn !== previous.isLoggedIn) sync(next.isLoggedIn);
+  });
+  sync(authStore.get().isLoggedIn);
+  return () => {
+    unsubscribe();
+    sync(false);
+  };
+}
+
 export async function hydrateBackendState(): Promise<void> {
-  if (!isRendererLoggedIn()) return;
+  if (!isRendererLoggedIn() || !canSendToBackend()) return;
   // 各路后端加载相互隔离：任一路失败不阻断其余，也不再让 sessions 挂掉连累 workspaces。
   // loadSessionsList / loadWorkspaces 内部已自带 try-catch + 错误态（区分「加载失败 vs 真空」），
   // 这里只对没有内部容错的 loadConfig/loadChannelSessions 包一层。

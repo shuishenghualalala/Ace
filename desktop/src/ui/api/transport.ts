@@ -97,7 +97,14 @@ export interface GatewayUploadResult {
 export type BackendSocketStatusMeta = {
   /** 主进程为换 socket 主动 close(1000, reconnect)，非真实断连。 */
   transient?: boolean;
+  gatewayGeneration?: number;
 };
+
+export interface BackendStartupReadiness {
+  status: 'starting' | 'ready' | 'failed';
+  generation: number;
+  errorCode?: string;
+}
 
 const DEFAULT_GATEWAY = 'http://127.0.0.1:8000';
 

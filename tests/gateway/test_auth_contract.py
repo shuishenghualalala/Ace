@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from crew.app import build_app
 from crew.channels.channel_manager import ChannelManager
@@ -25,6 +26,18 @@ def _restore_platform_entries(entries):
     platform_registry._entries.clear()
     for entry in entries:
         platform_registry.register(entry)
+
+
+def _wait_readiness(client: TestClient, expected: str) -> dict:
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        response = client.get("/api/health")
+        assert response.status_code == 200
+        current = response.json()["readiness"]
+        if current["status"] == expected:
+            return current
+        time.sleep(0.02)
+    pytest.fail(f"Gateway readiness never reached {expected}: {current}")
 
 
 def _feishu_webhook_app(channel, *, dev_mode: bool = False) -> FastAPI:
@@ -158,6 +171,7 @@ async def test_logout_without_active_owner_is_idempotent_and_does_not_claim(api)
 
 def test_websocket_disconnect_does_not_release_active_owner(api):
     with TestClient(api) as client:
+        _wait_readiness(client, "ready")
         assert client.get("/api/sessions").status_code == 200
         with client.websocket_connect("/ws"):
             pass
@@ -170,7 +184,7 @@ def test_gateway_restart_completes_pending_logout_before_readiness(api):
     assert crew.active_owner.prepare_restart_logout("A:uid-a") is True
 
     with TestClient(api) as client:
-        assert client.get("/api/health").status_code == 200
+        _wait_readiness(client, "ready")
         assert crew.active_owner.current() is None
         assert crew.active_owner.pending_restart_logout() is None
 
@@ -181,11 +195,11 @@ def test_login_required_mode_releases_legacy_local_owner_on_startup(api):
     crew.active_owner.claim("local")
 
     with TestClient(api) as client:
-        assert client.get("/api/health").status_code == 200
+        _wait_readiness(client, "ready")
         assert crew.active_owner.current() is None
 
 
-def test_health_is_ready_while_business_requests_wait_for_deferred_startup(api):
+def test_health_liveness_does_not_admit_requests_during_core_startup(api):
     crew = api.state.crew
     startup_entered = threading.Event()
     startup_release = threading.Event()
@@ -195,20 +209,25 @@ def test_health_is_ready_while_business_requests_wait_for_deferred_startup(api):
         while not startup_release.is_set():
             await asyncio.sleep(0.01)
 
-    crew.startup = blocked_startup
-    with TestClient(api) as client, ThreadPoolExecutor(max_workers=1) as pool:
-        assert startup_entered.wait(timeout=1)
-        assert client.get("/api/health").status_code == 200
-
-        business_request = pool.submit(client.get, "/api/scenarios")
-        deadline = time.monotonic() + 1
-        while not business_request.running() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert business_request.running()
-        time.sleep(0.05)
-        assert not business_request.done()
-        startup_release.set()
-        assert business_request.result(timeout=1).status_code == 200
+    crew.startup_core = blocked_startup
+    with TestClient(api) as client:
+        try:
+            assert startup_entered.wait(timeout=5)
+            starting = _wait_readiness(client, "starting")
+            UUID(starting["generation"])
+            unavailable = client.get("/api/scenarios")
+            assert unavailable.status_code == 503
+            assert unavailable.headers["Retry-After"] == "1"
+            assert unavailable.json()["code"] == "GATEWAY_STARTING"
+            with client.websocket_connect("/ws") as ws:
+                with pytest.raises(WebSocketDisconnect) as exc_info:
+                    ws.receive_text()
+                assert exc_info.value.code == 1013
+            assert crew.active_owner.current() is None
+        finally:
+            startup_release.set()
+        assert _wait_readiness(client, "ready")["generation"] == starting["generation"]
+        assert client.get("/api/scenarios").status_code == 200
 
 
 def test_deferred_startup_does_not_connect_channels_without_active_owner(api):
@@ -220,54 +239,167 @@ def test_deferred_startup_does_not_connect_channels_without_active_owner(api):
 
     crew.channel_manager.start_all = record_start
     with TestClient(api) as client:
-        # A non-health API crosses the startup fence, so this observes the
-        # completed deferred startup rather than racing it.
+        _wait_readiness(client, "ready")
         assert client.get("/api/scenarios").status_code == 200
         assert crew.active_owner.current() is None
 
     assert starts == []
 
 
-def test_health_reports_cron_start_failure_without_blocking_gateway(api):
+def test_health_reports_cron_start_failure_after_service_rollback(api, monkeypatch):
     crew = api.state.crew
 
-    class FailingCronService:
-        is_running = False
-        start_error = "scheduler unavailable"
+    async def fail_start() -> None:
+        raise RuntimeError("private scheduler failure")
 
-        async def start(self) -> None:
-            raise RuntimeError(self.start_error)
-
-        async def stop(self) -> None:
-            return None
-
-    crew.cron_service = FailingCronService()
+    monkeypatch.setattr(crew.cron_service, "start", fail_start)
     with TestClient(api) as client:
+        _wait_readiness(client, "ready")
         assert client.get("/api/scenarios").status_code == 200
-        health = client.get("/api/health")
+        deadline = time.monotonic() + 5
+        while True:
+            health = client.get("/api/health")
+            if health.json()["components"]["cron"]["status"] == "failed":
+                break
+            assert time.monotonic() < deadline, health.text
+            time.sleep(0.02)
+        assert crew.cron_service is None
 
     assert health.status_code == 200
+    assert health.json()["readiness"]["status"] == "ready"
+    assert "private scheduler failure" not in health.text
     assert health.json()["components"]["cron"] == {
         "status": "failed",
         "message": "定时任务启动失败，请查看 Gateway 日志",
     }
 
 
-def test_health_reports_deferred_startup_failure_without_losing_readiness(api):
+def test_health_reports_core_failure_with_stable_safe_code(api):
     async def failing_startup() -> None:
-        raise RuntimeError("mcp unavailable")
+        raise RuntimeError("private detail")
 
-    api.state.crew.startup = failing_startup
+    api.state.crew.startup_core = failing_startup
     with TestClient(api) as client:
+        failed = _wait_readiness(client, "failed")
         business = client.get("/api/scenarios")
         health = client.get("/api/health")
+        with client.websocket_connect("/ws") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_text()
+            assert exc_info.value.code == 1011
 
     assert business.status_code == 503
+    assert business.json()["code"] == "GATEWAY_STARTUP_FAILED"
     assert health.status_code == 200
+    assert health.json()["readiness"] == failed
+    assert failed["error_code"] == "GATEWAY_CORE_STARTUP_FAILED"
+    assert "private detail" not in health.text
     assert health.json()["components"]["startup"] == {
         "status": "failed",
         "message": "运行环境组件初始化失败，请查看 Gateway 日志",
     }
+
+
+def test_optional_services_do_not_gate_core_readiness(api):
+    optional_entered = threading.Event()
+    optional_release = threading.Event()
+
+    async def blocked_optional():
+        optional_entered.set()
+        while not optional_release.is_set():
+            await asyncio.sleep(0.01)
+        raise RuntimeError("optional service")
+
+    api.state.crew.startup_services = blocked_optional
+    with TestClient(api) as client:
+        try:
+            assert optional_entered.wait(timeout=5)
+            assert _wait_readiness(client, "ready")["status"] == "ready"
+            assert client.get("/api/scenarios").status_code == 200
+        finally:
+            optional_release.set()
+
+
+def test_process_recovery_and_checkpoint_precede_ready_even_with_optional_services_blocked(api, monkeypatch):
+    from crew.tools.process_registry import process_registry
+
+    probing = threading.Event()
+    finish_probe = threading.Event()
+    optional_entered = threading.Event()
+    finish_optional = threading.Event()
+    calls = []
+
+    def probe_checkpoint():
+        calls.append(("probe", threading.get_ident()))
+        probing.set()
+        assert finish_probe.wait(timeout=5)
+        return []
+
+    def register_sessions(_sessions):
+        calls.append(("register", threading.get_ident()))
+
+    def write_checkpoint():
+        calls.append(("checkpoint", threading.get_ident()))
+
+    async def optional_services():
+        calls.append(("optional", threading.get_ident()))
+        optional_entered.set()
+        while not finish_optional.is_set():
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(process_registry, "_read_checkpoint_candidates", probe_checkpoint)
+    monkeypatch.setattr(process_registry, "_register_recovered_sessions", register_sessions)
+    monkeypatch.setattr(process_registry, "_write_checkpoint", write_checkpoint)
+    monkeypatch.setattr(api.state.crew, "startup_services", optional_services)
+    with TestClient(api) as client:
+        try:
+            assert probing.wait(timeout=5)
+            assert client.get("/api/health").json()["readiness"]["status"] == "starting"
+            assert client.get("/api/scenarios").json()["code"] == "GATEWAY_STARTING"
+            assert not optional_entered.is_set()
+            finish_probe.set()
+            assert optional_entered.wait(timeout=5)
+            assert _wait_readiness(client, "ready")["status"] == "ready"
+            assert [name for name, _ in calls] == ["probe", "register", "checkpoint", "optional"]
+            _, registering, _, optional = [ident for _, ident in calls]
+            assert registering == optional
+            assert calls[0][1] != optional and calls[2][1] != optional
+        finally:
+            finish_probe.set()
+            finish_optional.set()
+
+
+def test_core_timeout_cannot_be_replaced_by_late_success(api, monkeypatch):
+    optional = threading.Event()
+    caught_cancel = threading.Event()
+    finish = threading.Event()
+    released = threading.Event()
+    monkeypatch.setattr("crew.gateway.app._CORE_STARTUP_TIMEOUT_SECONDS", 0.05)
+
+    async def delayed_startup():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            caught_cancel.set()
+            while not finish.is_set():
+                await asyncio.sleep(0.01)
+            released.set()
+
+    async def optional_startup():
+        optional.set()
+
+    api.state.crew.startup_core = delayed_startup
+    api.state.crew.startup_services = optional_startup
+    with TestClient(api) as client:
+        try:
+            expired = _wait_readiness(client, "failed")
+            assert expired["error_code"] == "GATEWAY_STARTUP_TIMEOUT"
+            assert caught_cancel.wait(timeout=5)
+        finally:
+            finish.set()
+        assert released.wait(timeout=5)
+        assert client.get("/api/health").json()["readiness"] == expired
+        assert not optional.is_set()
 
 
 @pytest.mark.asyncio
@@ -363,6 +495,7 @@ async def test_dev_mode_uses_configured_local_owner(api_dev):
 
 def test_dev_mode_websocket_uses_configured_local_owner(api_dev):
     with TestClient(api_dev) as client:
+        _wait_readiness(client, "ready")
         with client.websocket_connect("/ws"):
             lease = api_dev.state.crew.active_owner.current()
             assert lease is not None

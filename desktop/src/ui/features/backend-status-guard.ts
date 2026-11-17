@@ -3,8 +3,8 @@
  *
  * 监听主进程推送的 `backend:status` IPC 事件（周期健康检查 /api/health），
  * 后端不可用时在页面顶部展示状态横幅，恢复后自动消失。横幅不阻断任何
- * 交互：页面切换、浏览历史会话等只读操作在断连时依然可用；聊天输入框
- * 的禁用由 composer-view 依据 uiStore.backendConnected 自行处理。
+ * 交互：页面切换、历史会话和草稿在断连时依然可用；composer-view
+ * 依据 uiStore.backendCanSend 控制发送。
  *
  * 状态机由 connected + failureKind + since 派生：
  *   启动中（尚未收到失败分类）        「正在启动后端」
@@ -17,6 +17,7 @@
  */
 
 import type { BackendChatSocket } from '../backend-client';
+import type { BackendStartupReadiness } from '../api/transport';
 import { notify } from '../state';
 import { uiStore } from '../stores/stores';
 
@@ -24,6 +25,7 @@ const BANNER_ID = 'backend-status-banner';
 const TICK_MS = 1000;
 
 type BackendFailureKind = 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
+type TransportState = 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
 
 type BackendStatus = {
   connected: boolean;
@@ -32,13 +34,14 @@ type BackendStatus = {
   failureKind?: BackendFailureKind;
   processState?: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
   healthState?: 'unknown' | 'healthy' | 'degraded' | 'stalled';
-  transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+  transportState?: TransportState;
+  readiness?: BackendStartupReadiness;
   loopLagMs?: number;
   /** 断开起始时间（epoch ms），仅 connected=false 时携带。 */
   since?: number;
 };
 
-type BannerState = 'starting' | 'busy' | 'stalled' | 'restarting' | 'error' | 'hidden';
+type BannerState = 'starting' | 'connecting' | 'busy' | 'stalled' | 'restarting' | 'startup-failed' | 'error' | 'hidden';
 
 let initialized = false;
 let unsubscribe: (() => void) | null = null;
@@ -52,15 +55,22 @@ let currentLogPath = '';
 /** 避免 health 抖动时重复触发恢复 hydrate。 */
 let recoverInFlight = false;
 let lastComponentWarning = '';
+let lastStatus: BackendStatus | undefined;
+let socketState: TransportState = 'unknown';
+let socketGeneration: number | undefined;
+let lifecycle = 0;
+let recoverAgain = false;
+let recoveredGeneration: number | undefined;
 
-function deriveState(status: BackendStatus | undefined): BannerState {
-  if (!status) return 'hidden';
+function deriveState(status: BackendStatus, transport: TransportState): BannerState {
   if (status.failureKind === 'auth_failed') return 'error';
-  if (status.processState === 'starting' && !status.connected) return 'starting';
+  if (status.readiness?.status === 'failed') return 'startup-failed';
   if (status.processState === 'error') return 'error';
   if (status.processState === 'restarting' || status.processState === 'offline') return 'restarting';
   if (status.healthState === 'stalled') return 'stalled';
   if (status.healthState === 'degraded') return 'busy';
+  if (status.readiness?.status === 'starting' || (status.processState === 'starting' && !status.connected)) return 'starting';
+  if (status.connected && status.readiness && transport !== 'connected') return 'connecting';
   if (status.connected) return 'hidden';
   switch (status.failureKind) {
     case 'timeout':
@@ -125,6 +135,16 @@ function applyState(el: HTMLElement): void {
     icon.textContent = '…';
     title.textContent = '正在启动后端';
     text.textContent = '智能体运行环境准备中，请稍等';
+  } else if (currentState === 'connecting') {
+    el.classList.add('is-info');
+    icon.textContent = '…';
+    title.textContent = '正在连接聊天服务';
+    text.textContent = '可先编辑草稿，连接后发送';
+  } else if (currentState === 'startup-failed') {
+    el.classList.add('is-danger');
+    icon.textContent = '!';
+    title.textContent = '后端启动失败';
+    text.textContent = lastStatus?.components?.startup?.message || '聊天服务尚未可用，请查看日志或重试';
   } else if (currentState === 'busy') {
     el.classList.add('is-warn');
     icon.textContent = '!';
@@ -200,54 +220,89 @@ function setBannerState(next: BannerState): void {
   renderBanner();
 }
 
-let lastStatus: BackendStatus | undefined;
-
-function statusAllowsSending(status: BackendStatus): boolean {
+function statusAllowsSending(status: BackendStatus, transport: TransportState): boolean {
   const processReady = !status.processState || status.processState === 'ready';
   const healthReady = !status.healthState
     || status.healthState === 'unknown'
     || status.healthState === 'healthy'
     || status.healthState === 'degraded';
-  const transportReady = !status.transportState
-    || status.transportState === 'unknown'
-    || status.transportState === 'connected';
-  return Boolean(status.connected && processReady && healthReady && transportReady);
+  if (!status.connected || !processReady || !healthReady) return false;
+  if (status.readiness) {
+    return status.readiness.status === 'ready' && transport === 'connected';
+  }
+  // Older status senders do not necessarily expose transport.
+  return transport === 'connected' || transport === 'unknown';
+}
+
+function connectionTransport(status: BackendStatus): TransportState {
+  if (!status.readiness) return socketState === 'unknown' ? status.transportState ?? 'unknown' : socketState;
+  if (socketGeneration !== status.readiness.generation) return 'unknown';
+  if (socketState === 'connected') return status.transportState ?? 'unknown';
+  return socketState;
+}
+
+function updateReadiness(status: BackendStatus): void {
+  const transport = connectionTransport(status);
+  const canSend = statusAllowsSending(status, transport);
+  const wasReady = uiStore.get().backendCanSend;
+  const connected = Boolean(status.connected);
+  uiStore.set({
+    backendConnected: connected,
+    backendProcessState: status.processState ?? (connected ? 'ready' : 'starting'),
+    backendHealthState: status.healthState ?? (connected ? 'healthy' : 'unknown'),
+    backendReadiness: status.readiness ?? null,
+    backendLoopLagMs: typeof status.loopLagMs === 'number' ? status.loopLagMs : null,
+    backendTransportState: transport,
+    backendCanSend: canSend,
+  });
+  setBannerState(deriveState(status, transport));
+  if (canSend && !wasReady) void recoverAfterBackendConnected();
 }
 
 /** WS 只更新发送能力，不把 transport 断开误写成进程/HTTP 探针断开。 */
 export function setBackendTransportState(
-  transportState: NonNullable<BackendStatus['transportState']>,
+  transportState: TransportState,
+  generation?: number,
 ): void {
-  const status: BackendStatus = {
-    ...(lastStatus ?? { connected: uiStore.get().backendConnected }),
-    transportState,
-  };
-  uiStore.set({
-    backendTransportState: transportState,
-    backendCanSend: statusAllowsSending(status),
-  });
+  const current = lastStatus?.readiness?.generation;
+  if (typeof generation === 'number'
+    && (generation < (current ?? 0) || generation < (socketGeneration ?? 0))) return;
+  if (current !== undefined && generation === undefined && transportState !== 'unknown') return;
+  socketState = transportState;
+  socketGeneration = generation;
+  if (lastStatus) updateReadiness(lastStatus);
+  else uiStore.set({ backendTransportState: transportState, backendCanSend: false });
 }
 
 /**
- * gateway 晚于登录 hydrate 就绪时：补连 WS 并重放 hydrate。
- * hydrateBackendState 覆盖会话列表 / 工作空间 / 模型配置 / 渠道会话并刷新侧栏，
- * 冷启动首批请求打在未就绪 gateway 上留下的「加载失败」错误态随成功重拉自动清除。
- * 失败吞掉——下一次 backend:status / socket 自重连会再试。
+ * 在本窗口首次可以发送时拉取初始数据。普通 WS 重连由 session-controller
+ * 对账，Gateway 代次切换时才重新拉取整套会话、工作区和配置。
  */
 async function recoverAfterBackendConnected(): Promise<void> {
-  if (recoverInFlight) return;
+  const generation = lastStatus?.readiness?.generation;
+  if (generation !== undefined && generation === recoveredGeneration) return;
+  if (recoverInFlight) {
+    recoverAgain = true;
+    return;
+  }
   recoverInFlight = true;
+  const epoch = lifecycle;
   try {
-    const socket = uiStore.get().socket as BackendChatSocket | null;
-    if (socket && typeof socket.connect === 'function' && !socket.isGatewayProxyOpen()) {
-      socket.connect();
+    const { hydrateBackendState } = await import('./session-controller');
+    if (epoch === lifecycle && canSendToBackend() && generation === lastStatus?.readiness?.generation) {
+      await hydrateBackendState();
+      if (epoch === lifecycle && generation === lastStatus?.readiness?.generation) {
+        recoveredGeneration = generation;
+      }
     }
-    const recoveries: Promise<unknown>[] = [
-      import('./session-controller').then((module) => module.hydrateBackendState()),
-    ];
-    await Promise.allSettled(recoveries);
+  } catch {
+    // The next connection-ready transition retries recovery.
   } finally {
     recoverInFlight = false;
+    if (recoverAgain) {
+      recoverAgain = false;
+      if (canSendToBackend()) void recoverAfterBackendConnected();
+    }
   }
 }
 
@@ -255,49 +310,57 @@ async function recoverAfterBackendConnected(): Promise<void> {
  * 初始化后端状态横幅：
  * 1. 立即展示「正在启动后端」（首帧就能看到）
  * 2. 订阅主进程 backend:status 推送，按状态机重渲横幅
- * 3. 同步 uiStore.backendConnected（composer 输入禁用等消费方依赖）
+ * 3. 分别同步运行状态和当前窗口的聊天发送能力
  *
  * 幂等：多次调用安全，仅绑定一次监听器。
  */
 export function initBackendStatusGuard(): void {
   if (initialized) return;
   initialized = true;
+  const epoch = ++lifecycle;
 
   setBannerState('starting');
 
   const applyStatus = (status: BackendStatus): void => {
+    if (!status || epoch !== lifecycle) return;
+    const previous = lastStatus;
+    const readiness = status?.readiness;
+    if (previous?.readiness && (!readiness || readiness.generation < previous.readiness.generation)) return;
     const connected = !!status?.connected;
-    const wasConnected = uiStore.get().backendConnected === true;
     if (status?.logPath) currentLogPath = status.logPath;
     lastStatus = status;
     disconnectedSince = !connected && typeof status?.since === 'number' ? status.since : null;
-    uiStore.set({
-      backendConnected: connected,
-      backendProcessState: status.processState ?? (connected ? 'ready' : 'starting'),
-      backendHealthState: status.healthState ?? (connected ? 'healthy' : 'unknown'),
-      backendTransportState: status.transportState ?? uiStore.get().backendTransportState,
-      backendLoopLagMs: typeof status.loopLagMs === 'number' ? status.loopLagMs : null,
-      backendCanSend: statusAllowsSending(status),
-    });
-    setBannerState(deriveState(status));
-    const failedComponent = Object.values(status?.components ?? {})
-      .find((component) => component.status === 'failed');
+    updateReadiness(status);
+    const failedComponent = Object.entries(status?.components ?? {})
+      .find(([name, component]) => component.status === 'failed' && (!readiness || name !== 'startup'))?.[1];
     const warning = connected && failedComponent
       ? (failedComponent.message || '运行环境组件初始化失败，请查看 Gateway 日志')
       : '';
     if (warning && warning !== lastComponentWarning) notify(warning);
     lastComponentWarning = warning;
-    // 假阴性恢复：冷启动时登录 hydrate 打到未就绪 gateway，配置/WS 会空着；
-    // health 转正后补一次，避免一直「服务未连接」。
-    if (connected && !wasConnected) {
-      void recoverAfterBackendConnected();
+    const socket = uiStore.get().socket as BackendChatSocket | null;
+    if (readiness) socket?.setGatewayGeneration?.(readiness.generation);
+    const coreBecameReady = readiness
+      ? readiness.status === 'ready'
+        && (previous?.readiness?.status !== 'ready' || readiness.generation !== previous.readiness.generation)
+      : connected && !previous?.connected;
+    if (coreBecameReady && typeof socket?.connect === 'function' && !socket.isGatewayProxyOpen?.()) {
+      socket.connect();
     }
   };
 
   // reload 后 did-finish-load 可能早于 renderer 完成认证恢复，那次推送会丢失。
   // 先订阅后立即读一次主进程快照，保证已就绪时横幅不会永久停留。
-  unsubscribe = window.Crew?.onBackendStatus?.(applyStatus) ?? null;
-  void window.Crew?.getBackendStatus?.().then(applyStatus).catch(() => {
+  let pushed = false;
+  unsubscribe = window.Crew?.onBackendStatus?.((status) => {
+    pushed = true;
+    applyStatus(status);
+  }) ?? null;
+  void window.Crew?.getBackendStatus?.().then((status) => {
+    if (!pushed || (status.readiness && status.readiness.generation > (lastStatus?.readiness?.generation ?? -1))) {
+      applyStatus(status);
+    }
+  }).catch(() => {
     // 保持启动中横幅，后续健康状态推送会继续接管。
   });
 }
@@ -310,6 +373,7 @@ export function disposeBackendStatusGuard(): void {
   unsubscribe?.();
   unsubscribe = null;
   initialized = false;
+  lifecycle++;
   stopTick();
   document.getElementById(BANNER_ID)?.remove();
   bannerEl = null;
@@ -317,7 +381,12 @@ export function disposeBackendStatusGuard(): void {
   disconnectedSince = null;
   currentLogPath = '';
   lastStatus = undefined;
+  socketState = 'unknown';
+  socketGeneration = undefined;
+  recoverAgain = false;
+  recoveredGeneration = undefined;
   lastComponentWarning = '';
+  uiStore.set({ backendConnected: false, backendReadiness: null, backendTransportState: 'unknown', backendCanSend: false });
 }
 
 /**

@@ -328,11 +328,9 @@ export function createComposerView(
       : messages.attachments.length;
     const hasDraft = Boolean(input.value.trim() || attachmentCount);
     const ui = uiStore.get();
-    const backendCanSend = ui.backendCanSend
-      || (ui.backendConnected && ui.backendTransportState === 'unknown');
-    const blocked = !authStore.get().isLoggedIn || !backendCanSend;
-    input.disabled = blocked;
-    send.disabled = blocked || submitting || !hasDraft;
+    const loggedIn = authStore.get().isLoggedIn;
+    input.disabled = !loggedIn;
+    send.disabled = !loggedIn || !ui.backendCanSend || submitting || !hasDraft;
     send.hidden = busy && !hasDraft;
     stop.hidden = !busy || hasDraft;
     send.title = busy ? '加入队列' : '发送';
@@ -340,9 +338,8 @@ export function createComposerView(
     send.setAttribute('aria-busy', submitting ? 'true' : 'false');
     send.dataset.loading = submitting ? 'true' : 'false';
     editBanner.hidden = !(sessionId && session.editFromIdx[sessionId] != null);
-    status.textContent = submitError || (!authStore.get().isLoggedIn
-      ? '登录后可发送消息'
-      : (!backendCanSend ? '服务暂不可用' : ''));
+    status.textContent = submitError || (!loggedIn ? '登录后可发送消息'
+      : ui.backendCanSend ? '' : '聊天服务暂不可用，草稿可继续编辑');
     renderQueue();
   };
 

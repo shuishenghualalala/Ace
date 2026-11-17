@@ -137,7 +137,8 @@ import {
   type Bookkeeping,
 } from '../state';
 import { renderAttachmentPreview } from './attachments';
-import { messageStore, sessionStore, uiStore } from '../stores/stores';
+import { messageStore, sessionStore } from '../stores/stores';
+import { canSendToBackend } from './backend-status-guard';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
@@ -1540,7 +1541,11 @@ export async function dispatchWs(
       }
     : subScenarioOrOptions;
   const subScenario = dispatchOptions.subScenario ?? '';
-  if (!requireRendererLogin() || getSessionStreamRecovery(sessionId)) return false;
+  if (!requireRendererLogin() || !canSendToBackend() || getSessionStreamRecovery(sessionId)) return false;
+  const socket = state.socket;
+  const generation = state.backendReadiness?.generation;
+  const canDispatch = () => canSendToBackend() && state.socket === socket
+    && state.backendReadiness?.generation === generation;
   if (isDraftSession(sessionId)) {
     await persistDraftSessionModel(sessionId);
   }
@@ -1555,13 +1560,7 @@ export async function dispatchWs(
       notify('交互组件能力暂未就绪，本次仍可正常对话');
     }
   }
-  // 新一轮发送：解除对该会话的「迟到分片屏蔽」
-  removeSuppressedSession(sessionId);
-  const ui = uiStore.get();
-  const backendCanSend = ui.backendCanSend
-    || (ui.backendConnected && ui.backendTransportState === 'unknown');
-  const socket = state.socket;
-  if (!socket || !backendCanSend) {
+  if (!socket || !canDispatch()) {
     appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
     setBusyWithUi(sessionId, false);
     renderChat();
@@ -1583,9 +1582,11 @@ export async function dispatchWs(
     await primeTeamCollaborationIdentity(sessionId);
     renderChat();
   }
-  if (state.socket !== socket || getSessionStreamRecovery(sessionId) || dispatchOptions.canStart?.() === false) {
+  if (!canDispatch() || getSessionStreamRecovery(sessionId) || dispatchOptions.canStart?.() === false) {
     return false;
   }
+  // 新一轮发送：解除对该会话的「迟到分片屏蔽」
+  removeSuppressedSession(sessionId);
   // 修订式引导可能已经插入气泡。只记住本次发送创建的气泡，供发送失败时撤销。
   const requestId = newTurnRequestId();
   const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
@@ -1673,7 +1674,7 @@ export async function dispatchWs(
 
 /** Component actions never consume composer drafts, attachments or annotation drafts. */
 export async function sendNativeVisualMessage(sessionId: string, text: string): Promise<boolean> {
-  if (!requireRendererLogin() || state.activeSessionId !== sessionId || !state.backendConnected) return false;
+  if (!requireRendererLogin() || !canSendToBackend() || state.activeSessionId !== sessionId) return false;
   if (isBusy(sessionId)) {
     enqueuePending(sessionId, {
       id: newMessageId('q'), query: text, attachments: [], subScenario: '',
@@ -1687,7 +1688,7 @@ export async function sendNativeVisualMessage(sessionId: string, text: string): 
 }
 
 export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<boolean> {
-  if (!requireRendererLogin()) return false;
+  if (!requireRendererLogin() || !canSendToBackend()) return false;
   const plainContent = text.trim();
   const attachments = [...state.attachments];
   const activeHasAnnotations = state.activeSessionId

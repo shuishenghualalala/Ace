@@ -121,6 +121,7 @@ export function __resetAllStoresForTest(): void {
     backendProcessState: 'starting',
     backendHealthState: 'unknown',
     backendTransportState: 'unknown',
+    backendReadiness: null,
     backendLoopLagMs: null,
     backendCanSend: false,
     socket: null,

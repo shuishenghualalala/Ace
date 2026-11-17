@@ -84,7 +84,7 @@ def create_ws_router(
     channel_manager,
     *,
     logout_coordinator=None,
-    startup_waiter=None,
+    startup_status=None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -96,9 +96,17 @@ def create_ws_router(
         except AuthenticationError:
             await socket.close(code=4401, reason="Unauthorized")
             return
-        if startup_waiter is not None and not await startup_waiter():
-            await socket.close(code=1013, reason="Gateway startup failed")
-            return
+        if startup_status is not None:
+            status = startup_status()
+            if status != "ready":
+                # The client has been authenticated. Accept only long enough
+                # to deliver the close frame, with no owner claim or routing.
+                await socket.accept()
+                if status == "starting":
+                    await socket.close(code=1013, reason="Gateway starting")
+                else:
+                    await socket.close(code=1011, reason="Gateway startup failed")
+                return
         owner = account.owner_account_id
         if logout_coordinator is not None and logout_coordinator.is_draining(owner):
             await socket.close(code=4423, reason="Logout in progress")

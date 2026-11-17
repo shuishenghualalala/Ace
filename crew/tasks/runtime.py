@@ -730,7 +730,7 @@ class TaskRuntime:
         if self._monitor_task is not None and not self._monitor_task.done():
             return
         self._loop = asyncio.get_running_loop()
-        self.reconcile_after_restart()
+        await self.reconcile_after_restart_async()
         self._monitor_task = asyncio.create_task(self._monitor_loop())
 
     async def stop(self) -> None:

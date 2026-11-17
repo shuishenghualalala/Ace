@@ -18,7 +18,7 @@ from crew.agent.skills import (
 )
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
 from crew.gateway.context import complete_path, save_upload
-from crew.gateway.health_server import build_health_components
+from crew.gateway.health_server import build_app_health_components
 from crew.gateway.instance_auth import (
     GATEWAY_INSTANCE_CHALLENGE_HEADER,
     build_gateway_health_payload,
@@ -145,12 +145,6 @@ def create_misc_router(crew) -> APIRouter:
         _wiki_capture_tasks.add(task)
         task.add_done_callback(_on_wiki_capture_done)
 
-    def _components(request: Request) -> dict:
-        startup_status = str(
-            getattr(request.app.state, "deferred_startup_status", "starting") or "starting"
-        )
-        return build_health_components(startup_status, getattr(crew, "cron_service", None))
-
     @router.get("/api/health")
     async def health(request: Request) -> JSONResponse:
         """Public readiness plus an optional Desktop instance proof.
@@ -163,7 +157,12 @@ def create_misc_router(crew) -> APIRouter:
         challenge = request.headers.get(GATEWAY_INSTANCE_CHALLENGE_HEADER)
         payload, status = build_gateway_health_payload(challenge)
         if status == 200:
-            payload["components"] = _components(request)
+            readiness = getattr(request.app.state, "gateway_readiness", None)
+            if readiness is not None:
+                payload["readiness"] = readiness
+            payload["components"] = build_app_health_components(
+                readiness["status"] if readiness else "starting", crew,
+            )
         return JSONResponse(payload, status_code=status)
 
     # ---- 技能 ----

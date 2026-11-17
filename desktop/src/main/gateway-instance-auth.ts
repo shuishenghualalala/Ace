@@ -28,6 +28,12 @@ export interface GatewayComponentState {
   message?: string;
 }
 
+export interface GatewayStartupReadiness {
+  status: 'starting' | 'ready' | 'failed';
+  generation: string;
+  errorCode?: string;
+}
+
 /**
  * 探测失败类别，供 desktop 健康监控区分「进程死了 / 事件循环忙 / 冒名实例」：
  * - unreachable：TCP 被拒（ECONNREFUSED 等），gateway 进程大概率已退出；
@@ -40,6 +46,7 @@ export type GatewayProbeFailureKind = 'unreachable' | 'timeout' | 'auth_failed' 
 export interface GatewayInstanceProbe {
   verified: boolean;
   components?: Record<string, GatewayComponentState>;
+  readiness?: GatewayStartupReadiness;
   /** 仅失败时存在；成功不带该字段。 */
   failureKind?: GatewayProbeFailureKind;
 }
@@ -215,6 +222,17 @@ function parseComponents(raw: unknown): Record<string, GatewayComponentState> | 
   return Object.keys(parsed).length ? parsed : undefined;
 }
 
+function parseStartupReadiness(raw: unknown): GatewayStartupReadiness | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const { status, generation, error_code: errorCode } = raw as Record<string, unknown>;
+  if (status !== 'starting' && status !== 'ready' && status !== 'failed') return undefined;
+  if (typeof generation !== 'string' || !/^[a-zA-Z0-9._-]{1,96}$/.test(generation)) return undefined;
+  return {
+    status, generation,
+    ...(typeof errorCode === 'string' && /^[A-Z0-9_]{1,80}$/.test(errorCode) ? { errorCode } : {}),
+  };
+}
+
 /** Prove the loopback Gateway identity and return its authenticated component status. */
 export async function probeGatewayInstance(
   baseUrl: string,
@@ -274,7 +292,13 @@ export async function probeGatewayInstance(
       return fail('auth_failed');
     }
     const components = parseComponents(record.components);
-    return { verified: true, ...(components ? { components } : {}) };
+    const readiness = parseStartupReadiness(record.readiness);
+    if ('readiness' in record && !readiness) return fail('auth_failed');
+    return {
+      verified: true,
+      ...(components ? { components } : {}),
+      ...(readiness ? { readiness } : {}),
+    };
   } catch (error) {
     return fail(classifyFetchFailure(error, controller.signal));
   } finally {

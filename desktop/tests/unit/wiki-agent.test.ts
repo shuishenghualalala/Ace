@@ -142,6 +142,7 @@ const api = backendApi as unknown as {
   getSessionModel: ReturnType<typeof vi.fn>;
   setSessionModel: ReturnType<typeof vi.fn>;
   deleteSession: ReturnType<typeof vi.fn>;
+  sessions: ReturnType<typeof vi.fn>;
 };
 
 const mockSelectFile = vi.fn();
@@ -230,6 +231,7 @@ beforeEach(() => {
   });
   uiStore.set({
     backendConnected: true,
+    backendCanSend: true,
     socket: {
       send: vi.fn(async () => true),
       planEnter: vi.fn(async () => true),
@@ -256,6 +258,7 @@ beforeEach(() => {
   `;
   WIKI_SID = `wiki-sid-${++wikiSidSeq}`;
   api.wikiAgentSession.mockResolvedValue({ ok: true, session_id: WIKI_SID });
+  api.sessions.mockResolvedValue([]);
   api.wikiAgentSessions.mockResolvedValue({
     ok: true,
     kb_id: 'default',
@@ -765,6 +768,10 @@ describe('wiki-page 入口挂点', () => {
   });
 
   it('新建对话创建独立 Wiki session，保留旧会话并切到空白输入', async () => {
+    // A session refresh can run concurrently with activation. The fixture's
+    // session API should include the Wiki conversations it has created.
+    const oldRow = { session_id: WIKI_SID, title: '旧对话', updated_at: NOW, message_count: 2, workspace_id: 'wiki' };
+    api.sessions.mockResolvedValue([oldRow]);
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-new]')).not.toBeNull());
@@ -774,7 +781,13 @@ describe('wiki-page 入口挂点', () => {
       expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
     });
     const newSessionId = `wiki-new-${wikiSidSeq}`;
-    api.wikiAgentSession.mockResolvedValueOnce({ ok: true, session_id: newSessionId, kb_id: 'default' });
+    api.wikiAgentSession.mockImplementationOnce(async () => {
+      api.sessions.mockResolvedValue([
+        oldRow,
+        { session_id: newSessionId, title: '新对话', updated_at: NOW, message_count: 0, workspace_id: 'wiki' },
+      ]);
+      return { ok: true, session_id: newSessionId, kb_id: 'default' };
+    });
     const newConversation = document.querySelector<HTMLButtonElement>('[data-wiki-agent-new]')!;
     newConversation.click();
 

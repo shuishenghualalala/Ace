@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import uvicorn
+from fastapi.testclient import TestClient
 
 from crew.gateway import app as gateway_app
 from crew.gateway import desktop_parent_lease as lease_module
@@ -142,6 +143,31 @@ def test_managed_exit_code_reflects_dispatcher_drain_after_server_returns(monkey
         assert exc_info.value.code == 1
     else:
         assert gateway_app.run(parent_lease=lease) is None
+
+
+def test_managed_store_construction_failure_remains_observable(monkeypatch):
+    def fail_build():
+        raise RuntimeError("private store failure")
+
+    def run_server(server):
+        assert server.config.port == 28180
+        client = TestClient(server.config.app)
+        response = client.get("/api/health")
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        assert "private store failure" not in response.text
+        readiness = response.json()["readiness"]
+        assert readiness["status"] == "failed" and readiness["error_code"] == "GATEWAY_CORE_BUILD_FAILED"
+        assert client.get("/api/health").json()["readiness"] == readiness
+        assert client.get("/api/sessions").status_code == 404
+
+    monkeypatch.setattr(gateway_app, "build_app", fail_build)
+    monkeypatch.setattr(gateway_app._DesktopLeaseServer, "run", run_server)
+    monkeypatch.setenv("GATEWAY_PORT", "28180")
+
+    gateway_app.run(parent_lease=SimpleNamespace(closed=False))
+    with pytest.raises(RuntimeError, match="private store failure"):
+        gateway_app.run()
 
 
 async def test_eof_signals_managed_uvicorn_main_loop():

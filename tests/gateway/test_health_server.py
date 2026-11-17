@@ -72,6 +72,7 @@ def test_health_thread_server_without_challenge(health_server):
     assert status == 200
     assert body["ok"] is True
     assert body["service"] == "crew-gateway"
+    assert "readiness" not in body
     # 哨兵 task 尚未接入时 start() 已写入基线时间戳，字段从启动起就存在。
     assert isinstance(body["loop_lag_ms"], int | float)
 
@@ -176,3 +177,17 @@ def test_build_health_components_statuses():
 
     starting = build_health_components("starting", None)
     assert starting["cron"]["status"] == "disabled"
+
+
+def test_mcp_health_reports_only_aggregate_status():
+    class MCP:
+        @staticmethod
+        def status():
+            return [
+                {"connected": True, "config": {"token": "private token"}},
+                {"connected": False, "error": "private error"},
+            ]
+
+    components = build_health_components("ready", None, MCP())
+    assert components["mcp"] == {"status": "degraded"}
+    assert "private" not in str(components)

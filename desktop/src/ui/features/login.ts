@@ -13,6 +13,9 @@ let currentState: AuthStateSnapshot = {
 };
 let bound = false;
 let countdownTimer: number | null = null;
+let authRevision = 0;
+let rendererOwner: string | null = null;
+let reloading = false;
 
 function message(text: string, kind: 'error' | 'success' | 'info' = 'info'): void {
   const element = document.getElementById('login-message');
@@ -138,6 +141,16 @@ function renderLoginMode(): void {
 }
 
 function applyState(state: AuthStateSnapshot): void {
+  if (reloading) return;
+  const owner = state.mode === 'unknown' ? undefined : legacyUserInfo(state)?.staffCode;
+  if (!owner && state.isLoggedIn) state = { ...state, isLoggedIn: false, user: null };
+  if (owner && rendererOwner && owner !== rendererOwner) {
+    reloading = true;
+    authStore.replace({ isLoggedIn: false, userInfo: null });
+    window.location.reload();
+    return;
+  }
+  if (owner) rendererOwner = owner;
   currentState = state;
   syncRendererAuth(state);
   renderLoginMode();
@@ -212,7 +225,8 @@ function bind(): void {
           return;
         }
         message('登录成功，正在加载账号数据…', 'success');
-        window.setTimeout(() => window.location.reload(), 80);
+        if (!currentState.isLoggedIn) return refreshAuthSnapshot();
+        return;
       })
       .catch((error) => message((error as Error).message || '登录失败。', 'error'))
       .finally(() => setBusy(false));
@@ -239,13 +253,18 @@ function bind(): void {
       })
       .catch((error) => notify(`退出登录失败：${(error as Error).message}`));
   });
-  window.Crew.onSessionState((state) => applyState(state));
+  window.Crew.onSessionState((state) => {
+    authRevision++;
+    applyState(state);
+  });
 }
 
-export async function initAuthFlow(): Promise<boolean> {
-  bind();
+async function refreshAuthSnapshot(): Promise<void> {
+  const revision = authRevision;
   const result = await window.Crew.authGetState();
+  if (revision !== authRevision) return;
   if (result.ok && result.state) {
+    authRevision++;
     applyState(result.state);
   } else if (!result.ok) {
     applyState({
@@ -256,8 +275,13 @@ export async function initAuthFlow(): Promise<boolean> {
       user: null,
     });
   }
+}
+
+export async function initAuthFlow(): Promise<boolean> {
+  bind();
+  await refreshAuthSnapshot();
   await window.Crew.rendererInitialStateReady();
-  return result.ok ? result.state.isLoggedIn : false;
+  return currentState.isLoggedIn;
 }
 
 export function renderAuthAccount(): void {

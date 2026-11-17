@@ -12,9 +12,10 @@ import { BackendChatSocket } from '../../src/ui/backend-client';
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
+  static CONNECTING = 0;
   static OPEN = 1;
 
-  readyState = FakeWebSocket.OPEN;
+  readyState = FakeWebSocket.CONNECTING;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
@@ -35,6 +36,7 @@ class FakeWebSocket {
   }
 
   emitOpen(): void {
+    this.readyState = FakeWebSocket.OPEN;
     this.onopen?.();
   }
 
@@ -109,8 +111,7 @@ describe('BackendChatSocket subscription', () => {
   });
 
   it('forwards gateway_sequence frames and reports injected max sequence on subscribe', () => {
-    const originalWebSocket = globalThis.WebSocket;
-    const originalLocalStorage = globalThis.localStorage;
+    vi.stubGlobal('Crew', undefined);
     vi.stubGlobal('WebSocket', FakeWebSocket);
     vi.stubGlobal('localStorage', {
       getItem: vi.fn(() => ''),
@@ -184,8 +185,7 @@ describe('BackendChatSocket subscription', () => {
       });
       sock.dispose();
     } finally {
-      vi.stubGlobal('WebSocket', originalWebSocket);
-      vi.stubGlobal('localStorage', originalLocalStorage);
+      vi.unstubAllGlobals();
     }
   });
 });

@@ -28,6 +28,22 @@ beforeEach(() => {
 });
 
 describe('DesktopAuthSession email login', () => {
+  it('does not authorize an unknown state or install auth from a superseded Gateway', async () => {
+    const session = new DesktopAuthSession();
+    expect(session.state()).toMatchObject({ mode: 'unknown', isLoggedIn: false });
+    const obsolete = Promise.withResolvers<Response>();
+    vi.stubGlobal('fetch', vi.fn()
+      .mockReturnValueOnce(obsolete.promise)
+      .mockResolvedValueOnce(jsonResponse({ ok: true, mode: 'email', providerId: 'email' })));
+    const controller = new AbortController();
+    const first = session.refreshConfig('http://127.0.0.1:8000', controller.signal);
+    controller.abort();
+    await session.refreshConfig('http://127.0.0.1:8002');
+    obsolete.resolve(jsonResponse({ ok: true, mode: 'local', providerId: 'local' }));
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    expect(session.state()).toMatchObject({ mode: 'email', isLoggedIn: false, providerId: 'email' });
+  });
+
   it('clears the invalid cookie but preserves the Gateway session error', async () => {
     const responses = [
       jsonResponse(

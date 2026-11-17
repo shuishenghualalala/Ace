@@ -73,56 +73,59 @@ export class DesktopAuthSession {
     return target.toString();
   }
 
-  async refreshConfig(baseUrl: string): Promise<AuthStateSnapshot> {
-    this.sessionVerificationError = null;
-    const previousMode = this.mode;
-    const previousProviderId = this.providerId;
+  async refreshConfig(baseUrl: string, signal?: AbortSignal): Promise<AuthStateSnapshot> {
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/config'), {
       method: 'GET',
       redirect: 'error',
+      ...(signal ? { signal } : {}),
     });
     const payload = parseJson(await response.text()) as AuthConfigPayload;
     if (!response.ok || payload.ok !== true) {
       throw new Error('无法读取认证配置');
     }
-    this.mode = payload.mode === 'remote' || payload.mode === 'email' || payload.mode === 'dev' ? payload.mode : 'local';
-    this.configured = payload.configured !== false;
-    this.providerId = typeof payload.providerId === 'string' && payload.providerId.trim()
+    const mode = payload.mode === 'remote' || payload.mode === 'email' || payload.mode === 'dev' ? payload.mode : 'local';
+    const providerId = typeof payload.providerId === 'string' && payload.providerId.trim()
       ? payload.providerId.trim()
       : 'custom';
-    if (this.mode === 'remote' || this.mode === 'email') {
-      if (
-        previousMode !== this.mode
-        || previousProviderId !== this.providerId
-        || !this.cookie
-        || !this.user
-      ) {
-        this.restoreRemoteSession();
+    signal?.throwIfAborted();
+    let { cookie, user } = this;
+    let verificationError: Record<string, unknown> | null = null;
+    if (mode === 'remote' || mode === 'email') {
+      if (this.mode !== mode || this.providerId !== providerId || !cookie || !user) {
+        ({ cookie, user } = this.readRemoteSession(providerId));
       }
-      if (this.cookie && this.user) {
+      if (cookie && user) {
         const sessionResponse = await fetch(this.endpoint(baseUrl, '/api/auth/session'), {
           method: 'GET',
-          headers: { Cookie: this.cookie },
+          headers: { Cookie: cookie },
           redirect: 'error',
+          ...(signal ? { signal } : {}),
         }).catch(() => null);
         const sessionPayload = sessionResponse
           ? parseJson(await sessionResponse.text())
           : {};
         if (!sessionResponse || !sessionResponse.ok || sessionPayload.ok !== true) {
-          this.sessionVerificationError = {
+          verificationError = {
             ...sessionPayload,
             ok: false,
             status: sessionResponse?.status || 0,
           };
-          this.cookie = '';
-          this.user = null;
-          this.clearPersistedSession();
+          cookie = '';
+          user = null;
         }
       }
     } else {
-      this.cookie = '';
-      this.user = syntheticUser(this.mode === 'dev' ? 'dev' : 'local');
+      cookie = '';
+      user = syntheticUser(mode === 'dev' ? 'dev' : 'local');
     }
+    signal?.throwIfAborted();
+    this.mode = mode;
+    this.providerId = providerId;
+    this.configured = payload.configured !== false;
+    this.cookie = cookie;
+    this.user = user;
+    this.sessionVerificationError = verificationError;
+    if (verificationError) this.clearPersistedSession();
     return this.state();
   }
 
@@ -132,7 +135,7 @@ export class DesktopAuthSession {
       mode: this.mode,
       configured: this.configured,
       providerId: this.providerId,
-      isLoggedIn: !requiresSession || Boolean(this.cookie && this.user),
+      isLoggedIn: this.mode !== 'unknown' && (!requiresSession || Boolean(this.cookie && this.user)),
       user: this.user,
     };
   }
@@ -148,22 +151,20 @@ export class DesktopAuthSession {
     return this.mode === 'remote' || this.mode === 'email' ? this.cookie : '';
   }
 
-  private restoreRemoteSession(): void {
-    this.cookie = '';
-    this.user = null;
+  private readRemoteSession(providerId: string): { cookie: string; user: AuthUserSnapshot | null } {
+    const empty = { cookie: '', user: null };
     const prefs = readDesktopPrefsFile();
     const stored = prefs[PREFS_KEY] as StoredAuthSession | undefined;
-    if (!stored || stored.providerId !== this.providerId || !stored.encryptedCookie) return;
+    if (!stored || stored.providerId !== providerId || !stored.encryptedCookie) return empty;
     const user = normalizedUser(stored.user);
-    if (!user || !safeStorage.isEncryptionAvailable()) return;
+    if (!user || !safeStorage.isEncryptionAvailable()) return empty;
     try {
       const cookie = safeStorage.decryptString(Buffer.from(stored.encryptedCookie, 'base64'));
-      if (!cookie.startsWith(`${SESSION_COOKIE_NAME}=`)) return;
-      this.cookie = cookie;
-      this.user = user;
+      if (cookie.startsWith(`${SESSION_COOKIE_NAME}=`)) return { cookie, user };
     } catch {
       this.clearPersistedSession();
     }
+    return empty;
   }
 
   private persistRemoteSession(): void {

@@ -137,16 +137,16 @@ describe('BackendChatSocket connect', () => {
     events[0]({ type: 'close', code: 1006, reason: '' });
     await vi.advanceTimersByTimeAsync(1_200);
     expect(connect).toHaveBeenCalledTimes(2);
-    events[0]({ type: 'close', code: 1006, reason: '' });
+    events.at(-1)!({ type: 'close', code: 1006, reason: '' });
     await vi.advanceTimersByTimeAsync(2_400);
     expect(connect).toHaveBeenCalledTimes(3);
-    events[0]({ type: 'close', code: 1006, reason: '' });
+    events.at(-1)!({ type: 'close', code: 1006, reason: '' });
     await vi.advanceTimersByTimeAsync(4_800);
     expect(connect).toHaveBeenCalledTimes(4);
 
     // 重新 open 后退避清零：下一次断连回到 1200ms。
-    events[0]({ type: 'open' });
-    events[0]({ type: 'close', code: 1006, reason: '' });
+    events.at(-1)!({ type: 'open' });
+    events.at(-1)!({ type: 'close', code: 1006, reason: '' });
     await vi.advanceTimersByTimeAsync(1_200);
     expect(connect).toHaveBeenCalledTimes(5);
     vi.mocked(Math.random).mockRestore();
@@ -183,7 +183,7 @@ describe('BackendChatSocket connect', () => {
     expect(connect).toHaveBeenCalledTimes(2);
 
     // 退避继续增长（下一次 3s×0.8=2400ms），而不是原地 1.5s 抖动。
-    events[0]({ type: 'error', error: 'gateway proxy down again' });
+    events.at(-1)!({ type: 'error', error: 'gateway proxy down again' });
     await vi.advanceTimersByTimeAsync(1_200);
     expect(connect).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1_200);
@@ -223,5 +223,50 @@ describe('BackendChatSocket connect', () => {
     expect(connect).toHaveBeenCalledTimes(2);
     vi.mocked(Math.random).mockRestore();
     vi.useRealTimers();
+  });
+
+  it('does not open a renderer-side WebSocket when the Desktop proxy is incomplete', () => {
+    const onStatus = vi.fn();
+    const WebSocketCtor = vi.fn();
+    vi.stubGlobal('WebSocket', WebSocketCtor);
+    try {
+      Object.defineProperty(window, 'Crew', { configurable: true, value: { gatewayWsConnect: vi.fn() } });
+      const sock = new BackendChatSocket(() => {}, onStatus);
+      sock.connect();
+      expect(onStatus).toHaveBeenCalledWith(false, undefined);
+      expect(WebSocketCtor).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps newer socket state when a previous bridge attempt resolves or emits events late', async () => {
+    const events: Array<(event: unknown) => void> = [];
+    const old = Promise.withResolvers<{ ok: boolean }>();
+    const connect = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValue({ ok: true });
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        gatewayWsConnect: connect,
+        gatewayWsSend: vi.fn().mockResolvedValue({ ok: true }),
+        onGatewayWsEvent: (cb: (event: unknown) => void) => { events.push(cb); return () => {}; },
+      },
+    });
+    const onStatus = vi.fn();
+    const sock = new BackendChatSocket(() => {}, onStatus);
+    sock.setGatewayGeneration(10);
+    sock.connect();
+    sock.setGatewayGeneration(11);
+    sock.connect();
+
+    events[0]({ type: 'open', gatewayGeneration: 10 });
+    events[1]({ type: 'open', gatewayGeneration: 10 });
+    expect(sock.isGatewayProxyOpen()).toBe(false);
+    expect(onStatus).toHaveBeenCalledExactlyOnceWith(false, { transient: true, gatewayGeneration: 11 });
+    events[1]({ type: 'open', gatewayGeneration: 11 });
+    expect(onStatus).toHaveBeenLastCalledWith(true, { gatewayGeneration: 11 });
+    old.resolve({ ok: false });
+    await old.promise;
+    expect(sock.isGatewayProxyOpen()).toBe(true);
   });
 });

@@ -306,6 +306,7 @@ function buildSnapshot(): AppState {
     backendProcessState: u.backendProcessState,
     backendHealthState: u.backendHealthState,
     backendTransportState: u.backendTransportState,
+    backendReadiness: u.backendReadiness,
     backendLoopLagMs: u.backendLoopLagMs,
     backendCanSend: u.backendCanSend,
     socket: u.socket as AppState['socket'],

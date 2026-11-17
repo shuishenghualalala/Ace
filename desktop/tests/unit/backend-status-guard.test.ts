@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BackendStartupReadiness } from '../../src/ui/api/transport';
 
 const recoveryMocks = vi.hoisted(() => ({
   hydrateBackendState: vi.fn(async () => {}),
@@ -16,6 +17,9 @@ type StatusPayload = {
   components?: Record<string, { status: string; message?: string }>;
   failureKind?: 'unreachable' | 'timeout' | 'auth_failed' | 'unknown';
   since?: number;
+  processState?: 'starting' | 'ready' | 'error';
+  transportState?: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+  readiness?: BackendStartupReadiness;
 };
 
 type StatusCb = (s: StatusPayload) => void;
@@ -43,6 +47,7 @@ describe('backend-status-guard 状态横幅', () => {
   let statusCb: StatusCb | null = null;
   let retryCalled = 0;
   let initialStatus: StatusPayload;
+  let getStatus: () => Promise<StatusPayload>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -50,6 +55,7 @@ describe('backend-status-guard 状态横幅', () => {
     statusCb = null;
     retryCalled = 0;
     initialStatus = { connected: false };
+    getStatus = async () => initialStatus;
     recoveryMocks.hydrateBackendState.mockClear();
     document.body.innerHTML = `
       <main class="main-content">
@@ -65,7 +71,7 @@ describe('backend-status-guard 状态横幅', () => {
             statusCb = null;
           };
         },
-        getBackendStatus: async () => initialStatus,
+        getBackendStatus: () => getStatus(),
         retryGateway: () => {
           retryCalled += 1;
         },
@@ -74,10 +80,7 @@ describe('backend-status-guard 状态横幅', () => {
     });
   });
 
-  async function loadGuard(): Promise<{
-    initBackendStatusGuard: () => void;
-    disposeBackendStatusGuard: () => void;
-  }> {
+  async function loadGuard() {
     const mod = await import('../../src/ui/features/backend-status-guard');
     mod.initBackendStatusGuard();
     return mod;
@@ -168,6 +171,54 @@ describe('backend-status-guard 状态横幅', () => {
     expect(banner().classList.contains('show')).toBe(false);
 
     await vi.waitFor(() => expect(recoveryMocks.hydrateBackendState).toHaveBeenCalledOnce());
+  });
+
+  it('blocks a live Gateway until core readiness and an open for this renderer and generation', async () => {
+    const guard = await loadGuard();
+    const status: StatusPayload = {
+      connected: true, processState: 'ready', transportState: 'connected', readiness: { status: 'starting', generation: 2 },
+    };
+    statusCb!(status);
+    guard.setBackendTransportState('connected', 2);
+    expect(guard.isBackendConnected()).toBe(true);
+    expect(guard.canSendToBackend()).toBe(false);
+    expect(bannerTitle()).toBe('正在启动后端');
+
+    statusCb!({ ...status, transportState: 'unknown', readiness: { status: 'ready', generation: 2 } });
+    expect(guard.canSendToBackend()).toBe(false);
+    expect(bannerTitle()).toBe('正在连接聊天服务');
+    statusCb!({ ...status, readiness: { status: 'ready', generation: 3 } });
+    guard.setBackendTransportState('connected', 2);
+    expect(guard.canSendToBackend()).toBe(false);
+    expect(recoveryMocks.hydrateBackendState).not.toHaveBeenCalled();
+
+    guard.setBackendTransportState('connected', 3);
+    expect(guard.canSendToBackend()).toBe(true);
+    expect(banner().classList.contains('show')).toBe(false);
+    await vi.waitFor(() => expect(recoveryMocks.hydrateBackendState).toHaveBeenCalledOnce());
+    guard.setBackendTransportState('disconnected', 2);
+    expect(guard.canSendToBackend()).toBe(true);
+    guard.setBackendTransportState('disconnected', 3);
+    expect(guard.canSendToBackend()).toBe(false);
+    expect(bannerTitle()).toBe('正在连接聊天服务');
+  });
+
+  it('keeps a failed core startup blocking even if an older snapshot reports ready', async () => {
+    const snapshot = Promise.withResolvers<StatusPayload>();
+    getStatus = () => snapshot.promise;
+    const guard = await loadGuard();
+    statusCb!({
+      connected: true, processState: 'error', transportState: 'connected',
+      readiness: { status: 'failed', generation: 4 },
+      components: { startup: { status: 'failed', message: '核心依赖初始化失败' } },
+    });
+    expect(bannerTitle()).toBe('后端启动失败');
+    expect(bannerText()).toBe('核心依赖初始化失败');
+    snapshot.resolve({ connected: true, transportState: 'connected', readiness: { status: 'ready', generation: 2 } });
+    await Promise.resolve();
+    guard.setBackendTransportState('connected', 2);
+    expect(guard.canSendToBackend()).toBe(false);
+    expect(bannerTitle()).toBe('后端启动失败');
   });
 
   it('快照兜底：就绪事件早于订阅时 init 后隐藏横幅', async () => {

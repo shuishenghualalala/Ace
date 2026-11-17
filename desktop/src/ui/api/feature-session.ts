@@ -837,6 +837,8 @@ export class BackendChatSocket {
   private usingGatewayProxy = false;
   private gatewayProxyOpen = false;
   private connectInFlight = false;
+  private gatewayGeneration: number | undefined;
+  private proxyAttempt = 0;
   private unsubscribeGatewayProxy: (() => void) | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
@@ -854,6 +856,20 @@ export class BackendChatSocket {
   /** 供单测 / 诊断：当前 proxy 通道是否已 open。 */
   isGatewayProxyOpen(): boolean {
     return this.gatewayProxyOpen;
+  }
+
+  /** Invalidate a renderer's old proxy without closing a newer main-process connection. */
+  setGatewayGeneration(generation: number): void {
+    const previous = this.gatewayGeneration;
+    if (previous !== undefined && generation <= previous) return;
+    this.gatewayGeneration = generation;
+    if (previous === undefined) return;
+    this.proxyAttempt++;
+    this.connectInFlight = false;
+    this.gatewayProxyOpen = false;
+    this.unsubscribeGatewayProxy?.();
+    this.unsubscribeGatewayProxy = null;
+    this.publishProxyStatus(false, { transient: true });
   }
 
   /** 注入 gateway_sequence 解析器（由 session-controller 在 bootstrap 时绑定）。 */
@@ -892,16 +908,32 @@ export class BackendChatSocket {
       this.usingGatewayProxy = true;
       this.connectInFlight = true;
       this.gatewayProxyOpen = false;
+      const attempt = ++this.proxyAttempt;
+      const isCurrent = (): boolean => !this.closed && this.proxyAttempt === attempt;
+      const connectionFailed = (): void => {
+        if (!isCurrent()) return;
+        this.connectInFlight = false;
+        this.gatewayProxyOpen = false;
+        this.publishProxyStatus(false);
+        this.scheduleReconnect();
+      };
       logStream('ws-renderer', 'connect-via-proxy', {});
       this.unsubscribeGatewayProxy?.();
       this.unsubscribeGatewayProxy = bridge.onGatewayWsEvent((event) => {
-        const payload = event as { type?: string; data?: string; error?: string; code?: number; reason?: string };
+        if (!isCurrent() || !event || typeof event !== 'object') return;
+        const payload = event as {
+          type?: string; data?: string; error?: string; code?: number; reason?: string; gatewayGeneration?: number;
+        };
+        if (payload.gatewayGeneration !== undefined) {
+          if (this.gatewayGeneration !== undefined && payload.gatewayGeneration < this.gatewayGeneration) return;
+          this.gatewayGeneration = payload.gatewayGeneration;
+        } else if (this.gatewayGeneration !== undefined) return;
         if (payload.type === 'open') {
           this.connectInFlight = false;
           this.gatewayProxyOpen = true;
           this.reconnectAttempts = 0;
           logStream('ws-renderer', 'proxy-event-open', {});
-          this.onStatus(true);
+          this.publishProxyStatus(true);
           this.resubscribe();
           this.onOpen?.();
           return;
@@ -940,10 +972,7 @@ export class BackendChatSocket {
           logStream('ws-renderer', 'proxy-event-error', { error: payload.error });
           // 主进程只发 error 不保证随后再发 close：不清 in-flight 的话，后续 connect()
           // 会一直早退，socket 永久停在「连不上也不重连」，指数退避也就没机会生效。
-          this.connectInFlight = false;
-          this.gatewayProxyOpen = false;
-          this.onStatus(false);
-          this.scheduleReconnect();
+          connectionFailed();
           return;
         }
         if (payload.type === 'close') {
@@ -952,25 +981,33 @@ export class BackendChatSocket {
           logStream('ws-renderer', 'proxy-event-close', { code: payload.code, reason, transient });
           this.connectInFlight = false;
           this.gatewayProxyOpen = false;
-          this.onStatus(false, { transient });
+          this.publishProxyStatus(false, { transient });
           if (!transient) {
             this.scheduleReconnect();
           }
         }
       });
       void bridge.gatewayWsConnect().then((result: { ok?: boolean }) => {
+        if (!isCurrent()) return;
         this.connectInFlight = false;
         if (!result?.ok) {
           logStream('ws-renderer', 'proxy-connect-failed', { result });
-          this.gatewayProxyOpen = false;
-          this.onStatus(false);
           // ensureGateway 冷启动超时/失败时 connect 会直接 fail；gateway 稍后就绪
           // 后若这里不重试，会一直停在「服务未连接」。与 close 路径同样退避重连。
-          this.scheduleReconnect();
+          connectionFailed();
         }
+      }).catch((error: unknown) => {
+        logStream('ws-renderer', 'proxy-connect-failed', { error: String(error) });
+        connectionFailed();
       });
       return;
     }
+    if (bridge) {
+      logStream('ws-renderer', 'connect-missing-desktop-proxy', {});
+      this.publishProxyStatus(false);
+      return;
+    }
+    if (this.ws?.readyState === WebSocket.CONNECTING || this.ws?.readyState === WebSocket.OPEN) return;
     logStream('ws-renderer', 'connect-direct-ws', { wsBase: wsBase() });
     const wsUrl = `${wsBase()}/ws`;
     this.ws = new WebSocket(wsUrl);
@@ -1008,6 +1045,10 @@ export class BackendChatSocket {
     };
   }
 
+  private publishProxyStatus(open: boolean, meta?: BackendSocketStatusMeta): void {
+    this.onStatus(open, this.gatewayGeneration === undefined ? meta : { ...meta, gatewayGeneration: this.gatewayGeneration });
+  }
+
   async send(
     payload:
       | SendPayload
@@ -1038,10 +1079,14 @@ export class BackendChatSocket {
       if (!this.gatewayProxyOpen || !bridge?.gatewayWsSend) {
         return false;
       }
+      const attempt = this.proxyAttempt;
       const result = await bridge.gatewayWsSend(payload);
       if (!result?.ok) {
-        this.gatewayProxyOpen = false;
-        this.onStatus(false);
+        if (!this.closed && this.proxyAttempt === attempt) {
+          this.gatewayProxyOpen = false;
+          this.publishProxyStatus(false);
+          this.scheduleReconnect();
+        }
         return false;
       }
       return true;

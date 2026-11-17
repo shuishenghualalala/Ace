@@ -76,7 +76,7 @@ import { bindSettingsUi, registerConfigPaneRenderers } from './features/settings
 import { mountSettingsDataPanes } from './features/settings-data';
 import { isRendererLoggedIn, requireRendererLogin } from './features/auth-gate';
 import { initAuthFlow } from './features/login';
-import { initBackendStatusGuard, isBackendConnected } from './features/backend-status-guard';
+import { disposeBackendStatusGuard, initBackendStatusGuard, isBackendConnected } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
 import { bindInspectorUi, openInspectorToTab, refreshInspector, setPlanBoardActions } from './features/inspector';
 import { bindAttachments } from './features/attachments';
@@ -127,8 +127,7 @@ import {
   withdrawMessage,
 } from './features/chat-controller';
 import {
-  bootstrapBackend,
-  hydrateBackendState,
+  bindBackendAuth,
   openSession,
   setSessionControllerSetTab,
 } from './features/session-controller';
@@ -140,7 +139,6 @@ import {
   disposeTracingPage,
   resolveTracingDevLaunch,
 } from './features/tracing';
-import { stopStreamWatchdog } from './features/stream-watchdog';
 import type { RendererAdapter } from './adapters/renderer-adapter';
 import { createApplicationShell, type ApplicationShell } from './layouts/application-shell';
 import {
@@ -607,13 +605,16 @@ async function init(
 
   // Phase 1: 同步骨架（必须先做完才能显示首屏）
   // 后端状态守卫：优先初始化，确保遮罩在首屏就能展示
-  await safe('initBackendStatusGuard', initBackendStatusGuard);
+  await safe('initBackendStatusGuard', () => {
+    initBackendStatusGuard();
+    registerDispose(disposeBackendStatusGuard);
+  });
   await safe('initSystemTrayStatus', () => {
     registerDispose(initSystemTrayStatus());
   });
   // 认证流程：email/remote 模式下在首屏前判定登录态，未登录则展示登录墙。
   // local/dev 模式下 isLoggedIn 恒为 true，不显示登录墙，直接放行。
-  await safe('initAuthFlow', async () => { await initAuthFlow(); });
+  void safe('initAuthFlow', async () => { await initAuthFlow(); });
   // 把 openSession / setTab 注入 chat-controller + session-controller，破除循环依赖
   // （语义等价于抽离前这些顶层函数直接互相调用）。
   await safe('setChatCallbacks', () => setChatCallbacks({ openSession, setTab }));
@@ -647,7 +648,7 @@ async function init(
   renderWorkspaceHistory(openSession);
   renderChat();
   updateGatewayDot();
-  // initAuthFlow 已完成后再恢复用户上次停留的位置，确保 Wiki 请求带上已恢复的 Cookie。
+  // 恢复本地布局；后端会话在当前账号验证并建立聊天连接后加载。
   await safe('restoreProductMode', restoreProductMode);
   // 冷启动：当前会话若已有内存消息，补一次文件改动对账（清幽灵临时文件卡）
   const bootSid = state.activeSessionId;
@@ -670,11 +671,8 @@ async function init(
     onSessionAgentAssigned: assignSessionAgentDisplay,
   }));
   void safe('initSkillsPage', initSkillsPage);
-  // 登录墙已由 initAuthFlow 在 Phase 1 处理：local/dev 模式直接放行，
-  // email/remote 模式未登录时登录墙覆盖全部 UI，登录后 reload 重新初始化。
-  await safe('bootstrapBackend', bootstrapBackend);
+  await safe('bindBackendAuth', () => { registerDispose(bindBackendAuth()); });
   await safe('refreshTracingGate', refreshTracingGateAvailability);
-  void safe('hydrateBackendState', hydrateBackendState);
 }
 
 /**
@@ -1080,10 +1078,6 @@ export function mountRenderer(root: HTMLElement, adapter: RendererAdapter): () =
     if (disposed) return;
     disposed = true;
     for (const dispose of disposeEvents.splice(0)) dispose();
-    const socket = state.socket;
-    state.socket = null;
-    socket?.dispose();
-    stopStreamWatchdog();
     mountedShell.dispose();
     root.removeAttribute('data-renderer-mounted');
     rendererRoot.element.removeAttribute('data-renderer-mounted');

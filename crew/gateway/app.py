@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any
+from uuid import uuid4
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
@@ -30,10 +32,11 @@ from crew.gateway.connections import ConnectionManager
 from crew.gateway.desktop_parent_lease import DesktopParentLease
 from crew.gateway.health_server import (
     GatewayHealthServer,
-    build_health_components,
+    build_app_health_components,
     note_loop_tick,
     set_health_components,
 )
+from crew.gateway.instance_auth import GATEWAY_INSTANCE_CHALLENGE_HEADER, build_gateway_health_payload
 from crew.gateway.helpers import (
     DIST_DIR,
     EXTERNAL_AGENTS_DISABLED_BODY,
@@ -68,6 +71,7 @@ from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
 
 log = get_logger("gateway")
+_CORE_STARTUP_TIMEOUT_SECONDS = 90.0
 
 
 def make_route_gate(route_registry: Any, contribution_id: str) -> Any:
@@ -195,26 +199,40 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         security_service=crew.security_service,
     )
     crew.logout_coordinator = logout_coordinator
-    startup_ready = asyncio.Event()
-    startup_error = ""
-    startup_task: asyncio.Task[None] | None = None
+    def _prepare_owner_storage() -> None:
+        completed = crew.active_owner.complete_restart_logout()
+        if completed:
+            log.info("Gateway 重启已完成渠道物理断连，释放退出 Owner: %s", completed)
+        # An old anonymous local lease cannot be recovered in login mode.
+        auth_mode = str(getattr(crew.config, "auth_mode", "local") or "local").strip().lower()
+        if auth_mode in {"email", "remote"} and crew.active_owner.get("local") is not None:
+            if crew.active_owner.release("local"):
+                log.info("认证模式已切换为 %s，释放遗留 local Owner 租约", auth_mode)
 
-    async def _wait_for_gateway_startup() -> bool:
-        """Wait for deferred services when the ASGI lifespan is active."""
-        task = startup_task
-        if task is None:
-            # ASGI unit tests may intentionally call the app without running
-            # lifespan. Production servers always install the startup task.
-            return True
-        await startup_ready.wait()
-        return not startup_error
+    async def _startup_core() -> None:
+        # All ingress stays disconnected while leases from an earlier Gateway
+        # are reconciled and the core runtime becomes usable.
+        await _stop_all_channels(reason="login_required")
+        await asyncio.to_thread(_prepare_owner_storage)
+        await crew.startup_core()
+
+    def _read_startup_status() -> str:
+        return api.state.gateway_readiness["status"]
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        nonlocal startup_error, startup_task
-        startup_ready.clear()
-        startup_error = ""
-        _app.state.deferred_startup_status = "starting"
+        generation = str(uuid4())
+        _app.state.gateway_readiness = {"status": "starting", "generation": generation}
+        stopping = False
+
+        def publish(status: str, error_code: str | None = None) -> bool:
+            current = _app.state.gateway_readiness
+            if stopping or current["generation"] != generation or current["status"] != "starting":
+                return False
+            _app.state.gateway_readiness = {"status": status, "generation": generation}
+            if error_code is not None:
+                _app.state.gateway_readiness["error_code"] = error_code
+            return True
 
         # health 独立线程服务：与业务事件循环隔离，循环卡顿时桌面端仍能探测进程
         # 活性。端口默认主端口+1（runtime.health_port 可显式覆盖），绑定失败仅
@@ -225,91 +243,63 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         health_server = GatewayHealthServer(port=health_port)
         health_server.start()
 
-        # 循环活性哨兵：每秒把 loop.time() 与 components 快照戳到模块级变量，
-        # health 线程据此在响应里附带 loop_lag_ms（区分「循环忙」与「进程死」）。
-        async def _health_loop_sentinel() -> None:
-            loop = asyncio.get_running_loop()
-            while True:
-                note_loop_tick(loop.time())
-                set_health_components(build_health_components(
-                    getattr(_app.state, "deferred_startup_status", "starting"),
-                    getattr(crew, "cron_service", None),
-                ))
-                await asyncio.sleep(1.0)
+        def components() -> dict:
+            return build_app_health_components(_read_startup_status(), crew)
 
-        health_sentinel = asyncio.create_task(_health_loop_sentinel())
+        health_sentinel = asyncio.create_task(_health_loop_sentinel(components))
 
-        # Restart-finalized logout is a physical disconnection boundary and
-        # must complete before even health readiness becomes visible.
-        completed_restart_logout = crew.active_owner.complete_restart_logout()
-        if completed_restart_logout:
-            log.info(
-                "Gateway 重启已完成渠道物理断连，释放退出 Owner: %s",
-                completed_restart_logout,
-            )
-        # Registered channels remain physically and logically disconnected
-        # until a verified Active Owner is activated after Crew startup.
-        await _stop_all_channels(reason="login_required")
+        core = asyncio.create_task(_startup_core(), name="gateway-startup-core")
 
-        # 从旧版 local 免登录切换到 email/remote 登录时，SQLite 里可能仍保留
-        # local 的排他租约。该租约没有可恢复的登录凭据，却会阻止新账号接管，
-        # 因此在所有渠道已断开、业务请求尚未放行的启动边界安全释放它。
-        auth_mode = str(getattr(crew.config, "auth_mode", "local") or "local").strip().lower()
-        legacy_lease = crew.active_owner.get("local")
-        if (
-            auth_mode in {"email", "remote"}
-            and legacy_lease is not None
-            and legacy_lease.owner_account_id == "local"
-            and crew.active_owner.release("local")
-        ):
-            log.info("认证模式已切换为 %s，释放遗留 local Owner 租约", auth_mode)
-
-        # Keep remote early-health startup, but fence every business request
-        # until MCP/Cron and Owner lifecycle services are ready.
         async def _deferred_startup() -> None:
-            nonlocal startup_error
+            completed, _ = await asyncio.wait({core}, timeout=_CORE_STARTUP_TIMEOUT_SECONDS)
+            if not completed:
+                publish("failed", "GATEWAY_STARTUP_TIMEOUT")
+                log.error("Gateway 核心启动超时 generation=%s", generation)
+                core.cancel()
+                return
             try:
+                core.result()
+            except asyncio.CancelledError:
+                publish("failed", "GATEWAY_STARTUP_CANCELLED")
+                return
+            except Exception:
+                publish("failed", "GATEWAY_CORE_STARTUP_FAILED")
+                log.exception("Gateway 核心启动失败 generation=%s", generation)
+                return
+            if not publish("ready"):
+                return
+            try:
+                # Optional services may work on their own clocks. Core chat
+                # does not wait for a remote MCP or local scheduler.
                 await hook_registry.emit("gateway:startup", {
                     "gateway_host": crew.config.gateway_host,
                     "gateway_port": crew.config.gateway_port,
                 })
-                await crew.startup()   # 连接 MCP server、启动 cron 引擎
-                leases = crew.active_owner.list()
-                if leases:
-                    # Cron must be running before these calls; otherwise an
-                    # Owner mount can be skipped permanently.
-                    for lease in leases:
+                await crew.startup_services()
+                if not stopping and _app.state.gateway_readiness["generation"] == generation:
+                    # Remount current Owners once the optional scheduler has started.
+                    for lease in crew.active_owner.list():
                         logout_coordinator.activate_owner(lease.owner_account_id)
-                else:
-                    await _stop_all_channels(reason="login_required")
-                cron_error = str(getattr(crew.cron_service, "start_error", "") or "")
-                if cron_error:
-                    log.warning("Gateway 基础能力已就绪，但 CronService 启动失败")
-                else:
-                    log.info("Gateway 延迟初始化完成（MCP / cron / Owner 门禁已就绪）")
-                _app.state.deferred_startup_status = "ready"
-            except asyncio.CancelledError:
-                startup_error = "cancelled"
-                _app.state.deferred_startup_status = "failed"
-                raise
-            except Exception as exc:
-                startup_error = type(exc).__name__
-                _app.state.deferred_startup_status = "failed"
-                log.exception("Gateway 延迟初始化失败（部分功能可能不可用）")
-            finally:
-                startup_ready.set()
+            except Exception:
+                log.exception("Gateway 可选服务启动失败 generation=%s", generation)
 
-        startup_task = asyncio.create_task(_deferred_startup())
+        startup_task = asyncio.create_task(_deferred_startup(), name="gateway-startup")
         try:
             yield
         finally:
+            stopping = True
             dispatcher.begin_shutdown()
             health_sentinel.cancel()
             await asyncio.gather(health_sentinel, return_exceptions=True)
-            if not startup_task.done():
-                startup_task.cancel()
-            await asyncio.gather(startup_task, return_exceptions=True)
-            startup_task = None
+            for task in (startup_task, core):
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            completed, pending = await asyncio.wait({startup_task, core}, timeout=2.0)
+            for task in completed:
+                if not task.cancelled():
+                    task.exception()
+            if pending:
+                log.warning("Gateway 启动任务关停超时 generation=%s count=%d", generation, len(pending))
             await logout_coordinator.shutdown()
             await _stop_all_channels()
             await crew.shutdown()
@@ -330,6 +320,9 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
         redoc_url="/redoc" if publish_api_docs else None,
         openapi_url="/openapi.json" if publish_api_docs else None,
     )
+    # Embedded ASGI users that explicitly omit lifespan keep their existing
+    # behavior. Uvicorn replaces this state before serving any request.
+    api.state.gateway_readiness = {"status": "ready", "generation": str(uuid4())}
 
     @api.exception_handler(ExternalAgentsDisabledError)
     async def external_agents_disabled_handler(
@@ -346,20 +339,25 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             client_host = request.client.host if request.client else None
             if not is_loopback_client(client_host):
                 return JSONResponse({"ok": False, "error": "仅允许本机访问"}, status_code=401)
-        if path.startswith("/api/") and path != "/api/health" and not await _wait_for_gateway_startup():
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "error": "Gateway 初始化失败",
-                    "code": "GATEWAY_STARTUP_FAILED",
-                },
-                status_code=503,
-            )
+        account = None
         if requires_gateway_auth(path):
             try:
                 account = await authenticate_http_request(request, crew.config)
             except AuthenticationError as exc:
                 return JSONResponse({"ok": False, "error": str(exc)}, status_code=401)
+        startup_status = _read_startup_status()
+        if path.startswith("/api/") and path != "/api/health" and startup_status != "ready":
+            starting = startup_status == "starting"
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Gateway 正在初始化" if starting else "Gateway 初始化失败",
+                    "code": "GATEWAY_STARTING" if starting else "GATEWAY_STARTUP_FAILED",
+                },
+                status_code=503,
+                headers={"Retry-After": "1"} if starting else {},
+            )
+        if account is not None:
             is_logout = path == "/api/auth/logout"
             if logout_coordinator.is_draining(account.owner_account_id) and not is_logout:
                 return JSONResponse(
@@ -417,7 +415,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             connections,
             channel_manager,
             logout_coordinator=logout_coordinator,
-            startup_waiter=_wait_for_gateway_startup,
+            startup_status=_read_startup_status,
         )
     )
 
@@ -544,6 +542,48 @@ class _DesktopLeaseServer(uvicorn.Server):
         return await super().on_tick(counter)
 
 
+async def _health_loop_sentinel(components: Callable[[], dict] | None = None) -> None:
+    """Publish the main loop's liveness and optional component snapshot."""
+    loop = asyncio.get_running_loop()
+    while True:
+        note_loop_tick(loop.time())
+        if components is not None:
+            set_health_components(components())
+        await asyncio.sleep(1.0)
+
+
+def _serve_managed_build_failure(parent_lease: DesktopParentLease, port: int) -> None:
+    """Keep a failed managed generation observable when constructing its stores failed."""
+    readiness = {"status": "failed", "generation": str(uuid4()), "error_code": "GATEWAY_CORE_BUILD_FAILED"}
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        health = GatewayHealthServer(port=port + 1) if port < 65535 else None
+        if health is not None:
+            health.start()
+        sentinel = asyncio.create_task(_health_loop_sentinel())
+        try:
+            yield
+        finally:
+            sentinel.cancel()
+            await asyncio.gather(sentinel, return_exceptions=True)
+            if health is not None:
+                health.stop()
+
+    api = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+    @api.get("/api/health")
+    async def health(request: Request) -> JSONResponse:
+        challenge = request.headers.get(GATEWAY_INSTANCE_CHALLENGE_HEADER)
+        payload, status = build_gateway_health_payload(challenge)
+        if status == 200:
+            payload["readiness"] = readiness
+        return JSONResponse(payload, status_code=status, headers={"Cache-Control": "no-store"})
+
+    config = uvicorn.Config(api, host="127.0.0.1", port=port, log_level="warning")
+    _DesktopLeaseServer(config, parent_lease, lambda: None).run()
+
+
 def run(*, parent_lease: DesktopParentLease | None = None) -> None:
     if parent_lease is not None and parent_lease.closed:
         return
@@ -555,7 +595,21 @@ def run(*, parent_lease: DesktopParentLease | None = None) -> None:
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
-    crew = build_app()
+    try:
+        crew = build_app()
+    except Exception:
+        if parent_lease is None:
+            raise
+        configured_port = os.environ.get("GATEWAY_PORT", "")
+        if not configured_port.isascii() or not configured_port.isdecimal() or len(configured_port) > 5:
+            raise
+        port = int(configured_port)
+        if not 1 <= port <= 65535:
+            raise
+        log.exception("Gateway 核心装配失败")
+        if not parent_lease.closed:
+            _serve_managed_build_failure(parent_lease, port)
+        return
     if parent_lease is not None and parent_lease.closed:
         asyncio.run(crew.shutdown())
         return

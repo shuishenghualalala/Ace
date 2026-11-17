@@ -49,8 +49,8 @@ export class LoginNewService {
     return cookie || null;
   }
 
-  async refreshConfig(baseUrl: string): Promise<AuthStateSnapshot> {
-    return desktopAuthSession.refreshConfig(baseUrl);
+  async refreshConfig(baseUrl: string, signal?: AbortSignal): Promise<AuthStateSnapshot> {
+    return desktopAuthSession.refreshConfig(baseUrl, signal);
   }
 
   async loginWithEmail(baseUrl: string, email: string): Promise<Record<string, unknown>> {

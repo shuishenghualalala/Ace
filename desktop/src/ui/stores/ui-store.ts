@@ -3,6 +3,7 @@
  */
 import { createStore, type Store } from '../reducers/store-bus';
 import type { TabKey, SystemPanelKey, FeedbackDraft, FeedbackListItem } from '../state';
+import type { BackendStartupReadiness } from '../api/transport';
 
 export interface UiStoreState {
   activeTab: TabKey;
@@ -12,6 +13,7 @@ export interface UiStoreState {
   backendProcessState: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
   backendHealthState: 'unknown' | 'healthy' | 'degraded' | 'stalled';
   backendTransportState: 'unknown' | 'connected' | 'reconnecting' | 'disconnected';
+  backendReadiness: BackendStartupReadiness | null;
   backendLoopLagMs: number | null;
   /** 当前发送能力；历史、设置和日志不依赖此字段。 */
   backendCanSend: boolean;
@@ -31,6 +33,7 @@ export const uiStore: Store<UiStoreState> = createStore<UiStoreState>(
     backendProcessState: 'starting',
     backendHealthState: 'unknown',
     backendTransportState: 'unknown',
+    backendReadiness: null,
     backendLoopLagMs: null,
     backendCanSend: false,
     socket: null,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -25,6 +26,32 @@ from crew.state.config import (
 )
 
 OWNER_A = "A:uid-a"
+
+
+def _wait_gateway_ready(client: TestClient) -> None:
+    deadline = time.monotonic() + 10
+    while True:
+        response = client.get("/api/health")
+        assert response.status_code == 200, response.text
+        readiness = response.json()["readiness"]
+        if readiness["status"] == "ready":
+            return
+        assert readiness["status"] == "starting" and time.monotonic() < deadline, readiness
+        time.sleep(0.02)
+
+
+def _wait_channel_restored(client: TestClient, crew, platform: str) -> None:
+    _wait_gateway_ready(client)
+    # Observe the automatic restoration without sending an authenticated
+    # request that would independently trigger Owner activation.
+    assert client.portal is not None
+    deadline = time.monotonic() + 10
+    while True:
+        rows = client.portal.call(crew.channel_manager.status, OWNER_A)
+        if any(row["name"] == platform and row["running"] for row in rows):
+            return
+        assert time.monotonic() < deadline, f"channel {platform} did not restore on startup"
+        time.sleep(0.02)
 
 
 def test_weixin_network_error_is_classified_for_frontend():
@@ -313,6 +340,7 @@ def _assert_channel_restores_on_gateway_startup(
     platform_registry.register(entry)
     try:
         with TestClient(app) as client:
+            _wait_gateway_ready(client)
             saved = client.put(
                 f"/api/platforms/{platform}/config",
                 json=config_payload,
@@ -332,6 +360,7 @@ def _assert_channel_restores_on_gateway_startup(
         restarted = create_app(crew)
         restarted.state.crew = crew
         with TestClient(restarted) as client:
+            _wait_channel_restored(client, crew, platform)
             restored = client.get("/api/platforms", headers=auth_headers)
     finally:
         platform_registry._entries.clear()
@@ -387,6 +416,7 @@ def test_bound_owner_channel_wins_over_global_config_on_gateway_startup(channel_
     platform_registry.register(testchat_entry)
     try:
         with TestClient(app) as client:
+            _wait_gateway_ready(client)
             saved = client.put(
                 "/api/platforms/testchat/config",
                 json={
@@ -416,6 +446,7 @@ def test_bound_owner_channel_wins_over_global_config_on_gateway_startup(channel_
         restarted = create_app(crew)
         restarted.state.crew = crew
         with TestClient(restarted) as client:
+            _wait_channel_restored(client, crew, "testchat")
             restored = client.get("/api/platforms", headers=auth_headers)
     finally:
         platform_registry._entries.clear()
@@ -434,6 +465,7 @@ def test_bound_owner_channel_wins_over_global_config_on_gateway_startup(channel_
 def test_platform_status_detail_redacts_owner_env_secret(channel_api, auth_headers):
     app, _config_yaml = channel_api
     with TestClient(app) as client:
+        _wait_gateway_ready(client)
         saved = client.put(
             "/api/platforms/testchat/config",
             json={

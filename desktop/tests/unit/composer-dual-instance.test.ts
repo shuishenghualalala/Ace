@@ -59,7 +59,7 @@ beforeEach(() => {
   __resetAllStoresForTest();
   // Composer 未登录/离线会禁用输入与发送；测试默认已登录且在线。
   authStore.set({ isLoggedIn: true });
-  uiStore.set({ backendConnected: true });
+  uiStore.set({ backendConnected: true, backendCanSend: true });
   document.body.innerHTML = '<div id="host-a"></div><div id="host-b"></div>';
 });
 

@@ -17,6 +17,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from crew.cron.feature import CRON_FEATURE_ID
+from crew.features.runtime import FeatureState
 from crew.gateway.instance_auth import (
     GATEWAY_INSTANCE_CHALLENGE_HEADER,
     build_gateway_health_payload,
@@ -65,22 +67,63 @@ def read_health_components() -> dict[str, Any] | None:
         return _components_snapshot
 
 
-def build_health_components(deferred_startup_status: object, cron_service: object) -> dict:
+def build_health_components(
+    startup_status: str,
+    cron_service: object,
+    mcp_manager: object = None,
+    *,
+    cron_failed: bool = False,
+    mcp_start_failed: bool = False,
+) -> dict:
     """主端点 ``_components`` 与线程服务共用的快照逻辑（入参均为无类型依赖）。"""
 
-    startup_status = str(deferred_startup_status or "starting")
     startup: dict[str, Any] = {"status": startup_status}
     if startup_status == "failed":
         startup["message"] = "运行环境组件初始化失败，请查看 Gateway 日志"
-    if cron_service is None:
-        cron_status: dict[str, Any] = {"status": "disabled"}
+    if cron_failed:
+        cron_status: dict[str, Any] = {"status": "failed", "message": "定时任务启动失败，请查看 Gateway 日志"}
+    elif cron_service is None:
+        cron_status = {"status": "disabled"}
     elif bool(getattr(cron_service, "is_running", False)):
         cron_status = {"status": "ready"}
     elif str(getattr(cron_service, "start_error", "") or ""):
         cron_status = {"status": "failed", "message": "定时任务启动失败，请查看 Gateway 日志"}
     else:
         cron_status = {"status": "starting"}
-    return {"startup": startup, "cron": cron_status}
+    status = getattr(mcp_manager, "status", None)
+    if mcp_start_failed:
+        mcp_status = "failed"
+    elif not callable(status):
+        mcp_status = "disabled"
+    else:
+        # Only summarize the state. The manager's rows can include private
+        # configuration and details suitable only for authenticated callers.
+        try:
+            servers = status()
+            if not servers:
+                mcp_status = "disabled"
+            elif all(row.get("connected") for row in servers):
+                mcp_status = "ready"
+            elif any(row.get("error") for row in servers):
+                mcp_status = "degraded"
+            else:
+                mcp_status = "starting"
+        except Exception:
+            mcp_status = "degraded"
+    return {"startup": startup, "cron": cron_status, "mcp": {"status": mcp_status}}
+
+
+def build_app_health_components(startup_status: str, crew: object) -> dict:
+    """Read component health, including failed feature generations after rollback."""
+    runtime = getattr(getattr(crew, "plugins", None), "feature_runtime", None)
+    cron = runtime.get(CRON_FEATURE_ID) if runtime is not None else None
+    return build_health_components(
+        startup_status,
+        getattr(crew, "cron_service", None),
+        getattr(crew, "mcp_manager", None),
+        cron_failed=getattr(cron, "state", None) is FeatureState.FAILED,
+        mcp_start_failed=getattr(crew, "mcp_start_failed", False),
+    )
 
 
 class _HealthRequestHandler(BaseHTTPRequestHandler):
@@ -180,6 +223,7 @@ class GatewayHealthServer:
 
 __all__ = [
     "GatewayHealthServer",
+    "build_app_health_components",
     "build_health_components",
     "note_loop_tick",
     "read_health_components",

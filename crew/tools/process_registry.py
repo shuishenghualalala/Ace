@@ -17,6 +17,7 @@ PROMPT 阶段 Context Contributor（见本文件 build_process_notification_hand
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -1248,17 +1249,42 @@ class ProcessRegistry:
 
         返回认领为 detached 的进程数。已死进程跳过（无句柄取不到退出码）。
         """
+        sessions = self._read_checkpoint_candidates()
+        if sessions is None:
+            return 0
+        self._register_recovered_sessions(sessions)
+        self._write_checkpoint()
+        return len(sessions)
+
+    async def recover_from_checkpoint_async(self) -> int:
+        """Probe off-loop and register recovered owners on the Gateway thread."""
+        sessions = await asyncio.to_thread(self._read_checkpoint_candidates)
+        if sessions is None:
+            return 0
+        # register_live installs signal handlers when invoked from the main
+        # thread. Only subprocess discovery and disk I/O belong on a worker.
+        self._register_recovered_sessions(sessions)
+        await asyncio.to_thread(self._write_checkpoint)
+        return len(sessions)
+
+    def _read_checkpoint_candidates(self) -> list[ProcessSession] | None:
         path = _checkpoint_path()
         if not path.exists():
-            return 0
+            return None
         try:
             entries = json.loads(path.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
-            return 0
+            return None
+        if not isinstance(entries, list):
+            return None
 
-        recovered = 0
+        sessions = []
         for entry in entries:
+            if not isinstance(entry, dict):
+                continue
             pid = entry.get("pid")
+            if pid is not None and (type(pid) is not int or pid <= 0):
+                continue
             scope_unit = str(entry.get("scope_unit") or "")
             probe = ProcessSession(
                 id=entry.get("session_id") or f"proc_{uuid.uuid4().hex[:12]}",
@@ -1286,12 +1312,14 @@ class ProcessRegistry:
                 output_ref=entry.get("output_ref", ""),
                 _owner=ProcessOwner.for_pid(pid or 0, scope_unit=scope_unit or None),
             )
+            sessions.append(session)
+        return sessions
+
+    def _register_recovered_sessions(self, sessions: list[ProcessSession]) -> None:
+        for session in sessions:
             register_live(session._owner)
             with self._lock:
                 self._running[session.id] = session
-            recovered += 1
-        self._write_checkpoint()
-        return recovered
 
 
 # 模块级单例

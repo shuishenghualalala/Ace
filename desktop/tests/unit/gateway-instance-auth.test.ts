@@ -111,6 +111,32 @@ describe('desktop security proof', () => {
 });
 
 describe('verifyGatewayInstance', () => {
+  it('exposes readiness only after proof verification and carries its generation', async () => {
+    const crewHome = tempCrewHome();
+    const key = loadOrCreateGatewayInstanceKey(crewHome);
+    const challenge = '47'.repeat(32);
+    const validProof = createHmac('sha256', key).update(PROOF_CONTEXT).update(challenge).digest('hex');
+    const record = {
+      ok: true,
+      service: 'crew-gateway',
+      readiness: { status: 'failed', generation: 'one-attempt', error_code: 'GATEWAY_CORE_STARTUP_FAILED' },
+    };
+    const baseUrl = 'http://127.0.0.1:8000';
+    const probe = (body: unknown) => probeGatewayInstance(baseUrl, {
+      crewHome, challenge, fetchImpl: async () => jsonResponse(body),
+    });
+    expect(await probe({ ...record, instance_proof: validProof })).toEqual({
+      verified: true,
+      readiness: { status: 'failed', generation: 'one-attempt', errorCode: 'GATEWAY_CORE_STARTUP_FAILED' },
+    });
+    expect(await probe({ ...record, instance_proof: '88'.repeat(32) })).toEqual({
+      verified: false, failureKind: 'auth_failed',
+    });
+    expect(await probe({ ...record, instance_proof: validProof, readiness: { status: 'ready' } })).toEqual({
+      verified: false, failureKind: 'auth_failed',
+    });
+  });
+
   it('requires the exact managed launch and keeps standalone reuse compatible', async () => {
     const crewHome = tempCrewHome();
     const key = loadOrCreateGatewayInstanceKey(crewHome);

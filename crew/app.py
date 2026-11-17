@@ -2425,7 +2425,12 @@ class CrewApp:
         return self._wiki_component("manager")
 
     async def startup(self, *, start_cron: bool = True) -> None:
-        """拉起后台能力：连接外部 MCP server、启动 cron 引擎、会话过期定时器。失败静默降级。"""
+        """Start core runtime and optional services for embedded callers."""
+        await self.startup_core()
+        await self.startup_services(start_cron=start_cron)
+
+    async def startup_core(self) -> None:
+        """Open runtime task admission after owner storage and writer recovery."""
         try:
             # 不传 kanban_db_path（有意缺省）：通用 backfill 会把
             # kanban_workflows 的 legacy_ambiguous 歧义行（owner=''）改写/清除，
@@ -2438,7 +2443,8 @@ class CrewApp:
             # OWNER_TABLE_LABELS，语义同 external/team（见 _migration 注释）。
             # channels_db_path 照 cron/work 语义传入：routes 表在 OWNER_TABLE_
             # LABELS 内随库扫描；bindings 表不在清单内不参与扫描。
-            counts, backfilled = inspect_and_backfill_legacy_owners(
+            counts, backfilled = await asyncio.to_thread(
+                inspect_and_backfill_legacy_owners,
                 legacy_owner_scan_targets(
                     self.config.db_path,
                     self.config.cron_db_path,
@@ -2460,25 +2466,22 @@ class CrewApp:
                     )
         except Exception:  # noqa: BLE001
             log.exception("legacy owner 检查失败")
-        # 崩溃恢复注册（D5）：processes.json 后台进程认领登记进统一恢复序列，
-        # 实际执行在 managed features 激活之后（cron 等步骤也在那时注册完毕）。
-        try:
-            from crew.state.recovery import register_startup_recovery
-            from crew.tools.process_registry import process_registry
+        from crew.tools.process_registry import process_registry
 
-            register_startup_recovery(
-                "process_registry",
-                process_registry.recover_from_checkpoint,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("后台进程恢复注册失败")
+        recovered_processes = await process_registry.recover_from_checkpoint_async()
+        if recovered_processes:
+            log.info("崩溃恢复：认领 %d 个后台进程", recovered_processes)
         await self.tasks.start()
+
+    async def startup_services(self, *, start_cron: bool = True) -> None:
+        """Start optional capabilities independently of core request admission."""
         if self.mcp_manager is not None:
             try:
                 # MCP 连接移出 lifespan 关键路径：后台 task 内完成子进程 spawn + 工具注册，
                 # 不阻塞 /api/health 就绪。连接完成前调用对应工具返回“连接已断开”错误（守门不崩）。
                 await self.mcp_manager.start(self.registry)
             except Exception:  # noqa: BLE001
+                self.mcp_start_failed = True
                 log.exception("MCP Client 启动失败")
         # Directory plugins that own long-lived tasks activate on this host's
         # event loop.  The phase is manifest-driven and not feature-specific.
@@ -2490,15 +2493,11 @@ class CrewApp:
         # CrewApp 按具体 Manager 手写启动。
         excluded = frozenset() if start_cron else frozenset({"product.cron"})
         await self._activate_managed_features(excluded=excluded)
-        # 启动恢复序列（D5）：processes.json 后台进程认领、cron running fires 等
-        # checkpoint 的统一恢复入口（各子系统装配时已注册）。
+        # Cron and other optional features register their own recovery steps.
         try:
             from crew.state.recovery import run_startup_recovery
 
-            recovery_results = run_startup_recovery()
-            recovered_processes = recovery_results.get("process_registry") or 0
-            if recovered_processes:
-                log.info("崩溃恢复：认领 %d 个后台进程", recovered_processes)
+            run_startup_recovery()
         except Exception:  # noqa: BLE001
             log.exception("启动恢复序列失败")
         # 启动会话过期定时器

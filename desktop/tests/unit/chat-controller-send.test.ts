@@ -73,6 +73,7 @@ beforeEach(() => {
   });
   uiStore.set({
     backendConnected: true,
+    backendCanSend: true,
     socket: {
       send: vi.fn(async () => true),
       planEnter: vi.fn(async () => true),
@@ -93,6 +94,40 @@ beforeEach(() => {
 });
 
 describe('sendMessage', () => {
+  it('keeps text and attachments editable during startup while both entry points reject send', async () => {
+    const sid = 'startup-draft';
+    sessionStore.set({ activeSessionId: sid });
+    uiStore.set({
+      backendConnected: true,
+      backendTransportState: 'unknown',
+      backendReadiness: { status: 'starting', generation: 4 },
+      backendCanSend: false,
+    });
+    const sendFrame = vi.mocked(uiStore.get().socket!.send);
+    const { input, send, status } = mountMainComposer();
+    expect(input.disabled).toBe(false);
+    setInput(input, '启动期间编辑的草稿');
+    appendAttachment(attachment);
+    expect(send.disabled).toBe(true);
+    expect(status.textContent).toContain('草稿可继续编辑');
+    await expect(sendMessage(input.value)).resolves.toBe(false);
+    await expect(dispatchWs(sid, input.value, [attachment])).resolves.toBe(false);
+    expect(sendFrame).not.toHaveBeenCalled();
+    expect(input.value).toBe('启动期间编辑的草稿');
+    expect(state.attachments).toEqual([attachment]);
+
+    uiStore.set({
+      backendReadiness: { status: 'ready', generation: 4 },
+      backendTransportState: 'connected',
+      backendCanSend: true,
+    });
+    send.click();
+    await vi.waitFor(() => expect(input.value).toBe(''));
+    expect(sendFrame).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      query: '启动期间编辑的草稿', attachments: [attachment],
+    }));
+  });
+
   it('reserves a queued message until accepted even when two completion signals try to dispatch it', async () => {
     const sid = 'recover-queued-turn';
     sessionStore.set({ activeSessionId: sid });

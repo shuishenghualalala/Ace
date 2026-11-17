@@ -50,10 +50,17 @@ import {
   gatewayInstanceAccessToken,
   probeGatewayInstance,
   type GatewayComponentState,
+  type GatewayInstanceProbe,
   type GatewayProbeFailureKind,
   type GatewayInstanceVerificationOptions,
 } from './gateway-instance-auth';
 import { probeBackendHealth } from './backend-health-probe';
+import {
+  GatewayReadinessTracker,
+  GatewayStartupError,
+  readinessFromMainProbe,
+  type DesktopGatewayReadiness,
+} from './gateway-readiness';
 import { BackendHealthMonitor } from './backend-health-monitor';
 import type {
   BackendHealthState,
@@ -65,6 +72,7 @@ import { GatewayProcessRetirement, GatewayStopTimeoutError } from './gateway-pro
 import { DesktopShutdown, waitForShutdownTask, type ShutdownReason } from './desktop-shutdown';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
+  AuthStateSnapshot,
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
   UpdateStateSnapshot,
@@ -189,11 +197,16 @@ app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_pro
 let mainWindow: BrowserWindow | null = null;
 const inspirationWindows = new Map<string, BrowserWindow>();
 let managedGateway: ChildProcessWithoutNullStreams | null = null;
+interface GatewayBinding {
+  baseUrl: string;
+  managed: boolean;
+  serverGeneration: string | null;
+}
 const gatewayLaunchKeys = new WeakMap<ChildProcessWithoutNullStreams, Buffer>();
 const gatewayRetirement = new GatewayProcessRetirement({
   requestStop: (child) => { child.stdin?.end(); },
 });
-let ensureGatewayPromise: Promise<{ baseUrl: string; managed: boolean }> | null = null;
+let ensureGatewayPromise: Promise<GatewayBinding> | null = null;
 const securityApprovalNonces = new Map<string, string>();
 const gatewaySockets = new Map<number, WebSocket>();
 const gatewaySocketGenerations = new Map<number, number>();
@@ -233,6 +246,9 @@ const desktopShutdown = new DesktopShutdown({
 // 自己的代际，health wait 每轮校验——代际变了说明用户点了重试，立即中止让位，
 // 避免「旧 wait 无超时挂着、新重建又被排队」的假死。
 let gatewayGeneration = 0;
+const gatewayReadiness = new GatewayReadinessTracker();
+let gatewayAuthAbort = new AbortController();
+let gatewayAuthRefresh: Promise<void> | null = null;
 // A recovery of an owned instance must boot a replacement, even if an
 // unrelated Gateway becomes available on the default port in the meantime.
 let requireOwnedGateway = false;
@@ -270,7 +286,7 @@ const gatewayRestartController = new GatewayRestartController(async () => {
   }
 }, {
   // 用户重试作废旧 wait（GatewaySupersededError）不计失败，避免虚增退避指数。
-  isIgnorableError: (error) => error instanceof GatewaySupersededError,
+  isIgnorableError: (error) => error instanceof GatewaySupersededError || error instanceof GatewayStartupError,
   // 熔断：连续 5 次短命/失败重启 → 停止自动拉起，置 error 终态等用户手动重试。
   stableUptimeMs: 60_000,
   maxConsecutiveFailures: 5,
@@ -988,19 +1004,42 @@ function setTrayStatus(status: TrayStatus): void {
   trayService?.setStatus(status);
 }
 
-function pushSessionState(): void {
+function rendererAuthState(): AuthStateSnapshot {
   if (usesDevGatewayIdentity()) {
-    // 开发态：推送合成的已登录开发账号状态，让渲染进程登录墙不弹出。
-    mainWindow?.webContents.send('auth:session-state', {
+    return {
       mode: 'dev',
       configured: true,
       providerId: 'dev',
       isLoggedIn: true,
       user: { userId: 'dev', phoneNumber: '', displayName: '开发者' },
-    });
-    return;
+    };
   }
-  mainWindow?.webContents.send('auth:session-state', loginNewServiceInstance.getState());
+  return loginNewServiceInstance.getState();
+}
+
+function pushSessionState(): void {
+  mainWindow?.webContents.send('auth:session-state', rendererAuthState());
+}
+
+function refreshGatewayAuth(baseUrl: string): Promise<void> {
+  if (usesDevGatewayIdentity()) return Promise.resolve();
+  if (gatewayAuthRefresh) return gatewayAuthRefresh;
+  const signal = AbortSignal.any([gatewayAuthAbort.signal, AbortSignal.timeout(8_000)]);
+  const refresh = loginNewServiceInstance.refreshConfig(baseUrl, signal).then(() => {
+    if (isQuitting || signal.aborted) return;
+    pushSessionState();
+    scheduleBrowserHostConnection();
+  }).finally(() => {
+    if (gatewayAuthRefresh === refresh) gatewayAuthRefresh = null;
+  });
+  gatewayAuthRefresh = refresh;
+  return refresh;
+}
+
+function resetGatewayAuthRefresh(): void {
+  gatewayAuthAbort.abort();
+  gatewayAuthAbort = new AbortController();
+  gatewayAuthRefresh = null;
 }
 
 function closeGatewaySockets(reason = 'auth-state-changed'): WebSocket[] {
@@ -1400,21 +1439,6 @@ function createActiveGatewaySecurityProof(method: string, pathname: string, body
 }
 
 /**
- * 🌟 启动优化：加 2s AbortController 超时，避免半启动状态的 gateway 接受 TCP
- * 但无法返回 HTTP 响应时 fetch 无限挂起。
- */
-async function hasHealthApi(baseUrl: string, child: ChildProcessWithoutNullStreams | null): Promise<boolean> {
-  const options = gatewayProbeOptions(child);
-  const probe = await probeBackendHealth(baseUrl, options);
-  if (!probe.verified) return false;
-  // 独立健康线程（主端口+1）先于主 API 端口绑定（uvicorn 在 lifespan 返回后
-  // 才 listen）。「就绪」必须以主 API 端口真正接受连接为准，否则 auth 配置拉取等
-  // 主进程内部消费方会在启动窗口内吃到 ECONNREFUSED，拿到错误的兜底状态。
-  const mainApi = await probeGatewayInstance(baseUrl, options);
-  return mainApi.verified;
-}
-
-/**
  * 最近一次经 health 线程端口探测拿到的 loop_lag_ms：断连日志里带上它，
  * 便于区分「进程死」与「进程活但业务循环忙」（IPC payload 结构不变）。
  */
@@ -1446,6 +1470,7 @@ function handleManagedGatewayEnd(
   exit: { code: number | null; signal: NodeJS.Signals | null } | { error: string },
 ): void {
   if (managedGateway !== child) return;
+  resetGatewayAttempt();
   managedGateway = null;
   ensureGatewayPromise = null;
   requireOwnedGateway = true;
@@ -1801,6 +1826,7 @@ function backendStatusPayload(
   processState: BackendProcessState;
   healthState: BackendHealthState;
   transportState: BackendTransportState;
+  readiness: DesktopGatewayReadiness;
   loopLagMs?: number;
 } {
   return {
@@ -1813,6 +1839,7 @@ function backendStatusPayload(
     processState: backendProcessState,
     healthState: detail.healthState ?? backendHealthState,
     transportState: detail.transportState ?? backendTransportState,
+    readiness: gatewayReadiness.snapshot,
     ...(detail.loopLagMs !== undefined
       ? { loopLagMs: detail.loopLagMs }
       : lastGatewayLoopLagMs !== undefined ? { loopLagMs: lastGatewayLoopLagMs } : {}),
@@ -1864,41 +1891,78 @@ function assertGatewayGeneration(generation: number): void {
   if (isQuitting || generation !== gatewayGeneration) throw new GatewaySupersededError();
 }
 
+function resetGatewayAttempt(): number {
+  const generation = ++gatewayGeneration;
+  resetGatewayAuthRefresh();
+  gatewayReadiness.reset(generation);
+  closeGatewaySockets('gateway-replaced');
+  backendTransportState = 'unknown';
+  return generation;
+}
+
+function recordCoreReadiness(
+  generation: number,
+  status: DesktopGatewayReadiness['status'],
+  probe?: GatewayInstanceProbe,
+  errorCode?: string,
+): void {
+  assertGatewayGeneration(generation);
+  const changed = gatewayReadiness.observe(generation, status, errorCode);
+  if (probe?.verified) {
+    gatewayComponents = probe.components ?? gatewayComponents;
+    if (!backendConnected || changed) {
+      if (status === 'ready') backendProcessState = 'ready';
+      else if (status === 'failed') backendProcessState = 'error';
+      pushBackendStatus(true);
+    }
+  } else if (changed && status === 'failed') {
+    backendProcessState = 'error';
+    pushBackendStatus(backendConnected);
+  }
+}
+
 const GATEWAY_COLD_START_TIMEOUT_MS = 180_000;
 const GATEWAY_REUSE_WAIT_TIMEOUT_MS = 60_000;
 
-async function waitForHealthApi(
+async function waitForGatewayReady(
   baseUrl: string,
   child: ChildProcessWithoutNullStreams | null,
   generation: number,
   timeoutMs: number,
-): Promise<boolean> {
+  initialProbe?: GatewayInstanceProbe,
+): Promise<GatewayBinding> {
   const started = Date.now();
   let attempts = 0;
   const deadline = started + timeoutMs;
   const childIsCurrent = () =>
-    child !== null && managedGateway === child && child.pid !== undefined
-    && child.exitCode === null && child.signalCode === null;
-  while (true) {
+    child === null || (managedGateway === child && child.pid !== undefined
+      && child.exitCode === null && child.signalCode === null);
+  const options = gatewayProbeOptions(child);
+  while (Date.now() < deadline) {
     assertGatewayGeneration(generation);
-    if (!childIsCurrent()) return false;
-    if (Date.now() >= deadline) {
-      console.warn(`[gateway] Health API timeout after ${Date.now() - started}ms (${attempts} attempts)`);
-      logSupervisorDecision('health-wait-timeout', { waitedMs: Date.now() - started, attempts });
-      await stopManagedGateway('health-wait-timeout');
-      assertGatewayGeneration(generation);
-      return false;
-    }
+    if (!childIsCurrent()) throw new GatewaySupersededError();
     attempts++;
-    const verified = await hasHealthApi(baseUrl, child);
+    const probe = initialProbe ?? await probeGatewayInstance(baseUrl, options);
+    initialProbe = undefined;
     assertGatewayGeneration(generation);
-    if (!childIsCurrent()) return false;
-    if (verified) {
-      console.log(`[gateway] Health API ready after ${Date.now() - started}ms (${attempts} attempts)`);
-      return true;
+    if (!childIsCurrent()) throw new GatewaySupersededError();
+    const readiness = readinessFromMainProbe(probe, child !== null);
+    if (readiness !== undefined) {
+      const status = readiness?.status ?? 'ready';
+      const errorCode = status === 'failed' ? readiness?.errorCode ?? 'GATEWAY_STARTUP_FAILED' : undefined;
+      recordCoreReadiness(generation, status, probe, errorCode);
+      if (status === 'ready') {
+        console.log(`[gateway] Core ready after ${Date.now() - started}ms (${attempts} attempts)`);
+        return { baseUrl, managed: child !== null, serverGeneration: readiness?.generation ?? null };
+      }
+      if (errorCode) throw new GatewayStartupError(errorCode);
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
+  assertGatewayGeneration(generation);
+  logSupervisorDecision('health-wait-timeout', { waitedMs: Date.now() - started, attempts });
+  if (childIsCurrent() && child) await stopManagedGateway('health-wait-timeout');
+  throw new GatewayStartupError('GATEWAY_STARTUP_TIMEOUT');
 }
 
 function stopManagedGateway(reason: string, graceMs?: number): Promise<void> {
@@ -1921,7 +1985,7 @@ function stopManagedGateway(reason: string, graceMs?: number): Promise<void> {
 }
 
 function beginGatewayReplacement(reason: string, owned: boolean): number {
-  const generation = ++gatewayGeneration;
+  const generation = resetGatewayAttempt();
   const loopLagMs = lastGatewayLoopLagMs;
   requireOwnedGateway ||= owned;
   ensureGatewayPromise = null;
@@ -2008,9 +2072,6 @@ function pushBackendStatus(
   backendConnected = connected;
   if (detail.healthState) backendHealthState = detail.healthState;
   if (detail.loopLagMs !== undefined) lastGatewayLoopLagMs = detail.loopLagMs;
-  if (connected && (backendProcessState === 'starting' || backendProcessState === 'restarting')) {
-    backendProcessState = 'ready';
-  }
   console.log(
     `[main] backend status → ${connected ? 'connected' : `disconnected (${detail.failureKind ?? 'unknown'})`}`
     + (!connected && lastGatewayLoopLagMs !== undefined
@@ -2041,16 +2102,13 @@ function canReuseExternalGateway(): boolean {
     && (!app.isPackaged || process.platform === 'darwin');
 }
 
-async function launchGateway(generation: number): Promise<{ baseUrl: string; managed: boolean }> {
+async function launchGateway(generation: number): Promise<GatewayBinding> {
   assertGatewayGeneration(generation);
   if (managedGateway) {
     const child = managedGateway;
     const baseUrl = resolvedGatewayBaseUrl;
     logSupervisorDecision('reuse-alive-instance', { pid: child.pid ?? -1, generation });
-    if (await waitForHealthApi(baseUrl, child, generation, GATEWAY_REUSE_WAIT_TIMEOUT_MS)) {
-      return { baseUrl, managed: true };
-    }
-    throw new Error('Existing managed Gateway did not become ready');
+    return waitForGatewayReady(baseUrl, child, generation, GATEWAY_REUSE_WAIT_TIMEOUT_MS);
   }
 
   const platform = app.isPackaged ? process.platform : null;
@@ -2058,11 +2116,11 @@ async function launchGateway(generation: number): Promise<{ baseUrl: string; man
     : platform === 'linux' ? startLinuxPackagedGateway
       : platform === 'darwin' ? startMacOSPackagedGateway : null;
   if (canReuseExternalGateway()) {
-    const verified = await hasHealthApi(DEFAULT_GATEWAY_URL, null);
+    const probe = await probeGatewayInstance(DEFAULT_GATEWAY_URL, gatewayProbeOptions(null));
     assertGatewayGeneration(generation);
-    if (verified) {
+    if (probe.verified) {
       resolvedGatewayBaseUrl = DEFAULT_GATEWAY_URL;
-      return { baseUrl: DEFAULT_GATEWAY_URL, managed: false };
+      return waitForGatewayReady(DEFAULT_GATEWAY_URL, null, generation, GATEWAY_REUSE_WAIT_TIMEOUT_MS, probe);
     }
   }
 
@@ -2078,20 +2136,21 @@ async function launchGateway(generation: number): Promise<{ baseUrl: string; man
   }
   if (port === end) throw new Error(`No available Gateway port in ${firstPort}–${end - 1}`);
   const baseUrl = `http://127.0.0.1:${port}`;
+  backendHealthMonitor.markRestart();
   resolvedGatewayBaseUrl = baseUrl;
   if (IS_DEV_LAUNCH) process.env.GATEWAY_PORT = String(port);
   if (starter) starter(port);
   else startManagedGateway(port);
-  if (!await waitForHealthApi(baseUrl, managedGateway, generation, GATEWAY_COLD_START_TIMEOUT_MS)) {
-    throw new Error('Managed Crew Gateway exited or failed verification before readiness');
-  }
-
-  return { baseUrl, managed: true };
+  if (!managedGateway) throw new GatewayStartupError('GATEWAY_LAUNCH_FAILED');
+  return waitForGatewayReady(baseUrl, managedGateway, generation, GATEWAY_COLD_START_TIMEOUT_MS);
 }
 
-async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
+async function ensureGateway(): Promise<GatewayBinding> {
   const generation = gatewayGeneration;
   assertGatewayGeneration(generation);
+  if (gatewayReadiness.snapshot.status === 'failed') {
+    throw new GatewayStartupError(gatewayReadiness.snapshot.errorCode ?? 'GATEWAY_STARTUP_FAILED');
+  }
   if (gatewayRetirement.pending) {
     await gatewayRetirement.pending;
     return ensureGateway();
@@ -2109,10 +2168,16 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     for (let attempt = 0; attempt < HEALTH_FAIL_THRESHOLD; attempt++) {
       assertGatewayGeneration(generation);
       if (ensureGatewayPromise !== cachedPromise) return ensureGateway();
-      const verified = await hasHealthApi(cached.baseUrl, cached.managed ? managedGateway : null);
+      const probe = await probeGatewayInstance(
+        cached.baseUrl, gatewayProbeOptions(cached.managed ? managedGateway : null),
+      );
       assertGatewayGeneration(generation);
       if (ensureGatewayPromise !== cachedPromise) return ensureGateway();
-      if (verified) return cached;
+      if (probe.verified && (
+        cached.serverGeneration === null ? !probe.readiness
+          : probe.readiness?.status === 'ready' && probe.readiness.generation === cached.serverGeneration
+      )) return cached;
+      if (probe.verified && probe.readiness) break;
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
     assertGatewayGeneration(generation);
@@ -2123,19 +2188,28 @@ async function ensureGateway(): Promise<{ baseUrl: string; managed: boolean }> {
     return ensureGateway();
   }
 
-  const tracked = launchGateway(generation).then((result) => {
+  const tracked: Promise<GatewayBinding> = launchGateway(generation).then((result) => {
     assertGatewayGeneration(generation);
     if (ensureGatewayPromise !== tracked) throw new Error('Gateway changed before readiness');
     if (result.managed) {
       requireOwnedGateway = false;
       gatewayRestartController.noteGatewayReady();
     }
+    void refreshGatewayAuth(result.baseUrl).catch((error: unknown) => {
+      if (!isQuitting && generation === gatewayGeneration) console.warn('[auth] Gateway config refresh failed:', error);
+    });
     return result;
+  }).catch((error: unknown) => {
+    if (ensureGatewayPromise !== tracked) throw error;
+    ensureGatewayPromise = null;
+    if (isQuitting || generation !== gatewayGeneration || error instanceof GatewaySupersededError) throw error;
+    const startupError = error instanceof GatewayStartupError
+      ? error : new GatewayStartupError('GATEWAY_LAUNCH_FAILED');
+    if (startupError !== error) startupError.cause = error;
+    recordCoreReadiness(generation, 'failed', undefined, startupError.code);
+    throw startupError;
   });
   ensureGatewayPromise = tracked;
-  void tracked.catch(() => {
-    if (ensureGatewayPromise === tracked) ensureGatewayPromise = null;
-  });
   return tracked;
 }
 
@@ -3062,7 +3136,7 @@ function registerIpc() {
     }
     try {
       const { baseUrl } = await ensureGateway();
-      await loginNewServiceInstance.refreshConfig(baseUrl);
+      await refreshGatewayAuth(baseUrl);
     } catch {
       // 心跳不阻塞 UI；失败时沿用旧会话态
     }
@@ -3071,20 +3145,13 @@ function registerIpc() {
     return { success: true };
   });
 
-  trustedHandle('auth:get-state', async () => {
-    const { baseUrl } = await ensureGateway();
-    try {
-      const state = await loginNewServiceInstance.refreshConfig(baseUrl);
-      pushSessionState();
-      scheduleBrowserHostConnection();
-      return { ok: true, state };
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        state: loginNewServiceInstance.getState(),
-      };
+  // First paint depends on the last known auth state, not a cold Gateway.
+  // The successful startup attempt refreshes and publishes verified auth separately.
+  trustedHandle('auth:get-state', () => {
+    if (gatewayReadiness.snapshot.status === 'ready') {
+      void refreshGatewayAuth(resolvedGatewayBaseUrl).catch(() => {});
     }
+    return { ok: true, state: rendererAuthState() };
   });
 
   trustedHandle('auth:send-code', async (_e, raw: unknown) => {
@@ -3432,7 +3499,10 @@ function registerIpc() {
     return { results };
   });
 
-  trustedHandle('gateway:ensure', async () => ensureGateway());
+  trustedHandle('gateway:ensure', async () => {
+    const { baseUrl, managed } = await ensureGateway();
+    return { baseUrl, managed };
+  });
   trustedHandle('gateway:get-status', () => backendStatusPayload(backendConnected));
 
   trustedHandle('security:pending', async (_e, raw: unknown) => {
@@ -3572,14 +3642,24 @@ function registerIpc() {
 
   trustedHandle('gateway-ws:connect', async (event) => {
     const senderId = event.sender.id;
-    setBackendTransportState('reconnecting');
     const previous = gatewaySockets.get(senderId);
     if (previous?.readyState === WebSocket.OPEN) {
       logMainStream('ws-connect-skip', { senderId, reason: 'already-open' });
+      event.sender.send('gateway-ws:event', { type: 'open', gatewayGeneration });
+      if (event.sender === mainWindow?.webContents) setBackendTransportState('connected');
       return { ok: true };
     }
+    if (previous?.readyState === WebSocket.CONNECTING) return { ok: true };
+    const gatewayAttempt = gatewayGeneration;
+    const primaryTransport = event.sender === mainWindow?.webContents;
     const generation = (gatewaySocketGenerations.get(senderId) ?? 0) + 1;
     gatewaySocketGenerations.set(senderId, generation);
+    const currentAttempt = () => !isQuitting && gatewayAttempt === gatewayGeneration
+      && gatewaySocketGenerations.get(senderId) === generation && !event.sender.isDestroyed();
+    const setTransport = (state: BackendTransportState) => {
+      if (primaryTransport && currentAttempt()) setBackendTransportState(state);
+    };
+    setTransport('reconnecting');
     if (previous) {
       gatewaySockets.delete(senderId);
       try {
@@ -3591,18 +3671,27 @@ function registerIpc() {
 
     const usesRemoteAuth = usesGatewayRemoteAuth();
     if (usesRemoteAuth && !loginNewServiceInstance.getJWTToken()) {
+      setTransport('disconnected');
       return { ok: false, status: 401, error: '未登录' };
     }
     if (usesRemoteAuth && !gatewayIdentityHeaders()) {
+      setTransport('disconnected');
       return { ok: false, status: 401, error: '登录信息缺失，请重新登录' };
     }
-    const ensured = await ensureGateway();
-    if (gatewaySocketGenerations.get(senderId) !== generation || event.sender.isDestroyed()) {
+    let ensured: GatewayBinding;
+    try {
+      ensured = await ensureGateway();
+    } catch (error) {
+      setTransport('disconnected');
+      throw error;
+    }
+    if (!currentAttempt()) {
       return { ok: false, error: 'WebSocket 连接已取消' };
     }
     const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
     const identityHeaders = usesRemoteAuth ? gatewayIdentityHeaders() : null;
     if (usesRemoteAuth && (!jwt || !identityHeaders)) {
+      setTransport('disconnected');
       return { ok: false, status: 401, error: '登录状态已变更' };
     }
     const httpUrl = new URL(ensured.baseUrl);
@@ -3611,22 +3700,19 @@ function registerIpc() {
     httpUrl.search = '';
     httpUrl.hash = '';
 
-    const socket = !usesRemoteAuth
-      ? new WebSocket(httpUrl.toString())
-      : new WebSocket(httpUrl.toString(), {
-          headers: { Authorization: `Bearer ${jwt}`, ...identityHeaders },
-        });
+    const socket = new WebSocket(httpUrl.toString(), {
+      handshakeTimeout: 12_000,
+      ...(usesRemoteAuth ? { headers: { Authorization: `Bearer ${jwt}`, ...identityHeaders } } : {}),
+    });
     gatewaySockets.set(senderId, socket);
+    const currentSocket = () => currentAttempt() && gatewaySockets.get(senderId) === socket;
     const sendEvent = (payload: Record<string, unknown>): void => {
-      if (
-        gatewaySocketGenerations.get(senderId) !== generation
-        || gatewaySockets.get(senderId) !== socket
-        || event.sender.isDestroyed()
-      ) return;
-      event.sender.send('gateway-ws:event', payload);
+      if (!currentSocket()) return;
+      event.sender.send('gateway-ws:event', { ...payload, gatewayGeneration: gatewayAttempt });
     };
     const handleRendererDestroyed = (): void => {
       if (gatewaySocketGenerations.get(senderId) === generation) {
+        setTransport('disconnected');
         gatewaySocketGenerations.set(senderId, generation + 1);
       }
       if (gatewaySockets.get(senderId) === socket) gatewaySockets.delete(senderId);
@@ -3637,9 +3723,13 @@ function registerIpc() {
       }
     };
     socket.on('open', () => {
+      if (!currentSocket()) {
+        socket.close(1000, 'stale-gateway-attempt');
+        return;
+      }
       logMainStream('ws-open', { senderId, url: httpUrl.toString() });
-      setBackendTransportState('connected');
       sendEvent({ type: 'open' });
+      setTransport('connected');
     });
     socket.on('message', (data) => {
       let kind = 'unknown';
@@ -3661,7 +3751,7 @@ function registerIpc() {
     socket.on('close', (code, reason) => {
       event.sender.removeListener('destroyed', handleRendererDestroyed);
       logMainStream('ws-close', { code, reason: reason.toString(), senderId });
-      setBackendTransportState(reason.toString() === 'reconnect' ? 'reconnecting' : 'disconnected');
+      if (currentSocket()) setTransport('disconnected');
       sendEvent({
         type: 'close',
         code,
@@ -3670,7 +3760,7 @@ function registerIpc() {
       if (gatewaySockets.get(senderId) === socket) gatewaySockets.delete(senderId);
     });
     socket.on('error', (err) => {
-      setBackendTransportState('disconnected');
+      if (currentSocket()) setTransport('disconnected');
       sendEvent({ type: 'error', error: err.message });
     });
     event.sender.once('destroyed', handleRendererDestroyed);
@@ -3705,7 +3795,7 @@ function registerIpc() {
       gatewaySockets.delete(senderId);
       try { socket.close(1000, 'client-close'); } catch { /* best effort */ }
     }
-    setBackendTransportState('disconnected');
+    if (event.sender === mainWindow?.webContents) setBackendTransportState('disconnected');
     return { ok: true };
   });
 
@@ -3956,7 +4046,8 @@ app.on('window-all-closed', () => {
 
 async function prepareAppShutdown(reason: ShutdownReason): Promise<void> {
   isQuitting = true;
-  gatewayGeneration += 1;
+  resetGatewayAuthRefresh();
+  gatewayReadiness.reset(++gatewayGeneration);
   ensureGatewayPromise = null;
   loginNewServiceInstance.stopHeartbeat();
   stopBackendHealthMonitor();

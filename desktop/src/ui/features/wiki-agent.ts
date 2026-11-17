@@ -48,6 +48,7 @@ import {
   type SessionRow,
 } from '../state';
 import { sessionStore } from '../stores/stores';
+import { canSendToBackend } from './backend-status-guard';
 import {
   bindFileDrop,
   bindFilePaste,
@@ -514,7 +515,14 @@ async function sendEmbeddedPrompt(
     notifyEmbeddedAttachmentsChanged();
   };
   try {
-    const panel = await embeddedState(kbId);
+    const panel = canSendToBackend() ? await embeddedState(kbId) : null;
+    if (!panel || !canSendToBackend()) {
+      if (wikiConfirmationId) {
+        restoreWikiConfirmation(wikiConfirmationId);
+        scheduleEmbeddedRender();
+      }
+      return false;
+    }
     if (isBusy(panel.sessionId)) {
       // 与主对话一致：busy 时进待发队列（Composer 队列槽位可见、可编辑/排序/删除），
       // 回合结算时由 chat-controller.consumePending 依次派出。
