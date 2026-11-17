@@ -32,7 +32,7 @@ import {
   setChatCallbacks,
 } from '../../src/ui/features/chat-controller';
 import { openInspectorToTab } from '../../src/ui/features/inspector';
-import { bindFileDrop, bindFilePaste } from '../../src/ui/features/attachments';
+import { bindFileDrop, bindFilePaste, renderAttachmentList } from '../../src/ui/features/attachments';
 import {
   __resetWikiViewForTest,
   createWikiPageContribution,
@@ -68,6 +68,7 @@ vi.mock('../../src/ui/backend-client', async (importOriginal) => {
       wikiInit: vi.fn(),
       wikiPages: vi.fn(),
       wikiUpload: vi.fn(),
+      upload: vi.fn(),
       wikiIngest: vi.fn(),
       sessionTodos: vi.fn(),
       tasks: vi.fn(async () => []),
@@ -649,6 +650,31 @@ describe('wiki-page 入口挂点', () => {
     expect(vi.mocked(bindFileDrop)).toHaveBeenCalledWith(panel, expect.any(Function));
   });
 
+  it('Wiki 发送失败保留输入和附件，重试成功后清理', async () => {
+    await enterWiki();
+    const input = document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')!;
+    const send = document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')!;
+    const status = document.querySelector<HTMLElement>('[data-wiki-agent-panel] [aria-live="polite"]')!;
+    const attachment = { id: 'wk-report', name: 'report.txt', path: 'files/report.txt', type: 'file' as const };
+    vi.mocked(backendApi.upload).mockResolvedValueOnce(attachment);
+    const pasteFiles = vi.mocked(bindFilePaste).mock.calls.find(([target]) => target === input)![1];
+    pasteFiles([new File(['report'], 'report.txt')]);
+    await vi.waitFor(() => expect(vi.mocked(renderAttachmentList).mock.lastCall?.[1]).toEqual([attachment]));
+
+    socket().send.mockResolvedValueOnce(false);
+    input.value = '总结此附件';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    send.click();
+    await vi.waitFor(() => expect(status.textContent).toContain('草稿已保留'));
+    expect(input.value).toBe('总结此附件');
+    expect(vi.mocked(renderAttachmentList).mock.lastCall?.[1]).toEqual([attachment]);
+
+    send.click();
+    await vi.waitFor(() => expect(input.value).toBe(''));
+    expect(socket().send.mock.lastCall?.[0]).toMatchObject({ query: '总结此附件', attachments: [attachment] });
+    expect(vi.mocked(renderAttachmentList).mock.lastCall?.[1]).toEqual([]);
+  });
+
   it('运行中只显示停止按钮，点击后停止当前 Wiki 会话并恢复发送按钮', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
@@ -749,15 +775,17 @@ describe('wiki-page 入口挂点', () => {
     });
     const newSessionId = `wiki-new-${wikiSidSeq}`;
     api.wikiAgentSession.mockResolvedValueOnce({ ok: true, session_id: newSessionId, kb_id: 'default' });
-    document.querySelector<HTMLElement>('[data-wiki-agent-new]')!.click();
+    const newConversation = document.querySelector<HTMLButtonElement>('[data-wiki-agent-new]')!;
+    newConversation.click();
 
     await vi.waitFor(() => {
       expect(api.wikiAgentSession).toHaveBeenLastCalledWith('default', { forceNew: true });
       expect(mockLoadBackendHistory).toHaveBeenCalledWith(newSessionId);
+      expect(newConversation.disabled).toBe(false);
+      expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
+      expect(sessionStore.get().sessions.some((session) => session.id === newSessionId)).toBe(true);
+      expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value).toBe('');
     });
-    expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
-    expect(sessionStore.get().sessions.some((session) => session.id === newSessionId)).toBe(true);
-    expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value).toBe('');
   });
 
   it('历史按钮只列当前 KB 会话，点击后切换并恢复对应历史', async () => {
@@ -902,6 +930,32 @@ describe('wiki-page 入口挂点', () => {
     });
     expect(document.querySelector<HTMLTextAreaElement>('[data-wiki-agent-panel] [data-composer-input]')?.value)
       .toBe('切页前的草稿');
+  });
+
+  it('Wiki 发送成功后清理面板重挂期间恢复的同一份草稿', async () => {
+    const contribution = createWikiPageContribution();
+    uiStore.set({ activeTab: 'wiki' });
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+    const selector = '[data-wiki-agent-panel] [data-composer-input]';
+    const input = document.querySelector<HTMLTextAreaElement>(selector)!;
+    input.value = '切页时正在发送';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+
+    let resolveSend!: (sent: boolean) => void;
+    socket().send.mockReturnValueOnce(new Promise((resolve) => { resolveSend = resolve; }));
+    document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')!.click();
+    await vi.waitFor(() => expect(socket().send).toHaveBeenCalledTimes(1));
+    await contribution.deactivate();
+    contribution.activate({ signal: new AbortController().signal });
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLTextAreaElement>(selector)?.value).toBe('切页时正在发送');
+    });
+    expect(document.querySelector(selector)).not.toBe(input);
+
+    resolveSend(true);
+    await vi.waitFor(() => expect(document.querySelector<HTMLTextAreaElement>(selector)?.value).toBe(''));
+    expect(socket().send).toHaveBeenCalledTimes(1);
   });
 
   it('IME 合成中按 Enter 不发送，普通 Enter 发送', async () => {

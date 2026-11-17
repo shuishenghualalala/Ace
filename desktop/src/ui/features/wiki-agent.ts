@@ -165,7 +165,7 @@ const embeddedByKb = new Map<string, EmbeddedWikiAgentState>();
 const embeddedLoads = new Map<string, Promise<EmbeddedWikiAgentState>>();
 const embeddedAttachments = new Map<string, Attachment[]>();
 /** 输入草稿（kbId → 文本）：wiki 页 renderShell 会整体重建面板 DOM，草稿靠它存活。 */
-const embeddedDrafts = new Map<string, string>();
+const embeddedDrafts = new Map<string, { text: string }>();
 /** 已展开为宽栏的 kbId 集合（重挂载后恢复宽度档位）。 */
 const embeddedExpanded = new Set<string>();
 
@@ -503,10 +503,16 @@ async function sendEmbeddedPrompt(
   text: string,
   wikiConfirmationId = '',
   kbId = activeEmbeddedKbId,
-): Promise<void> {
+): Promise<boolean> {
   const query = text.trim();
-  const attachments = embeddedAttachments.get(kbId) || [];
-  if ((!query && attachments.length === 0) || !kbId) return;
+  const attachments = wikiConfirmationId ? [] : (embeddedAttachments.get(kbId) ?? []);
+  if ((!query && attachments.length === 0) || !kbId) return false;
+  const settleAttachments = (): void => {
+    if (!attachments.length) return;
+    const submitted = new Set(attachments);
+    embeddedAttachments.set(kbId, (embeddedAttachments.get(kbId) ?? []).filter((item) => !submitted.has(item)));
+    notifyEmbeddedAttachmentsChanged();
+  };
   try {
     const panel = await embeddedState(kbId);
     if (isBusy(panel.sessionId)) {
@@ -517,7 +523,7 @@ async function sendEmbeddedPrompt(
         restoreWikiConfirmation(wikiConfirmationId);
         scheduleEmbeddedRender();
         notify('Wiki Agent 正在处理上一条消息');
-        return;
+        return false;
       }
       enqueuePending(panel.sessionId, {
         id: newMessageId('q'),
@@ -525,25 +531,47 @@ async function sendEmbeddedPrompt(
         attachments: [...attachments],
         planActive: false,
       });
-      embeddedAttachments.set(kbId, []);
-      notifyEmbeddedAttachmentsChanged();
+      settleAttachments();
       setQueueHint(panel.sessionId, '正在排队…');
       setSessionStatus(panel.sessionId, 'queued');
-      return;
+      return true;
     }
-    embeddedAttachments.set(kbId, []);
-    notifyEmbeddedAttachmentsChanged();
-    await dispatchWs(panel.sessionId, query, attachments, {
+    const submitted = await dispatchWs(panel.sessionId, query, attachments, {
       planActive: false,
+      workDisabledPreferenceIds: [],
       ...(wikiConfirmationId ? { wikiConfirmationId } : {}),
     });
+    if (submitted) {
+      settleAttachments();
+    } else if (wikiConfirmationId) {
+      restoreWikiConfirmation(wikiConfirmationId);
+      scheduleEmbeddedRender();
+    }
+    return submitted;
   } catch (err) {
     notify(`发送 Wiki 问答失败：${(err as Error).message}`);
     if (wikiConfirmationId) {
       restoreWikiConfirmation(wikiConfirmationId);
       scheduleEmbeddedRender();
     }
+    return false;
   }
+}
+
+async function submitEmbeddedDraft(text: string, kbId: string): Promise<boolean> {
+  const draft = embeddedDrafts.get(kbId);
+  const submitted = await sendEmbeddedPrompt(text, '', kbId);
+  if (submitted && draft && embeddedDrafts.get(kbId) === draft) {
+    embeddedDrafts.delete(kbId);
+    const input = activeEmbeddedKbId === kbId
+      ? activeEmbeddedRoot?.querySelector<HTMLTextAreaElement>('[data-composer-input]')
+      : null;
+    if (input?.value === draft.text) {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+  return submitted;
 }
 
 function readFileAsBase64(file: File): Promise<string> {
@@ -696,7 +724,7 @@ async function deleteEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
 async function switchEmbeddedConversation(root: HTMLElement, req: WikiAgentEntryRequest, sessionId: string): Promise<void> {
   embeddedAttachments.set(req.kbId, []);
   notifyEmbeddedAttachmentsChanged();
-  embeddedDrafts.set(req.kbId, '');
+  embeddedDrafts.delete(req.kbId);
   await activateEmbeddedSession(req.kbId, sessionId, req.kbName || req.kbId);
   if (document.querySelector('[data-wiki-browser-surface]')) {
     setBrowserPanelSession(sessionId);
@@ -945,7 +973,7 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     getSessionId: getEmbeddedSessionId,
     attachments: createEmbeddedPanelAttachments(req.kbId),
     actions: {
-      submit: (text) => sendEmbeddedPrompt(text, '', req.kbId),
+      submit: (text) => submitEmbeddedDraft(text, req.kbId),
       stop: () => {
         const current = embeddedByKb.get(req.kbId);
         if (current) stopGeneration(current.sessionId);
@@ -1093,11 +1121,12 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
   if (input) {
     // 草稿存活：renderShell 重建面板不丢输入。发送/IME/自动增高由 Composer 内部处理，
     // 这里只同步草稿；恢复草稿后派发 input 让 Composer 刷新高度与发送按钮态。
-    input.addEventListener('input', () => {
-      embeddedDrafts.set(req.kbId, input.value);
-    });
-    input.value = embeddedDrafts.get(req.kbId) || '';
+    input.value = embeddedDrafts.get(req.kbId)?.text ?? '';
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.addEventListener('input', () => {
+      if (input.value) embeddedDrafts.set(req.kbId, { text: input.value });
+      else embeddedDrafts.delete(req.kbId);
+    });
     if (embeddedInputFocused) input.focus();
   }
   panel.render();

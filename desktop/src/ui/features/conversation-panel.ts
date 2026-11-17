@@ -14,9 +14,9 @@ import { renderTodoProgressPanelHtml, shouldShowTodoPanel } from '../chat-render
 import { createChatRenderCoalescer } from '../render-utils';
 import {
   ensureSessionBook,
+  replaceSessionMessages,
   setEditFrom,
   state,
-  truncateMessagesFrom,
 } from '../state';
 import { messageStore, sessionStore } from '../stores/stores';
 import { requireRendererLogin } from './auth-gate';
@@ -27,12 +27,12 @@ import {
 import {
   cancelEdit,
   editQueueItem,
+  renderChat,
   sendMessage,
   steerQueuedItem,
   stopGeneration,
 } from './chat-controller';
-import { createComposerView, type ComposerView } from './composer-view';
-import type { UserAgentMention } from './composer-mention';
+import { createComposerView, type ComposerView, type ComposerViewOptions } from './composer-view';
 import {
   disposeConversationRenderer,
   renderConversation,
@@ -46,7 +46,7 @@ import {
 
 /** Composer 动作组：submit/stop/edit/queue（app.ts 主对话原接线逻辑的参数化形态）。 */
 export interface ConversationPanelActions {
-  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
+  submit: ComposerViewOptions['submit'];
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -94,25 +94,30 @@ export interface ConversationPanel {
 }
 
 /**
- * 主对话 Composer 动作组（app.ts:230 原接线逻辑抽出）：编辑态截断后重发 + 全局 stop/queue 操作。
- * 语义与抽离前完全一致（会话来源仍是全局 activeSessionId）。
+ * 主对话的编辑重发在提交成功后移除原消息，保留等待期间收到的新消息。
  */
 export function createMainComposerActions(
   isCompletionOpen?: () => boolean,
 ): ConversationPanelActions {
   return {
     submit: async (text, userMentions) => {
-      if (!requireRendererLogin()) return;
+      if (!requireRendererLogin()) return false;
       const sessionId = state.activeSessionId;
-      if (sessionId && state.editFromIdx[sessionId] != null) {
-        const removed = truncateMessagesFrom(sessionId, state.editFromIdx[sessionId]);
-        setEditFrom(sessionId, null);
-        for (const message of removed) {
-          state.userFoldedTurns.delete(message.id);
-          state.userUnfoldedTurns.delete(message.id);
+      const editFrom = sessionId ? state.editFromIdx[sessionId] : null;
+      const replaced = sessionId && editFrom != null
+        ? new Set((state.messages[sessionId] ?? []).slice(editFrom).map(({ id }) => id))
+        : null;
+      if (!await sendMessage(text, userMentions)) return false;
+      if (sessionId && replaced) {
+        replaceSessionMessages(sessionId, (state.messages[sessionId] ?? []).filter(({ id }) => !replaced.has(id)));
+        for (const id of replaced) {
+          state.userFoldedTurns.delete(id);
+          state.userUnfoldedTurns.delete(id);
         }
+        if (state.editFromIdx[sessionId] === editFrom) setEditFrom(sessionId, null);
+        renderChat();
       }
-      await sendMessage(text, userMentions);
+      return true;
     },
     stop: () => stopGeneration(),
     cancelEdit,

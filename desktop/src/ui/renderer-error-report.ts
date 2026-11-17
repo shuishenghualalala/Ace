@@ -13,6 +13,7 @@ export type RendererErrorSource =
   | 'streaming-patch'
   | 'apply-chunk'
   | 'ws-frame'
+  | 'ws-send'
   | 'watchdog';
 
 export interface RendererErrorReport {

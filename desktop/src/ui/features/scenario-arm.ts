@@ -27,11 +27,9 @@ export function armSubScenario(label: string, subId: string): void {
   chip.hidden = false;
 }
 
-/** 取出并清空 arm 的 sub_scenario（send 时调用）。 */
-export function takeArmedSubScenario(): string {
-  const id = armedSubScenario;
-  armedSubScenario = '';
-  return id;
+/** 发送时读取场景，提交成功后再清除。 */
+export function getArmedSubScenario(): string {
+  return armedSubScenario;
 }
 
 /** 用户点 chip ✕ 时清除场景绑定。 */

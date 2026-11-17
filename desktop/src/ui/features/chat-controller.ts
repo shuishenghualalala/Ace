@@ -75,7 +75,7 @@ import {
   resumeSessionGeneration,
   setBackendIdleHandler,
 } from './session-busy';
-import { clearScenarioChip, takeArmedSubScenario } from './scenario-arm';
+import { clearScenarioChip, getArmedSubScenario } from './scenario-arm';
 import { requireRendererLogin } from './auth-gate';
 import {
   formatFollowupAnswerMessage,
@@ -83,6 +83,7 @@ import {
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import { backendApi, type ChatChunk, type WikiIngestProgress } from '../backend-client';
+import type { SendPayload } from '../api/transport';
 import { isObservationDevLaunch } from '../../shared/observability';
 import { makeSessionTitle } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
@@ -106,7 +107,6 @@ import {
   addSubscribedSessions,
   addSuppressedSession,
   appendSessionMessage,
-  clearAttachments,
   enqueuePending,
   ensureSessionBook,
   ensureSessionMessages,
@@ -120,7 +120,9 @@ import {
   promotePendingQueueItemAsRevision,
   removePendingQueueItem,
   removeSuppressedSession,
+  replaceAttachments,
   replacePendingQueue,
+  replaceSessionMessages,
   resetBook,
   patchBook,
   setEditFrom,
@@ -131,7 +133,6 @@ import {
   state,
   type Bookkeeping,
 } from '../state';
-import { takeAttachmentsForSend } from './attachments';
 import { renderAttachmentPreview } from './attachments';
 import { messageStore, sessionStore, uiStore } from '../stores/stores';
 import type { TabKey } from '../state';
@@ -1548,7 +1549,7 @@ const nativeVisualCapabilitySessions = new Set<string>();
 export async function dispatchWs(
   sessionId: string,
   query: string,
-  attachments = takeAttachmentsForSend(),
+  attachments: NonNullable<ChatMessage['attachments']> = [],
   subScenarioOrOptions: string | DispatchOptions = '',
   planActiveOverride?: boolean,
 ): Promise<boolean> {
@@ -1579,28 +1580,14 @@ export async function dispatchWs(
   const ui = uiStore.get();
   const backendCanSend = ui.backendCanSend
     || (ui.backendConnected && ui.backendTransportState === 'unknown');
-  if (!state.socket || !backendCanSend) {
+  const socket = state.socket;
+  if (!socket || !backendCanSend) {
     appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
     setBusyWithUi(sessionId, false);
     renderChat();
     notify('服务未连接');
     return false;
   }
-  // 乐观 UI：先把用户消息渲染出来，再 await WS send。
-  // 修订式引导在点击瞬间已经追加了 user 气泡；这里复用该气泡，避免当前 turn 收束后重复出现同一句。
-  const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
-  const hasOptimisticUserMessage = optimisticUserMessageId
-    ? getMessages(sessionId).some((m) => m.id === optimisticUserMessageId)
-    : false;
-  if (!hasOptimisticUserMessage) {
-    appendMessage(sessionId, 'user', query, {
-      attachments,
-      ...(optimisticUserMessageId ? { id: optimisticUserMessageId } : {}),
-    });
-  }
-  renderChat();
-  // 用户提交新消息：强制跳到底部（重置 stickyBottom）。对齐 hermes 的 runStart → jumpToBottom。
-  jumpChatToBottom();
   const planActiveForSend = dispatchOptions.planActive ?? state.composerMode === 'plan';
   const workDisabledPreferenceIds = dispatchOptions.workDisabledPreferenceIds
     ?? (productModeStore.get().productMode === 'work' ? takeDisabledWorkPreferenceIds() : []);
@@ -1616,6 +1603,15 @@ export async function dispatchWs(
     await primeTeamCollaborationIdentity(sessionId);
     renderChat();
   }
+  if (state.socket !== socket) return false;
+  // 修订式引导可能已经插入气泡。只记住本次发送创建的气泡，供发送失败时撤销。
+  const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
+  const existingUserMessage = optimisticUserMessageId
+    && getMessages(sessionId).some((message) => message.id === optimisticUserMessageId);
+  const optimisticUserMessage = existingUserMessage ? null : appendMessage(sessionId, 'user', query, {
+    attachments,
+    ...(optimisticUserMessageId ? { id: optimisticUserMessageId } : {}),
+  });
   const requestId = newTurnRequestId();
   openTurnForRequest(sessionId, requestId);
   // 乐观置 running + 立刻渲染「正在思考」：覆盖后续 await socket.send 与长 TTFT 空白。
@@ -1639,7 +1635,7 @@ export async function dispatchWs(
   });
   // 专用 Wiki Agent 经注册口提供本会话的 wiki_kb_id。
   const wikiExtras = wikiSendExtrasResolver?.(sessionId) ?? null;
-  const ok = await state.socket.send({
+  const payload: SendPayload = {
     query,
     session_id: sessionId,
     request_id: requestId,
@@ -1657,14 +1653,29 @@ export async function dispatchWs(
     ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),
     ...(workDisabledPreferenceIds.length > 0 ? { work_disabled_preference_ids: workDisabledPreferenceIds } : {}),
     ...(dispatchOptions.userMentions?.length ? { user_mentions: dispatchOptions.userMentions } : {}),
-  });
+  };
+  let ok = false;
+  let failure = '服务未连接，请稍后重试。';
+  try {
+    ok = await socket.send(payload);
+  } catch (error) {
+    reportRendererError('ws-send', error, { sessionId, requestId });
+    failure = '发送状态未确认，请先核对会话记录。';
+  }
   if (!ok) {
     logStream('dispatch', 'send-ws-failed', { sessionId, requestId });
     ttftRequestStartedAt.delete(requestId);
-    discardEmptyOptimisticAssistant(sessionId);
-    appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
-    setBusyWithUi(sessionId, false);
-    setStatusWithUi(sessionId, 'idle');
+    const book = bookFor(sessionId);
+    if (book.activeRequestId === requestId && book.firstChunkAt == null) {
+      if (optimisticUserMessage) {
+        replaceSessionMessages(sessionId, getMessages(sessionId).filter(({ id }) => id !== optimisticUserMessage.id));
+      }
+      discardEmptyOptimisticAssistant(sessionId);
+      patchBook(sessionId, { activeRequestId: null, turnSealed: true, acceptingNewRequest: false });
+      appendMessage(sessionId, 'error', failure);
+      setBusyWithUi(sessionId, false);
+      setStatusWithUi(sessionId, 'idle');
+    }
     renderChat();
     syncTurnDurationTicker();
     return false;
@@ -1691,13 +1702,13 @@ export async function sendNativeVisualMessage(sessionId: string, text: string): 
   return dispatchWs(sessionId, text, [], { subScenario: '', workDisabledPreferenceIds: [] });
 }
 
-export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<void> {
-  if (!requireRendererLogin()) return;
+export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<boolean> {
+  if (!requireRendererLogin()) return false;
   const plainContent = text.trim();
-  const attachments = state.attachments;
+  const attachments = [...state.attachments];
   const activeHasAnnotations = state.activeSessionId
     && (hasSiteAnnotationDraft(state.activeSessionId) || hasBlueprintAnnotationDraft(state.activeSessionId));
-  if (!plainContent && attachments.length === 0 && !activeHasAnnotations) return;
+  if (!plainContent && attachments.length === 0 && !activeHasAnnotations) return false;
 
   // 无活跃会话（欢迎页）时新建草稿：用 composerWorkspaceId()（即右下角选择器所显示的空间），
   // 而不是裸读 state.currentWorkspaceId——避免二者不一致时消息落到选择器之外的空间。
@@ -1711,13 +1722,25 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
     composeSiteAnnotationMessage(sessionId, plainContent),
   );
   const previewText = plainContent || (hasAnnotationDraft ? '页面注释' : '附件消息');
+  const subScenario = getArmedSubScenario();
+  const settleDraft = (): void => {
+    const submittedAttachments = new Set(attachments);
+    if (submittedAttachments.size) {
+      replaceAttachments(state.attachments.filter((attachment) => !submittedAttachments.has(attachment)));
+      renderAttachmentPreview();
+    }
+    clearSiteAnnotationDraft(sessionId);
+    clearBlueprintAnnotationDraft(sessionId);
+    if (getArmedSubScenario() === subScenario) clearScenarioChip();
+    if (queueEditDraft?.sessionId === sessionId) queueEditDraft = null;
+  };
 
   if (isBusy(sessionId)) {
     const pendingItem = {
       id: newMessageId('q'),
       query: content || '(附件)',
-      attachments: [...state.attachments],
-      subScenario: takeArmedSubScenario(),
+      attachments,
+      subScenario,
       planActive: state.composerMode === 'plan',
       workDisabledPreferenceIds: productModeStore.get().productMode === 'work'
         ? takeDisabledWorkPreferenceIds()
@@ -1725,12 +1748,8 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
       ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
       ...(userMentions.length > 0 ? { userMentions } : {}),
     };
-    if (queueEditDraft?.sessionId === sessionId) {
-      queueEditDraft = null;
-    }
     enqueuePending(sessionId, pendingItem);
-    clearSiteAnnotationDraft(sessionId);
-    clearBlueprintAnnotationDraft(sessionId);
+    settleDraft();
     setQueueHintWithUi(sessionId, '正在排队…');
     setStatusWithUi(sessionId, 'queued');
     // 入队不改写会话标题/预览：会话主题由首条消息确定（已在下方非-busy 分支经 dispatchWs +
@@ -1740,28 +1759,19 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
     // 「最近活动」排序，标题/预览保持首条消息。
     const enqueuedSession = state.sessions.find((s) => s.id === sessionId);
     if (enqueuedSession) enqueuedSession.updatedAt = Date.now();
-    clearAttachments();
-    renderAttachmentPreview();
     if (isStudioView()) openStudioChatPanel();
     renderChat();
     setTabFn('chat');
-    return;
+    return true;
   }
 
-  if (queueEditDraft?.sessionId === sessionId) {
-    queueEditDraft = null;
-  }
-
-  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), {
-    subScenario: takeArmedSubScenario(),
+  const sent = await dispatchWs(sessionId, content, attachments, {
+    subScenario,
     ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
     ...(userMentions.length > 0 ? { userMentions } : {}),
   });
-  if (sent) {
-    clearSiteAnnotationDraft(sessionId);
-    clearBlueprintAnnotationDraft(sessionId);
-  }
-  clearScenarioChip();
+  if (!sent) return false;
+  settleDraft();
   if (isDraftSession(sessionId)) {
     commitDraftSession(sessionId, makeSessionTitle(previewText), previewText.slice(0, 48), openSessionFn);
   } else {
@@ -1772,6 +1782,7 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
   if (isStudioView()) openStudioChatPanel();
   setTabFn('chat');
   renderChat();
+  return true;
 }
 
 /** 把指定会话当前正在 streaming 的 assistant 消息冻结并结算回合耗时。

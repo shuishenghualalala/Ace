@@ -27,7 +27,7 @@ import type { PanelAttachments } from './attachments';
 const MAX_INPUT_HEIGHT = 180;
 
 export interface ComposerViewOptions {
-  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
+  submit(text: string, userMentions?: UserAgentMention[]): boolean | Promise<boolean>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -232,6 +232,7 @@ export function createComposerView(
   let disposed = false;
   let submitting = false;
   let submitError = '';
+  let draftRevision = 0;
   let queueSignature = '';
   const imeState = createComposerImeState();
   const unbindIme = bindComposerIme(input, imeState);
@@ -347,27 +348,34 @@ export function createComposerView(
 
   const submit = async (): Promise<void> => {
     if (submitting || send.disabled) return;
+    const draft = input.value;
+    const revision = draftRevision;
     submitting = true;
     submitError = '';
     refresh();
     try {
-      await options.submit(
-        serializeMentionInput(input.value),
-        getUserAgentMentions(input.value),
+      const submitted = await options.submit(
+        serializeMentionInput(draft),
+        getUserAgentMentions(draft),
       );
-      input.value = '';
-      resetTextareaHeight(input);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (!submitted) {
+        submitError = '发送未完成，草稿已保留';
+      } else if (!disposed && revision === draftRevision && draft === input.value) {
+        input.value = '';
+        resetTextareaHeight(input);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
     } catch (error) {
       submitError = `发送失败：${(error as Error).message}`;
     } finally {
       submitting = false;
       refresh();
-      input.focus();
+      if (!disposed) input.focus();
     }
   };
 
   input.addEventListener('input', () => {
+    draftRevision += 1;
     submitError = '';
     autoresizeTextarea(input, MAX_INPUT_HEIGHT);
     refresh();
