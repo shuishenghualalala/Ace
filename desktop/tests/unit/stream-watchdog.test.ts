@@ -21,7 +21,7 @@ import {
   startStreamWatchdog,
   stopStreamWatchdog,
 } from '../../src/ui/features/stream-watchdog';
-import { messageStore, sessionStore, __resetAllStoresForTest } from '../../src/ui/stores/stores';
+import { messageStore, sessionStore, uiStore, __resetAllStoresForTest } from '../../src/ui/stores/stores';
 import { touchStreamActivity } from '../../src/ui/features/gateway-sequence';
 
 describe('stream-watchdog 升级可见', () => {
@@ -108,5 +108,18 @@ describe('stream-watchdog 升级可见', () => {
     sessionStore.set({ busySessions: nextBusy });
     await vi.advanceTimersByTimeAsync(15_000);
     expect(_watchdogEscalatedForTests().has('sid-idle')).toBe(false);
+  });
+
+  it('does not count a socket outage as a stalled model stream', async () => {
+    armStalledSession('sid-offline');
+    uiStore.set({ backendTransportState: 'disconnected' });
+    startStreamWatchdog();
+    await vi.advanceTimersByTimeAsync(180_000);
+
+    expect(mockSessionStatus).not.toHaveBeenCalled();
+    expect(_watchdogEscalatedForTests().has('sid-offline')).toBe(false);
+    uiStore.set({ backendTransportState: 'connected' });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(mockSessionStatus).toHaveBeenCalledOnce();
   });
 });

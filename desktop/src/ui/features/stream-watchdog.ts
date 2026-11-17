@@ -16,7 +16,7 @@ import {
   notify,
   state,
 } from '../state';
-import { sessionStore } from '../stores/stores';
+import { sessionStore, uiStore } from '../stores/stores';
 import { getLastGatewaySequences, getLastStreamActivity, clearStreamActivity, touchStreamActivity } from './gateway-sequence';
 import { logStream } from '../stream-debug';
 import { syncSessionLiveFromBackend } from './session-busy';
@@ -68,12 +68,18 @@ function resetEscalation(sessionId: string): void {
   logStream('watchdog', 'escalation-reset', { sessionId });
 }
 
+function transportAvailable(): boolean {
+  const transport = uiStore.get().backendTransportState;
+  return transport !== 'disconnected' && transport !== 'reconnecting';
+}
+
 async function recoverStalledSession(sessionId: string): Promise<void> {
   if (recovering.has(sessionId)) return;
   recovering.add(sessionId);
   logStream('watchdog', 'stall-detected', { sessionId, failures: recoveryFailures.get(sessionId) ?? 0 });
   try {
     const st = await backendApi.sessionStatus(sessionId);
+    if (!transportAvailable()) return;
     syncSessionLiveFromBackend(sessionId, st?.live, st?.last_status, st?.active_request_id);
     if (st?.live === 'idle' || st?.live === 'failed' || !st?.live) {
       const { loadBackendHistory } = await import('./session-controller');
@@ -94,6 +100,7 @@ async function recoverStalledSession(sessionId: string): Promise<void> {
 }
 
 function tickWatchdog(): void {
+  if (!transportAvailable()) return;
   const now = Date.now();
   for (const sid of collectWatchTargets()) {
     if (!isBusySession(sid)) {
@@ -116,6 +123,7 @@ function tickWatchdog(): void {
       continue;
     }
     void recoverStalledSession(sid).then(() => {
+      if (!transportAvailable()) return;
       lastRecoveryAt.set(sid, Date.now());
       recoveryFailures.set(sid, (recoveryFailures.get(sid) ?? 0) + 1);
     });

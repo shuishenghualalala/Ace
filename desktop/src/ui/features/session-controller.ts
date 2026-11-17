@@ -47,10 +47,8 @@ import {
   jumpChatToBottom,
   renderChat,
   seedStatuses,
-  setBusyWithUi,
   setHistoryLoading,
   subscribeSessions,
-  finalizeStreamingTurn,
   updateGatewayDot,
 } from './chat-controller';
 import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
@@ -167,17 +165,6 @@ export function shouldSkipHistoryReloadOnReconnect(sessionId: string): boolean {
   return hasStreamingAssistant || hasLocalActiveTurn || isBusySession(sessionId);
 }
 
-/**
- * 真断连时仅处理订阅中或 busy 的会话，避免无关会话被全局 finalize。
- */
-export function sessionsAffectedByDisconnect(): string[] {
-  const sids = new Set<string>(state.subscribedSessions);
-  for (const sid of Object.keys(state.messages)) {
-    if (isBusySession(sid)) sids.add(sid);
-  }
-  return Array.from(sids).filter(Boolean);
-}
-
 /** loadBackendHistory 的请求序号：start/end 通知、重连等可能并发触发同一会话的
  * history 回填，用 latest-request-wins 防止旧快照覆盖新快照。 */
 const historyLoadSeq = new Map<string, number>();
@@ -185,11 +172,15 @@ const historyLoadSeq = new Map<string, number>();
 /** 首屏尾部窗口大小（P1-6）：与历史总量解耦的常数；更早历史触顶翻页补。 */
 const HISTORY_WINDOW_SIZE = 100;
 
-export async function loadBackendHistory(sessionId: string): Promise<void> {
+export async function loadBackendHistory(
+  sessionId: string,
+  options: { canApply?: () => boolean } = {},
+): Promise<void> {
   if (!isRendererLoggedIn()) return;
   const loadSeq = (historyLoadSeq.get(sessionId) ?? 0) + 1;
   historyLoadSeq.set(sessionId, loadSeq);
   const isLatestLoad = () => historyLoadSeq.get(sessionId) === loadSeq;
+  const canApply = () => isLatestLoad() && (options.canApply?.() ?? true);
   setHistoryLoading(sessionId, true);
   // 首开（store 为空）走窗口端点：首屏延迟与历史总量解耦，游标存入 historyPaging。
   // 非空重载（重连/watchdog 恢复）仍走全量端点：保留用户已向上翻页加载的更早历史。
@@ -203,6 +194,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
       backendApi.sessionPlan(sessionId).catch(() => null),
       backendApi.sessionTodos(sessionId).catch(() => ({ todos: [] })),
     ]);
+    if (!canApply()) return;
     if (firstWindow) {
       setHistoryPaging(sessionId, {
         hasMore: windowOrFull.has_more,
@@ -210,8 +202,6 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
       });
     }
     const items = windowOrFull.items;
-    // 已有更新的回填请求在跑：丢弃旧快照，写回/flush 都由最新请求收尾。
-    if (!isLatestLoad()) return;
     const localMsgs = state.messages[sessionId] ?? [];
     const hasStreamingAssistant = localMsgs.some((m) => m.role === 'assistant' && m.streaming);
     const hasStreamingTeamTurn = localMsgs.some((m) => m.role === 'team_internal' && m.streaming);
@@ -358,7 +348,7 @@ export async function loadBackendHistory(sessionId: string): Promise<void> {
   } catch {
     // 历史加载失败不再静默清空：保留内存中已有消息；无消息可显示时置错误标记，
     // 聊天区渲染「加载失败 + 重试」卡（__history_error 单元），失败对用户可见。
-    if (isLatestLoad()) {
+    if (canApply()) {
       const hadMessages = (state.messages[sessionId] ?? []).length > 0;
       if (!hadMessages) markHistoryLoadError(sessionId);
       logStream('history', 'load-failed', { sessionId });
@@ -453,16 +443,35 @@ export function installHistoryPagingScroll(): void {
   );
 }
 
-async function syncSubscribedLiveStates(exceptSessionId?: string): Promise<void> {
-  const sessions = Array.from(state.subscribedSessions).filter((sid) => sid && sid !== exceptSessionId);
-  await Promise.all(sessions.map(async (sid) => {
-    try {
-      const st = await backendApi.sessionStatus(sid);
-      syncSessionLiveFromBackend(sid, st?.live, st?.last_status, st?.active_request_id);
-    } catch {
-      /* 单个会话状态同步失败不影响其它会话恢复 */
-    }
-  }));
+async function reconcileSessionAfterReconnect(
+  sessionId: string,
+  active: boolean,
+  isCurrentConnection: () => boolean,
+): Promise<void> {
+  if (state.suppressChunks.has(sessionId)) return;
+  const before = sessionStore.get().books[sessionId];
+  const canApply = () => {
+    const current = sessionStore.get().books[sessionId];
+    return isCurrentConnection()
+      && !state.suppressChunks.has(sessionId)
+      && current?.activeRequestId === before?.activeRequestId
+      && current?.turnSealed === before?.turnSealed;
+  };
+  const inFlight = shouldSkipHistoryReloadOnReconnect(sessionId);
+  if (active && !inFlight) {
+    await loadBackendHistory(sessionId, { canApply });
+    return;
+  }
+
+  const status = await backendApi.sessionStatus(sessionId).catch(() => null);
+  if (!canApply() || !status?.live) return;
+  if (inFlight && status.live !== 'running' && status.live !== 'queued') {
+    // A turn may have settled while disconnected. Read history after observing
+    // the terminal state so a replay gap cannot leave a permanently partial turn.
+    await loadBackendHistory(sessionId, { canApply });
+    return;
+  }
+  syncSessionLiveFromBackend(sessionId, status.live, status.last_status, status.active_request_id);
 }
 
 let channelSessionListenerBound = false;
@@ -486,9 +495,11 @@ export function bootstrapBackend(): void {
   bindChannelSessionListener();
   if (!isRendererLoggedIn()) return;
   state.socket?.dispose();
-  state.socket = new BackendChatSocket(
+  let transportVersion = 0;
+  const socket = new BackendChatSocket(
     (chunk) => applyChunk(chunk),
     (open, meta) => {
+      transportVersion += 1;
       logStream('ws-renderer', open ? 'socket-open' : 'socket-close', {
         subscribed: Array.from(state.subscribedSessions),
         activeSessionId: state.activeSessionId,
@@ -498,44 +509,30 @@ export function bootstrapBackend(): void {
         open ? 'connected' : meta?.transient ? 'reconnecting' : 'disconnected',
       );
       updateGatewayDot();
-      if (!open) {
-        // 主进程换 socket（close reason=reconnect）时紧接 open，不应结算 streaming / 封回合。
-        if (meta?.transient) {
-          renderWorkspaceHistory(openSession);
-          return;
-        }
-        // 真断连：仅冻结订阅/busy 会话的 streaming，避免全局误伤。
-        for (const sid of sessionsAffectedByDisconnect()) {
-          finalizeStreamingTurn(sid);
-          setBusyWithUi(sid, false);
-          patchBook(sid, { turnSealed: true, acceptingNewRequest: false });
-        }
-      }
+      // The Gateway can keep generating after this socket closes. Keep the
+      // request and its accumulated stream open for replay.
       renderWorkspaceHistory(openSession);
     },
     () => {
+      const version = transportVersion;
+      const isCurrentConnection = () => state.socket === socket && transportVersion === version;
       subscribeSessions(Array.from(state.subscribedSessions));
       const active = state.activeSessionId;
-      void syncSubscribedLiveStates(active ?? undefined).then(() => renderWorkspaceHistory(openSession));
-      if (active && !shouldSkipHistoryReloadOnReconnect(active)) {
-        void loadBackendHistory(active).then(() => {
-          renderChat();
-          renderWorkspaceHistory(openSession);
-        });
-      } else if (active) {
-        logStream('history', 'skip-on-open-live-turn', { sessionId: active });
-        void backendApi.sessionStatus(active).then((st) => {
-          syncSessionLiveFromBackend(active, st?.live, st?.last_status, st?.active_request_id);
-          renderChat();
-          renderWorkspaceHistory(openSession);
-        }).catch(() => {
-          renderChat();
-        });
-      }
+      const sessions = new Set(state.subscribedSessions);
+      if (active) sessions.add(active);
+      const recoveries = Array.from(sessions, (sid) =>
+        reconcileSessionAfterReconnect(sid, sid === active, isCurrentConnection).then(() => {
+          if (isCurrentConnection() && state.activeSessionId === sid) renderChat();
+        }),
+      );
+      void Promise.allSettled(recoveries).then(() => {
+        if (isCurrentConnection()) renderWorkspaceHistory(openSession);
+      });
     },
   );
-  state.socket.bindLastGatewaySequences(getLastGatewaySequences);
-  state.socket.connect();
+  state.socket = socket;
+  socket.bindLastGatewaySequences(getLastGatewaySequences);
+  socket.connect();
   startStreamWatchdog();
   installHistoryPagingScroll();
 }

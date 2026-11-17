@@ -1,21 +1,131 @@
 /**
  * @vitest-environment happy-dom
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { backendApi } from '../../src/ui/backend-client';
+import { bootstrapBackend, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
 import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
+import { openTurnForRequest } from '../../src/ui/features/session-busy';
+import { stopGeneration } from '../../src/ui/features/chat-controller';
+import { stopStreamWatchdog } from '../../src/ui/features/stream-watchdog';
+import { authStore } from '../../src/ui/stores/auth-store';
 import {
   __resetAllStoresForTest,
   configStore,
   messageStore,
   sessionStore,
 } from '../../src/ui/stores/stores';
-import { ensureSessionBook, patchBook, setBusy, setActiveSessionId } from '../../src/ui/state';
+import { addSubscribedSessions, ensureSessionBook, patchBook, setBusy, setActiveSessionId, state } from '../../src/ui/state';
 
 beforeEach(() => {
   __resetAllStoresForTest();
   document.body.innerHTML = '';
   setActiveSessionId('sid-1');
+});
+
+describe('conversation recovery after a socket outage', () => {
+  const sid = 'sid-1';
+  const oldRequest = 'req-before-disconnect';
+  const settledStatus = {
+    session_id: sid,
+    live: 'idle',
+    queue_depth: 0,
+    last_status: 'completed',
+    last_error: '',
+  };
+  let emitSocket: (event: unknown) => void;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    authStore.set({ isLoggedIn: true });
+    vi.stubGlobal('Crew', {
+      gatewayWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+      gatewayWsSend: vi.fn().mockResolvedValue({ ok: true }),
+      gatewayWsClose: vi.fn().mockResolvedValue({ ok: true }),
+      onGatewayWsEvent: (onEvent: (event: unknown) => void) => {
+        emitSocket = onEvent;
+        return () => {};
+      },
+    });
+    openTurnForRequest(sid, oldRequest);
+    setBusy(sid, true);
+    addSubscribedSessions([sid]);
+    bootstrapBackend();
+    vi.spyOn(backendApi, 'sessionPlan').mockRejectedValue(new Error('plan endpoint unavailable'));
+    vi.spyOn(backendApi, 'sessionTodos').mockResolvedValue({ todos: [] });
+  });
+
+  afterEach(() => {
+    state.socket?.dispose();
+    stopStreamWatchdog();
+    authStore.set({ isLoggedIn: false });
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function disconnectAndReconnect(): void {
+    emitSocket({ type: 'close', code: 1012 });
+    expect(sessionStore.get().busySessions[sid]).toBe(true);
+    expect(sessionStore.get().books[sid]?.turnSealed).toBe(false);
+    expect(messageStore.get().messages[sid][0].streaming).toBe(true);
+    emitSocket({ type: 'open' });
+  }
+
+  it.each([true, false])('recovers durable history when the interrupted request finished offline (foreground=%s)', async (active) => {
+    if (!active) setActiveSessionId(null);
+    const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
+    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([
+      { role: 'user', content: 'Prompt' },
+      { role: 'assistant', content: 'Completed while offline' },
+    ]);
+
+    disconnectAndReconnect();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(status.mock.invocationCallOrder[0]).toBeLessThan(history.mock.invocationCallOrder[0]);
+    expect(messageStore.get().messages[sid].map((message) => message.content)).toEqual([
+      'Prompt', 'Completed while offline',
+    ]);
+    expect(sessionStore.get().books[sid]?.turnSealed).toBe(true);
+    expect(sessionStore.get().busySessions[sid]).toBeFalsy();
+  });
+
+  it('does not treat a status transport error as a completed turn', async () => {
+    vi.spyOn(backendApi, 'sessionStatus').mockRejectedValue(new Error('connection unavailable'));
+    disconnectAndReconnect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe(oldRequest);
+    expect(sessionStore.get().busySessions[sid]).toBe(true);
+    expect(messageStore.get().messages[sid][0].streaming).toBe(true);
+  });
+
+  it('discards a reconnect status response after a new request starts', async () => {
+    const delayed = Promise.withResolvers<typeof settledStatus>();
+    vi.spyOn(backendApi, 'sessionStatus').mockReturnValue(delayed.promise);
+    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([]);
+    disconnectAndReconnect();
+    openTurnForRequest(sid, 'req-new');
+    delayed.resolve(settledStatus);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(history).not.toHaveBeenCalled();
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe('req-new');
+    expect(sessionStore.get().books[sid]?.turnSealed).toBe(false);
+  });
+
+  it('keeps a user-stopped request closed when a reconnect status response arrives', async () => {
+    const delayed = Promise.withResolvers<typeof settledStatus>();
+    vi.spyOn(backendApi, 'sessionStatus').mockReturnValue(delayed.promise);
+    disconnectAndReconnect();
+    stopGeneration(sid);
+    delayed.resolve({ ...settledStatus, live: 'running' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sessionStore.get().books[sid]?.turnSealed).toBe(true);
+    expect(sessionStore.get().busySessions[sid]).toBeFalsy();
+    expect(messageStore.get().messages[sid][0].interrupted).toBe(true);
+  });
 });
 
 describe('shouldSkipHistoryReloadOnReconnect', () => {
