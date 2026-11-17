@@ -26,6 +26,7 @@ from crew.gateway.auth import (
 )
 from crew.gateway.auth_policy import requires_gateway_auth
 from crew.gateway.connections import ConnectionManager
+from crew.gateway.desktop_parent_lease import DesktopParentLease
 from crew.gateway.health_server import (
     GatewayHealthServer,
     build_health_components,
@@ -523,7 +524,20 @@ def _write_gateway_discovery_file(host: str, port: int) -> None:
         log.warning("Gateway 发现文件写入失败", exc_info=True)
 
 
-def run() -> None:
+class _DesktopLeaseServer(uvicorn.Server):
+    def __init__(self, config: uvicorn.Config, parent_lease: DesktopParentLease) -> None:
+        super().__init__(config)
+        self._parent_lease = parent_lease
+
+    async def on_tick(self, counter: int) -> bool:
+        if self._parent_lease.closed:
+            self.should_exit = True
+        return await super().on_tick(counter)
+
+
+def run(*, parent_lease: DesktopParentLease | None = None) -> None:
+    if parent_lease is not None and parent_lease.closed:
+        return
     # 忽略 SIGPIPE：MCP stdio 子进程的 stdout 管道断开时不应杀死网关主进程。
     # 没有此处理时，BrokenPipeError 通过 anyio TaskGroup 冒泡到 uvicorn 事件循环，
     # 导致网关以 exit code 3 崩溃（MCP SDK 未隔离 stdout_writer 的 BrokenPipeError）。
@@ -533,6 +547,9 @@ def run() -> None:
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
     crew = build_app()
+    if parent_lease is not None and parent_lease.closed:
+        asyncio.run(crew.shutdown())
+        return
     api = create_app(crew)
     cfg = crew.config
 
@@ -543,4 +560,10 @@ def run() -> None:
     # 静默换端口（Linux 桌面端写死 8000，回退即失联）。
     log.info("Gateway 启动: http://%s:%s", cfg.gateway_host, cfg.gateway_port)
     _write_gateway_discovery_file(cfg.gateway_host, cfg.gateway_port)
-    uvicorn.run(api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning")
+    if parent_lease is None:
+        uvicorn.run(api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning")
+    else:
+        config = uvicorn.Config(
+            api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning", timeout_graceful_shutdown=5,
+        )
+        _DesktopLeaseServer(config, parent_lease).run()

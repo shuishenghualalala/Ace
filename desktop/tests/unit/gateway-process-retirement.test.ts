@@ -37,6 +37,22 @@ describe('GatewayProcessRetirement', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it('starts with the owned lease and only forces the owned handle on timeout', async () => {
+    const child = new TestChild(123);
+    const peer = new TestChild(456);
+    const requestStop = vi.fn();
+    const retirement = new GatewayProcessRetirement({ graceMs: 20, killSettleMs: 5, requestStop });
+    const stop = retirement.stop(child.process);
+
+    expect(requestStop).toHaveBeenCalledExactlyOnceWith(child.process);
+    expect(child.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(child.dispatchedSignals).toEqual(['SIGKILL']);
+    expect(peer.kill).not.toHaveBeenCalled();
+    child.exit(null, 'SIGKILL');
+    await stop;
+  });
+
   it('coalesces stops and waits for the graceful exit', async () => {
     const child = new TestChild(123);
     const retirement = new GatewayProcessRetirement({ graceMs: 20, killSettleMs: 5 });

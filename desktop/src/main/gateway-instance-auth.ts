@@ -8,6 +8,7 @@ export const GATEWAY_INSTANCE_DIRECTORY = '.gateway-instance';
 export const GATEWAY_INSTANCE_KEY_FILENAME = 'gateway-instance.key';
 
 const PROOF_CONTEXT = Buffer.from('crew-gateway-instance-v1\0', 'ascii');
+const DESKTOP_LAUNCH_PROOF_CONTEXT = Buffer.from('crew-gateway-desktop-launch-v1\0', 'ascii');
 const ACCESS_TOKEN_CONTEXT = Buffer.from('crew-gateway-browser-access-v1\0', 'ascii');
 const SECURITY_PROOF_CONTEXT = Buffer.from('crew-security-desktop-v1\0', 'ascii');
 const HEX_32_BYTES = /^[0-9a-f]{64}$/;
@@ -18,6 +19,8 @@ export interface GatewayInstanceVerificationOptions {
   fetchImpl?: typeof fetch;
   challenge?: string;
   timeoutMs?: number;
+  desktopLaunchKey?: Buffer;
+  rejectDesktopManaged?: boolean;
 }
 
 export interface GatewayComponentState {
@@ -190,9 +193,9 @@ function healthEndpoint(baseUrl: string): URL | null {
   }
 }
 
-function expectedProof(key: Buffer, challenge: string): Buffer {
+function expectedProof(key: Buffer, challenge: string, context = PROOF_CONTEXT): Buffer {
   return createHmac('sha256', key)
-    .update(PROOF_CONTEXT)
+    .update(context)
     .update(challenge, 'ascii')
     .digest();
 }
@@ -258,6 +261,16 @@ export async function probeGatewayInstance(
     const actual = Buffer.from(proof, 'hex');
     const expected = expectedProof(key, challenge);
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+      return fail('auth_failed');
+    }
+    const launchProof = record.desktop_launch_proof;
+    if (options.desktopLaunchKey) {
+      const expectedLaunch = expectedProof(options.desktopLaunchKey, challenge, DESKTOP_LAUNCH_PROOF_CONTEXT);
+      if (
+        typeof launchProof !== 'string' || !HEX_32_BYTES.test(launchProof)
+        || !timingSafeEqual(Buffer.from(launchProof, 'hex'), expectedLaunch)
+      ) return fail('auth_failed');
+    } else if (options.rejectDesktopManaged && 'desktop_launch_proof' in record) {
       return fail('auth_failed');
     }
     const components = parseComponents(record.components);

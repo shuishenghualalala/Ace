@@ -12,10 +12,18 @@
 
 from __future__ import annotations
 
-from crew.gateway.app import create_app, run  # noqa: F401
-
 __all__ = ["create_app", "run"]
 
 
 if __name__ == "__main__":
-    run()
+    import sys
+
+    from crew.gateway.desktop_parent_lease import bootstrap_desktop_parent_lease
+
+    lease = bootstrap_desktop_parent_lease(sys.argv[1:])
+    if lease is None or not lease.closed:
+        from crew.gateway.app import run
+
+        run(parent_lease=lease)
+else:
+    from crew.gateway.app import create_app, run

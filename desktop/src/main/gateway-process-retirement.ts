@@ -3,6 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 interface GatewayProcessRetirementOptions {
   graceMs?: number;
   killSettleMs?: number;
+  requestStop?: (child: ChildProcess) => void;
 }
 
 export class GatewayStopTimeoutError extends Error {
@@ -25,10 +26,12 @@ export class GatewayProcessRetirement {
   private stopAttempt: Promise<void> | null = null;
   private readonly graceMs: number;
   private readonly killSettleMs: number;
+  private readonly requestStop: (child: ChildProcess) => void;
 
   constructor(options: GatewayProcessRetirementOptions = {}) {
     this.graceMs = options.graceMs ?? 3_000;
     this.killSettleMs = options.killSettleMs ?? 400;
+    this.requestStop = options.requestStop ?? ((child) => { child.kill('SIGTERM'); });
   }
 
   get child(): ChildProcess | null {
@@ -85,7 +88,11 @@ export class GatewayProcessRetirement {
         }, this.killSettleMs);
         signal('SIGKILL');
       }, graceMs);
-      signal('SIGTERM');
+      try {
+        this.requestStop(child);
+      } catch {
+        // A failed graceful request still gets the same bounded force fallback.
+      }
     });
   }
 }

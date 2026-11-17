@@ -16,12 +16,14 @@ import threading
 import time
 from pathlib import Path
 
+from crew.gateway.desktop_parent_lease import create_desktop_launch_proof
 from crew.state.home import get_crew_home
 
 GATEWAY_INSTANCE_DIRECTORY = ".gateway-instance"
 GATEWAY_INSTANCE_KEY_FILENAME = "gateway-instance.key"
 GATEWAY_INSTANCE_CHALLENGE_HEADER = "X-Crew-Gateway-Challenge"
 GATEWAY_INSTANCE_PROOF_FIELD = "instance_proof"
+DESKTOP_LAUNCH_PROOF_FIELD = "desktop_launch_proof"
 
 _CHALLENGE_RE = re.compile(r"[0-9a-f]{64}\Z")
 _KEY_RE = re.compile(rb"[0-9a-f]{64}\Z")
@@ -126,6 +128,9 @@ def build_gateway_health_payload(challenge: str | None) -> tuple[dict, int]:
     if proof is None:
         return {"ok": False, "error": "gateway instance identity unavailable"}, 503
     payload[GATEWAY_INSTANCE_PROOF_FIELD] = proof
+    launch_proof = create_desktop_launch_proof(challenge.encode("ascii"))
+    if launch_proof is not None:
+        payload[DESKTOP_LAUNCH_PROOF_FIELD] = launch_proof
     return payload, 200
 
 
@@ -193,6 +198,7 @@ def verify_desktop_security_proof(
 
 
 __all__ = [
+    "DESKTOP_LAUNCH_PROOF_FIELD",
     "GATEWAY_INSTANCE_CHALLENGE_HEADER",
     "GATEWAY_INSTANCE_DIRECTORY",
     "GATEWAY_INSTANCE_KEY_FILENAME",

@@ -111,6 +111,44 @@ describe('desktop security proof', () => {
 });
 
 describe('verifyGatewayInstance', () => {
+  it('requires the exact managed launch and keeps standalone reuse compatible', async () => {
+    const crewHome = tempCrewHome();
+    const key = loadOrCreateGatewayInstanceKey(crewHome);
+    const launchKey = Buffer.alloc(32, 7);
+    const foreignLaunchKey = Buffer.alloc(32, 8);
+    const challenge = 'ab'.repeat(32);
+    const proof = createHmac('sha256', key).update(PROOF_CONTEXT).update(challenge).digest('hex');
+    const launchProof = createHmac('sha256', launchKey)
+      .update('crew-gateway-desktop-launch-v1\0', 'ascii')
+      .update(challenge, 'ascii')
+      .digest('hex');
+    const body = { ok: true, service: 'crew-gateway', instance_proof: proof };
+    const baseUrl = 'http://127.0.0.1:8000';
+    const managed = async () => jsonResponse({ ...body, desktop_launch_proof: launchProof });
+    const standalone = async () => jsonResponse(body);
+
+    expect(await verifyGatewayInstance(baseUrl, {
+      crewHome, challenge, fetchImpl: managed, desktopLaunchKey: launchKey,
+    })).toBe(true);
+    for (const fetchImpl of [
+      managed,
+      async () => jsonResponse({ ...body, desktop_launch_proof: false }),
+    ]) {
+      expect(await probeGatewayInstance(baseUrl, {
+        crewHome, challenge, fetchImpl, desktopLaunchKey: foreignLaunchKey,
+      })).toEqual({ verified: false, failureKind: 'auth_failed' });
+      expect(await verifyGatewayInstance(baseUrl, {
+        crewHome, challenge, fetchImpl, rejectDesktopManaged: true,
+      })).toBe(false);
+    }
+    expect(await verifyGatewayInstance(baseUrl, {
+      crewHome, challenge, fetchImpl: standalone, rejectDesktopManaged: true,
+    })).toBe(true);
+    expect(await verifyGatewayInstance(baseUrl, {
+      crewHome, challenge, fetchImpl: standalone, desktopLaunchKey: launchKey,
+    })).toBe(false);
+  });
+
   it('returns verified component status from the authenticated health response', async () => {
     const crewHome = tempCrewHome();
     const key = loadOrCreateGatewayInstanceKey(crewHome);
