@@ -5,7 +5,8 @@
  * Composer 自行订阅会话状态；此处只刷新其余依赖 busy 的界面。
  */
 
-import { resetGatewaySequence } from './gateway-sequence';
+import { resetLegacyGatewaySequence } from './gateway-sequence';
+import { cancelSessionStreamRecovery, getSessionStreamRecovery } from './session-stream-recovery';
 import {
   appendSessionMessage,
   ensureSessionBook,
@@ -46,7 +47,8 @@ export function applyBusyUi(sessionId: string, busy: boolean): void {
  * 由真实首包写入以保留 TTFT 指标语义。
  */
 export function openTurnForRequest(sessionId: string, requestId: string): void {
-  resetGatewaySequence(sessionId);
+  cancelSessionStreamRecovery(sessionId);
+  resetLegacyGatewaySequence(sessionId);
   ensureSessionBook(sessionId);
   const now = Date.now();
   const assistantId = newMessageId('m');
@@ -216,5 +218,5 @@ export function syncSessionLiveFromBackend(
   applyBusyUi(sessionId, false);
   const st: SessionStatus = lastStatus === 'failed' ? 'error' : 'idle';
   setSessionStatus(sessionId, st);
-  backendIdleHandler?.(sessionId);
+  if (!getSessionStreamRecovery(sessionId)) backendIdleHandler?.(sessionId);
 }

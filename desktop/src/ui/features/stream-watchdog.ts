@@ -20,6 +20,7 @@ import { sessionStore, uiStore } from '../stores/stores';
 import { getLastGatewaySequences, getLastStreamActivity, clearStreamActivity, touchStreamActivity } from './gateway-sequence';
 import { logStream } from '../stream-debug';
 import { syncSessionLiveFromBackend } from './session-busy';
+import { getSessionStreamRecovery } from './session-stream-recovery';
 
 const WATCHDOG_STALL_MS = 60_000;
 const WATCHDOG_TICK_MS = 15_000;
@@ -79,7 +80,7 @@ async function recoverStalledSession(sessionId: string): Promise<void> {
   logStream('watchdog', 'stall-detected', { sessionId, failures: recoveryFailures.get(sessionId) ?? 0 });
   try {
     const st = await backendApi.sessionStatus(sessionId);
-    if (!transportAvailable()) return;
+    if (!transportAvailable() || getSessionStreamRecovery(sessionId)) return;
     syncSessionLiveFromBackend(sessionId, st?.live, st?.last_status, st?.active_request_id);
     if (st?.live === 'idle' || st?.live === 'failed' || !st?.live) {
       const { loadBackendHistory } = await import('./session-controller');
@@ -103,6 +104,10 @@ function tickWatchdog(): void {
   if (!transportAvailable()) return;
   const now = Date.now();
   for (const sid of collectWatchTargets()) {
+    if (getSessionStreamRecovery(sid)) {
+      void import('./session-controller').then(({ reconcileSessionAfterResync }) => reconcileSessionAfterResync(sid));
+      continue;
+    }
     if (!isBusySession(sid)) {
       clearStreamActivity(sid);
       resetEscalation(sid);

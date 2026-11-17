@@ -54,6 +54,7 @@ class _ReplayConnections:
     def __init__(self) -> None:
         self.registered: list[str] = []
         self.replays: list[tuple[str, int]] = []
+        self.resume_cursors: list[tuple[str, object]] = []
         self.owners: list[str] = []
         self.sockets: dict[str, list] = {}
 
@@ -80,6 +81,8 @@ class _ReplayConnections:
         filter_fn=None, register_for_live: bool = False, **_kwargs,
     ) -> bool:
         self.replays.append((session_id, after_gateway_sequence))
+        if "resume_cursor" in _kwargs:
+            self.resume_cursors.append((session_id, _kwargs["resume_cursor"]))
         await socket.send_json({
             "kind": "delta",
             "body": {"text": f"replay:{session_id}:{after_gateway_sequence}"},
@@ -101,12 +104,14 @@ class _ActiveOwnerStub:
         self.claimed.append(owner_account_id)
 
 
-def _client(connections: _ReplayConnections) -> TestClient:
+def _client(connections: _ReplayConnections, *, owned_sessions: set[str] | None = None) -> TestClient:
     app = FastAPI()
     crew = SimpleNamespace(
         active_owner=_ActiveOwnerStub(),
         config=SimpleNamespace(),
-        session_store=SimpleNamespace(session_belongs_to=lambda _sid, _owner: True),
+        session_store=SimpleNamespace(
+            session_belongs_to=lambda sid, _owner: owned_sessions is None or sid in owned_sessions,
+        ),
     )
     dispatcher = SimpleNamespace()
     channel_manager = SimpleNamespace(status=lambda: [])
@@ -133,6 +138,25 @@ def test_ws_subscribe_replays_after_last_gateway_sequence():
     assert connections.replays == [("s1", 3), ("s2", 8)]
     assert first["body"]["text"] == "replay:s1:3"
     assert second["body"]["text"] == "replay:s2:8"
+    assert not connections.resume_cursors
+
+
+def test_ws_routes_modern_cursor_only_to_owned_replays():
+    connections = _ReplayConnections()
+    client = _client(connections, owned_sessions={"s1"})
+    cursor = {"epoch": "test-epoch", "sequence": 8}
+
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        ws.send_json({
+            "action": "subscribe",
+            "sessions": ["unowned", "s1"],
+            "last_gateway_sequences": {"s1": 3},
+            "gateway_cursors": {"unowned": cursor, "s1": cursor},
+        })
+        assert ws.receive_json()["session_id"] == "s1"
+
+    assert connections.registered == ["unowned", "s1"]
+    assert connections.resume_cursors == [("s1", cursor)]
 
 
 def test_ws_message_forwards_structured_user_mentions_before_dispatch(monkeypatch):

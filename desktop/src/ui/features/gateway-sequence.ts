@@ -5,16 +5,56 @@
  * 写入 gateway_sequence，subscribe 时携带 last_gateway_sequences 回放缺失帧。
  */
 
-import type { ChatChunk } from '../backend-client';
+import type { ChatChunk, GatewayCursor } from '../api/transport';
 import { logStream } from '../stream-debug';
 
 const lastSeqBySession = new Map<string, number>();
 const seenSeqBySession = new Map<string, Set<number>>();
+const epochBySession = new Map<string, string>();
+const resyncCutBySession = new Map<string, number>();
+
+function epochOf(chunk: ChatChunk): string | undefined {
+  return typeof chunk.gateway_epoch === 'string' && chunk.gateway_epoch.trim()
+    ? chunk.gateway_epoch : undefined;
+}
+
+/** Install an authoritative cut before consuming any live frames after a resync. */
+export function acceptGatewayResync(sessionId: string, chunk: ChatChunk): boolean {
+  const epoch = epochOf(chunk);
+  const sequence = chunk.gateway_sequence;
+  if (!epoch || typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 0) return false;
+  if (epochBySession.get(sessionId) === epoch && sequence <= (resyncCutBySession.get(sessionId) ?? -1)) {
+    return false;
+  }
+  epochBySession.set(sessionId, epoch);
+  resyncCutBySession.set(sessionId, sequence);
+  lastSeqBySession.set(sessionId, sequence);
+  seenSeqBySession.delete(sessionId);
+  clearStreamActivity(sessionId);
+  return true;
+}
+
+export function getGatewayCursors(sessionIds: string[]): Record<string, GatewayCursor> {
+  const cursors = new Map<string, GatewayCursor>();
+  for (const sessionId of sessionIds) {
+    const epoch = epochBySession.get(sessionId);
+    const sequence = lastSeqBySession.get(sessionId);
+    if (epoch && sequence !== undefined) cursors.set(sessionId, { epoch, sequence });
+  }
+  return Object.fromEntries(cursors);
+}
 
 /** 记录已处理的 gateway_sequence：最大值用于重连水位，seen 集合用于实时去重。 */
 export function noteGatewaySequence(sessionId: string, chunk: ChatChunk): void {
   const seq = chunk.gateway_sequence;
-  if (typeof seq !== 'number' || seq <= 0) return;
+  if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= 0) return;
+  const epoch = epochOf(chunk);
+  const currentEpoch = epochBySession.get(sessionId);
+  if (epoch && epoch !== currentEpoch) {
+    if (currentEpoch) return;
+    resetGatewaySequence(sessionId);
+    epochBySession.set(sessionId, epoch);
+  }
   const seen = seenGatewaySequencesFor(sessionId);
   seen.add(seq);
   trimSeenGatewaySequences(seen, seq);
@@ -31,7 +71,12 @@ export function noteGatewaySequence(sessionId: string, chunk: ChatChunk): void {
  */
 export function isDuplicateGatewayChunk(sessionId: string, chunk: ChatChunk): boolean {
   const seq = chunk.gateway_sequence;
-  if (typeof seq !== 'number' || seq <= 0) return false;
+  if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq <= 0) return false;
+  const epoch = epochOf(chunk);
+  const currentEpoch = epochBySession.get(sessionId);
+  if (epoch && epoch !== currentEpoch) return Boolean(currentEpoch);
+  const cut = resyncCutBySession.get(sessionId);
+  if (epoch && cut !== undefined && seq <= cut) return true;
   const seen = seenGatewaySequencesFor(sessionId);
   if (seen.has(seq)) {
     logStream('gateway-seq', 'drop-duplicate', { sessionId, seq, last: lastSeqBySession.get(sessionId) ?? 0, kind: chunk.kind });
@@ -50,10 +95,17 @@ export function getLastGatewaySequences(sessionIds: string[]): Record<string, nu
   return out;
 }
 
-/** 新回合开始时重置（与后端 clear_buffer 对齐）。 */
+/** Modern cursors belong to the session for the lifetime of the gateway epoch. */
+export function resetLegacyGatewaySequence(sessionId: string): void {
+  if (!epochBySession.has(sessionId)) resetGatewaySequence(sessionId);
+}
+
+/** Clear a session's cursor and deduplication state. */
 export function resetGatewaySequence(sessionId: string): void {
   lastSeqBySession.delete(sessionId);
   seenSeqBySession.delete(sessionId);
+  epochBySession.delete(sessionId);
+  resyncCutBySession.delete(sessionId);
 }
 
 /** 单测 / 诊断：读取当前序号。 */

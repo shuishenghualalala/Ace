@@ -16,6 +16,7 @@ import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, 
 import { noteDelta, parseDeltaRange, resetAssistant, resetSession } from '../stream-reassembly';
 import {
   type ChatMessage,
+  type PendingMessage,
   type MessageRole,
   type SessionStatus,
   renderEmptyState,
@@ -75,6 +76,7 @@ import {
   resumeSessionGeneration,
   setBackendIdleHandler,
 } from './session-busy';
+import { cancelSessionStreamRecovery, getSessionStreamRecovery } from './session-stream-recovery';
 import { clearScenarioChip, getArmedSubScenario } from './scenario-arm';
 import { requireRendererLogin } from './auth-gate';
 import {
@@ -129,7 +131,6 @@ import {
   setHistoryLoading as setHistoryLoadingState,
   setQueueHint,
   setSessionStatus,
-  shiftPendingQueue,
   state,
   type Bookkeeping,
 } from '../state';
@@ -153,6 +154,7 @@ const ttftRenderLoggedRequests = new Set<string>();
 const ttftRequestStartedAt = new Map<string, number>();
 
 interface DispatchOptions {
+  canStart?: () => boolean;
   subScenario?: string;
   planActive?: boolean;
   clientIntent?: 'revision';
@@ -976,7 +978,10 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
   const chunk: ChatChunk = sid === sourceSid
     ? incomingChunk
     : { ...incomingChunk, session_id: sid };
-  if (sid !== sourceSid) delete chunk.gateway_sequence;
+  if (sid !== sourceSid) {
+    delete chunk.gateway_sequence;
+    delete chunk.gateway_epoch;
+  }
   logStream('apply-chunk', 'recv', {
     sid,
     source_sid: sourceSid === sid ? undefined : sourceSid,
@@ -1497,35 +1502,45 @@ function applyMessageUpserts(
 
 // ---------- queue / dispatch / send ----------
 
-export function consumePending(sessionId: string): void {
-  const [head, _rest] = shiftPendingQueue(sessionId);
-  if (!head) return;
-  const dispatchOptions: DispatchOptions = { subScenario: head.subScenario ?? '' };
+const pendingDispatches = new Set<string>();
+
+function dispatchPendingItem(sessionId: string, head: PendingMessage): void {
+  const book = bookFor(sessionId);
+  if (pendingDispatches.has(sessionId) || getSessionStreamRecovery(sessionId)
+    || book.pendingFollowup || book.pendingPlan?.status === 'pending') return;
+  pendingDispatches.add(sessionId);
+  const dispatchOptions: DispatchOptions = {
+    subScenario: head.subScenario ?? '',
+    canStart: () => getPendingQueue(sessionId).includes(head),
+  };
   if (head.planActive !== undefined) dispatchOptions.planActive = head.planActive;
   if (head.clientIntent) dispatchOptions.clientIntent = head.clientIntent;
   if (head.optimisticUserMessageId) dispatchOptions.optimisticUserMessageId = head.optimisticUserMessageId;
   if (head.workDisabledPreferenceIds) dispatchOptions.workDisabledPreferenceIds = head.workDisabledPreferenceIds;
   if (head.userMentions) dispatchOptions.userMentions = head.userMentions;
   if (head.externalWikiReadKbId) dispatchOptions.externalWikiReadKbId = head.externalWikiReadKbId;
-  void dispatchWs(sessionId, head.query, head.attachments ?? [], dispatchOptions);
+  void dispatchWs(sessionId, head.query, head.attachments ?? [], dispatchOptions).then((sent) => {
+    pendingDispatches.delete(sessionId);
+    if (!sent) return;
+    const index = getPendingQueue(sessionId).indexOf(head);
+    if (index >= 0 && removePendingQueueItem(sessionId, index).length === 0) {
+      setQueueHintWithUi(sessionId, '');
+    }
+    if (!isBusy(sessionId)) consumePending(sessionId);
+  }).catch((error) => {
+    pendingDispatches.delete(sessionId);
+    reportRendererError('ws-send', error, { sessionId });
+  });
+}
+
+export function consumePending(sessionId: string): void {
+  const head = getPendingQueue(sessionId)[0];
+  if (head) dispatchPendingItem(sessionId, head);
 }
 
 export function sendQueueItemNow(sessionId: string, id: string): void {
-  const queue = getPendingQueue(sessionId);
-  const index = queue.findIndex((item) => item.id === id);
-  if (index < 0 || isBusy(sessionId)) return;
-  const item = queue[index]!;
-  removePendingQueueItem(sessionId, index);
-  setQueueHintWithUi(sessionId, '');
-  void dispatchWs(sessionId, item.query, item.attachments ?? [], {
-    subScenario: item.subScenario ?? '',
-    ...(item.planActive !== undefined ? { planActive: item.planActive } : {}),
-    ...(item.workDisabledPreferenceIds
-      ? { workDisabledPreferenceIds: item.workDisabledPreferenceIds }
-      : {}),
-    ...(item.userMentions?.length ? { userMentions: item.userMentions } : {}),
-    ...(item.externalWikiReadKbId ? { externalWikiReadKbId: item.externalWikiReadKbId } : {}),
-  });
+  const item = getPendingQueue(sessionId).find((queued) => queued.id === id);
+  if (item && !isBusy(sessionId)) dispatchPendingItem(sessionId, item);
 }
 
 export function editQueueItem(sessionId: string, index: number): void {
@@ -1560,7 +1575,7 @@ export async function dispatchWs(
       }
     : subScenarioOrOptions;
   const subScenario = dispatchOptions.subScenario ?? '';
-  if (!requireRendererLogin()) return false;
+  if (!requireRendererLogin() || getSessionStreamRecovery(sessionId)) return false;
   if (isDraftSession(sessionId)) {
     await persistDraftSessionModel(sessionId);
   }
@@ -1603,7 +1618,9 @@ export async function dispatchWs(
     await primeTeamCollaborationIdentity(sessionId);
     renderChat();
   }
-  if (state.socket !== socket) return false;
+  if (state.socket !== socket || getSessionStreamRecovery(sessionId) || dispatchOptions.canStart?.() === false) {
+    return false;
+  }
   // 修订式引导可能已经插入气泡。只记住本次发送创建的气泡，供发送失败时撤销。
   const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
   const existingUserMessage = optimisticUserMessageId
@@ -1824,6 +1841,7 @@ export function finalizeStreamingTurn(sessionId: string): void {
 export function stopGeneration(sessionIdOverride?: string | Event): void {
   const sessionId = typeof sessionIdOverride === 'string' ? sessionIdOverride : state.activeSessionId;
   if (!sessionId) return;
+  cancelSessionStreamRecovery(sessionId);
   // 修法3：用户主动停止是终态（每会话仅一个活跃回合）→ 清该会话 delta 重组缓冲，防泄漏。
   // withdrawMessage 走 stopGeneration，故撤回编辑也由此覆盖。
   resetSession(sessionId);

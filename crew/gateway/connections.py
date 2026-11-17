@@ -18,12 +18,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from typing import Any, Callable
+from uuid import uuid4
 
 from fastapi import WebSocket
 
+from crew.core.followup import get_followup_waiter
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.connections")
@@ -32,6 +35,10 @@ log = get_logger("gateway.connections")
 _MAX_CONSECUTIVE_FAILURES = 3
 # 每个 session 缓存的 WS payload 上限，用于断线重连后回放
 _CHUNK_BUFFER_SIZE = 2000
+_MAX_PENDING_FOLLOWUPS = 8
+_MAX_FOLLOWUP_SESSIONS = 128
+_MAX_FOLLOWUP_FRAME_BYTES = 32_768
+_LEGACY_CURSOR = object()
 
 
 class ConnectionManager:
@@ -58,6 +65,9 @@ class ConnectionManager:
         )
         self._gateway_seq: dict[tuple[str, str], int] = defaultdict(int)
         self._replay_locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._gateway_epoch = uuid4().hex
+        self._owner_replay_epochs: dict[str, str] = {}
+        self._pending_followups: OrderedDict[tuple[str, str], dict[str, dict]] = OrderedDict()
 
     def _key(self, session_id: str, owner_account_id: str | None = None) -> tuple[str, str]:
         """Build the connection key from explicit owner + session."""
@@ -217,6 +227,7 @@ class ConnectionManager:
                 self._chunk_buffers,
                 self._gateway_seq,
                 self._replay_locks,
+                self._pending_followups,
             )
             for key in mapping
             if key[0] == owner
@@ -226,6 +237,8 @@ class ConnectionManager:
             self._chunk_buffers.pop(key, None)
             self._gateway_seq.pop(key, None)
             self._replay_locks.pop(key, None)
+            self._pending_followups.pop(key, None)
+        self._owner_replay_epochs[owner] = uuid4().hex
 
         async def _close(ws: WebSocket) -> None:
             try:
@@ -455,7 +468,10 @@ class ConnectionManager:
 
             self._gateway_seq[key] += 1
             payload["gateway_sequence"] = self._gateway_seq[key]
+            payload["gateway_epoch"] = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
             self._chunk_buffers[key].append(dict(payload))
+            if payload.get("kind") == "followup_question":
+                self._remember_followup(key, payload)
 
             if self._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES:
                 log.debug("推送降级（连续失败过多）session=%s", self._label(key))
@@ -535,6 +551,74 @@ class ConnectionManager:
                 log.warning("推送连续失败 %d 次，降级为静默 session=%s",
                             self._consecutive_failures[key], self._label(key))
 
+    def _remember_followup(self, key: tuple[str, str], payload: dict) -> None:
+        """Keep still-waiting prompts available even if their replay frames expire."""
+        body = payload.get("body") or {}
+        if not isinstance(body, dict):
+            return
+        question_id = body.get("question_id")
+        if payload.get("session_id") != key[1] or not isinstance(question_id, str) or not question_id:
+            return
+        waiting = get_followup_waiter().is_waiting
+        prompts = {
+            qid: frame for qid, frame in self._pending_followups.get(key, {}).items()
+            if waiting(key[1], qid)
+        }
+        prompts.pop(question_id, None)
+        if (
+            body.get("questions")
+            and body.get("status") in (None, "pending")
+            and waiting(key[1], question_id)
+            and len(json.dumps(payload)) <= _MAX_FOLLOWUP_FRAME_BYTES
+        ):
+            if len(prompts) >= _MAX_PENDING_FOLLOWUPS:
+                prompts.pop(next(iter(prompts)))
+            prompts[question_id] = dict(payload)
+        if prompts:
+            self._pending_followups[key] = prompts
+            self._pending_followups.move_to_end(key)
+            if len(self._pending_followups) > _MAX_FOLLOWUP_SESSIONS:
+                self._pending_followups.popitem(last=False)
+        else:
+            self._pending_followups.pop(key, None)
+
+    @staticmethod
+    def _check_resume_cursor(cursor: object, epoch: str, floor: int, head: int) -> tuple[str | None, int]:
+        if not isinstance(cursor, dict):
+            return "invalid_cursor", 0
+        cursor_epoch = cursor.get("epoch")
+        sequence = cursor.get("sequence")
+        if not isinstance(cursor_epoch, str) or not cursor_epoch or type(sequence) is not int or sequence < 0:
+            return "invalid_cursor", 0
+        if cursor_epoch != epoch:
+            return "epoch_changed", 0
+        if sequence < floor:
+            return "cursor_expired", 0
+        if sequence > head:
+            return "cursor_ahead", 0
+        return None, sequence
+
+    def _resync_frame(self, key: tuple[str, str], epoch: str, floor: int, head: int, reason: str) -> dict:
+        waiting = get_followup_waiter().is_waiting
+        prompts = self._pending_followups.get(key, {})
+        for qid in tuple(prompts):
+            if not waiting(key[1], qid):
+                del prompts[qid]
+        if not prompts:
+            self._pending_followups.pop(key, None)
+        body: dict[str, Any] = {"reason": reason, "floor": floor}
+        if prompts:
+            body["pending_followups"] = list(prompts.values())
+        return {
+            "kind": "gateway_resync",
+            "session_id": key[1],
+            "gateway_epoch": epoch,
+            "gateway_sequence": head,
+            "sequence": 0,
+            "is_final": False,
+            "body": body,
+        }
+
     async def replay(
         self,
         session_id: str,
@@ -544,10 +628,12 @@ class ConnectionManager:
         filter_fn: Callable[[dict], bool] | None = None,
         owner_account_id: str,
         register_for_live: bool = False,
+        resume_cursor: object = _LEGACY_CURSOR,
     ) -> bool:
         """向指定 socket 回放该 session 缓存中 gateway_sequence > after 的帧。
 
         register_for_live 在同一个锁内接续实时订阅，避免新帧越过回放。
+        resume_cursor 提供代次和序号，失效时以当前水位发 resync，跳过残缺后缀。
         仅在所选帧发送成功且账号仍连接时返回 True。
         filter_fn 为可选过滤函数，返回 False 时跳过该帧（用于跳过已失效的
         临时交互帧，如已被回答的 followup_question）。
@@ -557,9 +643,15 @@ class ConnectionManager:
         async with lock:
             if self._replay_locks.get(key) is not lock:
                 return False
-            frames = {
-                payload["gateway_sequence"]: payload
-                for payload in self._chunk_buffers.get(key, ())
+            retained = self._chunk_buffers.get(key)
+            head = self._gateway_seq.get(key, 0)
+            floor = retained[0]["gateway_sequence"] - 1 if retained else head
+            epoch = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
+            reason = None
+            if resume_cursor is not _LEGACY_CURSOR:
+                reason, after_gateway_sequence = self._check_resume_cursor(resume_cursor, epoch, floor, head)
+            frames = {} if reason else {
+                payload["gateway_sequence"]: payload for payload in retained or ()
                 if payload["gateway_sequence"] > after_gateway_sequence
             }
             pending = self._pending_payloads.get(key)
@@ -567,7 +659,7 @@ class ConnectionManager:
             if register_for_live and pending:
                 # The pending batch is already journaled. A re-subscribing socket
                 # still needs pending live frames that fell out of the journal.
-                if ws in self._conns.get(key, ()):
+                if reason is None and ws in self._conns.get(key, ()):
                     for payload in pending:
                         seq = payload["gateway_sequence"]
                         frames[seq] = payload
@@ -578,6 +670,14 @@ class ConnectionManager:
                 await self._flush_pending_locked(key, skip_socket=ws)
 
             sent = False
+            if reason:
+                if self._replay_locks.get(key) is not lock:
+                    return False
+                try:
+                    await self.send_socket(ws, self._resync_frame(key, epoch, floor, head, reason))
+                except Exception:  # noqa: BLE001
+                    return False
+                sent = True
             for seq, payload in sorted(frames.items()):
                 if self._replay_locks.get(key) is not lock:
                     return False

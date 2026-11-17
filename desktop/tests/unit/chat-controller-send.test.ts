@@ -4,7 +4,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
-import { _resetQueueEditDraftForTests, appendMessage, dispatchWs, editQueueItem, finalizeStreamingTurn, sendMessage, sendNativeVisualMessage } from '../../src/ui/features/chat-controller';
+import {
+  _resetQueueEditDraftForTests, appendMessage, consumePending, dispatchWs,
+  editQueueItem, finalizeStreamingTurn, sendMessage, sendNativeVisualMessage,
+} from '../../src/ui/features/chat-controller';
 import { createComposerView, type ComposerView } from '../../src/ui/features/composer-view';
 import { createMainComposerActions } from '../../src/ui/features/conversation-panel';
 import { isDraftSession } from '../../src/ui/features/workspaces';
@@ -90,6 +93,29 @@ beforeEach(() => {
 });
 
 describe('sendMessage', () => {
+  it('reserves a queued message until accepted even when two completion signals try to dispatch it', async () => {
+    const sid = 'recover-queued-turn';
+    sessionStore.set({ activeSessionId: sid });
+    const sendFrame = vi.mocked(uiStore.get().socket!.send);
+    const first = Promise.withResolvers<boolean>();
+    sendFrame.mockReturnValueOnce(first.promise);
+    const item = { id: 'queued', query: 'Queued text', attachments: [attachment] };
+    enqueuePending(sid, item);
+    consumePending(sid);
+    consumePending(sid);
+    await vi.waitFor(() => expect(sendFrame).toHaveBeenCalledOnce());
+    expect(getPendingQueue(sid)).toEqual([item]);
+    first.resolve(false);
+    await vi.waitFor(() => expect(sessionStore.get().busySessions[sid]).toBeFalsy());
+    expect(getPendingQueue(sid)).toEqual([item]);
+
+    consumePending(sid);
+    consumePending(sid);
+    await vi.waitFor(() => expect(getPendingQueue(sid)).toEqual([]));
+    expect(sendFrame).toHaveBeenCalledTimes(2);
+    expect(state.messages[sid].filter(({ role }) => role === 'user')).toHaveLength(1);
+  });
+
   it('keeps the first draft and attachments when the socket refuses the message, then submits them once', async () => {
     const sendFrame = vi.mocked(uiStore.get().socket!.send);
     sendFrame.mockResolvedValueOnce(false);

@@ -28,6 +28,7 @@ import {
 import { reportRendererError, safeStringify } from '../renderer-error-report';
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
+import { getSessionStreamRecovery } from './session-stream-recovery';
 import { getSessionAgentDisplay } from './workspaces';
 import { isExternalAgentSession, isExternalTeamSession } from './external-agents-feature';
 import {
@@ -804,6 +805,10 @@ export function renderConversation(
         : 'crew';
       pushPlan('__typing', `typing|${identitySig}`, () => renderTypingIndicator(turnIdentity));
     }
+  }
+  const streamRecovery = sessionId ? getSessionStreamRecovery(sessionId) : undefined;
+  if (streamRecovery && (!pendingFollowup || streamRecovery.historyAppliedForFollowup !== pendingFollowup.questionId)) {
+    pushPlan('__stream-recovery', 'stream-recovery', () => renderQueueHintCard('正在恢复回复，完成后将同步完整内容。'));
   }
   if (pendingFollowup && sessionId) {
     const followupVersion = isRuntimeStaffingFollowup(pendingFollowup)

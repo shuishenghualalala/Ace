@@ -1,9 +1,85 @@
-import type { Chunk } from "./types";
+import type { Chunk, GatewayResumeCursor } from "./types";
+
+type CursorState = {
+  epoch?: string;
+  sequence: number;
+  coveredThrough: number;
+  seen: Set<number>;
+};
+
+const positiveSequence = (n: unknown): n is number =>
+  typeof n === "number" && Number.isSafeInteger(n) && n > 0;
+
+/** One bounded deduplication window per session, reset at a server-provided boundary. */
+export class GatewaySequenceTracker {
+  private sessions = new Map<string, CursorState>();
+
+  accept(sessionId: string, chunk: Chunk): boolean {
+    const seq = chunk.gateway_sequence;
+    if (!sessionId || !positiveSequence(seq)) return true;
+    const epoch = typeof chunk.gateway_epoch === "string" && chunk.gateway_epoch
+      ? chunk.gateway_epoch
+      : undefined;
+    let state = this.sessions.get(sessionId);
+    if (state?.epoch && epoch && state.epoch !== epoch) return false;
+    if (!state || (epoch && !state.epoch)) {
+      state = { epoch, sequence: 0, coveredThrough: -1, seen: new Set() };
+      this.sessions.set(sessionId, state);
+    }
+    if (seq <= state.coveredThrough || state.seen.has(seq)) return false;
+    state.sequence = Math.max(state.sequence, seq);
+    state.seen.add(seq);
+    if (state.seen.size > 2000) {
+      const keepFrom = state.sequence - 1000;
+      for (const value of state.seen) {
+        if (value < keepFrom) state.seen.delete(value);
+      }
+    }
+    return true;
+  }
+
+  epoch(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.epoch;
+  }
+
+  reset(sessionId: string, cursor: GatewayResumeCursor): boolean {
+    const current = this.sessions.get(sessionId);
+    if (current?.epoch === cursor.epoch && cursor.sequence === current.coveredThrough) return false;
+    this.sessions.set(sessionId, {
+      epoch: cursor.epoch,
+      sequence: cursor.sequence,
+      coveredThrough: cursor.sequence,
+      seen: new Set(),
+    });
+    return true;
+  }
+
+  subscription(sessionIds: string[]): {
+    lastSequences: Record<string, number>;
+    cursors: Record<string, GatewayResumeCursor>;
+  } {
+    const lastSequences: Record<string, number> = Object.create(null);
+    const cursors: Record<string, GatewayResumeCursor> = Object.create(null);
+    for (const sid of sessionIds) {
+      const state = this.sessions.get(sid);
+      if (state) {
+        lastSequences[sid] = state.sequence;
+        if (state.epoch) cursors[sid] = { epoch: state.epoch, sequence: state.sequence };
+      }
+    }
+    return { lastSequences, cursors };
+  }
+
+  delete(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+}
 
 /** 自动重连的对话 WebSocket。沿用后端 /ws 协议：发 {query,session_id,mode}，收 Chunk。 */
 export class ChatSocket {
   private ws: WebSocket | null = null;
   private closed = false;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
   private connectCount = 0; // 临时诊断：连接序号，排查断连来源
 
   constructor(
@@ -13,16 +89,20 @@ export class ChatSocket {
   ) {}
 
   connect() {
+    if (this.closed) return;
     this.connectCount += 1;
     const n = this.connectCount;
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    this.ws = new WebSocket(`${proto}://${location.host}/ws`);
-    this.ws.onopen = () => {
+    const ws = this.ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.onopen = () => {
+      if (this.closed || this.ws !== ws) return;
       this.onStatus(true);
       this.onOpen?.();
       console.log("[ws] connected", { n });
     };
-    this.ws.onclose = (e) => {
+    ws.onclose = (e) => {
+      if (this.closed || this.ws !== ws) return;
+      this.ws = null;
       this.onStatus(false);
       // 临时诊断：close code/reason/wasClean 用来判断是哪层心跳触发的断连
       console.warn("[ws] closed", {
@@ -31,12 +111,14 @@ export class ChatSocket {
         reason: e.reason || "(empty)",
         wasClean: e.wasClean,
       });
-      if (!this.closed) setTimeout(() => this.connect(), 1500);
+      this.reconnectTimer = setTimeout(() => this.connect(), 1500);
     };
-    this.ws.onerror = (e) => {
+    ws.onerror = (e) => {
+      if (this.closed || this.ws !== ws) return;
       console.warn("[ws] error", { n, error: e });
     };
-    this.ws.onmessage = (e) => {
+    ws.onmessage = (e) => {
+      if (this.closed || this.ws !== ws) return;
       const payload = JSON.parse(e.data);
       if (payload?.kind === "ping") {
         queueMicrotask(() => this.send({ kind: "pong" }));
@@ -59,7 +141,11 @@ export class ChatSocket {
   }
 
   /** 订阅一个或多个会话，用于断线重连后恢复后台流式推送。 */
-  subscribe(sessionIds: string[], lastGatewaySequences?: Record<string, number>): boolean {
+  subscribe(
+    sessionIds: string[],
+    lastGatewaySequences?: Record<string, number>,
+    gatewayCursors?: Record<string, GatewayResumeCursor>,
+  ): boolean {
     const sessions = Array.from(new Set(sessionIds.map((id) => id.trim()).filter(Boolean)));
     if (sessions.length === 0) return true;
     return this.send({
@@ -67,6 +153,7 @@ export class ChatSocket {
       session_id: sessions[0],
       sessions,
       last_gateway_sequences: lastGatewaySequences,
+      ...(gatewayCursors && Object.keys(gatewayCursors).length ? { gateway_cursors: gatewayCursors } : {}),
     });
   }
 
@@ -131,6 +218,7 @@ export class ChatSocket {
 
   dispose() {
     this.closed = true;
+    clearTimeout(this.reconnectTimer);
     this.ws?.close();
   }
 }

@@ -55,7 +55,7 @@ class TestOutboundContract:
 
         await cm.push_payload("s1", frame, owner_account_id="owner-1")
 
-        # 帧与入参一致，仅追加出口分配的 gateway_sequence
+        # 业务载荷原样透传，仅追加 Gateway 的回放游标。
         assert ws.sent == [{**frame, "gateway_sequence": 1}]
         assert ws.sent[0]["body"] == feature_event_body("wiki", "cards", {"pages": [{"title": "T"}]})
 
@@ -111,7 +111,7 @@ class TestOutboundContract:
         assert ws.sent == [{**payload, "gateway_sequence": 1}]
 
     async def test_replay_form_matches_live_form(self):
-        # 断线期间推送入缓存后回放：回放帧与直发帧逐字节一致
+        # 断线期间推送入缓存后回放：帧形状与直发相同，不同 Gateway 实例各有代次。
         offline = ConnectionManager(min_interval=0)
         frames = [
             _feature_frame("wiki", "cards", {"pages": []}),
@@ -126,7 +126,9 @@ class TestOutboundContract:
         for frame in frames:
             await live_cm.push_payload("s1", frame, owner_account_id="owner-1")
 
-        assert replay_ws.sent == live_ws.sent
-        assert replay_ws.sent == [
-            {**frame, "gateway_sequence": seq} for seq, frame in enumerate(frames, start=1)
-        ]
+        replay_epoch = replay_ws.sent[0]["gateway_epoch"]
+        live_epoch = live_ws.sent[0]["gateway_epoch"]
+        assert replay_epoch and live_epoch and replay_epoch != live_epoch
+        for seq, (payload, replay, live) in enumerate(zip(frames, replay_ws.sent, live_ws.sent, strict=True), 1):
+            assert replay == {**payload, "gateway_sequence": seq, "gateway_epoch": replay_epoch}
+            assert live == {**payload, "gateway_sequence": seq, "gateway_epoch": live_epoch}

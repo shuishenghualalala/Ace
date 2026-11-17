@@ -8,6 +8,7 @@ import time
 import pytest
 
 from crew.gateway.connections import ConnectionManager
+from crew.core.followup import get_followup_waiter
 
 
 class _FakeWS:
@@ -85,6 +86,167 @@ async def test_replay_respects_after_sequence(conn: ConnectionManager):
 
     # 只收到 4、5（gateway_sequence 4, 5）
     assert [p["gateway_sequence"] for p in ws2.sent] == [4, 5]
+
+
+@pytest.mark.asyncio
+async def test_versioned_replay_accepts_both_edges_of_the_retained_window(monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._CHUNK_BUFFER_SIZE", 2)
+    conn = ConnectionManager(min_interval=0)
+    frames = [{"kind": "delta", "body": {"text": str(i)}} for i in range(3)]
+    owner = "owner"
+    for frame in frames:
+        await conn.push_payload("s1", frame, owner_account_id=owner)
+    epoch = frames[0]["gateway_epoch"]
+
+    for sequence, expected in ((1, frames[1:]), (3, [])):
+        socket = _FakeWS()
+        assert await conn.replay(
+            "s1", socket, owner_account_id=owner, register_for_live=True,
+            after_gateway_sequence=99, resume_cursor={"epoch": epoch, "sequence": sequence},
+        )
+        assert socket.sent == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("sequence", "reason"), [
+    (0, "cursor_expired"),
+    (4, "cursor_ahead"),
+    (False, "invalid_cursor"),
+    (-1, "invalid_cursor"),
+    ("1", "invalid_cursor"),
+])
+async def test_versioned_reset_hands_off_only_events_after_the_cut(monkeypatch, sequence, reason):
+    monkeypatch.setattr("crew.gateway.connections._CHUNK_BUFFER_SIZE", 2)
+    conn = ConnectionManager(min_interval=0)
+    owner = "owner"
+    frame = {"kind": "delta", "body": {"text": "older text"}}
+    for _ in range(3):
+        await conn.push_payload("s1", frame, owner_account_id=owner)
+    epoch = frame["gateway_epoch"]
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowSubscriber(_FakeWS):
+        async def send_json(self, data: dict) -> None:
+            if data["kind"] == "gateway_resync":
+                started.set()
+                await release.wait()
+            await super().send_json(data)
+
+    socket = SlowSubscriber()
+    subscribe = asyncio.create_task(conn.replay(
+        "s1", socket, owner_account_id=owner, register_for_live=True,
+        resume_cursor={"epoch": epoch, "sequence": sequence},
+    ))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    live = asyncio.create_task(conn.push_payload("s1", {"kind": "delta"}, owner_account_id=owner))
+    await asyncio.sleep(0)
+    assert not socket.sent
+    release.set()
+    await asyncio.wait_for(asyncio.gather(subscribe, live), timeout=1)
+
+    assert [(f["kind"], f["gateway_sequence"], f["gateway_epoch"]) for f in socket.sent] == [
+        ("gateway_resync", 3, epoch), ("delta", 4, epoch),
+    ]
+    assert socket.sent[0]["body"] == {"reason": reason, "floor": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+async def test_stale_epoch_rejected_even_when_number_matches_current_head(restart):
+    conn = ConnectionManager(min_interval=0)
+    owner = "owner"
+    first = {"kind": "delta"}
+    await conn.push_payload("s1", first, owner_account_id=owner)
+    if restart:
+        conn = ConnectionManager(min_interval=0)
+    else:
+        await conn.close_owner(owner)
+    current = {"kind": "delta"}
+    await conn.push_payload("s1", current, owner_account_id=owner)
+    assert current["gateway_sequence"] == first["gateway_sequence"]
+    socket = _FakeWS()
+
+    await conn.replay(
+        "s1", socket, owner_account_id=owner, register_for_live=True,
+        resume_cursor={"epoch": first["gateway_epoch"], "sequence": first["gateway_sequence"]},
+    )
+
+    reset, = socket.sent
+    assert reset["kind"] == "gateway_resync"
+    assert reset["body"]["reason"] == "epoch_changed"
+    assert reset["gateway_epoch"] == current["gateway_epoch"] != first["gateway_epoch"]
+
+
+@pytest.mark.asyncio
+async def test_empty_ring_preserves_recovery_floor(conn):
+    owner = "owner"
+    frame = {"kind": "delta"}
+    await conn.push_payload("s1", frame, owner_account_id=owner)
+    conn.clear_buffer("s1", owner_account_id=owner)
+    socket = _FakeWS()
+
+    await conn.replay(
+        "s1", socket, owner_account_id=owner,
+        resume_cursor={"epoch": frame["gateway_epoch"], "sequence": 0},
+    )
+
+    reset, = socket.sent
+    assert reset["body"] == {"reason": "cursor_expired", "floor": 1}
+    assert reset["gateway_sequence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_resync_restores_only_still_waiting_owner_prompts_after_ring_eviction(conn):
+    waiter = get_followup_waiter()
+    sid = "s1"
+    waiting = waiter.create(sid)
+    other_owner = waiter.create(sid)
+    cancelled = waiter.create(sid)
+    try:
+        for owner, question_id in (("A", waiting), ("A", cancelled), ("B", other_owner)):
+            await conn.push_payload(sid, {
+                "kind": "followup_question",
+                "session_id": sid,
+                "body": {"question_id": question_id, "questions": [{"question": "Continue?"}]},
+            }, owner_account_id=owner)
+        waiter.cancel(sid, cancelled)
+        conn.clear_buffer(sid, owner_account_id="A")
+        socket = _FakeWS()
+
+        await conn.replay(sid, socket, owner_account_id="A", resume_cursor=None)
+
+        reset, = socket.sent
+        recovered, = reset["body"]["pending_followups"]
+        assert recovered["body"]["question_id"] == waiting
+        assert reset["body"]["reason"] == "invalid_cursor"
+    finally:
+        for question_id in (waiting, other_owner, cancelled):
+            waiter.cancel(sid, question_id)
+
+
+@pytest.mark.asyncio
+async def test_large_followup_is_delivered_without_retaining_an_extra_copy(conn, monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._MAX_FOLLOWUP_FRAME_BYTES", 128)
+    waiter = get_followup_waiter()
+    sid = "s1"
+    question_id = waiter.create(sid)
+    socket = _FakeWS()
+    conn.register(sid, socket, owner_account_id="owner")
+    prompt = "x" * 256
+    try:
+        await conn.push_payload(sid, {
+            "kind": "followup_question",
+            "session_id": sid,
+            "body": {"question_id": question_id, "questions": [{"question": prompt}]},
+        }, owner_account_id="owner")
+        reset_socket = _FakeWS()
+        await conn.replay(sid, reset_socket, owner_account_id="owner", resume_cursor=None)
+
+        assert socket.sent[0]["body"]["questions"] == [{"question": prompt}]
+        assert "pending_followups" not in reset_socket.sent[0]["body"]
+    finally:
+        waiter.cancel(sid, question_id)
 
 
 @pytest.mark.asyncio

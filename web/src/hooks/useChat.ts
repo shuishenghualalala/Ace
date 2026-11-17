@@ -4,7 +4,7 @@ import { api } from "../api";
 import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails } from "../lib/historyMap";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
-import { ChatSocket } from "../ws";
+import { ChatSocket, GatewaySequenceTracker } from "../ws";
 import {
   parseFeatureEventBody,
   type Bookkeeping,
@@ -19,6 +19,25 @@ let _seq = 0;
 const newId = () => `m${Date.now()}_${_seq++}`;
 const HISTORY_LOADING_TEXT = "正在加载历史记录…";
 const HISTORY_LOAD_TIMEOUT_MS = 8000;
+const RECOVERY_POLL_MS = 1500;
+const RECOVERY_NOTICE = "连接已恢复，正在同步会话历史…";
+const RECOVERY_RUNNING_NOTICE = "回复仍在生成，完成后将同步完整记录。";
+const RESYNC_REASONS = new Set(["epoch_changed", "cursor_expired", "cursor_ahead", "invalid_cursor"]);
+
+type SessionStatusSnapshot = Awaited<ReturnType<typeof api.sessionStatus>>;
+interface SessionRecovery {
+  revision: number;
+  inFlight: boolean;
+  retryRequested: boolean;
+  verifiedFollowupId?: string;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface RecoveryHistoryLoad {
+  recovery: SessionRecovery;
+  revision: number;
+  status: SessionStatusSnapshot;
+}
 
 function isHistoryLoadingMessage(msg: UiMessage): boolean {
   return msg.role === "assistant" && msg.text === HISTORY_LOADING_TEXT && !msg.thinking && !msg.toolCalls?.length;
@@ -32,6 +51,44 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+const closedFollowupStatuses = ["expired", "cancelled", "resolved"];
+
+function parseFollowupQuestion(body: Chunk["body"], status: string): FollowupQuestion {
+  return {
+    question_id: body.question_id ?? "",
+    title: body.title ?? "",
+    record_history: body.record_history !== false,
+    status,
+    note: typeof body.note === "string" ? body.note : undefined,
+    origin: body.origin && typeof body.origin === "object" ? body.origin : undefined,
+    questions: Array.isArray(body.questions)
+      ? body.questions.map((item: any) => ({
+          id: typeof item?.id === "string" ? item.id : "",
+          question: typeof item?.question === "string" ? item.question : "",
+          options: Array.isArray(item?.options)
+            ? item.options.map((opt: any) => {
+                if (opt && typeof opt === "object") {
+                  const label = String(opt.label ?? opt.text ?? opt.name ?? opt.value ?? "");
+                  const value = String(opt.value ?? label);
+                  const rawDescription = opt.description ?? opt.desc ?? opt.detail ?? opt.details
+                    ?? opt.content ?? opt.body ?? opt.explanation ?? opt.summary;
+                  const description = typeof rawDescription === "string" ? rawDescription.trim() : "";
+                  return description ? { label, value, description } : { label, value };
+                }
+                const text = String(opt ?? "");
+                return { label: text, value: text };
+              })
+            : [],
+          inputMode: typeof item?.inputMode === "string"
+            ? item.inputMode
+            : (typeof item?.input_mode === "string" ? item.input_mode : undefined),
+          allowFreeText: item?.allowFreeText !== false && item?.allow_free_text !== false,
+          multiSelect: !!item?.multiSelect,
+        }))
+      : [],
+  };
 }
 
 function formatFollowupAnswers(
@@ -337,6 +394,7 @@ export function useChat(
   const [messagesMap, setMessagesMap] = useState<Record<string, UiMessage[]>>({});
   const [busyMap, setBusyMap] = useState<Record<string, boolean>>({});
   const [queueMap, setQueueMap] = useState<Record<string, string>>({});
+  const [recoveryNotices, setRecoveryNotices] = useState<Record<string, string>>({});
   const [statusMap, setStatusMap] = useState<Record<string, SessionStatus>>({});
   const [pendingQueueMap, setPendingQueueMap] = useState<Record<string, PendingMessage[]>>({});
   const [todoMap, setTodoMap] = useState<Record<string, TodoItem[]>>({});
@@ -405,10 +463,10 @@ export function useChat(
   const suppressChunksRef = useRef<Set<string>>(new Set());
   const suppressedRequestIdsRef = useRef<Set<string>>(new Set());
   const loadedSessionsRef = useRef<Set<string>>(new Set());
-  // 各会话最后收到的 Gateway sequence（断线重连后回放定位用）
-  const lastGatewaySequenceRef = useRef<Map<string, number>>(new Map());
-  // Gateway 帧可能乱序到达：用 seen set 去重，不能按“更小即丢弃”的单调规则过滤。
-  const seenGatewaySequencesRef = useRef<Map<string, Set<number>>>(new Map());
+  const gatewaySequences = useRef(new GatewaySequenceTracker());
+  const recoveries = useRef(new Map<string, SessionRecovery>());
+  const historyLoads = useRef(new Map<string, symbol>());
+  const transportOpen = useRef(false);
 
   const bookFor = (sid: string): Bookkeeping => {
     let b = bookRef.current.get(sid);
@@ -529,16 +587,63 @@ export function useChat(
   };
 
   const syncSubscriptions = (sessions: string[]) => {
-    const lastSequences: Record<string, number> = {};
-    for (const sid of sessions) {
-      const seq = lastGatewaySequenceRef.current.get(sid);
-      if (seq != null) lastSequences[sid] = seq;
-    }
-    sockRef.current?.subscribe(
-      Array.from(new Set(sessions.map((id) => id.trim()).filter(Boolean))),
-      lastSequences,
-    );
+    const ids = Array.from(new Set(sessions.map((id) => id.trim()).filter(Boolean)));
+    const { lastSequences, cursors } = gatewaySequences.current.subscription(ids);
+    sockRef.current?.subscribe(ids, lastSequences, cursors);
   };
+
+  const setRecoveryNotice = (sid: string, notice = "") => {
+    setRecoveryNotices((prev) => {
+      if (prev[sid] === notice || (!notice && !(sid in prev))) return prev;
+      const next = { ...prev };
+      if (notice) next[sid] = notice;
+      else delete next[sid];
+      return next;
+    });
+  };
+
+  function recoveryIsCurrent(sid: string, recovery: SessionRecovery, revision: number): boolean {
+    return transportOpen.current && recoveries.current.get(sid) === recovery && recovery.revision === revision;
+  }
+
+  function scheduleRecovery(sid: string, recovery: SessionRecovery, immediate = false): void {
+    if (!transportOpen.current || recoveries.current.get(sid) !== recovery) return;
+    if (recovery.inFlight) {
+      if (immediate) recovery.retryRequested = true;
+      return;
+    }
+    clearTimeout(recovery.timer);
+    if (immediate) {
+      void checkRecovery(sid, recovery);
+    } else {
+      recovery.timer = setTimeout(() => {
+        recovery.timer = undefined;
+        void checkRecovery(sid, recovery);
+      }, RECOVERY_POLL_MS);
+    }
+  }
+
+  async function checkRecovery(sid: string, recovery: SessionRecovery): Promise<void> {
+    const revision = recovery.revision;
+    if (!recoveryIsCurrent(sid, recovery, revision)) return;
+    recovery.inFlight = true;
+    recovery.retryRequested = false;
+    try {
+      const status = await withTimeout(api.sessionStatus(sid), HISTORY_LOAD_TIMEOUT_MS, "session status");
+      if (!recoveryIsCurrent(sid, recovery, revision)) return;
+      if (status.live === "idle") {
+        await loadHistory(sid, { recovery, revision, status });
+      } else if (status.live === "running" || status.live === "queued") {
+        setStatus(sid, status.live);
+        setRecoveryNotice(sid, RECOVERY_RUNNING_NOTICE);
+      }
+    } catch {
+      // Keep what the user has already seen until the Gateway can confirm a terminal state.
+    } finally {
+      recovery.inFlight = false;
+      scheduleRecovery(sid, recovery, recovery.retryRequested);
+    }
+  }
 
   // 用 ref 固定消息操作，避免它们进入 useEffect 依赖导致 WS 重连
   const appendRef = useRef(
@@ -593,29 +698,83 @@ export function useChat(
         if (queue.length > 0) sessions.add(sid);
       }
       syncSubscriptions(Array.from(sessions));
+      for (const [sid, recovery] of recoveries.current) scheduleRecovery(sid, recovery, true);
+    };
+
+    const applyFollowup = (c: Chunk, sid: string): boolean => {
+      const status = typeof c.body.status === "string" ? c.body.status : "";
+      if (closedFollowupStatuses.includes(status)) {
+        const current = followupMapRef.current[sid];
+        const questionId = typeof c.body.question_id === "string" ? c.body.question_id : "";
+        if (!questionId || current?.question_id === questionId) setFollowup(sid, null);
+        return true;
+      }
+      setFollowup(sid, parseFollowupQuestion(c.body, status));
+      return false;
+    };
+
+    const applyPlanReview = (c: Chunk, sid: string): void => {
+      // 模型调了 exit_plan_mode → 写入当前回合的消息流（plan 轮），位置与工具调用卡片一致。
+      // empty=true 表示计划文件为空，前端弹提示卡（无审批按钮）；否则弹正常审批卡。
+      const isEmpty = !!c.body.empty;
+      const review: PlanReview = {
+        plan: c.body.plan ?? "",
+        planFile: c.body.plan_file ?? "",
+        status: isEmpty ? "empty" : (c.body.status ?? "pending"),
+        empty: isEmpty,
+        phase: typeof c.body.phase === "string" ? c.body.phase : undefined,
+      };
+      ensureAssistantMessage(sid, { planReview: review });
+      setPlan(sid, {
+        active: true,
+        review: null,
+      });
+    };
+
+    const beginRecovery = (c: Chunk): void => {
+      const sid = c.session_id;
+      const epoch = c.gateway_epoch;
+      const sequence = c.gateway_sequence;
+      if (!sid || !subscribedSessionsRef.current.has(sid) || typeof epoch !== "string" || !epoch
+        || typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0
+        || !RESYNC_REASONS.has(c.body?.reason)) return;
+      const sameEpoch = gatewaySequences.current.epoch(sid) === epoch;
+      if (!gatewaySequences.current.reset(sid, { epoch, sequence })) return;
+
+      const previous = recoveries.current.get(sid);
+      clearTimeout(previous?.timer);
+      historyLoads.current.delete(sid);
+      bookRef.current.delete(sid);
+      clearTimeout(compactionTimersRef.current[sid]);
+      delete compactionTimersRef.current[sid];
+      delete compactionStartedAtRef.current[sid];
+      setCompactionMap((prev) => prev[sid] ? { ...prev, [sid]: false } : prev);
+      if (!sameEpoch) setFollowup(sid, null);
+      const recovery: SessionRecovery = {
+        revision: 0, inFlight: false, retryRequested: false,
+        verifiedFollowupId: sameEpoch ? previous?.verifiedFollowupId : undefined,
+      };
+      if (Array.isArray(c.body.pending_followups)) {
+        for (const question of c.body.pending_followups) {
+          if (question?.kind !== "followup_question" || !question.body?.question_id
+            || question.session_id !== sid) continue;
+          if (!applyFollowup(question, sid)) recovery.verifiedFollowupId = question.body.question_id;
+        }
+      }
+      recoveries.current.set(sid, recovery);
+      setBusy(sid, true);
+      setQueue(sid, "");
+      setRecoveryNotice(sid, RECOVERY_NOTICE);
+      scheduleRecovery(sid, recovery, true);
     };
 
     const handle = (c: Chunk) => {
-      const sid = c.session_id || currentSidRef.current;
-      if (typeof c.gateway_sequence === "number" && c.gateway_sequence > 0) {
-        let seen = seenGatewaySequencesRef.current.get(sid);
-        if (!seen) {
-          seen = new Set<number>();
-          seenGatewaySequencesRef.current.set(sid, seen);
-        }
-        if (seen.has(c.gateway_sequence)) return;
-        seen.add(c.gateway_sequence);
-        if (seen.size > 2000) {
-          const keepFrom = c.gateway_sequence - 1000;
-          for (const value of seen) {
-            if (value < keepFrom) seen.delete(value);
-          }
-        }
-        const previousSequence = lastGatewaySequenceRef.current.get(sid) ?? 0;
-        if (c.gateway_sequence > previousSequence) {
-          lastGatewaySequenceRef.current.set(sid, c.gateway_sequence);
-        }
+      if (c.kind === "gateway_resync") {
+        beginRecovery(c);
+        return;
       }
+      const sid = c.session_id || currentSidRef.current;
+      if (!gatewaySequences.current.accept(sid, c)) return;
       if (suppressChunksRef.current.has(sid)) return;
       const chunkRequestId = String(
         c.request_id || c.body?.request_id || (c.body?.message && typeof c.body.message === "object"
@@ -623,6 +782,21 @@ export function useChat(
           : "") || "",
       ).trim();
       if (isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
+      const recovery = recoveries.current.get(sid);
+      if (recovery) {
+        // There is no complete active-turn projection. Keep the visible prefix and
+        // never join it with a suffix whose beginning may have fallen out of the log.
+        if (c.kind === "followup_question") {
+          if (!applyFollowup(c, sid)) recovery.verifiedFollowupId = c.body.question_id;
+        } else if (c.kind === "plan_review") {
+          applyPlanReview(c, sid);
+        }
+        recovery.revision += 1;
+        if (c.kind === "final" || c.kind === "error" || c.kind === "plan_review") {
+          scheduleRecovery(sid, recovery, true);
+        }
+        return;
+      }
       const book = bookFor(sid);
 
       const buildFeatureEventCtx = (): FeatureEventContext => ({
@@ -868,76 +1042,34 @@ export function useChat(
         // 自动消费前端本地队列（stop 导致的 error 会在 stop 回调中清空队列）
         consumePendingRef.current(sid);
       } else if (c.kind === "plan_review") {
-        // 模型调了 exit_plan_mode → 写入当前回合的消息流（plan 轮），位置与工具调用卡片一致。
-        // empty=true 表示计划文件为空，前端弹提示卡（无审批按钮）；否则弹正常审批卡。
-        const isEmpty = !!c.body.empty;
-        const review: PlanReview = {
-          plan: c.body.plan ?? "",
-          planFile: c.body.plan_file ?? "",
-          status: isEmpty ? "empty" : (c.body.status ?? "pending"),
-          empty: isEmpty,
-          phase: typeof c.body.phase === "string" ? c.body.phase : undefined,
-        };
-        ensureAssistantMessage(sid, { planReview: review });
-        setPlan(sid, {
-          active: true,
-          review: null,
-        });
+        applyPlanReview(c, sid);
       } else if (c.kind === "followup_question") {
         // 模型发起追问 → 展示选择框
-        const status = typeof c.body.status === "string" ? c.body.status : "";
-        if (["expired", "cancelled", "resolved"].includes(status)) {
-          const current = followupMapRef.current[sid];
-          const questionId = typeof c.body.question_id === "string" ? c.body.question_id : "";
-          if (!questionId || current?.question_id === questionId) {
-            setFollowup(sid, null);
-          }
-          if (typeof c.body.note === "string" && c.body.note.trim()) {
-            append(sid, "assistant", c.body.note.trim(), localTurnTiming(sid));
-          }
-          return;
+        if (applyFollowup(c, sid) && typeof c.body.note === "string" && c.body.note.trim()) {
+          append(sid, "assistant", c.body.note.trim(), localTurnTiming(sid));
         }
-        const q: FollowupQuestion = {
-          question_id: c.body.question_id ?? "",
-          title: c.body.title ?? "",
-          record_history: c.body.record_history !== false,
-          status,
-          note: typeof c.body.note === "string" ? c.body.note : undefined,
-          origin: c.body.origin && typeof c.body.origin === "object" ? c.body.origin : undefined,
-          questions: Array.isArray(c.body.questions)
-            ? c.body.questions.map((item: any) => ({
-                id: typeof item?.id === "string" ? item.id : "",
-                question: typeof item?.question === "string" ? item.question : "",
-                options: Array.isArray(item?.options)
-                  ? item.options.map((opt: any) => {
-                      if (opt && typeof opt === "object") {
-                        const label = String(opt.label ?? opt.text ?? opt.name ?? opt.value ?? "");
-                        const value = String(opt.value ?? label);
-                        const rawDescription = opt.description ?? opt.desc ?? opt.detail ?? opt.details
-                          ?? opt.content ?? opt.body ?? opt.explanation ?? opt.summary;
-                        const description = typeof rawDescription === "string" ? rawDescription.trim() : "";
-                        return description ? { label, value, description } : { label, value };
-                      }
-                      const text = String(opt ?? "");
-                      return { label: text, value: text };
-                    })
-                  : [],
-                inputMode: typeof item?.inputMode === "string"
-                  ? item.inputMode
-                  : (typeof item?.input_mode === "string" ? item.input_mode : undefined),
-                allowFreeText: item?.allowFreeText !== false && item?.allow_free_text !== false,
-                multiSelect: !!item?.multiSelect,
-              }))
-            : [],
-        };
-        setFollowup(sid, q);
       }
     };
 
-    const sock = new ChatSocket(handle, setConnected, subscribeOpenSessions);
-    sock.connect();
+    const sock = new ChatSocket(handle, (open) => {
+      transportOpen.current = open;
+      setConnected(open);
+      if (!open) {
+        for (const recovery of recoveries.current.values()) {
+          recovery.revision += 1;
+          clearTimeout(recovery.timer);
+        }
+      }
+    }, subscribeOpenSessions);
     sockRef.current = sock;
-    return () => sock.dispose();
+    sock.connect();
+    return () => {
+      transportOpen.current = false;
+      for (const recovery of recoveries.current.values()) clearTimeout(recovery.timer);
+      recoveries.current.clear();
+      historyLoads.current.clear();
+      sock.dispose();
+    };
   }, []); // 空依赖，只在挂载时创建一次 WS
 
   const send = useCallback(
@@ -949,7 +1081,7 @@ export function useChat(
       sendAttachments: Attachment[] = [],
       options: SendOptions = {},
     ) => {
-      const wasBusy = !!busyRef.current[sessionId];
+      const wasBusy = Boolean(busyRef.current[sessionId] || recoveries.current.has(sessionId));
       const planActive = Boolean(planMapRef.current[sessionId]?.active);
       if (wasBusy) {
         // 该会话已有一轮在跑 → 本条进入前端本地队列
@@ -1262,13 +1394,18 @@ export function useChat(
     });
   }, []);
 
-  const loadHistory = useCallback(async (sessionId: string) => {
+  const loadHistory = useCallback(async (sessionId: string, resume?: RecoveryHistoryLoad) => {
+    if (!resume && recoveries.current.has(sessionId)) return;
+    const load = Symbol();
+    historyLoads.current.set(sessionId, load);
+    const isCurrent = () => historyLoads.current.get(sessionId) === load
+      && (!resume || recoveryIsCurrent(sessionId, resume.recovery, resume.revision));
     const isLoaded = loadedSessionsRef.current.has(sessionId);
     const wasRunning = busyRef.current[sessionId] || !!bookRef.current.get(sessionId)?.assistantId;
 
     // 对 running/不完整的会话重新同步时，先清聚合记账，避免旧 toolMap/assistantId
     // 与新 chunk 或后端历史冲突。
-    if (isLoaded && wasRunning) {
+    if (!resume && isLoaded && wasRunning) {
       bookFor(sessionId).toolMap.clear();
       bookFor(sessionId).assistantId = null;
       bookFor(sessionId).awaitingAssistantAfterTool = false;
@@ -1277,8 +1414,8 @@ export function useChat(
     }
 
     subscribedSessionsRef.current.add(sessionId);
-    setQueue(sessionId, "");
-    if (!isLoaded && !wasRunning) {
+    if (!resume) setQueue(sessionId, "");
+    if (!resume && !isLoaded && !wasRunning) {
       setMessagesMap((prev) => ({
         ...prev,
         [sessionId]: [{ id: newId(), role: "assistant" as MsgRole, text: HISTORY_LOADING_TEXT }],
@@ -1286,12 +1423,15 @@ export function useChat(
     }
     try {
       // 并行取历史消息 + 当前运行态 + plan 状态。
+      const plan = api.sessionPlan(sessionId);
+      const todos = api.sessionTodos(sessionId);
       const [items, st, planState, todoState] = await Promise.all([
         withTimeout(api.history(sessionId), HISTORY_LOAD_TIMEOUT_MS, "history"),
-        api.sessionStatus(sessionId).catch(() => null),
-        api.sessionPlan(sessionId).catch(() => null),
-        api.sessionTodos(sessionId).catch(() => ({ todos: [] })),
+        resume ? Promise.resolve(resume.status) : api.sessionStatus(sessionId).catch(() => null),
+        resume ? withTimeout(plan, HISTORY_LOAD_TIMEOUT_MS, "plan") : plan.catch(() => null),
+        resume ? withTimeout(todos, HISTORY_LOAD_TIMEOUT_MS, "todos") : todos.catch(() => ({ todos: [] })),
       ]);
+      if (!isCurrent()) return;
       const list = mapHistoryItems(items);
       if (st && st.last_status === "failed" && st.last_error) {
         list.push({ id: newId(), role: "error" as MsgRole, text: st.last_error });
@@ -1367,7 +1507,7 @@ export function useChat(
         setBusy(sessionId, false);
         setMessagesMap((prev) => ({
           ...prev,
-          [sessionId]: preserveLocalProcessDetails(list, prev[sessionId] ?? []),
+          [sessionId]: resume ? list : preserveLocalProcessDetails(list, prev[sessionId] ?? []),
         }));
         if (st?.live === "queued") setStatus(sessionId, "queued");
         else if (st?.last_status === "failed") setStatus(sessionId, "error");
@@ -1383,8 +1523,20 @@ export function useChat(
         setPlan(sessionId, { active: Boolean(planState?.active), review: null });
       }
       setTodos(sessionId, normalizeTodos(todoState?.todos));
-      syncSubscriptions(Array.from(subscribedSessionsRef.current));
+      if (resume) {
+        recoveries.current.delete(sessionId);
+        bookRef.current.delete(sessionId);
+        setRecoveryNotice(sessionId);
+        if (followupMapRef.current[sessionId]?.question_id !== resume.recovery.verifiedFollowupId) {
+          setFollowup(sessionId, null);
+        }
+        const awaitingPlan = planState?.awaiting_approval || planState?.status === "pending";
+        if (!awaitingPlan && !followupMapRef.current[sessionId]) consumePendingRef.current(sessionId);
+      } else {
+        syncSubscriptions(Array.from(subscribedSessionsRef.current));
+      }
     } catch {
+      if (!isCurrent() || resume) return;
       loadedSessionsRef.current.add(sessionId);
       if (!wasRunning) {
         setBusy(sessionId, false);
@@ -1395,6 +1547,8 @@ export function useChat(
         setPlan(sessionId, { active: false, review: null });
         setStatus(sessionId, "error");
       }
+    } finally {
+      if (historyLoads.current.get(sessionId) === load) historyLoads.current.delete(sessionId);
     }
   }, []);
 
@@ -1424,6 +1578,7 @@ export function useChat(
     bookRef.current.delete(sessionId);
     subscribedSessionsRef.current.delete(sessionId);
     suppressChunksRef.current.delete(sessionId);
+    setFollowup(sessionId, null);
     loadedSessionsRef.current.delete(sessionId);
     delete busyRef.current[sessionId];
     delete pendingQueueRef.current[sessionId];
@@ -1435,6 +1590,7 @@ export function useChat(
     setMessagesMap(drop);
     setBusyMap(drop);
     setQueueMap(drop);
+    setRecoveryNotices(drop);
     setStatusMap(drop);
     setPendingQueueMap(drop);
     updatePlanMap(drop);
@@ -1448,8 +1604,10 @@ export function useChat(
       wikiProgressRef.current = next;
       return next;
     });
-    seenGatewaySequencesRef.current.delete(sessionId);
-    lastGatewaySequenceRef.current.delete(sessionId);
+    gatewaySequences.current.delete(sessionId);
+    clearTimeout(recoveries.current.get(sessionId)?.timer);
+    recoveries.current.delete(sessionId);
+    historyLoads.current.delete(sessionId);
   }, []);
 
   const plan = planMap[currentSessionId] ?? { active: false, review: null };
@@ -1457,6 +1615,7 @@ export function useChat(
     messages: messagesMap[currentSessionId] ?? [],
     busy: busyMap[currentSessionId] ?? false,
     queueHint: queueMap[currentSessionId] ?? "",
+    recoveryNotice: recoveryNotices[currentSessionId] ?? "",
     pendingQueue: pendingQueueMap[currentSessionId] ?? [],
     todos: todoMap[currentSessionId] ?? [],
     compactingContext: compactionMap[currentSessionId] ?? false,
@@ -1471,6 +1630,7 @@ export function useChat(
       messages: messagesMap[sid] ?? [],
       busy: busyMap[sid] ?? false,
       queueHint: queueMap[sid] ?? "",
+      recoveryNotice: recoveryNotices[sid] ?? "",
       pendingQueue: pendingQueueMap[sid] ?? [],
       planActive: (planMap[sid] ?? { active: false, review: null }).active,
       followupQuestion: followupMap[sid] ?? null,

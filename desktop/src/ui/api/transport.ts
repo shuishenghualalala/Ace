@@ -33,6 +33,7 @@ export type ChunkKind =
   | 'notification'
   | 'work_event'
   | 'feature_event'
+  | 'gateway_resync'
   | 'ping'
   | 'pong';
 
@@ -60,6 +61,11 @@ export interface SendPayload {
   work_disabled_preference_ids?: string[];
 }
 
+export interface GatewayCursor {
+  epoch: string;
+  sequence: number;
+}
+
 export interface ChatChunk {
   kind: ChunkKind | 'security_approval';
   body: Record<string, unknown>;
@@ -69,6 +75,7 @@ export interface ChatChunk {
   session_id?: string;
   /** Gateway 侧单调序号，用于断线 replay 与客户端去重。 */
   gateway_sequence?: number;
+  gateway_epoch?: string;
   /** kind === 'notification' 时携带的通知对象（owner 级广播帧）。 */
   notification?: BackendNotification;
 }

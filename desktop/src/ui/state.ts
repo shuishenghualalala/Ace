@@ -42,6 +42,8 @@ import {
 } from './stores/stores';
 // stream-reassembly 零依赖（不 import state/features），故 state.ts 可安全 import 无循环。
 import { resetSession as resetReassembly } from './stream-reassembly';
+import { clearStreamActivity, resetGatewaySequence } from './features/gateway-sequence';
+import { cancelSessionStreamRecovery } from './features/session-stream-recovery';
 
 export interface TeamWikiReadGrant {
   teamId: string;
@@ -713,6 +715,9 @@ export function clearAttachments(): void {
  *  busySessions / queueHints / editFromIdx / pendingQueues。订阅交给调用方通过
  *  addSubscribedSessions / BackendChatSocket.unsubscribe 处理。 */
 export function removeSessionState(sessionId: string): void {
+  cancelSessionStreamRecovery(sessionId);
+  resetGatewaySequence(sessionId);
+  clearStreamActivity(sessionId);
   teamWikiReadGrants.delete(sessionId);
   // 修法3：会话删除 → 清掉它的 delta 重组缓冲，防泄漏。
   resetReassembly(sessionId);

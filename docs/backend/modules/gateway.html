@@ -57,6 +57,8 @@
 
   <h2>2. 功能拆解</h2>
   <p>WebSocket 重连时，Gateway 按账号和会话串行处理序号分配、回放和实时订阅。新连接先按游标接收回放，再加入实时订阅。已经进入回放缓存的限流帧会先发给原订阅者，避免新连接在回放后重复收到这些帧。</p>
+  <p>会话帧包含 <code>gateway_epoch</code> 和 <code>gateway_sequence</code>。支持代次的客户端在 <code>gateway_cursors</code> 中按会话发送 <code>{epoch, sequence}</code>。Gateway 重启和账号退出都会更换对应代次。旧客户端仍可使用 <code>last_gateway_sequences</code>。</p>
+  <p>提交的游标格式无效、代次不符或越出保留窗口时，Gateway 给请求 socket 返回 <code>gateway_resync</code>，包含当前代次、保留下界和后续实时帧的起始水位。客户端从持久历史恢复已结束的回合。仍在生成时保留已显示的内容，回合结束后补齐有缺口的回复。恢复消息也可携带仍待答的追问，最多保留 128 个会话、每会话 8 条、每条 32 KiB。</p>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
     <tbody>

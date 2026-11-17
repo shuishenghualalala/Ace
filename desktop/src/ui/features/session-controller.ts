@@ -9,6 +9,7 @@
  */
 
 import { BackendChatSocket, backendApi } from '../backend-client';
+import type { ChatChunk } from '../api/transport';
 import type { PlanReviewStatus } from '../chat-render';
 import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './board-hooks';
@@ -37,11 +38,13 @@ import {
   setEditFrom,
   setHistoryPaging,
   state,
+  type PendingFollowup,
   type TabKey,
   type TodoItem,
 } from '../state';
 import {
   applyChunk,
+  consumePending,
   flushPendingChunks,
   getMessages,
   jumpChatToBottom,
@@ -55,8 +58,19 @@ import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-map
 import { mergeBackendHistory, prependHistoryWindow } from './history-merge';
 import { resolveChatRenderTargetId, isStudioView } from './studio-chrome-state';
 import { hydrateMissingTurnFileCounts } from './turn-file-counts';
-import { getLastGatewaySequences } from './gateway-sequence';
-import { resetSessionExcept } from '../stream-reassembly';
+import {
+  acceptGatewayResync,
+  getGatewayCursors,
+  getLastGatewaySequences,
+  isDuplicateGatewayChunk,
+  noteGatewaySequence,
+} from './gateway-sequence';
+import { resetSession, resetSessionExcept } from '../stream-reassembly';
+import {
+  beginSessionStreamRecovery,
+  cancelSessionStreamRecovery,
+  getSessionStreamRecovery,
+} from './session-stream-recovery';
 import { syncSessionLiveFromBackend } from './session-busy';
 import { startStreamWatchdog } from './stream-watchdog';
 import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
@@ -88,7 +102,9 @@ export async function openSession(
   window.dispatchEvent(new CustomEvent('workspace:context-changed'));
   // P1-6：订阅后立即渲染首屏（空消息 + historyLoading → 骨架占位），不等历史返回——
   // 首屏可交互时间与历史总量解耦；下方原序列在骨架之上继续执行。
-  if (getMessages(sessionId).length === 0) setHistoryLoading(sessionId, true);
+  if (getMessages(sessionId).length === 0 && !getSessionStreamRecovery(sessionId)) {
+    setHistoryLoading(sessionId, true);
+  }
   renderChat();
   jumpChatToBottom();
   // 历史消息优先读取逐消息 model；旧消息缺失时回退当前 Session 模型，
@@ -171,12 +187,17 @@ const historyLoadSeq = new Map<string, number>();
 
 /** 首屏尾部窗口大小（P1-6）：与历史总量解耦的常数；更早历史触顶翻页补。 */
 const HISTORY_WINDOW_SIZE = 100;
+type BackendSessionStatus = Awaited<ReturnType<typeof backendApi.sessionStatus>>;
 
 export async function loadBackendHistory(
   sessionId: string,
-  options: { canApply?: () => boolean } = {},
-): Promise<void> {
-  if (!isRendererLoggedIn()) return;
+  options: {
+    canApply?: () => boolean;
+    terminalStatus?: BackendSessionStatus;
+    pendingFollowup?: PendingFollowup;
+  } = {},
+): Promise<boolean> {
+  if (!isRendererLoggedIn() || (getSessionStreamRecovery(sessionId) && !options.terminalStatus)) return false;
   const loadSeq = (historyLoadSeq.get(sessionId) ?? 0) + 1;
   historyLoadSeq.set(sessionId, loadSeq);
   const isLatestLoad = () => historyLoadSeq.get(sessionId) === loadSeq;
@@ -190,11 +211,11 @@ export async function loadBackendHistory(
       firstWindow
         ? backendApi.historyWindow(sessionId, { limit: HISTORY_WINDOW_SIZE })
         : backendApi.history(sessionId).then((items) => ({ items, has_more: false, next_before: null })),
-      backendApi.sessionStatus(sessionId).catch(() => null),
+      options.terminalStatus ?? backendApi.sessionStatus(sessionId).catch(() => null),
       backendApi.sessionPlan(sessionId).catch(() => null),
       backendApi.sessionTodos(sessionId).catch(() => ({ todos: [] })),
     ]);
-    if (!canApply()) return;
+    if (!canApply()) return false;
     if (firstWindow) {
       setHistoryPaging(sessionId, {
         hasMore: windowOrFull.has_more,
@@ -212,7 +233,7 @@ export async function loadBackendHistory(
       subscribeSessions([sessionId]);
       syncSessionLiveFromBackend(sessionId, st?.live, st?.last_status, st?.active_request_id);
       renderWorkspaceHistory(openSession);
-      return;
+      return true;
     }
     const history = mergeTeamInternalMessages(mapBackendHistoryItems(items, sessionId));
     if (st?.last_status === 'failed' && st.last_error) {
@@ -307,6 +328,7 @@ export async function loadBackendHistory(
     );
     if (st?.live !== 'running' && st?.live !== 'queued') {
       resetBook(sessionId);
+      if (options.pendingFollowup) patchBook(sessionId, { pendingFollowup: options.pendingFollowup });
     } else {
       patchBook(sessionId, { hadTeamInternal: merged.some((message) => message.role === 'team_internal') });
     }
@@ -345,6 +367,7 @@ export async function loadBackendHistory(
       busy: sessionStore.get().busySessions[sessionId],
     });
     renderWorkspaceHistory(openSession);
+    return true;
   } catch {
     // 历史加载失败不再静默清空：保留内存中已有消息；无消息可显示时置错误标记，
     // 聊天区渲染「加载失败 + 重试」卡（__history_error 单元），失败对用户可见。
@@ -355,6 +378,7 @@ export async function loadBackendHistory(
       notify('会话历史加载失败，可点击对话区「重试」');
       if (state.activeSessionId === sessionId) renderChat();
     }
+    return false;
   } finally {
     // history 写回完成：flush 期间排队的迟到分片（P2-2），再清 loading 标记。
     // 仅最新请求收尾：旧请求不得清 loading（新请求仍在排队窗口内）也不得 flush。
@@ -380,7 +404,8 @@ const olderPageInFlight = new Set<string>();
 export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> {
   const paging = state.historyPaging[sessionId];
   if (!paging?.hasMore || !paging.nextBefore) return false;
-  if (olderPageInFlight.has(sessionId)) return false;
+  if (olderPageInFlight.has(sessionId) || getSessionStreamRecovery(sessionId)) return false;
+  const historyVersion = historyLoadSeq.get(sessionId);
   olderPageInFlight.add(sessionId);
   logStream('history', 'load-older-start', { sessionId, before: paging.nextBefore });
   try {
@@ -388,6 +413,7 @@ export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> 
       limit: HISTORY_WINDOW_SIZE,
       before: paging.nextBefore,
     });
+    if (historyVersion !== historyLoadSeq.get(sessionId)) return false;
     const current = state.messages[sessionId] ?? [];
     if (current.length === 0) {
       // 会话已被清空（删除/重开首窗）：迟到的旧页直接丢弃
@@ -443,16 +469,152 @@ export function installHistoryPagingScroll(): void {
   );
 }
 
+let recoveryConnection: (() => boolean) | null = null;
+const recoveryChecks = new Map<string, { recovery: object; connection: () => boolean; retry: boolean }>();
+
+// An incomplete stream cannot be repaired from the remaining suffix. Reconcile
+// via the durable transcript once the Gateway has settled the turn.
+export async function reconcileSessionAfterResync(sessionId: string, terminalFrame = false): Promise<void> {
+  const recovery = getSessionStreamRecovery(sessionId);
+  const connection = recoveryConnection;
+  if (!recovery || !connection?.() || state.suppressChunks.has(sessionId)) return;
+  const existing = recoveryChecks.get(sessionId);
+  if (existing?.recovery === recovery && existing.connection === connection) {
+    existing.retry ||= terminalFrame;
+    return;
+  }
+  const check = { recovery, connection, retry: false };
+  recoveryChecks.set(sessionId, check);
+  const progress = recovery.progress;
+  const before = sessionStore.get().books[sessionId];
+  const isCurrent = () => isRendererLoggedIn() && connection()
+    && getSessionStreamRecovery(sessionId) === recovery
+    && !state.suppressChunks.has(sessionId);
+  const canApply = () => {
+    const current = sessionStore.get().books[sessionId];
+    return isCurrent()
+      && progress === recovery.progress
+      && current?.activeRequestId === before?.activeRequestId
+      && current?.turnSealed === before?.turnSealed
+      && current?.pendingFollowup === before?.pendingFollowup
+      && current?.pendingPlan === before?.pendingPlan;
+  };
+  try {
+    const status = await backendApi.sessionStatus(sessionId).catch(() => null);
+    if (!canApply() || !status?.live) return;
+    if (status.live === 'running' || status.live === 'queued') {
+      syncSessionLiveFromBackend(sessionId, status.live, status.last_status, status.active_request_id);
+      return;
+    }
+    const pendingFollowup = before?.pendingFollowup?.questionId === recovery.verifiedFollowupId
+      ? before?.pendingFollowup : null;
+    if (pendingFollowup && recovery.historyAppliedForFollowup === pendingFollowup.questionId) return;
+    const applied = await loadBackendHistory(sessionId, {
+      canApply, terminalStatus: status, ...(pendingFollowup ? { pendingFollowup } : {}),
+    });
+    if (!applied || !isCurrent()) return;
+    if (pendingFollowup && sessionStore.get().books[sessionId]?.pendingFollowup === pendingFollowup) {
+      recovery.historyAppliedForFollowup = pendingFollowup.questionId;
+      if (state.activeSessionId === sessionId) renderChat();
+      return;
+    }
+    cancelSessionStreamRecovery(sessionId);
+    if (state.activeSessionId === sessionId) renderChat();
+    consumePending(sessionId);
+  } finally {
+    if (recoveryChecks.get(sessionId) === check) recoveryChecks.delete(sessionId);
+    if (check.retry && isCurrent()) void reconcileSessionAfterResync(sessionId);
+  }
+}
+
+const INCOMPLETE_STREAM_KINDS = new Set<ChatChunk['kind']>([
+  'delta', 'thinking', 'tool', 'status', 'final', 'error', 'todo_updated', 'file_changes',
+]);
+
+function handleGatewayChunk(chunk: ChatChunk): void {
+  const sessionId = chunk.session_id;
+  if (chunk.kind === 'gateway_resync') {
+    if (!sessionId || (!state.subscribedSessions.has(sessionId) && state.activeSessionId !== sessionId)) return;
+    const previousEpoch = getGatewayCursors([sessionId])[sessionId]?.epoch;
+    if (!acceptGatewayResync(sessionId, chunk) || state.suppressChunks.has(sessionId)) return;
+    const previousRecovery = getSessionStreamRecovery(sessionId);
+    const recovery = beginSessionStreamRecovery(sessionId);
+    if (previousEpoch === chunk.gateway_epoch && previousRecovery?.verifiedFollowupId) {
+      recovery.verifiedFollowupId = previousRecovery.verifiedFollowupId;
+    }
+    historyLoadSeq.set(sessionId, (historyLoadSeq.get(sessionId) ?? 0) + 1);
+    setHistoryLoading(sessionId, false);
+    flushPendingChunks(sessionId);
+    resetSession(sessionId);
+    if (previousEpoch && previousEpoch !== chunk.gateway_epoch) patchBook(sessionId, { pendingFollowup: null });
+    const followups = chunk.body?.pending_followups;
+    if (Array.isArray(followups)) {
+      for (const pending of followups) {
+        if (pending?.kind !== 'followup_question' || pending.session_id !== sessionId
+          || !Array.isArray(pending.body?.questions) || !pending.body?.question_id) continue;
+        if (sessionStore.get().books[sessionId]?.pendingFollowup?.questionId !== pending.body.question_id) {
+          // The Gateway has verified this is still waiting. It is outside replay
+          // and may refer to a request the renderer never saw over the socket.
+          applyChunk({ ...pending, request_id: undefined, gateway_epoch: undefined, gateway_sequence: undefined });
+        }
+        if (sessionStore.get().books[sessionId]?.pendingFollowup?.questionId === pending.body.question_id) {
+          recovery.verifiedFollowupId = pending.body.question_id;
+        }
+      }
+    }
+    if (state.activeSessionId === sessionId) renderChat();
+    void reconcileSessionAfterResync(sessionId);
+    return;
+  }
+  const recovery = sessionId && getSessionStreamRecovery(sessionId);
+  if (sessionId && recovery) {
+    if (INCOMPLETE_STREAM_KINDS.has(chunk.kind)
+      || (chunk.kind === 'feature_event' && chunk.body?.feature === 'team' && chunk.body?.event === 'internal_message')) {
+      if (isDuplicateGatewayChunk(sessionId, chunk)) return;
+      noteGatewaySequence(sessionId, chunk);
+      recovery.progress += 1;
+      if (chunk.kind === 'final' || (chunk.kind === 'error' && chunk.is_final)) {
+        void reconcileSessionAfterResync(sessionId, true);
+      }
+      return;
+    }
+    if (chunk.kind === 'followup_question' || chunk.kind === 'plan_review') {
+      if (isDuplicateGatewayChunk(sessionId, chunk)) return;
+      recovery.progress += 1;
+      if (chunk.kind === 'followup_question' && typeof chunk.body?.question_id === 'string'
+        && Array.isArray(chunk.body.questions)) {
+        recovery.verifiedFollowupId = chunk.body.question_id;
+      }
+      // Post-cut controls describe an interaction even when the original
+      // request was never opened locally.
+      const interaction = { ...chunk };
+      delete interaction.request_id;
+      applyChunk(interaction);
+      if (chunk.kind === 'followup_question') {
+        const pending = sessionStore.get().books[sessionId]?.pendingFollowup;
+        if (!pending && recovery.historyAppliedForFollowup) void reconcileSessionAfterResync(sessionId, true);
+      }
+      return;
+    }
+  }
+  applyChunk(chunk);
+}
+
 async function reconcileSessionAfterReconnect(
   sessionId: string,
   active: boolean,
   isCurrentConnection: () => boolean,
 ): Promise<void> {
   if (state.suppressChunks.has(sessionId)) return;
+  if (getSessionStreamRecovery(sessionId)) {
+    await reconcileSessionAfterResync(sessionId);
+    return;
+  }
   const before = sessionStore.get().books[sessionId];
   const canApply = () => {
     const current = sessionStore.get().books[sessionId];
     return isCurrentConnection()
+      && !getSessionStreamRecovery(sessionId)
       && !state.suppressChunks.has(sessionId)
       && current?.activeRequestId === before?.activeRequestId
       && current?.turnSealed === before?.turnSealed;
@@ -495,11 +657,13 @@ export function bootstrapBackend(): void {
   bindChannelSessionListener();
   if (!isRendererLoggedIn()) return;
   state.socket?.dispose();
+  recoveryConnection = null;
   let transportVersion = 0;
   const socket = new BackendChatSocket(
-    (chunk) => applyChunk(chunk),
+    handleGatewayChunk,
     (open, meta) => {
       transportVersion += 1;
+      if (!open) recoveryConnection = null;
       logStream('ws-renderer', open ? 'socket-open' : 'socket-close', {
         subscribed: Array.from(state.subscribedSessions),
         activeSessionId: state.activeSessionId,
@@ -516,6 +680,7 @@ export function bootstrapBackend(): void {
     () => {
       const version = transportVersion;
       const isCurrentConnection = () => state.socket === socket && transportVersion === version;
+      recoveryConnection = isCurrentConnection;
       subscribeSessions(Array.from(state.subscribedSessions));
       const active = state.activeSessionId;
       const sessions = new Set(state.subscribedSessions);
@@ -531,7 +696,7 @@ export function bootstrapBackend(): void {
     },
   );
   state.socket = socket;
-  socket.bindLastGatewaySequences(getLastGatewaySequences);
+  socket.bindLastGatewaySequences(getLastGatewaySequences, getGatewayCursors);
   socket.connect();
   startStreamWatchdog();
   installHistoryPagingScroll();

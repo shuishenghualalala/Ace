@@ -14,7 +14,7 @@ import {
   wsBase,
   readDynamicKanbanResumeStream,
 } from './transport';
-import type { SendPayload, ChatChunk, BackendSocketStatusMeta } from './transport';
+import type { SendPayload, ChatChunk, BackendSocketStatusMeta, GatewayCursor } from './transport';
 
 // ── 会话 / Agent 配置 ──
 
@@ -843,6 +843,7 @@ export class BackendChatSocket {
   private subscribedSessions = new Set<string>();
   /** 重连 resubscribe 时解析各 session 的 last_gateway_sequences。 */
   private resolveLastGatewaySequences: ((sessionIds: string[]) => Record<string, number>) | undefined;
+  private resolveGatewayCursors: ((sessionIds: string[]) => Record<string, GatewayCursor>) | undefined;
 
   constructor(
     private readonly onChunk: (chunk: ChatChunk) => void,
@@ -856,8 +857,12 @@ export class BackendChatSocket {
   }
 
   /** 注入 gateway_sequence 解析器（由 session-controller 在 bootstrap 时绑定）。 */
-  bindLastGatewaySequences(resolver: (sessionIds: string[]) => Record<string, number>): void {
+  bindLastGatewaySequences(
+    resolver: (sessionIds: string[]) => Record<string, number>,
+    resolveCursors?: (sessionIds: string[]) => Record<string, GatewayCursor>,
+  ): void {
     this.resolveLastGatewaySequences = resolver;
+    this.resolveGatewayCursors = resolveCursors;
   }
 
   /** 指数退避重连（成功 open 后 attempts 清零）。已有待执行重连时不叠加。 */
@@ -1012,6 +1017,7 @@ export class BackendChatSocket {
           text?: string;
           sessions?: string[];
           last_gateway_sequences?: Record<string, number>;
+          gateway_cursors?: Record<string, GatewayCursor>;
           answers?: Record<string, unknown>;
           request_id?: string;
           mode?: string;
@@ -1048,16 +1054,7 @@ export class BackendChatSocket {
 
   private resubscribe(): void {
     const sessions = Array.from(this.subscribedSessions);
-    if (sessions.length > 0) {
-      const seqs = this.resolveLastGatewaySequences?.(sessions);
-      const hasSeqs = seqs && Object.keys(seqs).length > 0;
-      void this.send({
-        action: 'subscribe',
-        session_id: sessions[0],
-        sessions,
-        ...(hasSeqs ? { last_gateway_sequences: seqs } : {}),
-      });
-    }
+    void this.subscribe(sessions, this.resolveLastGatewaySequences?.(sessions));
   }
 
   subscribe(sessionIds: string[], lastGatewaySequences?: Record<string, number>): Promise<boolean> {
@@ -1065,11 +1062,13 @@ export class BackendChatSocket {
     sessions.forEach((id) => this.subscribedSessions.add(id));
     if (sessions.length === 0) return Promise.resolve(true);
     const hasSeqs = lastGatewaySequences && Object.keys(lastGatewaySequences).length > 0;
+    const cursors = this.resolveGatewayCursors?.(sessions);
     return this.send({
       action: 'subscribe',
       session_id: sessions[0],
       sessions,
       ...(hasSeqs ? { last_gateway_sequences: lastGatewaySequences } : {}),
+      ...(cursors && Object.keys(cursors).length ? { gateway_cursors: cursors } : {}),
     });
   }
 

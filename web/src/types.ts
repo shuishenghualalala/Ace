@@ -64,7 +64,8 @@ export type ChunkKind =
   | "todo_updated"
   | "todo_reminder"
   | "file_changes"
-  | "feature_event";
+  | "feature_event"
+  | "gateway_resync";
 
 export interface TodoItem {
   id: string;
@@ -123,6 +124,11 @@ export interface FeatureEventBody {
   payload?: Record<string, any>;
 }
 
+export interface GatewayResumeCursor {
+  epoch: string;
+  sequence: number;
+}
+
 export interface Chunk {
   kind: ChunkKind;
   body: Record<string, any>;
@@ -132,6 +138,7 @@ export interface Chunk {
   sequence: number;
   /** Gateway 内部单调序列号，用于断线重连后回放定位 */
   gateway_sequence?: number;
+  gateway_epoch?: string;
   /** 该帧所属会话；前端据此把帧路由到对应会话的消息缓存 */
   session_id?: string;
 }

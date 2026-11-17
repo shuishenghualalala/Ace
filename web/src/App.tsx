@@ -543,6 +543,7 @@ export default function App() {
     messages: chat.messages,
     busy: chat.busy,
     queueHint: chat.queueHint,
+    recoveryNotice: chat.recoveryNotice,
     pendingQueue: chat.pendingQueue,
     config,
     attachments,
@@ -731,6 +732,7 @@ export default function App() {
               busy={chat.busy}
               compactingContext={chat.compactingContext}
               queueHint={chat.queueHint}
+              recoveryNotice={chat.recoveryNotice}
               pendingQueue={chat.pendingQueue}
               config={config}
               attachments={attachments}

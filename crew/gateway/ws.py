@@ -326,6 +326,8 @@ def create_ws_router(
                     if not isinstance(sessions, list):
                         sessions = [session_id]
                     raw_seqs = data.get("last_gateway_sequences")
+                    raw_cursors = data.get("gateway_cursors")
+                    cursors = raw_cursors if isinstance(raw_cursors, dict) else {}
                     last_seqs: dict[str, int] = {}
                     if isinstance(raw_seqs, dict):
                         for k, v in raw_seqs.items():
@@ -334,7 +336,7 @@ def create_ws_router(
                                 continue
                             try:
                                 last_seqs[sid_key] = max(0, int(v))
-                            except (TypeError, ValueError):
+                            except (TypeError, ValueError, OverflowError):
                                 continue
 
                     def _replay_filter(payload: dict) -> bool:
@@ -360,6 +362,7 @@ def create_ws_router(
                         # 生成但尚未落库的会话。注册按 (owner, session_id) 索引，不会跨账号泄露。
                         if _session_owned(sid):
                             after = last_seqs.get(sid, 0)
+                            cursor_arg = {"resume_cursor": cursors[sid]} if sid in cursors else {}
                             if not await connections.replay(
                                 sid,
                                 socket,
@@ -367,6 +370,7 @@ def create_ws_router(
                                 filter_fn=_replay_filter,
                                 owner_account_id=owner,
                                 register_for_live=True,
+                                **cursor_arg,
                             ):
                                 return
                             registered_sessions.add(sid)

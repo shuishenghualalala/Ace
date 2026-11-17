@@ -16,6 +16,7 @@ export interface Props {
   busy: boolean;
   compactingContext?: boolean;
   queueHint?: string;
+  recoveryNotice?: string;
   pendingQueue: PendingMessage[];
   config: AppConfig | null;
   attachments: Attachment[];
@@ -74,6 +75,7 @@ export default function ChatPanel({
   busy,
   compactingContext = false,
   queueHint,
+  recoveryNotice,
   pendingQueue,
   config,
   attachments,
@@ -332,7 +334,12 @@ export default function ChatPanel({
             onEdit={(i, q) => onEditQueueItem?.(i, q)}
             onSendNow={(id) => onSendQueueItemNow?.(id)}
           />
-          {busy && !compactingContext && <RunningIntro />}
+          {recoveryNotice && (
+            <div className="context-compaction-notice" role="status" aria-live="polite">
+              {recoveryNotice}
+            </div>
+          )}
+          {busy && !compactingContext && !recoveryNotice && <RunningIntro />}
           {compactingContext && (
             <div className="context-compaction-notice" role="status" aria-live="polite">
               <svg className="nav-agent-logo context-compaction-notice__logo" width="18" height="18" viewBox="3 3 18 18" aria-hidden="true">
