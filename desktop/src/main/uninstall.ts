@@ -343,7 +343,14 @@ export async function handleUninstall(): Promise<void> {
 
   // ── 第 3 步：停止 gateway 子进程，释放 ~/.Crew 文件句柄 ────────
   console.log('[uninstall] 停止 managed gateway...');
-  await deps.stopManagedGateway();
+  try {
+    await deps.stopManagedGateway();
+  } catch (error) {
+    console.error('[uninstall] 停止 managed gateway 失败:', error);
+    deps.resetQuittingFlag?.();
+    showUninstallError(win, '后台进程未退出', '未继续卸载 Crew', '请关闭应用后再重试。');
+    return;
+  }
   // Other Gateway processes are independent of this Desktop, even when they
   // use the same Python module name. Do not enumerate or terminate them.
 

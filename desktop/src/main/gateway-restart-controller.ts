@@ -25,14 +25,13 @@ export class GatewayRestartController {
   private running = false;
   private pending = false;
   private stopped = false;
+  private generation = 0;
   private failures = 0;
   /** 连续短命实例数（熔断计数；restart() 成功不清零，只有长命实例/复位清零）。 */
   private consecutiveFailures = 0;
   private tripped = false;
   /** 最近一次实例健康就绪时间戳；null = 从未就绪（启动期崩溃由抛错路径计数）。 */
   private readyAt: number | null = null;
-  /** 主动回收（用户重试/卡死回收/身份失效）预期内的退出不计失败。 */
-  private expectIntentionalExit = false;
   private readonly minDelayMs: number;
   private readonly maxDelayMs: number;
   private readonly stableUptimeMs: number;
@@ -68,13 +67,20 @@ export class GatewayRestartController {
     }, delay);
   }
 
+  /** Request a restart once this generation's old process has stopped. */
+  async scheduleAfter(stop: Promise<void>, canRestart: () => boolean): Promise<void> {
+    const generation = this.generation;
+    await stop;
+    if (!this.stopped && this.generation === generation && canRestart()) this.schedule();
+  }
+
   /** 熔断后的手动复位（用户点「重试」）：清零计数并允许后续自动重启。 */
   reset(): void {
+    this.invalidateSchedule();
     this.tripped = false;
     this.consecutiveFailures = 0;
     this.failures = 0;
     this.readyAt = null;
-    this.expectIntentionalExit = false;
   }
 
   isTripped(): boolean {
@@ -83,6 +89,11 @@ export class GatewayRestartController {
 
   stop(): void {
     this.stopped = true;
+    this.invalidateSchedule();
+  }
+
+  private invalidateSchedule(): void {
+    this.generation += 1;
     this.pending = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
@@ -93,18 +104,13 @@ export class GatewayRestartController {
     this.readyAt = Date.now();
   }
 
-  /** 主动回收前调用：下一次 exit 不计失败（用户重试 / 卡死回收 / 身份失效重建）。 */
+  /** 主动回收前放弃旧实例的就绪时间，后续实例重新独立计时。 */
   noteIntentionalStop(): void {
-    this.expectIntentionalExit = true;
+    this.readyAt = null;
   }
 
   /** 子进程退出时调用：短命实例（就绪后存活 < stableUptimeMs）计入熔断。 */
   noteGatewayExit(): void {
-    if (this.expectIntentionalExit) {
-      this.expectIntentionalExit = false;
-      this.readyAt = null;
-      return;
-    }
     if (this.readyAt === null) {
       // 从未健康就绪（启动期崩溃）：该路径由 ensureGateway 抛错 → run() catch 计数。
       return;
@@ -128,21 +134,18 @@ export class GatewayRestartController {
   }
 
   private async run(): Promise<void> {
-    if (this.stopped || this.running) return;
+    if (this.stopped || this.running || this.tripped) return;
+    const generation = this.generation;
     this.running = true;
     this.pending = false;
     try {
       await this.restart();
-      this.failures = 0;
+      if (this.generation === generation) this.failures = 0;
     } catch (error) {
-      if (this.isIgnorableError?.(error)) {
-        // 被更新代际作废（用户重试让位）：不计失败、不退避、不重排。
-        this.running = false;
-        this.pending = false;
-        return;
-      }
+      if (this.generation !== generation || this.isIgnorableError(error)) return;
       this.failures += 1;
       this.consecutiveFailures += 1;
+      this.pending = true;
       if (!this.tripped && this.consecutiveFailures >= this.maxConsecutiveFailures) {
         this.tripped = true;
         try {
@@ -150,19 +153,15 @@ export class GatewayRestartController {
         } catch {
           /* 回调失败不影响熔断状态 */
         }
-        this.running = false;
-        this.pending = false;
-        return;
       }
+    } finally {
       this.running = false;
-      this.pending = false;
-      this.schedule();
-      return;
-    }
-    this.running = false;
-    if (this.pending) {
-      this.pending = false;
-      this.schedule();
+      // A reset discards the old attempt's outcome. Its slot still releases
+      // any restart requested by the new generation while it was running.
+      if (this.pending) {
+        this.pending = false;
+        this.schedule();
+      }
     }
   }
 }

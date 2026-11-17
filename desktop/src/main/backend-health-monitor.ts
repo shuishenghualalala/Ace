@@ -72,6 +72,8 @@ export class BackendHealthMonitor {
 
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
+  private probeInFlight = false;
+  private probeGeneration = 0;
   private connected = false;
   private failCount = 0;
   private components: Record<string, GatewayComponentState> | undefined;
@@ -108,13 +110,14 @@ export class BackendHealthMonitor {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
-    this.startedAt = this.now();
+    this.markRestart();
     this.schedule(0);
   }
 
   /** 停止排程；在途 probe 的结果会被丢弃且不再排下一次。 */
   stop(): void {
     this.stopped = true;
+    this.probeGeneration += 1;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -123,6 +126,7 @@ export class BackendHealthMonitor {
 
   /** Gateway 重建（自动/手动重启）后调用：宽限期与失败计数复位。 */
   markRestart(): void {
+    this.probeGeneration += 1;
     this.startedAt = this.now();
     this.failCount = 0;
     this.since = undefined;
@@ -135,7 +139,7 @@ export class BackendHealthMonitor {
   }
 
   private schedule(delayMs: number): void {
-    if (this.stopped) return;
+    if (this.stopped || this.timer !== null || this.probeInFlight) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.tick();
@@ -144,16 +148,23 @@ export class BackendHealthMonitor {
 
   private async tick(): Promise<void> {
     if (this.stopped) return;
-    let result: BackendHealthProbeResult;
+    const generation = this.probeGeneration;
+    this.probeInFlight = true;
     try {
-      result = await this.probe();
-    } catch {
-      result = { verified: false, failureKind: 'unknown' };
+      let result: BackendHealthProbeResult;
+      try {
+        result = await this.probe();
+      } catch {
+        result = { verified: false, failureKind: 'unknown' };
+      }
+      if (this.stopped || generation !== this.probeGeneration) return;
+      if (result.verified) this.onSuccess(result);
+      else this.onFailure(result.failureKind ?? 'unknown');
+    } finally {
+      this.probeInFlight = false;
+      // A replacement probe can start as soon as the invalidated probe settles.
+      this.schedule(generation === this.probeGeneration ? this.intervalMs : 0);
     }
-    if (this.stopped) return;
-    if (result.verified) this.onSuccess(result);
-    else this.onFailure(result.failureKind ?? 'unknown');
-    this.schedule(this.intervalMs);
   }
 
   private onSuccess(result: BackendHealthProbeResult): void {

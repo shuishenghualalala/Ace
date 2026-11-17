@@ -140,6 +140,81 @@ describe('BackendHealthMonitor', () => {
     monitor.stop();
   });
 
+  it.each([
+    { lifecycle: 'markRestart', oldLag: 50 },
+    { lifecycle: 'markRestart', oldLag: 15_000 },
+    { lifecycle: 'stop/start', oldLag: 50 },
+    { lifecycle: 'stop/start', oldLag: 15_000 },
+  ])('discards a probe with lag $oldLag from before $lifecycle without overlapping', async ({
+    lifecycle,
+    oldLag,
+  }) => {
+    vi.useFakeTimers();
+    let finishOld!: (result: BackendHealthProbeResult) => void;
+    const probe = vi.fn<() => Promise<BackendHealthProbeResult>>()
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue({ ...OK, loopLagMs: 40 });
+    const push = vi.fn();
+    const monitor = new BackendHealthMonitor(probe, push, {
+      intervalMs: 100,
+      lagTransitionSamples: 1,
+    });
+    monitor.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    if (lifecycle === 'markRestart') {
+      monitor.markRestart();
+    } else {
+      monitor.stop();
+      monitor.start();
+    }
+    await vi.advanceTimersByTimeAsync(500);
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    finishOld({ ...OK, loopLagMs: oldLag });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenLastCalledWith({
+      connected: true,
+      components: OK.components,
+      healthState: 'healthy',
+      loopLagMs: 40,
+    });
+
+    await vi.advanceTimersByTimeAsync(300);
+    expect(probe).toHaveBeenCalledTimes(5);
+    monitor.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not count a stalled sample from before restart toward the new transition', async () => {
+    vi.useFakeTimers();
+    const stalled = { ...OK, loopLagMs: 15_000 };
+    let finishOld!: (result: BackendHealthProbeResult) => void;
+    const probe = vi.fn<() => Promise<BackendHealthProbeResult>>()
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValue(stalled);
+    const push = vi.fn();
+    const monitor = new BackendHealthMonitor(probe, push, {
+      intervalMs: 100,
+      lagTransitionSamples: 2,
+    });
+    monitor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    monitor.markRestart();
+
+    finishOld(stalled);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenLastCalledWith(expect.objectContaining({ healthState: 'unknown' }));
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(push).toHaveBeenCalledTimes(2);
+    expect(push).toHaveBeenLastCalledWith(expect.objectContaining({ healthState: 'stalled' }));
+    monitor.stop();
+  });
+
   it('forwards the failure kind and first-failure timestamp on disconnect', async () => {
     vi.useFakeTimers();
     const { probe } = scriptedProbe([OK, fail('timeout'), fail('timeout'), fail('timeout')]);

@@ -1,8 +1,20 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { GatewayRestartController } from '../../src/main/gateway-restart-controller';
 
+function deferredStop() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('GatewayRestartController', () => {
+  afterEach(() => vi.useRealTimers());
+
   it('coalesces duplicate exit signals and retries one restart at a time', async () => {
     vi.useFakeTimers();
     let running = 0;
@@ -45,6 +57,120 @@ describe('GatewayRestartController', () => {
 
     expect(restart).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+
+  it('cancels the old backoff timer when a manual retry resets the controller', async () => {
+    vi.useFakeTimers();
+    const restart = vi.fn(async () => undefined);
+    const controller = new GatewayRestartController(restart, { minDelayMs: 100 });
+
+    controller.schedule();
+    controller.reset();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(restart).not.toHaveBeenCalled();
+
+    controller.schedule();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards queued requests that preceded the reset of an in-flight restart', async () => {
+    vi.useFakeTimers();
+    const firstAttempt = deferredStop();
+    const restart = vi.fn(() => firstAttempt.promise);
+    const controller = new GatewayRestartController(restart, { minDelayMs: 100 });
+
+    controller.schedule();
+    await vi.advanceTimersByTimeAsync(100);
+    controller.schedule();
+    controller.reset();
+    firstAttempt.reject(new Error('old attempt failed'));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'preserves the new generation backoff and request when an old attempt completes via %s',
+    async (settle) => {
+      vi.useFakeTimers();
+      const firstAttempt = deferredStop();
+      const restart = vi.fn(async () => undefined).mockImplementationOnce(() => firstAttempt.promise);
+      const controller = new GatewayRestartController(restart, {
+        minDelayMs: 100,
+        maxConsecutiveFailures: 2,
+      });
+
+      controller.schedule();
+      await vi.advanceTimersByTimeAsync(100);
+      controller.reset();
+      controller.noteGatewayReady();
+      controller.noteGatewayExit();
+      controller.schedule();
+
+      if (settle === 'resolve') firstAttempt.resolve();
+      else firstAttempt.reject(new Error('old attempt failed'));
+      await vi.advanceTimersByTimeAsync(199);
+      expect(controller.isTripped()).toBe(false);
+      expect(restart).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(restart).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('coalesces restart requests waiting for the same child to stop', async () => {
+    vi.useFakeTimers();
+    const stopping = deferredStop();
+    const restart = vi.fn(async () => undefined);
+    const controller = new GatewayRestartController(restart, { minDelayMs: 100 });
+    const pending = [
+      controller.scheduleAfter(stopping.promise, () => true),
+      controller.scheduleAfter(stopping.promise, () => true),
+    ];
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(restart).not.toHaveBeenCalled();
+
+    stopping.resolve();
+    await Promise.all(pending);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['reset', 'stop'] as const)(
+    'invalidates a request waiting for process exit on %s',
+    async (invalidate) => {
+      vi.useFakeTimers();
+      const stopping = deferredStop();
+      const restart = vi.fn(async () => undefined);
+      const controller = new GatewayRestartController(restart, { minDelayMs: 100 });
+
+      const pending = controller.scheduleAfter(stopping.promise, () => true);
+      controller[invalidate]();
+      stopping.resolve();
+      await pending;
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(restart).not.toHaveBeenCalled();
+    },
+  );
+
+  it('checks the caller generation after exit and propagates a stop failure', async () => {
+    vi.useFakeTimers();
+    const restart = vi.fn(async () => undefined);
+    const controller = new GatewayRestartController(restart, { minDelayMs: 100 });
+    const stopping = deferredStop();
+    let canRestart = true;
+    const pending = controller.scheduleAfter(stopping.promise, () => canRestart);
+    canRestart = false;
+    stopping.resolve();
+    await pending;
+
+    const failure = new Error('Gateway process did not exit');
+    await expect(
+      controller.scheduleAfter(Promise.reject(failure), () => true),
+    ).rejects.toBe(failure);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(restart).not.toHaveBeenCalled();
   });
 
   it('queues another attempt when the replacement exits during restart', async () => {
@@ -149,6 +275,21 @@ describe('GatewayRestartController', () => {
     expect(tripped).not.toHaveBeenCalled();
     expect(controller.isTripped()).toBe(false);
     vi.useRealTimers();
+  });
+
+  it('counts a replacement crash when the detached child never reported its intentional exit', () => {
+    vi.useFakeTimers();
+    const controller = new GatewayRestartController(async () => undefined, {
+      maxConsecutiveFailures: 1,
+    });
+
+    controller.noteGatewayReady();
+    controller.noteIntentionalStop();
+    expect(controller.isTripped()).toBe(false);
+
+    controller.noteGatewayReady();
+    controller.noteGatewayExit();
+    expect(controller.isTripped()).toBe(true);
   });
 
   it('ignorable errors (superseded waits) do not inflate backoff or count failures', async () => {
