@@ -153,6 +153,7 @@ export class ChatSocket {
       session_id: sessions[0],
       sessions,
       last_gateway_sequences: lastGatewaySequences,
+      gateway_snapshots: true,
       ...(gatewayCursors && Object.keys(gatewayCursors).length ? { gateway_cursors: gatewayCursors } : {}),
     });
   }

@@ -14,6 +14,7 @@
 import type { ChatMessage, PlanReviewStatus, SessionStatus, ToolCallInfo, TurnFileChangeSummary } from '../chat-render';
 import type { Bookkeeping, FileChange, TodoItem } from '../state';
 import { isPlanDocumentPath } from '../plan-document-path';
+import { parseDeltaRange, type DeltaRange } from '../stream-reassembly';
 import {
   featureEventRegistry,
   emptyFeatureReducerResult,
@@ -382,6 +383,42 @@ export function chunkRequestId(chunk: AnyChatChunk, fallback?: string): string |
 }
 
 export type ReducerResult = FeatureReducerResult;
+
+export function applyMessageUpserts(
+  messages: ChatMessage[],
+  { messageUpserts, replaceMessages }: ReducerResult,
+): ChatMessage[] {
+  let next = replaceMessages ?? messages;
+  for (const upsert of messageUpserts) {
+    if (upsert.op === 'append' && upsert.message) {
+      next = [...next, upsert.message];
+    } else if (upsert.op === 'patch' && upsert.messageId && upsert.patch) {
+      next = next.map((message) => message.id === upsert.messageId ? { ...message, ...upsert.patch } : message);
+    } else if (upsert.op === 'remove' && upsert.messageId) {
+      next = next.filter((message) => message.id !== upsert.messageId);
+    }
+  }
+  return next;
+}
+
+export function reassembleChunkDelta(
+  result: ReducerResult,
+  chunk: DeltaChunk,
+  gatewaySequence: number | undefined,
+  record: (assistantId: string, sequence: number, text: string, range: DeltaRange | null) => string,
+): void {
+  const assistantId = result.replaceBook?.assistantId;
+  if (!assistantId || typeof gatewaySequence !== 'number' || !Number.isSafeInteger(gatewaySequence)
+    || gatewaySequence <= 0) return;
+  const content = record(assistantId, gatewaySequence, textOf(chunk.body), parseDeltaRange(chunk.body, chunk.sequence));
+  for (const upsert of result.messageUpserts) {
+    if (upsert.op === 'append' && upsert.message) {
+      upsert.message = { ...upsert.message, content };
+    } else if (upsert.op === 'patch' && upsert.patch && 'content' in upsert.patch) {
+      upsert.patch = { ...upsert.patch, content };
+    }
+  }
+}
 
 // ---------- 7 个 reducer ----------
 

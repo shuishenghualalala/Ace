@@ -33,22 +33,10 @@ interface TurnBuffer {
   ranges: Map<number, DeltaRange>;
 }
 
-/** session → assistantId → 回合缓冲。模块级状态，跨 applyChunk 调用累积。 */
-const buffers = new Map<string, Map<string, TurnBuffer>>();
+export type SessionReassembly = Map<string, TurnBuffer>;
 
-function ensureTurn(sessionId: string, assistantId: string): TurnBuffer {
-  let byAid = buffers.get(sessionId);
-  if (!byAid) {
-    byAid = new Map();
-    buffers.set(sessionId, byAid);
-  }
-  let turn = byAid.get(assistantId);
-  if (!turn) {
-    turn = { frags: new Map(), ranges: new Map() };
-    byAid.set(assistantId, turn);
-  }
-  return turn;
-}
+/** session → assistantId → 回合缓冲。模块级状态，跨 applyChunk 调用累积。 */
+const buffers = new Map<string, SessionReassembly>();
 
 /**
  * 从 delta 帧 body 解析帧区间；无效（缺失/非数/<=0）时返回 null，调用方按无区间旧帧处理。
@@ -123,10 +111,33 @@ export function noteDelta(
   text: string,
   range?: DeltaRange | null,
 ): string {
-  const turn = ensureTurn(sessionId, assistantId);
+  let reassembly = buffers.get(sessionId);
+  if (!reassembly) {
+    reassembly = new Map();
+    buffers.set(sessionId, reassembly);
+  }
+  return noteSessionDelta(reassembly, assistantId, seq, text, range);
+}
+
+export function noteSessionDelta(
+  reassembly: SessionReassembly,
+  assistantId: string,
+  seq: number,
+  text: string,
+  range?: DeltaRange | null,
+): string {
+  let turn = reassembly.get(assistantId);
+  if (!turn) {
+    turn = { frags: new Map(), ranges: new Map() };
+    reassembly.set(assistantId, turn);
+  }
   turn.frags.set(seq, text);
   if (range) turn.ranges.set(seq, range);
   return reconstruct(turn.frags, turn.ranges);
+}
+
+export function installSessionReassembly(sessionId: string, reassembly: SessionReassembly): void {
+  buffers.set(sessionId, reassembly);
 }
 
 /** 清除指定回合（assistantId）的片段缓冲。回合封口（finalizeTurn）时调用。 */

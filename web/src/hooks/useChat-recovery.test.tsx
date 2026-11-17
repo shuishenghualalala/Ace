@@ -145,6 +145,130 @@ describe("Web Gateway recovery", () => {
     expect(afterFinal).not.toHaveBeenCalled();
   });
 
+
+  it("rebuilds the active transcript across tools and thinking, then continues from the cut", async () => {
+    const socket = TestWebSocket.instances[0];
+    expect(socket.sent.at(-1)).toMatchObject({ action: "subscribe", gateway_snapshots: true });
+    const attachment = { id: "upload", name: "note.txt", type: "file" } as const;
+    await act(async () => chat.send("previous prompt", sid, "agent", workspace));
+    await act(async () => socket.receive(frame("final", 1, { text: "completed response" })));
+    await act(async () => chat.send("current prompt", sid, "agent", workspace, [attachment]));
+    await act(async () => socket.receive(frame("delta", 2, { text: "partial from old socket" })));
+    await act(async () => chat.send("queued prompt", sid, "agent", workspace, [attachment]));
+
+    const requestId = "active";
+    const turnFrame = (kind: Chunk["kind"], seq: number, body: Chunk["body"]) =>
+      ({ ...frame(kind, seq, body), request_id: requestId });
+    const startedAt = 1_700_000_000;
+    const snapshot = frame("gateway_resync", 30, {
+      reason: "cursor_expired",
+      floor: 19,
+      turn_snapshot: {
+        request_id: requestId,
+        started_at: startedAt,
+        history: {
+          items: [
+            { role: "user", content: "previous prompt" },
+            { role: "assistant", content: "completed response" },
+            { role: "user", content: "current prompt" },
+          ],
+          has_more: false,
+          next_before: null,
+        },
+        frames: [
+          turnFrame("thinking", 5, { text: "first thought" }),
+          { ...turnFrame("delta", 9, { text: "first segment", delta_start: 2, delta_end: 4 }), sequence: 4 },
+          turnFrame("tool", 11, { phase: "generating", tool_call_id: "one", name: "read" }),
+          turnFrame("tool", 12, { phase: "start", tool_call_id: "one", args: "note.txt" }),
+          turnFrame("tool", 13, { phase: "result", tool_call_id: "one", detail: "read result" }),
+          turnFrame("thinking", 14, { text: "second thought " }),
+          turnFrame("thinking", 15, { text: "continues" }),
+          { ...turnFrame("delta", 17, { text: "second segment", delta_start: 11, delta_end: 12 }), sequence: 12 },
+          turnFrame("tool", 18, { phase: "start", tool_call_id: "two", name: "edit", args: "note.txt" }),
+          turnFrame("tool", 20, { phase: "result", tool_call_id: "two", detail: "edit result" }),
+          turnFrame("status", 22, { message: "Reviewing the result" }),
+          turnFrame("todo_updated", 23, { todos: [{ id: "todo", content: "Review", status: "in_progress" }] }),
+          turnFrame("file_changes", 25, { files: [{ path: "note.txt", status: "modified", added: 1 }] }),
+          turnFrame("thinking", 28, { text: "third thought" }),
+          { ...turnFrame("delta", 30, { text: "third", delta_start: 22, delta_end: 23 }), sequence: 23 },
+        ],
+      },
+    });
+    await act(async () => socket.receive(snapshot));
+
+    expect(chat.messages.map((message) => [message.role, message.text])).toEqual([
+      ["user", "previous prompt"],
+      ["assistant", "completed response"],
+      ["user", "current prompt"],
+      ["assistant", "first segment"],
+      ["assistant", "second segment"],
+      ["status", "Reviewing the result"],
+      ["assistant", "third"],
+    ]);
+    expect(chat.messages[2].attachments).toEqual([attachment]);
+    expect(chat.messages[3]).toMatchObject({
+      thinking: "first thought",
+      turnStartedAt: startedAt * 1000,
+      toolCalls: [{ toolCallId: "one", args: "note.txt", result: "read result", status: "done" }],
+    });
+    expect(chat.messages[4]).toMatchObject({
+      thinking: "second thought continues",
+      toolCalls: [{ toolCallId: "two", args: "note.txt", result: "edit result", status: "done" }],
+    });
+    expect(chat.messages[6].thinking).toBe("third thought");
+    expect(chat.todos).toEqual([{ id: "todo", content: "Review", status: "in_progress" }]);
+    expect(chat.pendingQueue.map((message) => message.query)).toEqual(["queued prompt"]);
+    expect(chat.recoveryNotice).toBe("");
+    expect(chat.busy).toBe(true);
+    expect(afterFinal).toHaveBeenCalledTimes(1);
+    expect(registry.dispatch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await chat.loadHistory(sid);
+      socket.receive(turnFrame("delta", 30, { text: "duplicate at cut" }));
+      socket.receive({ ...turnFrame("delta", 31, { text: " segment" }), sequence: 24 });
+      socket.receive(turnFrame("delta", 31, { text: "duplicate after cut" }));
+      socket.receive(snapshot);
+    });
+    expect(chat.messages[6].text).toBe("third segment");
+    expect(api.sessionStatus).not.toHaveBeenCalled();
+    expect(api.history).not.toHaveBeenCalled();
+
+    await act(async () => {
+      socket.receive(turnFrame("final", 32, { text: "third segment" }));
+      socket.receive(turnFrame("final", 32, { text: "duplicate final" }));
+    });
+    expect(chat.messages[6]).toMatchObject({
+      text: "third segment",
+      turnFileChanges: [{ path: "note.txt", status: "modified", added: 1 }],
+    });
+    expect(chat.messages.at(-1)).toMatchObject({ role: "user", text: "queued prompt", attachments: [attachment] });
+    expect(afterFinal).toHaveBeenCalledTimes(2);
+    expect(chat.pendingQueue).toEqual([]);
+    expect(socket.sent.filter((payload) => payload.query === "queued prompt")).toHaveLength(1);
+  });
+
+  it("keeps the visible prefix and polls when a snapshot contains a foreign active frame", async () => {
+    vi.mocked(api.sessionStatus).mockResolvedValue(status("running"));
+    const socket = TestWebSocket.instances[0];
+    await act(async () => chat.send("current prompt", sid, "agent", workspace));
+    await act(async () => socket.receive(frame("delta", 1, { text: "local prefix" })));
+    await act(async () => socket.receive(frame("gateway_resync", 3, {
+      reason: "cursor_expired",
+      floor: 2,
+      turn_snapshot: {
+        request_id: "active",
+        started_at: 1_700_000_000,
+        history: { items: [{ role: "user", content: "current prompt" }], has_more: false, next_before: null },
+        frames: [{ ...frame("delta", 2, { text: "other request" }), request_id: "foreign" }],
+      },
+    })));
+    expect(chat.messages.map((message) => message.text)).toEqual(["current prompt", "local prefix"]);
+    expect(chat.recoveryNotice).toContain("回复仍在生成");
+    expect(api.sessionStatus).toHaveBeenCalledTimes(1);
+    expect(afterFinal).not.toHaveBeenCalled();
+  });
+
   it("discards history from an older reset after a new epoch supersedes it", async () => {
     vi.mocked(api.sessionStatus).mockResolvedValue(status("idle"));
     let resolveOldHistory!: (items: Awaited<ReturnType<typeof api.history>>) => void;

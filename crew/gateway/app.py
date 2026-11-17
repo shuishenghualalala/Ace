@@ -57,7 +57,7 @@ from crew.gateway.routers.collaboration_planning import create_collaboration_pla
 from crew.gateway.routers.collaboration_execution import create_collaboration_execution_router
 from crew.gateway.routers.scenarios import create_scenarios_router
 from crew.gateway.routers.security import create_security_router
-from crew.gateway.routers.sessions import create_sessions_router
+from crew.gateway.routers.sessions import create_sessions_router, read_session_history_window
 from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.system import create_system_router
 from crew.gateway.routers.tracing import create_tracing_router
@@ -115,6 +115,26 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     log.info("调度器忙时策略: %s", crew.config.gateway_busy_mode)
     # 连接管理器：session → 活跃 WS，供 cron/后台任务主动推送
     connections = ConnectionManager(min_interval=crew.config.gateway_push_min_interval)
+
+    async def capture_turn_history(owner, sid, request_id, started_at, is_current):
+        def read_history():
+            store = crew.session_store
+            if not callable(getattr(store, "load_window", None)):
+                return None
+            get_config = getattr(store, "get_agent_config", None)
+            binding = get_config(sid, owner_account_id=owner) if callable(get_config) else None
+            if str((binding or {}).get("executor") or "").lower() == "team":
+                return None
+            result = read_session_history_window(store, sid, owner, 100)
+            items = result["items"]
+            if not items or items[-1]["role"] != "user" or items[-1].get("source_session_id") != sid:
+                return None
+            items[-1]["request_id"] = request_id
+            return result
+
+        await connections.capture_turn_history(owner, sid, request_id, started_at, is_current, read_history)
+
+    dispatcher.capture_turn_history = capture_turn_history
     crew.set_push(connections.push, push_payload_fn=connections.push_payload, notify_owner_fn=connections.notify_owner)
     crew.connections = connections  # 供平台 channel 复用 stream_and_broadcast 广播对话流
     # 渠道入站统一入口：start_all / connect / reconnect / webhook fallback 都消费这个广播包装 handler，

@@ -546,23 +546,7 @@ export function resetBook(sessionId: string): void {
   sessionStore.set({
     books: {
       ...sessionStore.get().books,
-      [sessionId]: {
-        toolMap: new Map(),
-        assistantId: null,
-        firstChunkAt: null,
-        hadTeamInternal: false,
-        planActive: false,
-        pendingPlan: null,
-        pendingFollowup: null,
-        todos: [],
-        fileChanges: [],
-        prevTurnFileSignature: null,
-        deltaSpans: [],
-        legacyDeltaText: '',
-        turnSealed: true,
-        activeRequestId: null,
-        acceptingNewRequest: false,
-      },
+      [sessionId]: createSessionBook(),
     },
 
   });
@@ -789,11 +773,8 @@ export function removeSubscribedSession(sessionId: string): void {
   sessionStore.set({ subscribedSessions: next });
 }
 
-/** 确保某 session 的 bookkeeping 存在并返回它。 */
-export function ensureSessionBook(sessionId: string): Bookkeeping {
-  const cur = sessionStore.get().books[sessionId];
-  if (cur) return cur;
-  const next: Bookkeeping = {
+export function createSessionBook(): Bookkeeping {
+  return {
     toolMap: new Map(),
     assistantId: null,
     firstChunkAt: null,
@@ -810,6 +791,13 @@ export function ensureSessionBook(sessionId: string): Bookkeeping {
     activeRequestId: null,
     acceptingNewRequest: false,
   };
+}
+
+/** 确保某 session 的 bookkeeping 存在并返回它。 */
+export function ensureSessionBook(sessionId: string): Bookkeeping {
+  const cur = sessionStore.get().books[sessionId];
+  if (cur) return cur;
+  const next = createSessionBook();
   sessionStore.set({ books: { ...sessionStore.get().books, [sessionId]: next } });
   return sessionStore.get().books[sessionId] ?? next;
 }

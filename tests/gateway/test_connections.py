@@ -197,6 +197,77 @@ async def test_empty_ring_preserves_recovery_floor(conn):
 
 
 @pytest.mark.asyncio
+async def test_active_snapshot_preserves_frozen_history_and_evicted_frames(monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._CHUNK_BUFFER_SIZE", 2)
+    conn = ConnectionManager(min_interval=0)
+    history = {
+        "items": [{"role": "assistant", "content": "prior"}, {"role": "user", "content": "question"}],
+        "has_more": True,
+        "next_before": "s1:7",
+    }
+    await conn.capture_turn_history("owner", "s1", "req", 123.5, lambda: True, lambda: history)
+    history["items"].append({"role": "assistant", "content": "persisted concurrently"})
+    for sequence, (kind, body) in enumerate([
+        ("delta", {"text": "first "}), ("delta", {"text": "second"}),
+        ("tool", {"phase": "start", "id": "tool-1"}),
+        ("tool", {"phase": "result", "id": "tool-1", "result": "ok"}),
+        ("thinking", {"text": "ponder"}), ("delta", {"text": "third"}),
+    ], 1):
+        payload = {
+            "kind": kind, "body": body, "sequence": sequence, "session_id": "s1", "request_id": "req",
+        }
+        await conn.push_payload("s1", payload, owner_account_id="owner")
+    socket = _FakeWS()
+    epoch = payload["gateway_epoch"]
+    cursor = {"epoch": epoch, "sequence": 1}
+
+    assert await conn.replay(
+        "s1", socket, owner_account_id="owner", register_for_live=True, resume_cursor=cursor,
+        snapshot_request_id=lambda: "req",
+    )
+    reset, = socket.sent
+    assert reset["gateway_sequence"] == 6
+    snapshot = reset["body"]["turn_snapshot"]
+    assert snapshot["history"] == {**history, "items": history["items"][:2]}
+    assert snapshot["request_id"] == "req" and snapshot["started_at"] == 123.5
+    compacted = snapshot["frames"]
+    assert [(f["kind"], f["gateway_sequence"]) for f in compacted] == [
+        ("delta", 2), ("tool", 3), ("tool", 4), ("thinking", 5), ("delta", 6),
+    ]
+    assert compacted[0]["body"] == {"text": "first second", "delta_start": 1, "delta_end": 2}
+    assert {f["gateway_epoch"] for f in compacted} == {epoch}
+
+    for owner, request in (("owner", None), ("other-owner", "req"), ("owner", "old-req")):
+        observer = _FakeWS()
+        await conn.replay(
+            "s1", observer, owner_account_id=owner, resume_cursor=None,
+            snapshot_request_id=lambda: request,
+        )
+        assert "turn_snapshot" not in observer.sent[0]["body"]
+
+    await conn.push_payload("s1", {"kind": "final", "request_id": "req"}, owner_account_id="owner")
+    assert socket.sent[-1]["gateway_sequence"] == 7
+    after = _FakeWS()
+    await conn.replay("s1", after, owner_account_id="owner", resume_cursor=cursor, snapshot_request_id=lambda: "req")
+    assert "turn_snapshot" not in after.sent[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_snapshot_budget_does_not_publish_a_partial_turn(conn, monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._MAX_ACTIVE_SNAPSHOT_BYTES", 512)
+    await conn.capture_turn_history("owner", "s1", "req", 1.0, lambda: True, lambda: {"items": []})
+    await conn.push_payload("s1", {
+        "kind": "delta", "request_id": "req", "body": {"text": "x" * 1024},
+    }, owner_account_id="owner")
+    socket = _FakeWS()
+
+    await conn.replay("s1", socket, owner_account_id="owner", resume_cursor=None, snapshot_request_id=lambda: "req")
+
+    assert socket.sent[0]["kind"] == "gateway_resync"
+    assert "turn_snapshot" not in socket.sent[0]["body"]
+
+
+@pytest.mark.asyncio
 async def test_resync_restores_only_still_waiting_owner_prompts_after_ring_eviction(conn):
     waiter = get_followup_waiter()
     sid = "s1"

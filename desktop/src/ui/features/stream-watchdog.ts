@@ -17,7 +17,7 @@ import {
   state,
 } from '../state';
 import { sessionStore, uiStore } from '../stores/stores';
-import { getLastGatewaySequences, getLastStreamActivity, clearStreamActivity, touchStreamActivity } from './gateway-sequence';
+import { getGatewayResyncCut, getLastGatewaySequences, getLastStreamActivity, clearStreamActivity, touchStreamActivity } from './gateway-sequence';
 import { logStream } from '../stream-debug';
 import { syncSessionLiveFromBackend } from './session-busy';
 import { getSessionStreamRecovery } from './session-stream-recovery';
@@ -77,10 +77,12 @@ function transportAvailable(): boolean {
 async function recoverStalledSession(sessionId: string): Promise<void> {
   if (recovering.has(sessionId)) return;
   recovering.add(sessionId);
+  const beforeResync = getGatewayResyncCut(sessionId);
   logStream('watchdog', 'stall-detected', { sessionId, failures: recoveryFailures.get(sessionId) ?? 0 });
   try {
     const st = await backendApi.sessionStatus(sessionId);
-    if (!transportAvailable() || getSessionStreamRecovery(sessionId)) return;
+    if (!transportAvailable() || getSessionStreamRecovery(sessionId)
+      || getGatewayResyncCut(sessionId) !== beforeResync) return;
     syncSessionLiveFromBackend(sessionId, st?.live, st?.last_status, st?.active_request_id);
     if (st?.live === 'idle' || st?.live === 'failed' || !st?.live) {
       const { loadBackendHistory } = await import('./session-controller');

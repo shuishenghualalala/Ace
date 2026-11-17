@@ -328,6 +328,8 @@ def create_ws_router(
                     raw_seqs = data.get("last_gateway_sequences")
                     raw_cursors = data.get("gateway_cursors")
                     cursors = raw_cursors if isinstance(raw_cursors, dict) else {}
+                    supports_snapshots = data.get("gateway_snapshots") is True
+                    snapshot_request = getattr(dispatcher, "snapshot_request_id", None)
                     last_seqs: dict[str, int] = {}
                     if isinstance(raw_seqs, dict):
                         for k, v in raw_seqs.items():
@@ -363,6 +365,8 @@ def create_ws_router(
                         if _session_owned(sid):
                             after = last_seqs.get(sid, 0)
                             cursor_arg = {"resume_cursor": cursors[sid]} if sid in cursors else {}
+                            if supports_snapshots and callable(snapshot_request):
+                                cursor_arg["snapshot_request_id"] = lambda session=sid: snapshot_request(session, owner)
                             if not await connections.replay(
                                 sid,
                                 socket,

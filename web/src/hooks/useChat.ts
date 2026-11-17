@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api } from "../api";
-import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails } from "../lib/historyMap";
+import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails, type BackendHistoryItem } from "../lib/historyMap";
+import { backendSecondsToMs } from "../lib/backendTime";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
 import { ChatSocket, GatewaySequenceTracker } from "../ws";
@@ -386,6 +387,208 @@ export function applyToolChunk(
  * WS 帧带 session_id（见后端），handler 据此路由到对应会话，
  * 因此多对话互不串台，后台会话也能边生成边写入自己的桶、切回去仍是实时流式。
  */
+type MessagePatch = Partial<UiMessage> | ((message: UiMessage) => Partial<UiMessage>);
+
+interface TurnOutput {
+  append(role: "assistant" | "status", text: string, extra: Partial<UiMessage>): string;
+  patch(id: string, patch: MessagePatch): void;
+  setTodos(todos: TodoItem[]): void;
+}
+
+function createTurnBook(
+  turnStartedAt: number | null = null,
+  prevTurnFileSignature: Record<string, string> = {},
+): Bookkeeping {
+  return {
+    toolMap: new Map(),
+    assistantId: null,
+    turnStartedAt,
+    awaitingAssistantAfterTool: false,
+    deltaSpans: [],
+    legacyDeltaText: "",
+    hadTeamInternal: false,
+    fileChanges: [],
+    fileChangeSignatures: {},
+    prevTurnFileSignature,
+  };
+}
+
+function startTurn(book: Bookkeeping, now: number): number {
+  return book.turnStartedAt ??= now;
+}
+
+function startAssistantSegment(book: Bookkeeping): void {
+  book.assistantId = null;
+  book.toolMap.clear();
+  book.awaitingAssistantAfterTool = false;
+  resetDeltaBook(book);
+}
+
+function showsTurnOutput(chunk: Chunk): boolean {
+  return chunk.kind === "delta" || chunk.kind === "thinking" || chunk.kind === "tool" || chunk.kind === "status";
+}
+
+/** Project display data for both live frames and a temporary active-turn snapshot. */
+function applyTurnOutput(chunk: Chunk, book: Bookkeeping, output: TurnOutput, now: number): boolean {
+  const { kind, body } = chunk;
+  if (kind === "delta") {
+    const turnStartedAt = startTurn(book, now);
+    if (book.awaitingAssistantAfterTool) startAssistantSegment(book);
+    const text = applyOrderedDelta(book, chunk, normalizeTeamText(body.text));
+    if (book.assistantId) {
+      output.patch(book.assistantId, (message) => ({ text, turnStartedAt: message.turnStartedAt ?? turnStartedAt }));
+    } else {
+      book.assistantId = output.append("assistant", text, { turnStartedAt });
+    }
+  } else if (kind === "thinking") {
+    const thinking = body.text ?? "";
+    if (!thinking.trim()) return true;
+    if (book.awaitingAssistantAfterTool) startAssistantSegment(book);
+    if (book.assistantId) {
+      output.patch(book.assistantId, (message) => ({ thinking: mergeStreamingText(message.thinking, thinking) }));
+    } else {
+      book.assistantId = output.append("assistant", "", { turnStartedAt: startTurn(book, now), thinking });
+    }
+  } else if (kind === "tool") {
+    const turnStartedAt = startTurn(book, now);
+    book.toolMap = applyToolChunk(book.toolMap, body as ToolChunkBody, now, newId);
+    const toolCalls = Array.from(book.toolMap.values());
+    if (book.assistantId) {
+      output.patch(book.assistantId, { turnStartedAt, toolCalls });
+    } else {
+      book.assistantId = output.append("assistant", "", { turnStartedAt, toolCalls });
+    }
+    if (body.phase !== "start") book.awaitingAssistantAfterTool = true;
+  } else if (kind === "file_changes") {
+    book.fileChanges = normalizeTurnFileChanges(body.files) ?? [];
+    book.fileChangeSignatures = snapshotFileSignatures(book.fileChanges, body.files);
+  } else if (kind === "todo_updated") {
+    output.setTodos(normalizeTodos(body.todos));
+  } else if (kind === "status") {
+    const message = body.message ?? "";
+    if (body.activity === "context_compaction" || message.includes("排队")
+      || isPlanControlStatus(message) || isTeamRuntimeStatus(message)) return false;
+    output.append("status", message, { turnStartedAt: startTurn(book, now) });
+  } else {
+    return false;
+  }
+  return true;
+}
+
+const SNAPSHOT_FRAME_KINDS = new Set<Chunk["kind"]>([
+  "delta", "thinking", "tool", "status", "todo_updated", "file_changes",
+]);
+
+interface ActiveTurnSnapshot {
+  request_id: string;
+  started_at: number;
+  history: {
+    items: BackendHistoryItem[];
+    has_more: boolean;
+    next_before: string | null;
+  };
+  frames: Chunk[];
+}
+
+function parseActiveTurnSnapshot(value: ActiveTurnSnapshot | undefined, boundary: Chunk): ActiveTurnSnapshot | null {
+  if (!value || typeof value.request_id !== "string" || !value.request_id
+    || !Number.isFinite(value.started_at) || value.started_at <= 0
+    || !Array.isArray(value.history?.items) || typeof value.history.has_more !== "boolean"
+    || !(value.history.next_before === null || typeof value.history.next_before === "string")
+    || !Array.isArray(value.frames)) return null;
+
+  let sequence = 0;
+  for (const frame of value.frames) {
+    if (!frame || !SNAPSHOT_FRAME_KINDS.has(frame.kind) || !frame.body || frame.is_final
+      || frame.session_id !== boundary.session_id || frame.gateway_epoch !== boundary.gateway_epoch
+      || frame.request_id !== value.request_id || typeof frame.gateway_sequence !== "number"
+      || !Number.isSafeInteger(frame.gateway_sequence) || frame.gateway_sequence <= sequence
+      || frame.gateway_sequence > (boundary.gateway_sequence ?? -1)) return null;
+    if ((frame.kind === "thinking" && frame.body.text != null && typeof frame.body.text !== "string")
+      || (frame.kind === "status" && frame.body.message != null && typeof frame.body.message !== "string")) return null;
+    sequence = frame.gateway_sequence;
+  }
+  if (value.history.items.some((item) => item == null
+    || typeof item.role !== "string" || typeof item.content !== "string"
+    || (item.tool_calls != null && (!Array.isArray(item.tool_calls) || item.tool_calls.some((tool) => !tool))))) return null;
+  return value;
+}
+
+function projectActiveTurn(
+  snapshot: ActiveTurnSnapshot,
+  prevTurnFileSignature: Record<string, string> | undefined,
+) {
+  const startedAt = backendSecondsToMs(snapshot.started_at)!;
+  const book = createTurnBook(startedAt, prevTurnFileSignature);
+  const messages: UiMessage[] = [];
+  const indexes = new Map<string, number>();
+  let todos: TodoItem[] | undefined;
+  let compaction = false;
+  let queueHint = "";
+  let queued = false;
+  const output: TurnOutput = {
+    append(role, text, extra) {
+      const id = newId();
+      indexes.set(id, messages.length);
+      messages.push({ id, role, text, ...extra });
+      return id;
+    },
+    patch(id, patch) {
+      const index = indexes.get(id)!;
+      const message = messages[index];
+      messages[index] = { ...message, ...(typeof patch === "function" ? patch(message) : patch) };
+    },
+    setTodos(value) { todos = value; },
+  };
+  for (const chunk of snapshot.frames) {
+    if (applyTurnOutput(chunk, book, output, startedAt)) {
+      if (showsTurnOutput(chunk)) {
+        queueHint = "";
+        queued = false;
+      }
+    } else if (chunk.kind === "status") {
+      const message = chunk.body.message ?? "";
+      if (chunk.body.activity === "context_compaction") {
+        compaction = chunk.body.active === true;
+      } else if (message.includes("排队") || isTeamRuntimeStatus(message)) {
+        queueHint = message;
+        queued = message.includes("排队");
+      }
+    }
+  }
+  return { book, messages, todos, compaction, queueHint, queued };
+}
+
+function matchesSnapshotHistory(canonical: UiMessage, local: UiMessage): boolean {
+  if (canonical.role !== local.role || canonical.text !== local.text) return false;
+  if (canonical.requestId && local.requestId) return canonical.requestId === local.requestId;
+  return canonical.timestamp == null || local.timestamp == null || canonical.timestamp === local.timestamp;
+}
+
+function mergeActiveSnapshotHistory(history: UiMessage[], local: UiMessage[], hasMore: boolean): UiMessage[] {
+  // Both sources are chronological. Align their latest user messages before
+  // transferring local attachment data, which the history endpoint omits.
+  const localUsers = local.map((message, index) => ({ message, index }))
+    .filter(({ message }) => message.role === "user");
+  let cursor = localUsers.length - 1;
+  let oldestMatch: number | undefined;
+  const merged = history.slice();
+  for (let index = merged.length - 1; index >= 0; index -= 1) {
+    const canonical = merged[index];
+    if (canonical.role !== "user") continue;
+    let match = cursor;
+    while (match >= 0 && !matchesSnapshotHistory(canonical, localUsers[match].message)) match -= 1;
+    if (match < 0) continue;
+    const { message, index: localIndex } = localUsers[match];
+    merged[index] = { ...canonical, id: message.id, attachments: message.attachments };
+    cursor = match - 1;
+    if (index === 0 && !localUsers.slice(0, match).some((candidate) => matchesSnapshotHistory(canonical, candidate.message))) {
+      oldestMatch = localIndex;
+    }
+  }
+  return hasMore && oldestMatch != null ? [...local.slice(0, oldestMatch), ...merged] : merged;
+}
+
 export function useChat(
   currentSessionId: string,
   onAfterFinal: () => void,
@@ -466,32 +669,20 @@ export function useChat(
   const gatewaySequences = useRef(new GatewaySequenceTracker());
   const recoveries = useRef(new Map<string, SessionRecovery>());
   const historyLoads = useRef(new Map<string, symbol>());
+  const snapshotBooks = useRef(new WeakSet<Bookkeeping>());
   const transportOpen = useRef(false);
 
   const bookFor = (sid: string): Bookkeeping => {
     let b = bookRef.current.get(sid);
     if (!b) {
-      b = {
-        toolMap: new Map(),
-        assistantId: null,
-        turnStartedAt: null,
-        awaitingAssistantAfterTool: false,
-        deltaSpans: [],
-        legacyDeltaText: "",
-        hadTeamInternal: false,
-        fileChanges: [],
-        fileChangeSignatures: {},
-        prevTurnFileSignature: {},
-      };
+      b = createTurnBook();
       bookRef.current.set(sid, b);
     }
     return b;
   };
 
   const startLocalTurn = (sid: string): number => {
-    const book = bookFor(sid);
-    if (book.turnStartedAt == null) book.turnStartedAt = Date.now();
-    return book.turnStartedAt;
+    return startTurn(bookFor(sid), Date.now());
   };
 
   const localTurnTiming = (sid: string) => {
@@ -575,6 +766,7 @@ export function useChat(
 
   const finishLocalTurn = (sid: string, status: SessionStatus = "idle") => {
     const book = bookFor(sid);
+    snapshotBooks.current.delete(book);
     book.toolMap.clear();
     book.assistantId = null;
     book.turnStartedAt = null;
@@ -744,6 +936,8 @@ export function useChat(
       const previous = recoveries.current.get(sid);
       clearTimeout(previous?.timer);
       historyLoads.current.delete(sid);
+      const previousBook = bookRef.current.get(sid);
+      const snapshot = parseActiveTurnSnapshot(c.body.turn_snapshot, c);
       bookRef.current.delete(sid);
       clearTimeout(compactionTimersRef.current[sid]);
       delete compactionTimersRef.current[sid];
@@ -760,6 +954,32 @@ export function useChat(
             || question.session_id !== sid) continue;
           if (!applyFollowup(question, sid)) recovery.verifiedFollowupId = question.body.question_id;
         }
+      }
+      if (snapshot && !suppressChunksRef.current.has(sid)
+        && !isSuppressedRequest(suppressedRequestKey(sid, snapshot.request_id), suppressedRequestIdsRef.current)) {
+        const projected = projectActiveTurn(snapshot, previousBook?.prevTurnFileSignature);
+        const history = mapHistoryItems(snapshot.history.items);
+        recoveries.current.delete(sid);
+        bookRef.current.set(sid, projected.book);
+        snapshotBooks.current.add(projected.book);
+        loadedSessionsRef.current.add(sid);
+        setMessagesMap((prev) => ({
+          ...prev,
+          [sid]: [
+            ...mergeActiveSnapshotHistory(history, prev[sid] ?? [], snapshot.history.has_more),
+            ...projected.messages,
+          ],
+        }));
+        if (projected.todos) setTodos(sid, projected.todos);
+        if (projected.compaction) {
+          compactionStartedAtRef.current[sid] = Date.now();
+          setCompactionMap((prev) => ({ ...prev, [sid]: true }));
+        }
+        setBusy(sid, true);
+        setStatus(sid, projected.queued ? "queued" : "running");
+        setQueue(sid, projected.queueHint);
+        setRecoveryNotice(sid);
+        return;
       }
       recoveries.current.set(sid, recovery);
       setBusy(sid, true);
@@ -850,87 +1070,20 @@ export function useChat(
         return;
       }
 
-      if (c.kind === "delta") {
-        const text = normalizeTeamText(c.body.text);
-        const turnStartedAt = startLocalTurn(sid);
-        setQueue(sid, "");            // 开始产出 → 清队列提示
-        setStatus(sid, "running");
-        if (book.awaitingAssistantAfterTool) {
-          book.assistantId = null;
-          book.toolMap.clear();
+      if (applyTurnOutput(c, book, {
+        append: (role, text, extra) => append(sid, role, text, extra),
+        patch: (id, update) => patch(sid, id, update),
+        setTodos: (todos) => setTodos(sid, todos),
+      }, Date.now())) {
+        if (showsTurnOutput(c)) {
+          setQueue(sid, "");
+          setStatus(sid, "running");
         }
-        const nextText = applyAssistantTextDelta(book, c, text);
-        if (!book.assistantId) {
-          console.log(
-            "[useChat delta] new assistant msg, text=",
-            text.slice(0, 50).replace(/\n/g, "\\n"),
-          );
-          book.assistantId = append(sid, "assistant", nextText, { turnStartedAt });
-        } else {
-          console.log(
-            "[useChat delta] append chunk, text=",
-            text.slice(0, 50).replace(/\n/g, "\\n"),
-          );
-          patch(sid, book.assistantId, (m) => {
-            console.log(
-              "[useChat delta] merged len=", nextText.length,
-              "endsWithNewline=", nextText.endsWith("\n"),
-              "tail=", nextText.slice(-40).replace(/\n/g, "\\n"),
-            );
-            return { text: nextText, turnStartedAt: m.turnStartedAt ?? turnStartedAt };
-          });
-        }
-      } else if (c.kind === "thinking") {
-        const thinkingText = c.body.text ?? "";
-        const hasThinkingText = Boolean(thinkingText.trim());
-        setQueue(sid, "");
-        setStatus(sid, "running");
-        if (book.awaitingAssistantAfterTool && hasThinkingText) {
-          book.assistantId = append(sid, "assistant", "", {
-            turnStartedAt: startLocalTurn(sid),
-            thinking: thinkingText,
-          });
-          book.toolMap.clear();
-          book.awaitingAssistantAfterTool = false;
-        } else if (!book.assistantId && hasThinkingText) {
-          book.assistantId = append(sid, "assistant", "", {
-            turnStartedAt: startLocalTurn(sid),
-            thinking: thinkingText,
-          });
-        } else if (book.assistantId && hasThinkingText) {
-          patch(sid, book.assistantId, (message) => ({
-            thinking: mergeStreamingText(message.thinking, thinkingText),
-          }));
-          book.awaitingAssistantAfterTool = false;
-        }
-      } else if (c.kind === "tool") {
-        const b = c.body;
-        const turnStartedAt = startLocalTurn(sid);
-        setQueue(sid, "");
-        setStatus(sid, "running");
-        book.toolMap = applyToolChunk(book.toolMap, b as ToolChunkBody, Date.now(), newId);
-        if (!book.assistantId) {
-          book.assistantId = append(sid, "assistant", "", {
-            turnStartedAt,
-            toolCalls: Array.from(book.toolMap.values()),
-          });
-        } else if (book.assistantId) {
-          patch(sid, book.assistantId, {
-            turnStartedAt,
-            toolCalls: Array.from(book.toolMap.values()),
-          });
-        }
-        if (b.phase !== "start") {
-          book.awaitingAssistantAfterTool = true;
-        }
-      } else if (c.kind === "task") {
+        return;
+      }
+
+      if (c.kind === "task") {
         fireAfterFinalThrottled();
-      } else if (c.kind === "file_changes") {
-        book.fileChanges = normalizeTurnFileChanges(c.body.files) ?? [];
-        book.fileChangeSignatures = snapshotFileSignatures(book.fileChanges, c.body.files);
-      } else if (c.kind === "todo_updated") {
-        const todos = normalizeTodos(c.body.todos);
-        setTodos(sid, todos);
       } else if (c.kind === "status") {
         const msg = c.body.message ?? "";
         if (c.body.activity === "context_compaction") {
@@ -981,10 +1134,6 @@ export function useChat(
         } else if (isTeamRuntimeStatus(msg)) {
           setQueue(sid, msg);
           setStatus(sid, "running");
-        } else {
-          setQueue(sid, "");
-          setStatus(sid, "running");
-          append(sid, "status", msg, { turnStartedAt: startLocalTurn(sid) });
         }
       } else if (c.kind === "final") {
         const text = c.body.text ?? "";
@@ -1395,7 +1544,8 @@ export function useChat(
   }, []);
 
   const loadHistory = useCallback(async (sessionId: string, resume?: RecoveryHistoryLoad) => {
-    if (!resume && recoveries.current.has(sessionId)) return;
+    const book = bookRef.current.get(sessionId);
+    if (!resume && (recoveries.current.has(sessionId) || (book && snapshotBooks.current.has(book)))) return;
     const load = Symbol();
     historyLoads.current.set(sessionId, load);
     const isCurrent = () => historyLoads.current.get(sessionId) === load

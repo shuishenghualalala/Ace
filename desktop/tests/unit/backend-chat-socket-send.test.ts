@@ -48,6 +48,7 @@ describe('BackendChatSocket send', () => {
       await socket.subscribe(['a', 'b'], { a: 11, b: 5 });
       const expected = {
         action: 'subscribe', session_id: 'a', sessions: ['a', 'b'],
+        gateway_snapshots: true,
         last_gateway_sequences: { a: 11, b: 5 },
         gateway_cursors: { a: { epoch: 'epoch', sequence: 11 } },
       };

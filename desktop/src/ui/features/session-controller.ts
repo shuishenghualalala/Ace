@@ -10,6 +10,7 @@
 
 import { BackendChatSocket, backendApi } from '../backend-client';
 import type { ChatChunk } from '../api/transport';
+import { batchStoreUpdates } from '../reducers/store-bus';
 import type { PlanReviewStatus } from '../chat-render';
 import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './board-hooks';
@@ -25,6 +26,7 @@ import { syncCraftLabel } from './composer-toolbar';
 import {
   clearHistoryLoadError,
   ensureSessionMessages,
+  getPendingQueue,
   isBusySession,
   markHistoryLoadError,
   newMessageId,
@@ -61,11 +63,14 @@ import { hydrateMissingTurnFileCounts } from './turn-file-counts';
 import {
   acceptGatewayResync,
   getGatewayCursors,
+  getGatewayResyncCut,
   getLastGatewaySequences,
   isDuplicateGatewayChunk,
   noteGatewaySequence,
+  touchStreamActivity,
 } from './gateway-sequence';
-import { resetSession, resetSessionExcept } from '../stream-reassembly';
+import { installSessionReassembly, resetSession, resetSessionExcept } from '../stream-reassembly';
+import { projectActiveTurnSnapshot } from './active-turn-snapshot';
 import {
   beginSessionStreamRecovery,
   cancelSessionStreamRecovery,
@@ -75,7 +80,7 @@ import { syncSessionLiveFromBackend } from './session-busy';
 import { startStreamWatchdog } from './stream-watchdog';
 import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { logStream } from '../stream-debug';
-import { sessionStore } from '../stores/stores';
+import { messageStore, sessionStore } from '../stores/stores';
 import { hydrateTurnFoldFromStorage } from './fold-state';
 import { setBackendTransportState } from './backend-status-guard';
 
@@ -394,7 +399,7 @@ export async function loadBackendHistory(
 
 // ---------- P1-6：触顶翻页（更早历史按游标前缀补页） ----------
 
-const olderPageInFlight = new Set<string>();
+const olderPageInFlight = new Map<string, object>();
 
 /**
  * 加载更早一页历史并前缀拼接。滚动距顶 < 2 视口时由滚动预取触发；
@@ -406,14 +411,15 @@ export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> 
   if (!paging?.hasMore || !paging.nextBefore) return false;
   if (olderPageInFlight.has(sessionId) || getSessionStreamRecovery(sessionId)) return false;
   const historyVersion = historyLoadSeq.get(sessionId);
-  olderPageInFlight.add(sessionId);
+  const pageLoad = {};
+  olderPageInFlight.set(sessionId, pageLoad);
   logStream('history', 'load-older-start', { sessionId, before: paging.nextBefore });
   try {
     const res = await backendApi.historyWindow(sessionId, {
       limit: HISTORY_WINDOW_SIZE,
       before: paging.nextBefore,
     });
-    if (historyVersion !== historyLoadSeq.get(sessionId)) return false;
+    if (historyVersion !== historyLoadSeq.get(sessionId) || olderPageInFlight.get(sessionId) !== pageLoad) return false;
     const current = state.messages[sessionId] ?? [];
     if (current.length === 0) {
       // 会话已被清空（删除/重开首窗）：迟到的旧页直接丢弃
@@ -443,7 +449,7 @@ export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> 
     logStream('history', 'load-older-failed', { sessionId, error: String(err) });
     return false;
   } finally {
-    olderPageInFlight.delete(sessionId);
+    if (olderPageInFlight.get(sessionId) === pageLoad) olderPageInFlight.delete(sessionId);
   }
 }
 
@@ -531,20 +537,70 @@ const INCOMPLETE_STREAM_KINDS = new Set<ChatChunk['kind']>([
   'delta', 'thinking', 'tool', 'status', 'final', 'error', 'todo_updated', 'file_changes',
 ]);
 
+function applyActiveTurnSnapshot(sessionId: string, control: ChatChunk): boolean {
+  let projection: ReturnType<typeof projectActiveTurnSnapshot>;
+  try {
+    projection = projectActiveTurnSnapshot(sessionId, control, {
+      messages: getMessages(sessionId),
+      book: sessionStore.get().books[sessionId],
+      queue: getPendingQueue(sessionId),
+    });
+  } catch (error) {
+    logStream('history', 'active-snapshot-invalid', { sessionId, error: String(error) });
+    return false;
+  }
+  if (!projection) return false;
+
+  const { messages, book, paging, status, busy, queueHint, reassembly } = projection;
+  installSessionReassembly(sessionId, reassembly);
+  cancelSessionStreamRecovery(sessionId);
+  touchStreamActivity(sessionId);
+  batchStoreUpdates(() => {
+    const currentMessages = messageStore.get();
+    const historyLoading = new Set(currentMessages.historyLoading);
+    const historyLoadErrors = new Set(currentMessages.historyLoadErrors);
+    historyLoading.delete(sessionId);
+    historyLoadErrors.delete(sessionId);
+    messageStore.set({
+      messages: { ...currentMessages.messages, [sessionId]: messages },
+      historyPaging: { ...currentMessages.historyPaging, [sessionId]: paging },
+      queueHints: { ...currentMessages.queueHints, [sessionId]: queueHint },
+      historyLoading,
+      historyLoadErrors,
+    });
+    const currentSessions = sessionStore.get();
+    sessionStore.set({
+      books: { ...currentSessions.books, [sessionId]: book },
+      busySessions: { ...currentSessions.busySessions, [sessionId]: busy },
+      sessionStatuses: { ...currentSessions.sessionStatuses, [sessionId]: status },
+    });
+  });
+  hydrateTurnFoldFromStorage(messages.map((message) => message.id), {
+    unfolded: state.userUnfoldedTurns, folded: state.userFoldedTurns,
+  });
+  if (state.activeSessionId === sessionId) renderChat();
+  logStream('history', 'active-snapshot-applied', {
+    sessionId, requestId: book.activeRequestId, cut: control.gateway_sequence, messageCount: messages.length,
+  });
+  return true;
+}
+
 function handleGatewayChunk(chunk: ChatChunk): void {
   const sessionId = chunk.session_id;
   if (chunk.kind === 'gateway_resync') {
     if (!sessionId || (!state.subscribedSessions.has(sessionId) && state.activeSessionId !== sessionId)) return;
     const previousEpoch = getGatewayCursors([sessionId])[sessionId]?.epoch;
     if (!acceptGatewayResync(sessionId, chunk) || state.suppressChunks.has(sessionId)) return;
+    historyLoadSeq.set(sessionId, (historyLoadSeq.get(sessionId) ?? 0) + 1);
+    olderPageInFlight.delete(sessionId);
+    flushPendingChunks(sessionId);
+    if (applyActiveTurnSnapshot(sessionId, chunk)) return;
     const previousRecovery = getSessionStreamRecovery(sessionId);
     const recovery = beginSessionStreamRecovery(sessionId);
     if (previousEpoch === chunk.gateway_epoch && previousRecovery?.verifiedFollowupId) {
       recovery.verifiedFollowupId = previousRecovery.verifiedFollowupId;
     }
-    historyLoadSeq.set(sessionId, (historyLoadSeq.get(sessionId) ?? 0) + 1);
     setHistoryLoading(sessionId, false);
-    flushPendingChunks(sessionId);
     resetSession(sessionId);
     if (previousEpoch && previousEpoch !== chunk.gateway_epoch) patchBook(sessionId, { pendingFollowup: null });
     const followups = chunk.body?.pending_followups;
@@ -597,6 +653,14 @@ function handleGatewayChunk(chunk: ChatChunk): void {
       return;
     }
   }
+  if (chunk.kind === 'followup_question' && sessionId && getGatewayResyncCut(sessionId)
+    && chunk.body?.question_id && chunk.body.question_id === sessionStore.get().books[sessionId]?.pendingFollowup?.questionId) {
+    // A verified waiting question can have a side-channel request id.
+    const interaction = { ...chunk };
+    delete interaction.request_id;
+    applyChunk(interaction);
+    return;
+  }
   applyChunk(chunk);
 }
 
@@ -611,9 +675,11 @@ async function reconcileSessionAfterReconnect(
     return;
   }
   const before = sessionStore.get().books[sessionId];
+  const beforeResync = getGatewayResyncCut(sessionId);
   const canApply = () => {
     const current = sessionStore.get().books[sessionId];
     return isCurrentConnection()
+      && getGatewayResyncCut(sessionId) === beforeResync
       && !getSessionStreamRecovery(sessionId)
       && !state.suppressChunks.has(sessionId)
       && current?.activeRequestId === before?.activeRequestId

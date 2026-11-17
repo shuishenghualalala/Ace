@@ -23,7 +23,7 @@ import enum
 import json
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import CrewError, ProviderError, ToolError, category_for_kind
@@ -102,6 +102,8 @@ class SessionDispatcher:
         self._running_counts: dict[SessionKey, int] = {}
         self._running_task: dict[SessionKey, asyncio.Task] = {}
         self._running_request_ids: dict[SessionKey, str] = {}
+        self._snapshot_requests: dict[SessionKey, str] = {}
+        self.capture_turn_history: Callable[[str, str, str, float, Callable[[], bool]], Awaitable[None]] | None = None
         self._waiting_request_ids: dict[SessionKey, list[str]] = {}
         self._run_task_ids: dict[SessionKey, str] = {}
         self._active_exec_session_ids: dict[SessionKey, str] = {}
@@ -179,6 +181,7 @@ class SessionDispatcher:
             self._steer_texts.pop(key, None)
             self._running_task.pop(key, None)
             self._running_request_ids.pop(key, None)
+            self._snapshot_requests.pop(key, None)
             self._waiting_request_ids.pop(key, None)
             self._active_exec_session_ids.pop(key, None)
 
@@ -499,8 +502,10 @@ class SessionDispatcher:
         task_id = self._run_task_ids.get(key)
         if not task_id or self._task_runtime is None:
             return None
+        self._snapshot_requests.pop(key, None)
         try:
             await self._task_runtime.set_backgrounded_async(task_id)
+            self._snapshot_requests.pop(key, None)
             # The current run keeps its old lock, while future foreground
             # messages use a fresh lock and a fresh sidechain Agent.
             current_lock = self._locks.get(key)
@@ -510,6 +515,13 @@ class SessionDispatcher:
         except Exception:
             log.exception("后台化当前轮失败 session=%s", session_id)
             return None
+
+    def snapshot_request_id(self, session_id: str, owner_account_id: str) -> str | None:
+        key = self._resolve_key(session_id, owner_account_id)
+        if self._running_counts.get(key) != 1 or key[0] in self._blocked_owners:
+            return None
+        request_id = self._snapshot_requests.get(key)
+        return request_id if self._running_request_ids.get(key) == request_id else None
 
     # ------------------------------------------------------------------ #
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
@@ -858,7 +870,23 @@ class SessionDispatcher:
                             attachments=list(envelope.attachments),
                         )
                     try:
+                        capture = self.capture_turn_history
+                        if not sidechain_id or envelope.mode == "team" or envelope.params.get("internal_task_resume"):
+                            capture = None
+                        started_at = time.time()
                         async for chunk in self._inner(exec_envelope):
+                            if capture is not None and chunk.kind in {"delta", "thinking", "tool", "todo_updated", "file_changes"}:
+                                # The executor has now committed the canonical user row,
+                                # including attachment references. Do not freeze the earlier
+                                # provisional row or a pagination cursor from that write.
+                                if self._running_counts.get(key) == 1 and self._locks.get(key) is lock:
+                                    self._snapshot_requests[key] = rid
+                                    await capture(
+                                        owner, sid, rid, started_at,
+                                        lambda: self._owner_epochs.get(owner, 0) == owner_epoch
+                                        and self.snapshot_request_id(sid, owner) == rid,
+                                    )
+                                capture = None
                             if runtime_activity_touch is not None:
                                 progress: dict[str, object] = {"last_chunk": chunk.kind}
                                 if chunk.kind in {"delta", "thinking"}:
@@ -1031,6 +1059,8 @@ class SessionDispatcher:
                                 deferred_terminal = None
                                 yield terminal_chunk
                         finally:
+                            if self._snapshot_requests.get(key) == rid:
+                                self._snapshot_requests.pop(key, None)
                             # agent:end 负载需要回合刚结束时的队列深度，先算好；
                             # emit 本身挪到下方 running 计数与落库状态清理之后，
                             # 否则监听者（如桌面端渠道通知）收到通知立即拉 status 仍看到 running。

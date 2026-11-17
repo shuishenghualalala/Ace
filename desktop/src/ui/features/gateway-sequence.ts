@@ -11,7 +11,11 @@ import { logStream } from '../stream-debug';
 const lastSeqBySession = new Map<string, number>();
 const seenSeqBySession = new Map<string, Set<number>>();
 const epochBySession = new Map<string, string>();
-const resyncCutBySession = new Map<string, number>();
+const resyncCutBySession = new Map<string, GatewayCursor>();
+
+export function getGatewayResyncCut(sessionId: string): Readonly<GatewayCursor> | undefined {
+  return resyncCutBySession.get(sessionId);
+}
 
 function epochOf(chunk: ChatChunk): string | undefined {
   return typeof chunk.gateway_epoch === 'string' && chunk.gateway_epoch.trim()
@@ -23,11 +27,12 @@ export function acceptGatewayResync(sessionId: string, chunk: ChatChunk): boolea
   const epoch = epochOf(chunk);
   const sequence = chunk.gateway_sequence;
   if (!epoch || typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 0) return false;
-  if (epochBySession.get(sessionId) === epoch && sequence <= (resyncCutBySession.get(sessionId) ?? -1)) {
+  const cut = getGatewayResyncCut(sessionId);
+  if (cut?.epoch === epoch && sequence <= cut.sequence) {
     return false;
   }
   epochBySession.set(sessionId, epoch);
-  resyncCutBySession.set(sessionId, sequence);
+  resyncCutBySession.set(sessionId, { epoch, sequence });
   lastSeqBySession.set(sessionId, sequence);
   seenSeqBySession.delete(sessionId);
   clearStreamActivity(sessionId);
@@ -75,8 +80,8 @@ export function isDuplicateGatewayChunk(sessionId: string, chunk: ChatChunk): bo
   const epoch = epochOf(chunk);
   const currentEpoch = epochBySession.get(sessionId);
   if (epoch && epoch !== currentEpoch) return Boolean(currentEpoch);
-  const cut = resyncCutBySession.get(sessionId);
-  if (epoch && cut !== undefined && seq <= cut) return true;
+  const cut = getGatewayResyncCut(sessionId);
+  if (cut && epoch === cut.epoch && seq <= cut.sequence) return true;
   const seen = seenGatewaySequencesFor(sessionId);
   if (seen.has(seq)) {
     logStream('gateway-seq', 'drop-duplicate', { sessionId, seq, last: lastSeqBySession.get(sessionId) ?? 0, kind: chunk.kind });

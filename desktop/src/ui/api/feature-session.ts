@@ -1018,6 +1018,7 @@ export class BackendChatSocket {
           sessions?: string[];
           last_gateway_sequences?: Record<string, number>;
           gateway_cursors?: Record<string, GatewayCursor>;
+          gateway_snapshots?: boolean;
           answers?: Record<string, unknown>;
           request_id?: string;
           mode?: string;
@@ -1067,6 +1068,7 @@ export class BackendChatSocket {
       action: 'subscribe',
       session_id: sessions[0],
       sessions,
+      gateway_snapshots: true,
       ...(hasSeqs ? { last_gateway_sequences: lastGatewaySequences } : {}),
       ...(cursors && Object.keys(cursors).length ? { gateway_cursors: cursors } : {}),
     });

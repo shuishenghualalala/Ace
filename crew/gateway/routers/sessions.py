@@ -164,6 +164,25 @@ def _session_messages_to_history_items(
     return items
 
 
+def read_session_history_window(store, session_id: str, owner: str, limit: int, before: str | None = None) -> dict:
+    messages, has_more, next_before = store.load_window(
+        session_id, owner_account_id=owner, limit=limit, before=before,
+    )
+    # Forked windows can include rows from different source sessions.
+    groups: list[tuple[str, list[Message]]] = []
+    for sid, _seq, message in messages:
+        if groups and groups[-1][0] == sid:
+            groups[-1][1].append(message)
+        else:
+            groups.append((sid, [message]))
+    items = [
+        item
+        for sid, rows in groups
+        for item in _session_messages_to_history_items(rows, source_session_id=sid)
+    ]
+    return {"items": items, "has_more": has_more, "next_before": next_before}
+
+
 def _history_sort_key(item: dict[str, Any], index: int) -> tuple[float, int]:
     timestamp = item.get("timestamp")
     if isinstance(timestamp, int | float):
@@ -671,29 +690,11 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             items, _ = await _aggregate_history_items(crew, session_id, owner)
             return JSONResponse({"items": items, "has_more": False, "next_before": None})
 
-        def _load_window_and_map() -> tuple[list[dict[str, Any]], bool, str | None]:
-            messages, has_more, next_before = load_window(
-                session_id, owner_account_id=owner, limit=limit, before=before
-            )
-            # fork 续接时消息可能来自不同会话：按连续来源分组映射 source_session_id
-            groups: list[tuple[str, list[Message]]] = []
-            for sid, _seq, msg in messages:
-                if groups and groups[-1][0] == sid:
-                    groups[-1][1].append(msg)
-                else:
-                    groups.append((sid, [msg]))
-            items = [
-                item
-                for sid, msgs in groups
-                for item in _session_messages_to_history_items(msgs, source_session_id=sid)
-            ]
-            return items, has_more, next_before
-
         try:
-            items, has_more, next_before = await asyncio.to_thread(_load_window_and_map)
+            window = await asyncio.to_thread(read_session_history_window, crew.session_store, session_id, owner, limit, before)
         except SessionEventLogError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-        return JSONResponse({"items": items, "has_more": has_more, "next_before": next_before})
+        return JSONResponse(window)
 
     @router.get("/api/session/{session_id}/plan")
     def session_plan(request: Request, session_id: str) -> JSONResponse:

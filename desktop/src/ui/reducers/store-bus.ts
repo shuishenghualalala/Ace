@@ -34,6 +34,15 @@ export function createStore<T extends object>(initial: T, name: string): Store<T
   let state: T = initial;
   const listeners = new Set<(next: T, prev: T) => void>();
   const sym = Symbol(name);
+  const notify = (prev: T): void => {
+    const next = state;
+    const publish = () => {
+      for (const listener of listeners) listener(next, prev);
+      storeBus.publish(sym);
+    };
+    if (deferredStoreNotifications) deferredStoreNotifications.push(publish);
+    else publish();
+  };
 
   return {
     name: sym,
@@ -42,15 +51,13 @@ export function createStore<T extends object>(initial: T, name: string): Store<T
       const prev = state;
       state = { ...state, ...patch };
       if (prev === state) return;
-      for (const l of listeners) l(state, prev);
-      storeBus.publish(sym);
+      notify(prev);
     },
     replace(next) {
       const prev = state;
       state = next;
       if (prev === state) return;
-      for (const l of listeners) l(state, prev);
-      storeBus.publish(sym);
+      notify(prev);
     },
     subscribe(listener) {
       listeners.add(listener);
@@ -59,6 +66,24 @@ export function createStore<T extends object>(initial: T, name: string): Store<T
       };
     },
   };
+}
+
+let deferredStoreNotifications: Array<() => void> | null = null;
+
+/** Publishes related store writes after all values have been installed. */
+export function batchStoreUpdates(update: () => void): void {
+  if (deferredStoreNotifications) {
+    update();
+    return;
+  }
+  const notifications: Array<() => void> = [];
+  deferredStoreNotifications = notifications;
+  try {
+    update();
+  } finally {
+    deferredStoreNotifications = null;
+    for (const notify of notifications) notify();
+  }
 }
 
 // ---------- store-bus 中枢 ----------

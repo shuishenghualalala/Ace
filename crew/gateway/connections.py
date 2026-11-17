@@ -21,6 +21,7 @@ import asyncio
 import json
 import time
 from collections import OrderedDict, defaultdict, deque
+from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -38,7 +39,23 @@ _CHUNK_BUFFER_SIZE = 2000
 _MAX_PENDING_FOLLOWUPS = 8
 _MAX_FOLLOWUP_SESSIONS = 128
 _MAX_FOLLOWUP_FRAME_BYTES = 32_768
+_MAX_ACTIVE_SNAPSHOTS = 16
+_MAX_ACTIVE_SNAPSHOT_BYTES = 2 * 1024 * 1024
+_SNAPSHOT_KINDS = {"delta", "thinking", "tool", "file_changes", "todo_updated", "status"}
 _LEGACY_CURSOR = object()
+
+
+def _encode_snapshot_part(payload: dict) -> bytes:
+    return json.dumps(payload, separators=(",", ":")).encode("ascii")
+
+
+@dataclass
+class _ActiveTurnSnapshot:
+    request_id: str
+    started_at: float
+    history: bytes
+    remaining: int
+    frames: list[bytes] = field(default_factory=list)
 
 
 class ConnectionManager:
@@ -68,6 +85,7 @@ class ConnectionManager:
         self._gateway_epoch = uuid4().hex
         self._owner_replay_epochs: dict[str, str] = {}
         self._pending_followups: OrderedDict[tuple[str, str], dict[str, dict]] = OrderedDict()
+        self._active_snapshots: OrderedDict[tuple[str, str], _ActiveTurnSnapshot] = OrderedDict()
 
     def _key(self, session_id: str, owner_account_id: str | None = None) -> tuple[str, str]:
         """Build the connection key from explicit owner + session."""
@@ -228,6 +246,7 @@ class ConnectionManager:
                 self._gateway_seq,
                 self._replay_locks,
                 self._pending_followups,
+                self._active_snapshots,
             )
             for key in mapping
             if key[0] == owner
@@ -238,6 +257,7 @@ class ConnectionManager:
             self._gateway_seq.pop(key, None)
             self._replay_locks.pop(key, None)
             self._pending_followups.pop(key, None)
+            self._active_snapshots.pop(key, None)
         self._owner_replay_epochs[owner] = uuid4().hex
 
         async def _close(ws: WebSocket) -> None:
@@ -470,6 +490,7 @@ class ConnectionManager:
             payload["gateway_sequence"] = self._gateway_seq[key]
             payload["gateway_epoch"] = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
             self._chunk_buffers[key].append(dict(payload))
+            self._record_snapshot_frame(key, payload)
             if payload.get("kind") == "followup_question":
                 self._remember_followup(key, payload)
 
@@ -551,6 +572,56 @@ class ConnectionManager:
                 log.warning("推送连续失败 %d 次，降级为静默 session=%s",
                             self._consecutive_failures[key], self._label(key))
 
+    async def capture_turn_history(
+        self, owner: str, session_id: str, request_id: str, started_at: float,
+        is_current: Callable[[], bool], read_history: Callable[[], dict | None],
+    ) -> None:
+        """Freeze the committed prefix before this request can emit generation frames."""
+        key = self._key(session_id, owner)
+        lock = self._replay_locks[key]
+
+        def encode_history() -> bytes | None:
+            history = read_history()
+            return _encode_snapshot_part(history) if history else None
+
+        try:
+            history_bytes = await asyncio.to_thread(encode_history)
+        except Exception:  # noqa: BLE001 - an unavailable snapshot must not interrupt generation
+            log.debug("Could not capture turn history session=%s", self._label(key), exc_info=True)
+            return
+        async with lock:
+            if self._replay_locks.get(key) is not lock or not is_current():
+                return
+            self._active_snapshots.pop(key, None)
+            if history_bytes is None or len(history_bytes) >= _MAX_ACTIVE_SNAPSHOT_BYTES:
+                return
+            if len(self._active_snapshots) >= _MAX_ACTIVE_SNAPSHOTS:
+                self._active_snapshots.popitem(last=False)
+            self._active_snapshots[key] = _ActiveTurnSnapshot(
+                request_id, started_at, history_bytes, _MAX_ACTIVE_SNAPSHOT_BYTES - len(history_bytes),
+            )
+
+    def _record_snapshot_frame(self, key: tuple[str, str], payload: dict) -> None:
+        snapshot = self._active_snapshots.get(key)
+        if snapshot is None or payload.get("request_id") != snapshot.request_id:
+            return
+        kind = payload.get("kind")
+        if payload.get("is_final") or kind in ("final", "error"):
+            self._active_snapshots.pop(key, None)
+            return
+        if kind not in _SNAPSHOT_KINDS or (kind == "status" and (payload.get("body") or {}).get("control")):
+            return
+        try:
+            encoded = _encode_snapshot_part(payload)
+        except (ValueError, TypeError):
+            self._active_snapshots.pop(key, None)
+            return
+        if len(encoded) > snapshot.remaining:
+            self._active_snapshots.pop(key, None)
+            return
+        snapshot.remaining -= len(encoded)
+        snapshot.frames.append(encoded)
+
     def _remember_followup(self, key: tuple[str, str], payload: dict) -> None:
         """Keep still-waiting prompts available even if their replay frames expire."""
         body = payload.get("body") or {}
@@ -598,7 +669,10 @@ class ConnectionManager:
             return "cursor_ahead", 0
         return None, sequence
 
-    def _resync_frame(self, key: tuple[str, str], epoch: str, floor: int, head: int, reason: str) -> dict:
+    def _resync_frame(
+        self, key: tuple[str, str], epoch: str, floor: int, head: int, reason: str,
+        active_request_id: str | None = None,
+    ) -> dict:
         waiting = get_followup_waiter().is_waiting
         prompts = self._pending_followups.get(key, {})
         for qid in tuple(prompts):
@@ -609,6 +683,14 @@ class ConnectionManager:
         body: dict[str, Any] = {"reason": reason, "floor": floor}
         if prompts:
             body["pending_followups"] = list(prompts.values())
+        snapshot = self._active_snapshots.get(key)
+        if snapshot is not None and snapshot.request_id == active_request_id:
+            body["turn_snapshot"] = {
+                "request_id": snapshot.request_id,
+                "started_at": snapshot.started_at,
+                "history": json.loads(snapshot.history),
+                "frames": self._merge_pending_payloads([json.loads(frame) for frame in snapshot.frames]),
+            }
         return {
             "kind": "gateway_resync",
             "session_id": key[1],
@@ -629,6 +711,7 @@ class ConnectionManager:
         owner_account_id: str,
         register_for_live: bool = False,
         resume_cursor: object = _LEGACY_CURSOR,
+        snapshot_request_id: Callable[[], str | None] | None = None,
     ) -> bool:
         """向指定 socket 回放该 session 缓存中 gateway_sequence > after 的帧。
 
@@ -650,6 +733,14 @@ class ConnectionManager:
             reason = None
             if resume_cursor is not _LEGACY_CURSOR:
                 reason, after_gateway_sequence = self._check_resume_cursor(resume_cursor, epoch, floor, head)
+            elif (
+                snapshot_request_id is not None
+                and after_gateway_sequence < floor
+                and snapshot_request_id() is not None
+            ):
+                # A snapshot-capable observer without a cursor also needs the
+                # full prefix when the log starts partway through this turn.
+                reason = "cursor_expired"
             frames = {} if reason else {
                 payload["gateway_sequence"]: payload for payload in retained or ()
                 if payload["gateway_sequence"] > after_gateway_sequence
@@ -674,7 +765,8 @@ class ConnectionManager:
                 if self._replay_locks.get(key) is not lock:
                     return False
                 try:
-                    await self.send_socket(ws, self._resync_frame(key, epoch, floor, head, reason))
+                    active_request_id = snapshot_request_id() if snapshot_request_id is not None else None
+                    await self.send_socket(ws, self._resync_frame(key, epoch, floor, head, reason, active_request_id))
                 except Exception:  # noqa: BLE001
                     return False
                 sent = True

@@ -3,10 +3,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi } from '../../src/ui/backend-client';
-import { bootstrapBackend, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
+import { bootstrapBackend, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
 import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
-import { consumePending, stopGeneration } from '../../src/ui/features/chat-controller';
+import { appendMessage, consumePending, stopGeneration } from '../../src/ui/features/chat-controller';
 import { getGatewayCursors, resetGatewaySequence } from '../../src/ui/features/gateway-sequence';
 import { cancelSessionStreamRecovery, getSessionStreamRecovery } from '../../src/ui/features/session-stream-recovery';
 import { stopStreamWatchdog } from '../../src/ui/features/stream-watchdog';
@@ -19,7 +19,7 @@ import {
 } from '../../src/ui/stores/stores';
 import {
   addSubscribedSessions, enqueuePending, ensureSessionBook, getPendingQueue, patchBook,
-  setBusy, setActiveSessionId, state,
+  setBusy, setActiveSessionId, setHistoryPaging, state,
 } from '../../src/ui/state';
 
 beforeEach(() => {
@@ -85,6 +85,143 @@ describe('conversation recovery after a socket outage', () => {
       gateway_sequence: sequence, sequence, body, is_final: kind === 'final',
     }) });
   }
+
+  function snapshotFrame(kind: string, sequence: number, body: object) {
+    return {
+      kind, session_id: sid, request_id: oldRequest, gateway_epoch: 'epoch-1',
+      gateway_sequence: sequence, sequence, body, is_final: false,
+    };
+  }
+
+  function snapshotBody(frames: ReturnType<typeof snapshotFrame>[] = []) {
+    return {
+      reason: 'cursor_expired', floor: 6,
+      turn_snapshot: {
+        request_id: oldRequest,
+        started_at: 1_700_000_000,
+        history: {
+          items: [
+            { role: 'assistant', content: 'Offline durable turn' },
+            { role: 'user', content: 'User from Gateway', request_id: oldRequest },
+          ],
+          has_more: true,
+          next_before: 'new-page',
+        },
+        frames,
+      },
+    };
+  }
+
+  it('atomically projects the active snapshot, preserves local input and queue, and extends the seeded text', async () => {
+    const status = Promise.withResolvers<typeof settledStatus>();
+    vi.spyOn(backendApi, 'sessionStatus').mockReturnValue(status.promise);
+    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([{ role: 'assistant', content: 'Stale terminal response' }]);
+    const attachment = { id: 'file', name: 'notes.txt', path: '/fixture/notes.txt', type: 'file' as const };
+    const prompt = appendMessage(sid, 'user', 'Local display', { requestId: oldRequest, attachments: [attachment] });
+    const queuedPrompt = appendMessage(sid, 'user', 'Queued change');
+    const queued = { id: 'queued', query: 'Queued change', attachments: [], optimisticUserMessageId: queuedPrompt.id };
+    enqueuePending(sid, queued);
+    emitFrame('delta', 1, { text: 'Old partial' });
+    emitSocket({ type: 'open' });
+    const seen: Array<{ answer: string | undefined; requestId: string | null | undefined }> = [];
+    const unsubscribe = messageStore.subscribe((next) => {
+      const book = sessionStore.get().books[sid];
+      if (next.historyPaging[sid]?.nextBefore === 'new-page') {
+        seen.push({ answer: next.messages[sid].find((row) => row.id === book?.assistantId)?.content,
+          requestId: book?.activeRequestId });
+      }
+    });
+    emitFrame('gateway_resync', 10, snapshotBody([
+      snapshotFrame('thinking', 2, { text: 'Lost thinking' }),
+      snapshotFrame('delta', 3, { text: 'Before tool' }),
+      snapshotFrame('tool', 4, { name: 'browser', tool_call_id: 'tool-1', phase: 'start' }),
+      snapshotFrame('tool', 5, { name: 'browser', tool_call_id: 'tool-1', phase: 'result', detail: 'Result' }),
+      snapshotFrame('delta', 8, { text: 'After tool' }),
+    ]));
+    unsubscribe();
+
+    expect(seen).toEqual([{ answer: 'After tool', requestId: oldRequest }]);
+    expect(getSessionStreamRecovery(sid)).toBeUndefined();
+    expect(sessionStore.get().busySessions[sid]).toBe(true);
+    expect(getPendingQueue(sid)).toEqual([queued]);
+    expect(messageStore.get().messages[sid].map(({ content }) => content)).toEqual([
+      'Offline durable turn', 'Local display', 'Before tool', 'After tool', 'Queued change',
+    ]);
+    expect(messageStore.get().messages[sid][1]).toMatchObject({ id: prompt.id, attachments: [attachment] });
+    expect(messageStore.get().messages[sid][2]).toMatchObject({
+      thinking: 'Lost thinking', toolCalls: [{ toolCallId: 'tool-1', status: 'done', result: 'Result' }],
+    });
+    expect(messageStore.get().messages[sid].at(-1)?.id).toBe(queuedPrompt.id);
+
+    status.resolve(settledStatus);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(history).not.toHaveBeenCalled();
+    emitFrame('delta', 8, { text: 'After tool' });
+    emitFrame('delta', 11, { text: ' continues' });
+    expect(messageStore.get().messages[sid][3].content).toBe('After tool continues');
+  });
+
+  it('replaces an in-flight pagination read and applies the snapshot pagination cursor', async () => {
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: oldRequest });
+    const oldPage = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.historyWindow>>>();
+    const window = vi.spyOn(backendApi, 'historyWindow')
+      .mockReturnValueOnce(oldPage.promise)
+      .mockResolvedValueOnce({ items: [{ role: 'user', content: 'Older retained page' }], has_more: false, next_before: null });
+    setHistoryPaging(sid, { hasMore: true, nextBefore: 'old-page' });
+    const outdatedLoad = loadOlderHistoryPage(sid);
+    emitSocket({ type: 'open' });
+    emitFrame('gateway_resync', 10, snapshotBody([snapshotFrame('delta', 8, { text: 'Recovered' })]));
+
+    await expect(loadOlderHistoryPage(sid)).resolves.toBe(true);
+    expect(window).toHaveBeenLastCalledWith(sid, { limit: 100, before: 'new-page' });
+    oldPage.resolve({ items: [{ role: 'user', content: 'Outdated page' }], has_more: false, next_before: null });
+    await expect(outdatedLoad).resolves.toBe(false);
+    expect(messageStore.get().messages[sid].map(({ content }) => content)).toEqual([
+      'Older retained page', 'Offline durable turn', 'User from Gateway', 'Recovered',
+    ]);
+  });
+
+  it('retains a verified question in the projection and accepts its side-channel resolution', () => {
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: oldRequest });
+    emitSocket({ type: 'open' });
+    emitFrame('gateway_resync', 10, {
+      ...snapshotBody([snapshotFrame('delta', 8, { text: 'Before question' })]),
+      pending_followups: [{
+        ...snapshotFrame('followup_question', 9, { question_id: 'q-verified', questions: [{ id: 'q', question: 'Proceed?' }] }),
+        request_id: 'question-side-channel',
+      }],
+    });
+    expect(getSessionStreamRecovery(sid)).toBeUndefined();
+    expect(sessionStore.get().busySessions[sid]).toBeFalsy();
+    expect(sessionStore.get().books[sid]?.pendingFollowup?.questionId).toBe('q-verified');
+    expect(messageStore.get().messages[sid].at(-1)).toMatchObject({ content: 'Before question', streaming: false });
+    emitFrame('followup_question', 11, { question_id: 'q-verified', status: 'resolved' }, 'epoch-1', 'question-side-channel');
+    expect(sessionStore.get().books[sid]?.pendingFollowup).toBeNull();
+  });
+
+  it.each(['different active request', 'out-of-cut frame', 'nonprojection event'])(
+    'keeps terminal-history fallback for an unusable active snapshot (%s)', async (scenario) => {
+      const newerRequest = 'newer-local-request';
+      if (scenario === 'different active request') openTurnForRequest(sid, newerRequest);
+      vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+        ...settledStatus, live: 'running',
+        active_request_id: scenario === 'different active request' ? newerRequest : oldRequest,
+      });
+      const history = vi.spyOn(backendApi, 'history').mockResolvedValue([]);
+      emitSocket({ type: 'open' });
+      const frame = scenario === 'nonprojection event'
+        ? snapshotFrame('feature_event', 8, { feature: 'wiki', event: 'changed' })
+        : snapshotFrame('delta', scenario === 'out-of-cut frame' ? 11 : 8, { text: 'Stale projection' });
+      emitFrame('gateway_resync', 10, snapshotBody([frame]));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getSessionStreamRecovery(sid)).toBeDefined();
+      expect(history).not.toHaveBeenCalled();
+      expect(messageStore.get().messages[sid].map(({ content }) => content)).not.toContain('Stale projection');
+      if (scenario === 'different active request') {
+        expect(sessionStore.get().books[sid]?.activeRequestId).toBe(newerRequest);
+      }
+    },
+  );
 
   it('rebuilds settled history after an epoch reset and rejects frames from the retired epoch', async () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);

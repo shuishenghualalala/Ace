@@ -11,6 +11,7 @@ describe('BackendChatSocket subscribe replay', () => {
       action: 'subscribe',
       session_id: 'a',
       sessions: ['a'],
+      gateway_snapshots: true,
       last_gateway_sequences: { a: 12, b: 3 },
     });
   });
@@ -24,7 +25,7 @@ describe('BackendChatSocket subscribe replay', () => {
       action: 'subscribe',
       session_id: 'a',
       sessions: ['a'],
-      last_gateway_sequences: undefined,
+      gateway_snapshots: true,
     });
   });
 
@@ -38,6 +39,7 @@ describe('BackendChatSocket subscribe replay', () => {
     expect(sendSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'subscribe',
+        gateway_snapshots: true,
         last_gateway_sequences: { a: 10, b: 20 },
       }),
     );

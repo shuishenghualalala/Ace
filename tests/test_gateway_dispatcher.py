@@ -218,10 +218,13 @@ async def test_different_sessions_run_concurrently():
 async def test_same_session_id_different_owners_run_concurrently():
     store = InMemorySessionStore()
     gate = asyncio.Event()
+    both_started = asyncio.Event()
     running: list[str] = []
 
     async def inner(env):
         running.append(env.user_id)
+        if len(running) == 2:
+            both_started.set()
         yield ResponseChunk.delta(env.request_id, env.user_id)
         await gate.wait()
         yield ResponseChunk.final(env.request_id, "done")
@@ -229,17 +232,16 @@ async def test_same_session_id_different_owners_run_concurrently():
     disp = SessionDispatcher(inner, store)
     t1 = asyncio.create_task(_drain(disp.run(Envelope.of("a", session_id="same", user_id="A:uid-a"))))
     t2 = asyncio.create_task(_drain(disp.run(Envelope.of("b", session_id="same", user_id="B:uid-b"))))
-    await asyncio.sleep(0.02)
-
-    assert set(running) == {"A:uid-a", "B:uid-b"}
-    assert disp.status("same", owner_account_id="A:uid-a")["live"] == "running"
-    assert disp.status("same", owner_account_id="B:uid-b")["live"] == "running"
-    assert disp.status("same", owner_account_id="A:uid-a")["queue_depth"] == 0
-    assert disp.status("same", owner_account_id="B:uid-b")["queue_depth"] == 0
-
-    gate.set()
-    await t1
-    await t2
+    try:
+        await asyncio.wait_for(both_started.wait(), timeout=2.0)
+        assert set(running) == {"A:uid-a", "B:uid-b"}
+        assert disp.status("same", owner_account_id="A:uid-a")["live"] == "running"
+        assert disp.status("same", owner_account_id="B:uid-b")["live"] == "running"
+        assert disp.status("same", owner_account_id="A:uid-a")["queue_depth"] == 0
+        assert disp.status("same", owner_account_id="B:uid-b")["queue_depth"] == 0
+    finally:
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(t1, t2), timeout=2.0)
 
 
 async def test_global_active_run_limit_across_sessions():
@@ -429,10 +431,12 @@ async def test_steer_routes_to_sidechain_agent_when_task_runtime_enabled(tmp_pat
     """普通 agent turn 走 sidechain 时，steer 应命中实际运行的 sidechain Agent。"""
     store = InMemorySessionStore()
     gate = asyncio.Event()
+    started = asyncio.Event()
     exec_sessions: list[str] = []
 
     async def slow_inner(env):
         exec_sessions.append(env.session_id)
+        started.set()
         yield ResponseChunk.delta(env.request_id, "x")
         await gate.wait()
         yield ResponseChunk.final(env.request_id, "done")
@@ -453,15 +457,15 @@ async def test_steer_routes_to_sidechain_agent_when_task_runtime_enabled(tmp_pat
         task_runtime=_DummyTaskRuntime(tmp_path),
     )
     t1 = asyncio.create_task(_drain(disp.run(_env("s1", "first"))))
-    await asyncio.sleep(0.02)
-
-    assert exec_sessions and exec_sessions[0].startswith("s1::turn::")
-    assert disp.steer("s1", "用更谨慎的方向", owner_account_id=OWNER) is True
-    assert ctrl.steers == [(exec_sessions[0], "用更谨慎的方向", OWNER)]
-    assert (OWNER, "s1") not in disp._steer_texts
-
-    gate.set()
-    await asyncio.wait_for(t1, timeout=2.0)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        assert exec_sessions and exec_sessions[0].startswith("s1::turn::")
+        assert disp.steer("s1", "用更谨慎的方向", owner_account_id=OWNER) is True
+        assert ctrl.steers == [(exec_sessions[0], "用更谨慎的方向", OWNER)]
+        assert (OWNER, "s1") not in disp._steer_texts
+    finally:
+        gate.set()
+        await asyncio.wait_for(t1, timeout=2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1216,6 +1220,40 @@ async def test_sidechain_copies_base_history_into_isolated_transcript(tmp_path):
         assert [m.role for m in record["entry_history"]] == ["user", "assistant"]
     finally:
         hook_registry.unregister("session:end", disp._on_session_end)
+
+
+async def test_snapshot_anchors_canonical_input_before_first_output(tmp_path):
+    store = InMemorySessionStore()
+    previous = [Message.user("old"), Message.assistant("response")]
+    store.save("s1", previous, owner_account_id=OWNER)
+    captured: list[list[str]] = []
+
+    async def inner(env):
+        yield ResponseChunk.status_event(env.request_id, "Preparing")
+        assert not captured
+        user = Message.user("new [[attachment /tmp/test.txt]]")
+        store.save("s1", [*previous, user], owner_account_id=OWNER)
+        yield ResponseChunk.delta(env.request_id, "one", sequence=2)
+        assert captured == [["old", "response", user.content]]
+        yield ResponseChunk.delta(env.request_id, " two", sequence=3)
+        store.save(env.session_id, [*previous, user, Message.assistant("one two")], owner_account_id=OWNER)
+        yield ResponseChunk.final(env.request_id, "one two")
+
+    dispatcher = SessionDispatcher(inner, store, task_runtime=_DummyTaskRuntime(tmp_path))
+    envelope = _env("s1", "new")
+
+    async def capture(owner, session, request, started_at, is_current):
+        assert (owner, session, request) == (OWNER, "s1", envelope.request_id)
+        assert started_at > 0 and is_current()
+        captured.append([message.content for message in store.load(session, owner_account_id=owner)])
+
+    dispatcher.capture_turn_history = capture
+    try:
+        await _drain(dispatcher.run(envelope))
+        assert len(captured) == 1
+        assert dispatcher.snapshot_request_id("s1", OWNER) is None
+    finally:
+        hook_registry.unregister("session:end", dispatcher._on_session_end)
 
 
 async def test_sidechain_history_folded_back_into_outer_session(tmp_path):

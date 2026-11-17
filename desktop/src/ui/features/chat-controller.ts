@@ -13,7 +13,7 @@
  */
 
 import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, touchStreamActivity } from './gateway-sequence';
-import { noteDelta, parseDeltaRange, resetAssistant, resetSession } from '../stream-reassembly';
+import { noteDelta, resetAssistant, resetSession } from '../stream-reassembly';
 import {
   type ChatMessage,
   type PendingMessage,
@@ -93,11 +93,13 @@ import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
 import { renderModelFallbackBanner } from './model-fallback-banner';
 import {
+  applyMessageUpserts,
   chunkRequestId,
   featureEventFrameOf,
   isPlanControlStatus,
   normalizeChunk,
   reduceChunk,
+  reassembleChunkDelta,
   resolveBusyTransition,
   resolveTurnGate,
   USER_WAIT_CHUNK_KINDS,
@@ -1218,20 +1220,7 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
   // 入缓冲，用「按 seq 升序拼接」的重组结果覆盖 upsert 的 content，与到达顺序彻底解耦。
   // 无 gateway_sequence 的旧帧无可靠排序键，回退到 reducer 的到达顺序拼接（向后兼容）。
   if (parsed.kind === 'delta') {
-    const aid = result.replaceBook?.assistantId ?? null;
-    const seq = typeof chunk.gateway_sequence === 'number' && chunk.gateway_sequence > 0 ? chunk.gateway_sequence : null;
-    if (aid && seq !== null) {
-      const text = typeof parsed.body.text === 'string' ? parsed.body.text : '';
-      // 帧区间（回合内帧序号）一并入缓冲：live 合并帧与 replay 单帧文本重复时按区间去重。
-      const reconstructed = noteDelta(sid, aid, seq, text, parseDeltaRange(parsed.body, parsed.sequence));
-      for (const u of result.messageUpserts) {
-        if (u.op === 'append' && u.message) {
-          u.message = { ...u.message, content: reconstructed };
-        } else if (u.op === 'patch' && u.patch && 'content' in u.patch) {
-          u.patch = { ...u.patch, content: reconstructed };
-        }
-      }
-    }
+    reassembleChunkDelta(result, parsed, chunk.gateway_sequence, (...args) => noteDelta(sid, ...args));
   }
 
   // 状态 patch：book 整体替换
@@ -1244,9 +1233,11 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
     patchBook(sid, { activeRequestId: bindRequestId, acceptingNewRequest: false });
   }
   // 消息 upsert：append / patch / 全量替换，全部走 store 不可变更新
-  const hasMessageChanges = result.messageUpserts.length > 0 || result.replaceMessages != null;
-  applyMessageUpserts(sid, result.messageUpserts, result.replaceMessages);
+  const beforeMessages = messageStore.get().messages[sid] ?? [];
+  const nextMessages = applyMessageUpserts(beforeMessages, result);
+  const hasMessageChanges = nextMessages !== beforeMessages;
   if (hasMessageChanges) {
+    replaceSessionMessages(sid, nextMessages);
     window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId: sid } }));
   }
   if (parsed.kind === 'task' && parsed.body.task_kind === 'wiki_ingest') {
@@ -1474,32 +1465,6 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
   // 非活跃会话的其它 chunk 同理不重绘侧栏（见上 delta 分支注释）。
 }
 
-/** T3：把 reducer 输出的 MessageUpsert 应用到 messageStore；replaceMessages 为全量替换逃生口。 */
-function applyMessageUpserts(
-  sessionId: string,
-  upserts: ReturnType<typeof reduceChunk>['messageUpserts'],
-  replaceMessages?: ChatMessage[],
-): void {
-  if (upserts.length === 0 && !replaceMessages) return;
-  const cur = getMessages(sessionId);
-  let next = cur;
-  if (replaceMessages) {
-    next = replaceMessages;
-  }
-  for (const u of upserts) {
-    if (u.op === 'append' && u.message) {
-      next = [...next, u.message];
-    } else if (u.op === 'patch' && u.messageId && u.patch) {
-      next = next.map((m) => (m.id === u.messageId ? { ...m, ...u.patch } : m));
-    } else if (u.op === 'remove' && u.messageId) {
-      next = next.filter((m) => m.id !== u.messageId);
-    }
-  }
-  if (next !== cur) {
-    messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: next } });
-  }
-}
-
 // ---------- queue / dispatch / send ----------
 
 const pendingDispatches = new Set<string>();
@@ -1622,14 +1587,16 @@ export async function dispatchWs(
     return false;
   }
   // 修订式引导可能已经插入气泡。只记住本次发送创建的气泡，供发送失败时撤销。
+  const requestId = newTurnRequestId();
   const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
   const existingUserMessage = optimisticUserMessageId
     && getMessages(sessionId).some((message) => message.id === optimisticUserMessageId);
   const optimisticUserMessage = existingUserMessage ? null : appendMessage(sessionId, 'user', query, {
     attachments,
+    requestId,
     ...(optimisticUserMessageId ? { id: optimisticUserMessageId } : {}),
   });
-  const requestId = newTurnRequestId();
+  if (existingUserMessage && optimisticUserMessageId) patchMessage(sessionId, optimisticUserMessageId, { requestId });
   openTurnForRequest(sessionId, requestId);
   // 乐观置 running + 立刻渲染「正在思考」：覆盖后续 await socket.send 与长 TTFT 空白。
   window.dispatchEvent(new CustomEvent('context:usage-cleared', {
