@@ -14,7 +14,7 @@ import {
   wsBase,
   readDynamicKanbanResumeStream,
 } from './transport';
-import type { SendPayload, ChatChunk, BackendSocketStatusMeta, GatewayCursor } from './transport';
+import type { SendPayload, SendReceiptAction, ChatChunk, BackendSocketStatusMeta, GatewayCursor } from './transport';
 
 // ── 会话 / Agent 配置 ──
 
@@ -1052,6 +1052,7 @@ export class BackendChatSocket {
   async send(
     payload:
       | SendPayload
+      | SendReceiptAction
       | {
           action: string;
           session_id: string;
@@ -1073,6 +1074,8 @@ export class BackendChatSocket {
       | { action: 'followup_answer'; session_id: string; question_id: string; answers: FollowupAnswer[] }
       | { action: 'followup_cancel'; session_id: string; question_id: string }
       | { kind: 'pong' },
+    outboxScope?: string,
+    outboxStoreId?: string,
   ): Promise<boolean> {
     if (this.usingGatewayProxy) {
       const bridge = CrewBridge();
@@ -1080,9 +1083,11 @@ export class BackendChatSocket {
         return false;
       }
       const attempt = this.proxyAttempt;
-      const result = await bridge.gatewayWsSend(payload);
+      const result = outboxScope === undefined
+        ? await bridge.gatewayWsSend(payload)
+        : await bridge.gatewayWsSend(payload, outboxScope, outboxStoreId);
       if (!result?.ok) {
-        if (!this.closed && this.proxyAttempt === attempt) {
+        if (outboxScope === undefined && !this.closed && this.proxyAttempt === attempt) {
           this.gatewayProxyOpen = false;
           this.publishProxyStatus(false);
           this.scheduleReconnect();

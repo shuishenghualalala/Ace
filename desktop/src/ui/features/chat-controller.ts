@@ -138,7 +138,8 @@ import {
 } from '../state';
 import { renderAttachmentPreview } from './attachments';
 import { messageStore, sessionStore } from '../stores/stores';
-import { canSendToBackend } from './backend-status-guard';
+import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge, outboxQueueItem, outboxTurn, type OutboxObserver } from './chat-outbox';
+import { MAX_CHAT_FRAME_BYTES } from '../../shared/chat-outbox';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
@@ -166,6 +167,7 @@ interface DispatchOptions {
   externalWikiReadKbId?: string;
   workDisabledPreferenceIds?: string[];
   userMentions?: UserAgentMention[];
+  queuedItem?: PendingMessage;
 }
 /**
  * index.ts init 时调用，把 openSession / setTab 等顶层入口注入本模块。
@@ -1472,12 +1474,13 @@ const pendingDispatches = new Set<string>();
 
 function dispatchPendingItem(sessionId: string, head: PendingMessage): void {
   const book = bookFor(sessionId);
-  if (pendingDispatches.has(sessionId) || getSessionStreamRecovery(sessionId)
+  if (head.requiresReview || pendingDispatches.has(sessionId) || getSessionStreamRecovery(sessionId)
     || book.pendingFollowup || book.pendingPlan?.status === 'pending') return;
   pendingDispatches.add(sessionId);
   const dispatchOptions: DispatchOptions = {
     subScenario: head.subScenario ?? '',
     canStart: () => getPendingQueue(sessionId).includes(head),
+    queuedItem: head,
   };
   if (head.planActive !== undefined) dispatchOptions.planActive = head.planActive;
   if (head.clientIntent) dispatchOptions.clientIntent = head.clientIntent;
@@ -1500,7 +1503,7 @@ function dispatchPendingItem(sessionId: string, head: PendingMessage): void {
 }
 
 export function consumePending(sessionId: string): void {
-  const head = getPendingQueue(sessionId)[0];
+  const head = getPendingQueue(sessionId).find((item) => !item.requiresReview);
   if (head) dispatchPendingItem(sessionId, head);
 }
 
@@ -1509,14 +1512,134 @@ export function sendQueueItemNow(sessionId: string, id: string): void {
   if (item && !isBusy(sessionId)) dispatchPendingItem(sessionId, item);
 }
 
-export function editQueueItem(sessionId: string, index: number): void {
+export async function queueChatMessage(sessionId: string, item: PendingMessage): Promise<boolean> {
+  if (!canSubmitDesktopChat()) return false;
+  let pending = item;
+  if (desktopOutboxBridge()) {
+    const requestId = newTurnRequestId();
+    const wikiExtras = wikiSendExtrasResolver?.(sessionId);
+    const durableItem = {
+      ...item,
+      requestId,
+      workspaceId: workspaceForSessionDispatch(sessionId),
+      ...(wikiExtras ? { wikiKbId: wikiExtras.wikiKbId } : {}),
+    };
+    try {
+      if (!await chatOutbox.queue(sessionId, durableItem)) return false;
+    } catch {
+      notify('无法保存待发消息，草稿已保留');
+      return false;
+    }
+    pending = durableItem;
+  }
+  if (pending.clientIntent === 'revision') replacePendingQueue(sessionId, [pending, ...getPendingQueue(sessionId)]);
+  else enqueuePending(sessionId, pending);
+  if (pending.requestId && !pending.clientIntent && !isBusy(sessionId)) {
+    const owner = state.userInfo?.staffCode;
+    setTimeout(() => {
+      if (state.userInfo?.staffCode === owner && !isBusy(sessionId)) consumePending(sessionId);
+    }, 0);
+  }
+  return true;
+}
+
+export const chatOutboxObserver: OutboxObserver = {
+  onRestored(entry) {
+    if (entry.phase === 'queued') {
+      const item = outboxQueueItem(entry);
+      if (!item) return;
+      const queue = getPendingQueue(entry.sessionId);
+      const previous = queue.findIndex((candidate) => candidate.requestId === entry.requestId);
+      if (previous < 0) enqueuePending(entry.sessionId, item);
+      else replacePendingQueue(entry.sessionId, queue.map((candidate, index) => index === previous ? item : candidate));
+      if (item.requiresReview) {
+        setQueueHintWithUi(entry.sessionId, item.reviewReason === 'uncertain' ? '有消息执行结果待确认' : '有待编辑的未发送消息');
+      } else {
+        if (item.optimisticUserMessageId && !getMessages(entry.sessionId).some(({ id }) => id === item.optimisticUserMessageId)) {
+          appendMessage(entry.sessionId, 'user', item.query, {
+            id: item.optimisticUserMessageId, requestId: entry.requestId, attachments: item.attachments ?? [],
+          });
+        }
+        subscribeSessions([entry.sessionId]);
+      }
+      return;
+    }
+    const turn = outboxTurn(entry);
+    if (!turn || entry.phase === 'withdrawing') return;
+    if (!getMessages(entry.sessionId).some((message) => message.role === 'user' && message.requestId === entry.requestId)) {
+      appendMessage(entry.sessionId, 'user', turn.payload.query, {
+        requestId: entry.requestId,
+        attachments: turn.payload.attachments ?? [],
+        ...(turn.userMessageId ? { id: turn.userMessageId } : {}),
+      });
+    }
+    const book = bookFor(entry.sessionId);
+    if ((!book.activeRequestId || book.turnSealed) && !getSessionStreamRecovery(entry.sessionId)) {
+      openTurnForRequest(entry.sessionId, entry.requestId);
+      setBusyWithUi(entry.sessionId, true);
+    }
+    subscribeSessions([entry.sessionId]);
+  },
+  onReceipt(entry, status, code) {
+    if (status === 'uncertain') {
+      const detail = code === 'receipt_store_changed'
+        ? '网关消息记录已更换，无法确认这条消息是否执行。请核对会话记录。'
+        : '这条消息的执行结果待确认。请核对会话记录。';
+      appendMessage(entry.sessionId, 'error', detail);
+      if (bookFor(entry.sessionId).activeRequestId === entry.requestId) {
+        finalizeStreamingTurn(entry.sessionId);
+        discardEmptyOptimisticAssistant(entry.sessionId);
+        resetSession(entry.sessionId);
+        patchBook(entry.sessionId, { activeRequestId: null, turnSealed: true, acceptingNewRequest: false });
+        setBusyWithUi(entry.sessionId, false);
+        setStatusWithUi(entry.sessionId, 'idle');
+      }
+      notify(detail);
+      renderChat();
+    } else if (status === 'rejected') {
+      notify(code === 'queue_full' ? 'Gateway 的待发队列已满，消息已保留' : 'Gateway 未受理消息，内容已保留');
+    }
+  },
+};
+
+export function editQueueItem(
+  sessionId: string,
+  index: number,
+  restoreDraft = restorePrimaryQueueDraft,
+): void {
   const item = getPendingQueue(sessionId)[index];
   if (!item) return;
+  if (item.requestId) {
+    withOutboxWithdrawal(sessionId, () => {
+      const current = getPendingQueue(sessionId).findIndex((message) => message.id === item.id);
+      if (current >= 0) editQueueItemNow(sessionId, current, item, restoreDraft);
+    }, item.requestId);
+    return;
+  }
+  editQueueItemNow(sessionId, index, item, restoreDraft);
+}
+
+function editQueueItemNow(
+  sessionId: string,
+  index: number,
+  item: PendingMessage,
+  restoreDraft: (sessionId: string, item: PendingMessage) => void,
+): void {
   // 回填输入框供用户修改：从队列移除，下一次发送按新的提交时间追加到队尾。
-  queueEditDraft = { sessionId };
   removePendingQueueItem(sessionId, index);
-  setDisabledWorkPreferenceIdsForTurn(item.workDisabledPreferenceIds ?? []);
   if (getPendingQueue(sessionId).length === 0) setQueueHintWithUi(sessionId, '');
+  restoreDraft(sessionId, item);
+}
+
+function restorePrimaryQueueDraft(sessionId: string, item: PendingMessage): void {
+  if (state.activeSessionId !== sessionId) return;
+  queueEditDraft = { sessionId };
+  setDisabledWorkPreferenceIdsForTurn(item.workDisabledPreferenceIds ?? []);
+  if (item.attachments?.length) {
+    const knownAttachments = new Set(state.attachments.map(({ id }) => id));
+    replaceAttachments([...state.attachments, ...item.attachments.filter(({ id }) => !knownAttachments.has(id))]);
+    renderAttachmentPreview();
+  }
   const input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]');
   if (input) {
     input.value = item.query;
@@ -1541,10 +1664,11 @@ export async function dispatchWs(
       }
     : subScenarioOrOptions;
   const subScenario = dispatchOptions.subScenario ?? '';
-  if (!requireRendererLogin() || !canSendToBackend() || getSessionStreamRecovery(sessionId)) return false;
+  if (!requireRendererLogin() || !canSubmitDesktopChat() || getSessionStreamRecovery(sessionId)) return false;
+  const durable = Boolean(desktopOutboxBridge());
   const socket = state.socket;
   const generation = state.backendReadiness?.generation;
-  const canDispatch = () => canSendToBackend() && state.socket === socket
+  const canDispatch = () => canSubmitDesktopChat() && state.socket === socket
     && state.backendReadiness?.generation === generation;
   if (isDraftSession(sessionId)) {
     await persistDraftSessionModel(sessionId);
@@ -1570,10 +1694,8 @@ export async function dispatchWs(
   const planActiveForSend = dispatchOptions.planActive ?? state.composerMode === 'plan';
   const workDisabledPreferenceIds = dispatchOptions.workDisabledPreferenceIds
     ?? (productModeStore.get().productMode === 'work' ? takeDisabledWorkPreferenceIds() : []);
-  // Plan 模式：发送实际 query 之前先发一帧 plan_enter。
-  // 注意：openTurn 必须在 plan_enter 之后——plan 控制 status 会把 busy 置 idle，
-  // 若先开乐观回合再 plan_enter，会把刚置起的 busy/计时打回 idle。
-  await ensurePlanModeForSession(sessionId, planActiveForSend);
+  // The native Gateway enters Plan as part of the accepted turn.
+  if (!durable) await ensurePlanModeForSession(sessionId, planActiveForSend);
   // 外源 Team 路由已写入 session_agent_config；WS payload 再带上 id，便于网关直连场景。
   const externalTeamId = state.activeExternalTeamIdBySession[sessionId] || '';
   const mode = externalTeamId || isExternalTeamSession(sessionId) ? 'team' : 'agent';
@@ -1585,10 +1707,34 @@ export async function dispatchWs(
   if (!canDispatch() || getSessionStreamRecovery(sessionId) || dispatchOptions.canStart?.() === false) {
     return false;
   }
-  // 新一轮发送：解除对该会话的「迟到分片屏蔽」
+  const requestId = dispatchOptions.queuedItem?.requestId ?? newTurnRequestId();
+  const wikiKbId = dispatchOptions.queuedItem?.wikiKbId ?? wikiSendExtrasResolver?.(sessionId)?.wikiKbId;
+  const payload: SendPayload & { request_id: string } = {
+    query,
+    session_id: sessionId,
+    request_id: requestId,
+    mode,
+    workspace_id: dispatchOptions.queuedItem?.workspaceId ?? workspaceForSessionDispatch(sessionId),
+    attachments,
+    ...(planActiveForSend ? { plan_active: true } : {}),
+    ...(dispatchOptions.clientIntent ? { client_intent: dispatchOptions.clientIntent } : {}),
+    ...(externalTeamId ? { external_team_id: externalTeamId } : {}),
+    ...(subScenario ? { sub_scenario: subScenario } : {}),
+    ...(wikiKbId ? { wiki_kb_id: wikiKbId } : {}),
+    ...(mode === 'team' && dispatchOptions.externalWikiReadKbId
+      ? { external_wiki_read_kb_id: dispatchOptions.externalWikiReadKbId }
+      : {}),
+    ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),
+    ...(workDisabledPreferenceIds.length > 0 ? { work_disabled_preference_ids: workDisabledPreferenceIds } : {}),
+    ...(dispatchOptions.userMentions?.length ? { user_mentions: dispatchOptions.userMentions } : {}),
+  };
+  const receipted = { ...payload, send_receipt: true } as const;
+  if (durable && new TextEncoder().encode(JSON.stringify(receipted)).byteLength > MAX_CHAT_FRAME_BYTES) {
+    notify('消息超过发送大小限制，草稿已保留');
+    return false;
+  }
   removeSuppressedSession(sessionId);
   // 修订式引导可能已经插入气泡。只记住本次发送创建的气泡，供发送失败时撤销。
-  const requestId = newTurnRequestId();
   const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
   const existingUserMessage = optimisticUserMessageId
     && getMessages(sessionId).some((message) => message.id === optimisticUserMessageId);
@@ -1618,31 +1764,23 @@ export async function dispatchWs(
     backendConnected: state.backendConnected,
     clientTs,
   });
-  // 专用 Wiki Agent 经注册口提供本会话的 wiki_kb_id。
-  const wikiExtras = wikiSendExtrasResolver?.(sessionId) ?? null;
-  const payload: SendPayload = {
-    query,
-    session_id: sessionId,
-    request_id: requestId,
-    mode,
-    workspace_id: workspaceForSessionDispatch(sessionId),
-    attachments,
-    ...(planActiveForSend ? { plan_active: true } : {}),
-    ...(dispatchOptions.clientIntent ? { client_intent: dispatchOptions.clientIntent } : {}),
-    ...(externalTeamId ? { external_team_id: externalTeamId } : {}),
-    ...(subScenario ? { sub_scenario: subScenario } : {}),
-    ...(wikiExtras ? { wiki_kb_id: wikiExtras.wikiKbId } : {}),
-    ...(mode === 'team' && dispatchOptions.externalWikiReadKbId
-      ? { external_wiki_read_kb_id: dispatchOptions.externalWikiReadKbId }
-      : {}),
-    ...(dispatchOptions.wikiConfirmationId ? { wiki_confirmation_id: dispatchOptions.wikiConfirmationId } : {}),
-    ...(workDisabledPreferenceIds.length > 0 ? { work_disabled_preference_ids: workDisabledPreferenceIds } : {}),
-    ...(dispatchOptions.userMentions?.length ? { user_mentions: dispatchOptions.userMentions } : {}),
-  };
   let ok = false;
   let failure = '服务未连接，请稍后重试。';
   try {
-    ok = await socket.send(payload);
+    if (durable) {
+      subscribeSessions([sessionId]);
+      const delivery = await chatOutbox.submit({
+        payload: receipted,
+        ...(optimisticUserMessage?.id || optimisticUserMessageId
+          ? { userMessageId: optimisticUserMessage?.id ?? optimisticUserMessageId! }
+          : {}),
+        ...(dispatchOptions.queuedItem ? { queuedItem: dispatchOptions.queuedItem } : {}),
+      });
+      ok = delivery === 'accepted';
+      failure = delivery === 'rejected' ? 'Gateway 未受理消息，内容已保留。' : '发送已取消，内容已保留。';
+    } else {
+      ok = await socket.send(payload);
+    }
   } catch (error) {
     reportRendererError('ws-send', error, { sessionId, requestId });
     failure = '发送状态未确认，请先核对会话记录。';
@@ -1665,7 +1803,7 @@ export async function dispatchWs(
     syncTurnDurationTicker();
     return false;
   }
-  subscribeSessions([sessionId]);
+  if (!durable) subscribeSessions([sessionId]);
   logStream('dispatch', 'local-state-ready', { sessionId, requestId, busy: true });
   renderChat();
   syncTurnDurationTicker();
@@ -1674,12 +1812,12 @@ export async function dispatchWs(
 
 /** Component actions never consume composer drafts, attachments or annotation drafts. */
 export async function sendNativeVisualMessage(sessionId: string, text: string): Promise<boolean> {
-  if (!requireRendererLogin() || !canSendToBackend() || state.activeSessionId !== sessionId) return false;
+  if (!requireRendererLogin() || !canSubmitDesktopChat() || state.activeSessionId !== sessionId) return false;
   if (isBusy(sessionId)) {
-    enqueuePending(sessionId, {
+    if (!await queueChatMessage(sessionId, {
       id: newMessageId('q'), query: text, attachments: [], subScenario: '',
       planActive: state.composerMode === 'plan', workDisabledPreferenceIds: [],
-    });
+    })) return false;
     setQueueHintWithUi(sessionId, '正在排队…');
     renderChat();
     return true;
@@ -1688,7 +1826,7 @@ export async function sendNativeVisualMessage(sessionId: string, text: string): 
 }
 
 export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<boolean> {
-  if (!requireRendererLogin() || !canSendToBackend()) return false;
+  if (!requireRendererLogin() || !canSubmitDesktopChat()) return false;
   const plainContent = text.trim();
   const attachments = [...state.attachments];
   const activeHasAnnotations = state.activeSessionId
@@ -1702,6 +1840,8 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
   const wikiGrant = activeTeamId ? getTeamWikiReadGrant(sessionId, activeTeamId) : null;
   const externalWikiReadKbId = wikiGrant?.kbId || '';
   const hasAnnotationDraft = hasSiteAnnotationDraft(sessionId) || hasBlueprintAnnotationDraft(sessionId);
+  const siteDraft = composeSiteAnnotationMessage(sessionId, '');
+  const blueprintDraft = composeBlueprintAnnotationMessage(sessionId, '');
   const content = composeBlueprintAnnotationMessage(
     sessionId,
     composeSiteAnnotationMessage(sessionId, plainContent),
@@ -1714,8 +1854,10 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
       replaceAttachments(state.attachments.filter((attachment) => !submittedAttachments.has(attachment)));
       renderAttachmentPreview();
     }
-    clearSiteAnnotationDraft(sessionId);
-    clearBlueprintAnnotationDraft(sessionId);
+    if (siteDraft && composeSiteAnnotationMessage(sessionId, '') === siteDraft) clearSiteAnnotationDraft(sessionId);
+    if (blueprintDraft && composeBlueprintAnnotationMessage(sessionId, '') === blueprintDraft) {
+      clearBlueprintAnnotationDraft(sessionId);
+    }
     if (getArmedSubScenario() === subScenario) clearScenarioChip();
     if (queueEditDraft?.sessionId === sessionId) queueEditDraft = null;
   };
@@ -1733,7 +1875,7 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
       ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
       ...(userMentions.length > 0 ? { userMentions } : {}),
     };
-    enqueuePending(sessionId, pendingItem);
+    if (!await queueChatMessage(sessionId, pendingItem)) return false;
     settleDraft();
     setQueueHintWithUi(sessionId, '正在排队…');
     setStatusWithUi(sessionId, 'queued');
@@ -1809,6 +1951,24 @@ export function finalizeStreamingTurn(sessionId: string): void {
 export function stopGeneration(sessionIdOverride?: string | Event): void {
   const sessionId = typeof sessionIdOverride === 'string' ? sessionIdOverride : state.activeSessionId;
   if (!sessionId) return;
+  withOutboxWithdrawal(sessionId, () => stopGenerationNow(sessionId));
+}
+
+function withOutboxWithdrawal(sessionId: string, apply: () => void, requestId?: string): void {
+  if (!desktopOutboxBridge()) {
+    apply();
+    return;
+  }
+  const owner = state.userInfo?.staffCode;
+  void chatOutbox.withdraw(sessionId, requestId).then(() => {
+    if (state.isLoggedIn && state.userInfo?.staffCode === owner) apply();
+  }).catch((error: unknown) => {
+    reportRendererError('ws-send', error, { sessionId });
+    notify('无法保存取消状态，请重试');
+  });
+}
+
+function stopGenerationNow(sessionId: string): void {
   cancelSessionStreamRecovery(sessionId);
   // 修法3：用户主动停止是终态（每会话仅一个活跃回合）→ 清该会话 delta 重组缓冲，防泄漏。
   // withdrawMessage 走 stopGeneration，故撤回编辑也由此覆盖。
@@ -1840,13 +2000,18 @@ export function stopGeneration(sessionIdOverride?: string | Event): void {
 export function withdrawMessage(msgId: string): void {
   const sessionId = state.activeSessionId;
   if (!sessionId) return;
+  withOutboxWithdrawal(sessionId, () => withdrawMessageNow(sessionId, msgId));
+}
+
+function withdrawMessageNow(sessionId: string, msgId: string): void {
+  if (state.activeSessionId !== sessionId) return;
   const list = state.messages[sessionId];
   const idx = list.findIndex((m) => m.id === msgId);
   if (idx < 0 || list[idx].role !== 'user') return;
   const content = list[idx].content;
 
   // 1. 中断当前工作流 + 立即解除 busy（让发送按钮可点）
-  stopGeneration();
+  stopGenerationNow(sessionId);
   setBusyWithUi(sessionId, false);
 
   // 2. 冻结「该消息起」的所有内容（把还在流式的助手消息标记为非流式，
@@ -1912,12 +2077,29 @@ function requestRevisionAfterCurrentTurn(sessionId: string): void {
 
 /** 待发卡片「引导」按钮：立刻显示为用户气泡，再把该队列项提升为修订式下一轮。 */
 export function steerQueuedItem(sessionId: string, index: number): void {
+  const item = getPendingQueue(sessionId)[index];
+  if (!item || item.requiresReview) return;
   const optimisticUserMessageId = newMessageId('user');
+  if (item.requestId) {
+    void chatOutbox.updateQueued(sessionId, {
+      ...item, requestId: item.requestId, clientIntent: 'revision', optimisticUserMessageId,
+    }).then((updated) => {
+      if (!updated) return;
+      const current = getPendingQueue(sessionId).findIndex(({ id }) => id === item.id);
+      if (current >= 0) applyQueuedSteer(sessionId, current, optimisticUserMessageId);
+    }).catch(() => notify('无法保存引导消息，请重试'));
+    return;
+  }
+  applyQueuedSteer(sessionId, index, optimisticUserMessageId);
+}
+
+function applyQueuedSteer(sessionId: string, index: number, optimisticUserMessageId: string): void {
   const item = promotePendingQueueItemAsRevision(sessionId, index, { optimisticUserMessageId });
   if (!item) return;
   appendMessage(sessionId, 'user', item.query, {
     id: optimisticUserMessageId,
     attachments: item.attachments ?? [],
+    ...(item.requestId ? { requestId: item.requestId } : {}),
   });
   requestRevisionAfterCurrentTurn(sessionId);
   renderChat();
@@ -1930,20 +2112,19 @@ export function steerGeneration(text: string): void {
   const t = text.trim();
   if (!sessionId || !t) return;
   const optimisticUserMessageId = newMessageId('user');
-  appendMessage(sessionId, 'user', t, { id: optimisticUserMessageId });
-  replacePendingQueue(sessionId, [
-    {
-      id: newMessageId('q'),
-      query: t,
-      attachments: [],
-      clientIntent: 'revision',
-      optimisticUserMessageId,
-    },
-    ...getPendingQueue(sessionId),
-  ]);
-  requestRevisionAfterCurrentTurn(sessionId);
-  renderChat();
-  jumpChatToBottom();
+  void queueChatMessage(sessionId, {
+    id: newMessageId('q'),
+    query: t,
+    attachments: [],
+    clientIntent: 'revision',
+    optimisticUserMessageId,
+  }).then((queued) => {
+    if (!queued) return;
+    appendMessage(sessionId, 'user', t, { id: optimisticUserMessageId });
+    requestRevisionAfterCurrentTurn(sessionId);
+    renderChat();
+    jumpChatToBottom();
+  });
 }
 
 export function subscribeSessions(sessionIds: string[]): void {

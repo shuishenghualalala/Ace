@@ -7,6 +7,8 @@ import { showContextMenu } from '../lib/context-menu';
 import { exportSessionToJson } from '../lib/session-export';
 import { notify, removeSessionState, setActiveSessionId, state } from '../state';
 import { showConfirmDialog, showPromptDialog } from '../ui-feedback';
+import { chatOutbox } from './chat-outbox';
+import { interactiveOwnerKey } from './interactive-owner';
 import type { RefreshSessionsFn } from './workspaces';
 import { renderChat } from './chat-controller';
 
@@ -113,14 +115,19 @@ export async function setArchived(
 }
 
 export async function deleteSession(sessionId: string, refresh: RefreshSessionsFn): Promise<void> {
+  const owner = interactiveOwnerKey();
   const ok = await showConfirmDialog({
     title: '删除会话',
     message: '确认删除该会话？此操作不可撤销。',
     confirmText: '删除',
     cancelText: '取消',
   });
-  if (!ok) return;
+  if (!ok || interactiveOwnerKey() !== owner) return;
   try {
+    // Persist the cancellation before deleting a session whose first send
+    // may still be waiting for its Gateway receipt.
+    await chatOutbox.withdraw(sessionId);
+    if (interactiveOwnerKey() !== owner) return;
     await backendApi.deleteSession(sessionId);
     removeSessionState(sessionId);
     if (state.activeSessionId === sessionId) {

@@ -309,6 +309,7 @@ function buildSnapshot(): AppState {
     backendReadiness: u.backendReadiness,
     backendLoopLagMs: u.backendLoopLagMs,
     backendCanSend: u.backendCanSend,
+    backendReceiptsReady: u.backendReceiptsReady,
     socket: u.socket as AppState['socket'],
     feedbackDraft: u.feedbackDraft,
     feedbackList: u.feedbackList,

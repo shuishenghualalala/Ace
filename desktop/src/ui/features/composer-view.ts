@@ -22,6 +22,7 @@ import {
 import { getUserAgentMentions, serializeMentionInput, type UserAgentMention } from './composer-mention';
 import { registerPrimaryComposerRoot } from './composer-scope';
 import { registerRunningIntroTarget } from './running-intro';
+import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge } from './chat-outbox';
 import type { PanelAttachments } from './attachments';
 
 const MAX_INPUT_HEIGHT = 180;
@@ -243,7 +244,7 @@ export function createComposerView(
     const queue = sessionId ? getPendingQueue(sessionId) : [];
     const canSteer = Boolean(sessionId && !isDynamicKanbanSession(sessionId));
     const signature = `${sessionId ?? ''}|${canSteer}|${queue.map((item) =>
-      `${item.id}:${item.query}:${item.optimisticUserMessageId ?? ''}`).join('|')}`;
+      `${item.id}:${item.query}:${item.optimisticUserMessageId ?? ''}:${item.reviewReason ?? ''}`).join('|')}`;
     if (signature === queueSignature) return;
     queueSignature = signature;
     const focused = queueSlot.contains(document.activeElement)
@@ -269,11 +270,12 @@ export function createComposerView(
       order.setAttribute('aria-label', `等待队列第 ${visibleIndex} 条`);
       const text = document.createElement('span');
       text.className = 'mw-composer-queue__text';
-      text.textContent = item.query;
+      text.textContent = item.reviewReason === 'uncertain' ? `执行结果待确认 · ${item.query}`
+        : item.reviewReason === 'rejected' ? `上次未受理 · ${item.query}` : item.query;
       text.title = item.query;
       const actions = document.createElement('div');
       actions.className = 'mw-composer-queue__actions';
-      if (canSteer) {
+      if (canSteer && !item.requiresReview) {
         actions.append(createQueueButton(
           '引导',
           { queueSteer: String(originalIndex), composerQueueFocus: `${item.id}:steer` },
@@ -329,17 +331,20 @@ export function createComposerView(
     const hasDraft = Boolean(input.value.trim() || attachmentCount);
     const ui = uiStore.get();
     const loggedIn = authStore.get().isLoggedIn;
+    const withReceipts = Boolean(desktopOutboxBridge());
     input.disabled = !loggedIn;
-    send.disabled = !loggedIn || !ui.backendCanSend || submitting || !hasDraft;
+    send.disabled = !loggedIn || !canSubmitDesktopChat() || submitting || !hasDraft;
     send.hidden = busy && !hasDraft;
-    stop.hidden = !busy || hasDraft;
+    stop.hidden = !busy || (hasDraft && !(withReceipts && submitting));
     send.title = busy ? '加入队列' : '发送';
     send.setAttribute('aria-label', send.title);
     send.setAttribute('aria-busy', submitting ? 'true' : 'false');
     send.dataset.loading = submitting ? 'true' : 'false';
     editBanner.hidden = !(sessionId && session.editFromIdx[sessionId] != null);
     status.textContent = submitError || (!loggedIn ? '登录后可发送消息'
-      : ui.backendCanSend ? '' : '聊天服务暂不可用，草稿可继续编辑');
+      : submitting && withReceipts ? '等待网关确认，草稿已保留'
+      : !ui.backendCanSend ? '聊天服务暂不可用，草稿可继续编辑'
+      : withReceipts && !ui.backendReceiptsReady ? '网关尚未提供发送确认能力，草稿已保留' : '');
     renderQueue();
   };
 
@@ -391,8 +396,18 @@ export function createComposerView(
     if (!sessionId) return;
     const remove = target.closest<HTMLElement>('[data-queue-remove]');
     if (remove) {
-      removePendingQueueItem(sessionId, Number(remove.dataset.queueRemove));
-      if (getPendingQueue(sessionId).length === 0) setQueueHint(sessionId, '');
+      const item = getPendingQueue(sessionId)[Number(remove.dataset.queueRemove)];
+      if (!item) return;
+      const removeItem = () => {
+        const index = getPendingQueue(sessionId).findIndex((entry) => entry.id === item.id);
+        if (index >= 0) removePendingQueueItem(sessionId, index);
+        if (getPendingQueue(sessionId).length === 0) setQueueHint(sessionId, '');
+      };
+      if (item.requestId) void chatOutbox.withdraw(sessionId, item.requestId).then(removeItem).catch(() => {
+        submitError = '无法移除待发消息，请重试';
+        refresh();
+      });
+      else removeItem();
       return;
     }
     const steer = target.closest<HTMLElement>('[data-queue-steer]');

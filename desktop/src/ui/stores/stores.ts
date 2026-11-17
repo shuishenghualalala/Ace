@@ -124,6 +124,7 @@ export function __resetAllStoresForTest(): void {
     backendReadiness: null,
     backendLoopLagMs: null,
     backendCanSend: false,
+    backendReceiptsReady: false,
     socket: null,
     feedbackDraft: { title: '', description: '', images: [] },
     feedbackList: [],

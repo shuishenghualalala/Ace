@@ -12,6 +12,8 @@
 import { backendApi } from '../backend-client';
 import { escapeHtml, notify, removeSelectedSession, removeSessionState, removeSubscribedSession, setActiveSessionId, setSelectedSession, setSelectedSessions, state } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
+import { chatOutbox } from './chat-outbox';
+import { interactiveOwnerKey } from './interactive-owner';
 import { sessionsForManageList } from './workspaces';
 import { refreshAllSessions, type OpenSessionFn } from './workspaces';
 
@@ -316,6 +318,7 @@ function closeSessionManage(): void {
 }
 
 async function deleteSelectedSessions(): Promise<void> {
+  const owner = interactiveOwnerKey();
   const ids = Object.entries(state.selectedSessions)
     .filter(([, v]) => v)
     .map(([k]) => k);
@@ -327,9 +330,14 @@ async function deleteSelectedSessions(): Promise<void> {
     confirmText: '批量删除',
     cancelText: '取消',
   });
-  if (!confirmed) return;
+  if (!confirmed || interactiveOwnerKey() !== owner) return;
 
-  const results = await Promise.allSettled(ids.map((id) => backendApi.deleteSession(id)));
+  const results = await Promise.allSettled(ids.map(async (id) => {
+    await chatOutbox.withdraw(id);
+    if (interactiveOwnerKey() !== owner) throw new Error('账号已变更');
+    return backendApi.deleteSession(id);
+  }));
+  if (interactiveOwnerKey() !== owner) return;
   const ok: string[] = [];
   const failed: Array<{ id: string; reason: string }> = [];
   results.forEach((r, i) => {

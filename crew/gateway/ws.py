@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -23,8 +24,10 @@ from crew.agent.skills import (
 )
 from crew.core.runctx import current_active_skill_packages
 from crew.core.envelope import Envelope
+from crew.channels.channel_sessions import is_channel_session_id
 from crew.features import FeatureEventContributionFailedError
 from crew.gateway.auth import AuthenticationError, authenticate_websocket
+from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey, SendReceipt, current_send_execution
 from crew.scenarios import resolve_binding as resolve_scenario_binding
 from crew.gateway.helpers import (
     WS_PING_INTERVAL_S,
@@ -85,6 +88,7 @@ def create_ws_router(
     *,
     logout_coordinator=None,
     startup_status=None,
+    send_inbox: DesktopSendInbox | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -117,6 +121,7 @@ def create_ws_router(
 
         await socket.accept()
         connections.register_owner(owner, socket)
+        receipt_capability = send_inbox is not None and socket.query_params.get("send_receipts") == "1"
         log.info("WebSocket 已连接")
         registered_sessions: set[str] = set()
         runners: set[asyncio.Task] = set()
@@ -140,7 +145,7 @@ def create_ws_router(
 
         def _register_session(session_id: str) -> None:
             """把当前 socket 订阅到 session，供重连后的后台 chunk 继续投递。"""
-            if session_id not in registered_sessions:
+            if not disconnected.is_set() and session_id not in registered_sessions:
                 connections.register(session_id, socket, owner_account_id=owner)
                 registered_sessions.add(session_id)
 
@@ -171,7 +176,6 @@ def create_ws_router(
             from crew.channels.channel_sessions import (
                 build_outbound_channel_envelope,
                 deliver_channel_session_reply,
-                is_channel_session_id,
             )
 
             is_channel = is_channel_session_id(envelope.session_id)
@@ -296,8 +300,335 @@ def create_ws_router(
             request_id = str(data.get("request_id") or "").strip()
             return {"request_id": request_id} if request_id else {}
 
+        async def _handle_chat(
+            data: dict[str, Any], session_id: str, execution: SendExecution | None = None,
+        ) -> None:
+            attachments = data.get("attachments", [])
+            if not isinstance(attachments, list):
+                attachments = []
+            query = data.get("query", "")
+            if not isinstance(query, str):
+                query = str(query or "")
+            # 空 query 且无附件：禁止起一轮。否则会把 content 为空的 user 写入历史，
+            # 后续 OpenAI 兼容网关（如 MiniMax）对 messages 校验 400。
+            if not query.strip() and not attachments:
+                if session_id and _session_owned(session_id):
+                    await _send_status(session_id, "消息内容为空，请输入后再发送")
+                return
+            if execution is not None and (
+                data.get("sub_scenario") or data.get("plan_active")
+                or query.startswith("/") or is_channel_session_id(session_id)
+                or not _session_owned(session_id)
+            ):
+                if not await execution.begin():
+                    return
+                if dispatcher.closed or dispatcher.owner_is_blocked(owner):
+                    await execution.defer()
+                    return
+            external_team_id = str(data.get("external_team_id") or "").strip()
+            raw_team_profile = data.get("team_execution_profile")
+            team_execution_profile = normalize_team_execution_profile(raw_team_profile)
+
+            # 场景化推荐：sub_scenario 反查绑定 → 懒装 skill / 注入提示词。
+            scenario_meta: str | None = None
+            sub_scenario = str(data.get("sub_scenario") or "").strip()
+            if sub_scenario:
+                binding = resolve_scenario_binding(sub_scenario)
+                if binding:
+                    # a) 懒加载安装 optional skills（仅装尚未可用的）
+                    for slug in binding.get("skills") or []:
+                        if await aresolve_skill(slug) is None:
+                            try:
+                                # 安装是重 IO（copytree + 审计），移出事件循环
+                                await asyncio.to_thread(
+                                    install_skill,
+                                    slug,
+                                    operator_account_id=owner,
+                                    source="scenario-auto-install",
+                                )
+                            except Exception:  # noqa: BLE001
+                                log.warning("场景 skill 自动安装失败: %s", slug)
+                    # a2) 场景绑定的 skill 若属于某个 package，自动展开该 package，
+                    #     避免模型因 progressive disclosure 看不到内部 skills 而多轮交互。
+                    active_packages = set(current_active_skill_packages.get())
+                    for slug in binding.get("skills") or []:
+                        info = await aresolve_skill_any(slug)
+                        pkg = info.get("package") if info else None
+                        if pkg:
+                            active_packages.add(pkg)
+                    if active_packages:
+                        current_active_skill_packages.set(active_packages)
+                    # b) 注入提示词（手写文案，原样透传）
+                    if binding.get("inject"):
+                        scenario_meta = binding["inject"]
+                    # c) 可选运行模式（不覆盖前端显式 mode）
+                    if binding.get("mode") and not data.get("mode"):
+                        data["mode"] = binding["mode"]
+
+            # 注册：该 WS 正在服务 session_id（首次则登记，供后台任务推送）
+            ensure = getattr(crew.session_store, "ensure_session", None)
+            if not _session_owned(session_id):
+                if callable(ensure):
+                    ensure(
+                        session_id,
+                        workspace_id=str(data.get("workspace_id", "default")),
+                        title="",
+                        owner_account_id=owner,
+                    )
+                if not _session_owned(session_id):
+                    await _reject_missing_session(session_id)
+                    return
+            _register_session(session_id)
+
+            # 新会话在首条消息发送前只存在于前端；Plan 选择随首条消息带入，
+            # 必须等 ensure_session 后再进入 Plan，避免空会话点击 Plan 报“会话不存在”。
+            if data.get("plan_active"):
+                pm = getattr(crew, "plan_manager", None)
+                if pm is not None:
+                    pm.enter(session_id, owner_account_id=owner)
+
+            # 斜杠命令：直接走插件命令分发，不走 Agent 回合。
+            if query.startswith("/"):
+                command_result = await crew.plugins.run_plugin_command(
+                    query,
+                    session_id=session_id,
+                    owner_account_id=owner,
+                    channel="web",
+                    workspace_id=str(data.get("workspace_id", "default")),
+                )
+                if command_result is not None:
+                    if execution is not None:
+                        await execution.finish("completed")
+                    await connections.push_payload(
+                        session_id,
+                        {
+                            "kind": "final",
+                            "body": {"text": command_result},
+                            "is_final": True,
+                            "status": "succeeded",
+                            "sequence": 1,
+                            "request_id": str(data.get("request_id") or ""),
+                            "session_id": session_id,
+                        },
+                        owner_account_id=owner,
+                    )
+                    return
+
+            # Skill 调度：/skill-name [补充指令] 或 /package-name 或 /package-name/skill-name
+            # 保留原始输入作为用户可见消息，skill/package 展开内容作为 is_meta 消息
+            skill_meta: str | None = None
+            active_skills: list[dict] = []
+            active_packages_added: list[str] = []
+            if query.startswith("/"):
+                command, _, user_instruction = query[1:].partition(" ")
+
+                # 1. 先尝试解析为 skill（支持 /package/skill、/skill、alias、中文名）
+                skill_key = await aresolve_skill(command)
+                if skill_key:
+                    activation = await abuild_skill_activation(
+                        skill_key,
+                        user_instruction,
+                        session_id,
+                    )
+                    if activation is not None:
+                        skill_meta = activation.instruction
+                        active_skills.append(activation.to_dict())
+                else:
+                    # 2. 尝试解析为 package 并展开
+                    pkg = await aresolve_package(command)
+                    if pkg is not None:
+                        pkg_slug = pkg["slug"]
+                        try:
+                            active = set(current_active_skill_packages.get())
+                        except Exception:
+                            active = set()
+                        if pkg_slug not in active:
+                            active.add(pkg_slug)
+                            current_active_skill_packages.set(active)
+                            active_packages_added.append(pkg_slug)
+
+                        members = await aget_package_members(pkg_slug)
+                        lines = [
+                            f'[IMPORTANT: 用户激活了 "{pkg_slug}" skill package，以下 skills 已展开并可用。]',
+                            "",
+                        ]
+                        for m in members:
+                            desc = m.get("description_zh") or m.get("description") or ""
+                            lines.append(f"- /{m['slug']}: {desc}")
+                        if user_instruction.strip():
+                            lines += ["", f"用户补充指令：{user_instruction.strip()}"]
+                        skill_meta = "\n".join(lines)
+
+            # 场景注入提示词：与手输 /skill 互斥时拼接
+            if scenario_meta:
+                skill_meta = f"{skill_meta}\n\n{scenario_meta}" if skill_meta else scenario_meta
+
+            mode = data.get("mode") or "agent"
+
+            envelope = Envelope.of(
+                query,
+                session_id=session_id,
+                channel="web",
+                **_request_id_kw(data),
+                workspace_id=data.get("workspace_id", "default"),
+                user_id=owner,
+                mode=mode,
+            )
+            log.info(
+                "[PERF] gateway_request_received request_id=%s session=%s query_len=%d mode=%s",
+                envelope.request_id,
+                envelope.session_id,
+                len(query),
+                envelope.mode,
+            )
+            if external_team_id:
+                envelope.params["external_team_id"] = external_team_id
+            raw_user_mentions = data.get("user_mentions")
+            if raw_user_mentions is not None:
+                user_mentions = normalize_user_mentions(raw_user_mentions)
+                if user_mentions is None:
+                    await _send_status(
+                        session_id,
+                        "用户 Agent mention 格式无效，请重新从候选列表中选择成员",
+                    )
+                    return
+                envelope.params["user_mentions"] = user_mentions
+            intent = str(data.get("intent") or "").strip()
+            if intent:
+                envelope.params["intent"] = intent
+            client_intent = str(data.get("client_intent") or "").strip()
+            if client_intent == "revision":
+                envelope.params["client_intent"] = client_intent
+            # 沉淀开关状态透传（暂不触发实际编译）
+            if data.get("wiki_ingest"):
+                envelope.params["wiki_ingest"] = True
+            # 专用 Wiki Agent 的知识库透传。客户端未显式携带
+            # kb_id 时，从持久化会话配置恢复，不依赖临时模式状态。
+            wiki_kb_id = str(data.get("wiki_kb_id") or data.get("kb_id") or "").strip()
+            if not wiki_kb_id:
+                get_agent_config = getattr(crew.session_store, "get_agent_config", None)
+                if callable(get_agent_config):
+                    agent_config = get_agent_config(session_id, owner_account_id=owner) or {}
+                    if agent_config.get("wiki_agent_session"):
+                        wiki_kb_id = str(agent_config.get("wiki_kb_id") or "default").strip()
+            if wiki_kb_id:
+                envelope.params["wiki_kb_id"] = wiki_kb_id
+            external_wiki_read_kb_id = str(data.get("external_wiki_read_kb_id") or "").strip()
+            if mode == "team" and external_wiki_read_kb_id:
+                envelope.params["external_wiki_read_kb_id"] = external_wiki_read_kb_id
+            if mode == "team" and data.get("collaboration_contract") == "project_review_v1":
+                envelope.params["collaboration_contract"] = "project_review_v1"
+            wiki_confirmation_id = str(data.get("wiki_confirmation_id") or "").strip()
+            if wiki_confirmation_id:
+                envelope.params["wiki_confirmation_id"] = wiki_confirmation_id
+            if team_execution_profile is not None:
+                envelope.params["team_execution_profile"] = team_execution_profile
+            if data.get("team_confirm_execution_mode"):
+                envelope.params["team_confirm_execution_mode"] = True
+            envelope.attachments = attachments
+            envelope.params["session_context"] = session_context_from_envelope(
+                envelope, connected_platforms(channel_manager, owner)
+            )
+            if active_packages_added:
+                envelope.params["active_skill_packages"] = active_packages_added
+            if skill_meta:
+                envelope.params["skill_meta"] = skill_meta
+            if active_skills:
+                envelope.params["active_skills"] = active_skills
+
+            if execution is None:
+                _spawn(envelope)
+            else:
+                token = current_send_execution.set(execution)
+                try:
+                    await _run(envelope)
+                finally:
+                    current_send_execution.reset(token)
+
+        async def _execute_accepted(receipt: SendReceipt) -> None:
+            if dispatcher.closed or dispatcher.owner_is_blocked(owner) or (
+                logout_coordinator is not None and not logout_coordinator.allows_work(owner)
+            ):
+                return
+            assert send_inbox is not None and receipt.payload is not None
+            execution = SendExecution(send_inbox, receipt.key)
+            try:
+                await _handle_chat(receipt.payload, receipt.key.session_id, execution)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Desktop send failed before or during dispatch request=%s", receipt.key.request_id)
+                if not dispatcher.closed and not execution.started:
+                    await execution.finish("failed", "turn_failed")
+            finally:
+                if execution.started and not execution.finished and not dispatcher.closed:
+                    try:
+                        await execution.finish("uncertain", "dispatch_outcome_unverified")
+                    except Exception:
+                        log.exception("Desktop send outcome persistence failed request=%s", receipt.key.request_id)
+
+        async def _handle_receipt(data: dict[str, Any]) -> bool:
+            action = data.get("action")
+            query_receipt = action == "send_receipt_query"
+            cancel_receipt = action == "send_receipt_cancel"
+            if not (query_receipt or cancel_receipt or (not action and data.get("send_receipt") is True)):
+                return False
+            key = SendKey.from_frame(owner, data)
+            if key is None:
+                sid, rid = data.get("session_id"), data.get("request_id")
+                if isinstance(sid, str) and len(sid) <= 256 and isinstance(rid, str) and len(rid) <= 128:
+                    await connections.send_socket(socket, SendReceipt(
+                        SendKey(owner, sid, rid), "rejected", "invalid_request_id",
+                    ).frame())
+                return True
+            if send_inbox is None:
+                receipt = SendReceipt(key, "unavailable", "receipt_store_unavailable")
+            else:
+                try:
+                    if query_receipt:
+                        receipt = await send_inbox.query(key)
+                    elif cancel_receipt:
+                        receipt = await send_inbox.cancel(key)
+                    else:
+                        raw_query = data.get("query", "")
+                        attachments = data.get("attachments", [])
+                        mentions = data.get("user_mentions")
+                        if (
+                            not isinstance(raw_query, str) or not isinstance(attachments, list)
+                            or any(not isinstance(item, dict) for item in attachments)
+                            or not (raw_query.strip() or attachments)
+                            or (mentions is not None and normalize_user_mentions(mentions) is None)
+                        ):
+                            receipt = SendReceipt(key, "rejected", "invalid_payload")
+                        elif dispatcher.closed or dispatcher.owner_is_blocked(owner):
+                            receipt = await send_inbox.query(key)
+                            if receipt.status == "unknown":
+                                receipt = SendReceipt(key, "unavailable", "gateway_shutting_down")
+                        else:
+                            receipt = await send_inbox.accept(key, data)
+                except Exception:
+                    log.exception("Desktop send receipt store unavailable request=%s", key.request_id)
+                    receipt = SendReceipt(key, "unavailable", "receipt_store_unavailable")
+            if receipt.status in {"accepted", "running"}:
+                _register_session(key.session_id)
+            try:
+                # Preserve receipt-before-new-execution ordering without
+                # leaving committed work stranded if the original socket dies.
+                await asyncio.wait_for(connections.send_socket(socket, receipt.frame()), timeout=2.0)
+            finally:
+                if send_inbox is not None and not cancel_receipt and not dispatcher.closed:
+                    send_inbox.reserve(receipt, _execute_accepted)
+            return True
+
         heartbeat_task = asyncio.create_task(_heartbeat())
         try:
+            if receipt_capability:
+                await connections.send_socket(socket, {
+                    "kind": "send_receipt_capability",
+                    "body": {"version": 1, "store_id": send_inbox.store_id},
+                    "sequence": 0,
+                    "is_final": False,
+                })
             while True:
                 try:
                     data = await asyncio.wait_for(socket.receive_json(), timeout=WS_RECEIVE_TIMEOUT_S)
@@ -324,7 +655,9 @@ def create_ws_router(
                     await socket.close(code=4401, reason="Login required")
                     break
 
-                if data.get("kind") == "pong":
+                if not isinstance(data, dict) or data.get("kind") == "pong":
+                    continue
+                if await _handle_receipt(data):
                     continue
 
                 session_id = resolve_session_id(data, platform="web")
@@ -394,8 +727,17 @@ def create_ws_router(
                     if not _session_owned(session_id):
                         await _reject_missing_session(session_id)
                         continue
+                    stopped_preparation = False
+                    if send_inbox is not None:
+                        try:
+                            await send_inbox.cancel_pending(owner, session_id)
+                        except Exception:
+                            log.exception("Desktop pending sends could not be cancelled session=%s", session_id)
+                        stopped_preparation = send_inbox.stop_preparation(
+                            owner, session_id, dispatcher.active_tasks_snapshot(),
+                        )
                     stopped = await dispatcher.stop(session_id, owner_account_id=owner)
-                    if not stopped:
+                    if not stopped and not stopped_preparation:
                         await _send_status(session_id, "当前没有正在运行的回复")
                     continue
 
@@ -586,228 +928,7 @@ def create_ws_router(
                         _spawn(exec_env)
                     continue
 
-                attachments = data.get("attachments", [])
-                if not isinstance(attachments, list):
-                    attachments = []
-                query = data.get("query", "")
-                if not isinstance(query, str):
-                    query = str(query or "")
-                # 空 query 且无附件：禁止起一轮。否则会把 content 为空的 user 写入历史，
-                # 后续 OpenAI 兼容网关（如 MiniMax）对 messages 校验 400。
-                if not query.strip() and not attachments:
-                    if session_id and _session_owned(session_id):
-                        await _send_status(session_id, "消息内容为空，请输入后再发送")
-                    continue
-                external_team_id = str(data.get("external_team_id") or "").strip()
-                raw_team_profile = data.get("team_execution_profile")
-                team_execution_profile = normalize_team_execution_profile(raw_team_profile)
-
-                # 场景化推荐：sub_scenario 反查绑定 → 懒装 skill / 注入提示词。
-                scenario_meta: str | None = None
-                sub_scenario = str(data.get("sub_scenario") or "").strip()
-                if sub_scenario:
-                    binding = resolve_scenario_binding(sub_scenario)
-                    if binding:
-                        # a) 懒加载安装 optional skills（仅装尚未可用的）
-                        for slug in binding.get("skills") or []:
-                            if await aresolve_skill(slug) is None:
-                                try:
-                                    # 安装是重 IO（copytree + 审计），移出事件循环
-                                    await asyncio.to_thread(
-                                        install_skill,
-                                        slug,
-                                        operator_account_id=owner,
-                                        source="scenario-auto-install",
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    log.warning("场景 skill 自动安装失败: %s", slug)
-                        # a2) 场景绑定的 skill 若属于某个 package，自动展开该 package，
-                        #     避免模型因 progressive disclosure 看不到内部 skills 而多轮交互。
-                        active_packages = set(current_active_skill_packages.get())
-                        for slug in binding.get("skills") or []:
-                            info = await aresolve_skill_any(slug)
-                            pkg = info.get("package") if info else None
-                            if pkg:
-                                active_packages.add(pkg)
-                        if active_packages:
-                            current_active_skill_packages.set(active_packages)
-                        # b) 注入提示词（手写文案，原样透传）
-                        if binding.get("inject"):
-                            scenario_meta = binding["inject"]
-                        # c) 可选运行模式（不覆盖前端显式 mode）
-                        if binding.get("mode") and not data.get("mode"):
-                            data["mode"] = binding["mode"]
-
-                # 注册：该 WS 正在服务 session_id（首次则登记，供后台任务推送）
-                ensure = getattr(crew.session_store, "ensure_session", None)
-                if not _session_owned(session_id):
-                    if callable(ensure):
-                        ensure(
-                            session_id,
-                            workspace_id=str(data.get("workspace_id", "default")),
-                            title="",
-                            owner_account_id=owner,
-                        )
-                    if not _session_owned(session_id):
-                        await _reject_missing_session(session_id)
-                        continue
-                _register_session(session_id)
-
-                # 新会话在首条消息发送前只存在于前端；Plan 选择随首条消息带入，
-                # 必须等 ensure_session 后再进入 Plan，避免空会话点击 Plan 报“会话不存在”。
-                if data.get("plan_active"):
-                    pm = getattr(crew, "plan_manager", None)
-                    if pm is not None:
-                        pm.enter(session_id, owner_account_id=owner)
-
-                # 斜杠命令：直接走插件命令分发，不走 Agent 回合。
-                if query.startswith("/"):
-                    command_result = await crew.plugins.run_plugin_command(
-                        query,
-                        session_id=session_id,
-                        owner_account_id=owner,
-                        channel="web",
-                        workspace_id=str(data.get("workspace_id", "default")),
-                    )
-                    if command_result is not None:
-                        await connections.push_payload(
-                            session_id,
-                            {
-                                "kind": "final",
-                                "body": {"text": command_result},
-                                "is_final": True,
-                                "status": "succeeded",
-                                "sequence": 1,
-                                "request_id": str(data.get("request_id") or ""),
-                                "session_id": session_id,
-                            },
-                            owner_account_id=owner,
-                        )
-                        continue
-
-                # Skill 调度：/skill-name [补充指令] 或 /package-name 或 /package-name/skill-name
-                # 保留原始输入作为用户可见消息，skill/package 展开内容作为 is_meta 消息
-                skill_meta: str | None = None
-                active_skills: list[dict] = []
-                active_packages_added: list[str] = []
-                if query.startswith("/"):
-                    command, _, user_instruction = query[1:].partition(" ")
-
-                    # 1. 先尝试解析为 skill（支持 /package/skill、/skill、alias、中文名）
-                    skill_key = await aresolve_skill(command)
-                    if skill_key:
-                        activation = await abuild_skill_activation(
-                            skill_key,
-                            user_instruction,
-                            session_id,
-                        )
-                        if activation is not None:
-                            skill_meta = activation.instruction
-                            active_skills.append(activation.to_dict())
-                    else:
-                        # 2. 尝试解析为 package 并展开
-                        pkg = await aresolve_package(command)
-                        if pkg is not None:
-                            pkg_slug = pkg["slug"]
-                            try:
-                                active = set(current_active_skill_packages.get())
-                            except Exception:
-                                active = set()
-                            if pkg_slug not in active:
-                                active.add(pkg_slug)
-                                current_active_skill_packages.set(active)
-                                active_packages_added.append(pkg_slug)
-
-                            members = await aget_package_members(pkg_slug)
-                            lines = [
-                                f'[IMPORTANT: 用户激活了 "{pkg_slug}" skill package，以下 skills 已展开并可用。]',
-                                "",
-                            ]
-                            for m in members:
-                                desc = m.get("description_zh") or m.get("description") or ""
-                                lines.append(f"- /{m['slug']}: {desc}")
-                            if user_instruction.strip():
-                                lines += ["", f"用户补充指令：{user_instruction.strip()}"]
-                            skill_meta = "\n".join(lines)
-
-                # 场景注入提示词：与手输 /skill 互斥时拼接
-                if scenario_meta:
-                    skill_meta = f"{skill_meta}\n\n{scenario_meta}" if skill_meta else scenario_meta
-
-                mode = data.get("mode") or "agent"
-
-                envelope = Envelope.of(
-                    query,
-                    session_id=session_id,
-                    channel="web",
-                    **_request_id_kw(data),
-                    workspace_id=data.get("workspace_id", "default"),
-                    user_id=owner,
-                    mode=mode,
-                )
-                log.info(
-                    "[PERF] gateway_request_received request_id=%s session=%s query_len=%d mode=%s",
-                    envelope.request_id,
-                    envelope.session_id,
-                    len(query),
-                    envelope.mode,
-                )
-                if external_team_id:
-                    envelope.params["external_team_id"] = external_team_id
-                raw_user_mentions = data.get("user_mentions")
-                if raw_user_mentions is not None:
-                    user_mentions = normalize_user_mentions(raw_user_mentions)
-                    if user_mentions is None:
-                        await _send_status(
-                            session_id,
-                            "用户 Agent mention 格式无效，请重新从候选列表中选择成员",
-                        )
-                        continue
-                    envelope.params["user_mentions"] = user_mentions
-                intent = str(data.get("intent") or "").strip()
-                if intent:
-                    envelope.params["intent"] = intent
-                client_intent = str(data.get("client_intent") or "").strip()
-                if client_intent == "revision":
-                    envelope.params["client_intent"] = client_intent
-                # 沉淀开关状态透传（暂不触发实际编译）
-                if data.get("wiki_ingest"):
-                    envelope.params["wiki_ingest"] = True
-                # 专用 Wiki Agent 的知识库透传。客户端未显式携带
-                # kb_id 时，从持久化会话配置恢复，不依赖临时模式状态。
-                wiki_kb_id = str(data.get("wiki_kb_id") or data.get("kb_id") or "").strip()
-                if not wiki_kb_id:
-                    get_agent_config = getattr(crew.session_store, "get_agent_config", None)
-                    if callable(get_agent_config):
-                        agent_config = get_agent_config(session_id, owner_account_id=owner) or {}
-                        if agent_config.get("wiki_agent_session"):
-                            wiki_kb_id = str(agent_config.get("wiki_kb_id") or "default").strip()
-                if wiki_kb_id:
-                    envelope.params["wiki_kb_id"] = wiki_kb_id
-                external_wiki_read_kb_id = str(data.get("external_wiki_read_kb_id") or "").strip()
-                if mode == "team" and external_wiki_read_kb_id:
-                    envelope.params["external_wiki_read_kb_id"] = external_wiki_read_kb_id
-                if mode == "team" and data.get("collaboration_contract") == "project_review_v1":
-                    envelope.params["collaboration_contract"] = "project_review_v1"
-                wiki_confirmation_id = str(data.get("wiki_confirmation_id") or "").strip()
-                if wiki_confirmation_id:
-                    envelope.params["wiki_confirmation_id"] = wiki_confirmation_id
-                if team_execution_profile is not None:
-                    envelope.params["team_execution_profile"] = team_execution_profile
-                if data.get("team_confirm_execution_mode"):
-                    envelope.params["team_confirm_execution_mode"] = True
-                envelope.attachments = attachments
-                envelope.params["session_context"] = session_context_from_envelope(
-                    envelope, connected_platforms(channel_manager, owner)
-                )
-                if active_packages_added:
-                    envelope.params["active_skill_packages"] = active_packages_added
-                if skill_meta:
-                    envelope.params["skill_meta"] = skill_meta
-                if active_skills:
-                    envelope.params["active_skills"] = active_skills
-
-                _spawn(envelope)
+                await _handle_chat(data, session_id)
         except WebSocketDisconnect:
             log.info("WebSocket 断开")
         except RuntimeError as exc:

@@ -297,6 +297,11 @@ class SQLiteSessionStore(SessionStore):
         """Run related session/workspace writes atomically on this store connection."""
         return self._writer.execute(fn)
 
+    def read_query(self, fn: Callable[[Any], T]) -> T:
+        """Read through this connection's access lock without taking a writer lease."""
+        with self._lock:
+            return fn(self._conn)
+
     def close(self) -> None:
         """关闭底层 SQLite 连接（WAL 模式下每库持有多个 fd，必须显式释放）。"""
         # 后台回填短暂让路：避免关连接与回填事务竞争（超时则由回填自身的
@@ -446,6 +451,30 @@ class SQLiteSessionStore(SessionStore):
             )
             """
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS desktop_send_inbox (
+                owner_account_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                code TEXT NOT NULL DEFAULT '',
+                generation TEXT NOT NULL DEFAULT '',
+                payload_hash TEXT,
+                payload_json TEXT,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(owner_account_id, session_id, request_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS desktop_send_identity (
+                singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+                store_id TEXT NOT NULL
+            )
+        """)
+        conn.execute("INSERT OR IGNORE INTO desktop_send_identity VALUES (1, ?)", (uuid.uuid4().hex,))
+        self.desktop_send_store_id = str(conn.execute(
+            "SELECT store_id FROM desktop_send_identity WHERE singleton=1"
+        ).fetchone()[0])
         # 清理已过期的写者租约：持有进程已死或租期已尽后无人续约，陈行只会在
         # 表里无限累积。活进程的租约必然未过期，不受影响。删除后 fence 从 1
         # 重新起算不影响防脑裂：续约与写入都对照当前行的 owner_pid/fence 校验，
@@ -2008,18 +2037,22 @@ class SQLiteSessionStore(SessionStore):
         owner_account_id: str,
     ) -> None:
         """创建一个空会话占位，用于派活后立即在侧栏展示。已有会话不覆盖。"""
+        self._writer.execute(
+            lambda conn: self.ensure_session_in_transaction(conn, session_id, workspace_id, title, owner_account_id)
+        )
+
+    @staticmethod
+    def ensure_session_in_transaction(conn, session_id: str, workspace_id: str, title: str, owner_account_id: str) -> None:
         now = time.time()
-        def _write(conn):
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO sessions (
-                    session_id, owner_account_id, messages, updated_at, created_at, workspace_id,
-                    title, message_count, token_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
-                """,
-                (session_id, owner_account_id, "[]", now, now, workspace_id or "default", "" if is_placeholder_title(title) else title),
-            )
-        self._writer.execute(_write)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sessions (
+                session_id, owner_account_id, messages, updated_at, created_at, workspace_id,
+                title, message_count, token_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (session_id, owner_account_id, "[]", now, now, workspace_id or "default", "" if is_placeholder_title(title) else title),
+        )
 
     def session_belongs_to(self, session_id: str, owner_account_id: str) -> bool:
         """Return whether a session row belongs to the given owner."""
@@ -2036,29 +2069,16 @@ class SQLiteSessionStore(SessionStore):
         self.save(session_id, existing, owner_account_id=owner_account_id)
 
     def clear(self, session_id: str, owner_account_id: str) -> None:
-        def _write(conn):
-            conn.execute(
-                "DELETE FROM session_events WHERE session_id = ? AND owner_account_id = ?",
-                (session_id, owner_account_id),
-            )
-            conn.execute(
-                "DELETE FROM writer_leases WHERE session_id = ? AND owner_account_id = ?",
-                (session_id, owner_account_id),
-            )
-            conn.execute(
-                "DELETE FROM sessions WHERE session_id = ? AND owner_account_id = ?",
-                (session_id, owner_account_id),
-            )
-            conn.execute(
-                "DELETE FROM session_agent_config WHERE session_id = ? AND owner_account_id = ?",
-                (session_id, owner_account_id),
-            )
-
-        self._writer.execute(_write)
+        self._writer.execute(lambda conn: self._delete_session_rows(conn, session_id, owner_account_id))
         self._projections.pop((owner_account_id, session_id), None)
 
     @staticmethod
     def _delete_session_rows(conn, session_id: str, owner_account_id: str) -> None:
+        conn.execute("""
+            UPDATE desktop_send_inbox
+            SET status='cancelled', code='session_deleted', payload_json=NULL, updated_at=?
+            WHERE session_id=? AND owner_account_id=? AND status='accepted'
+        """, (time.time(), session_id, owner_account_id))
         conn.execute(
             "DELETE FROM session_events WHERE session_id = ? AND owner_account_id = ?",
             (session_id, owner_account_id),

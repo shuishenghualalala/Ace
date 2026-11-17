@@ -881,6 +881,7 @@ class SingleAgent(Agent):
         if content_parts:
             user_message.content_parts = content_parts
         user_message.timestamp = turn_started_at
+        user_message.request_id = envelope.request_id
         history.append(user_message)
 
         if not self.lightweight:
@@ -1610,6 +1611,9 @@ class SingleAgent(Agent):
         new_msgs = self._drop_dangling_tool_calls(
             [m for m in new_from_executor if not m.is_meta]
         )
+        for message in new_msgs:
+            if message.request_id is None:
+                message.request_id = envelope.request_id
         history.extend(new_msgs)
 
         # 子 agent（lightweight）的会话用完即弃：不落库、不写记忆，避免 SQLite 堆积

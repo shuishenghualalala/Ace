@@ -8,7 +8,7 @@
  * - 错误处理：识别 HTML 响应（典型为 SPA fallback）和 JSON 错误体（提取 error / detail），
  *   把 HTTP 状态码 + 后端错误信息合成人类可读消息抛给 UI 层。
  */
-import { logStream } from '../stream-debug';
+import type { DesktopChatOutboxEntry, DesktopChatOutboxSnapshot } from '../../shared/chat-outbox';
 // BackendNotification 在 feature-work 中定义；此处仅用于 ChatChunk 类型引用。
 import type { BackendNotification } from './feature-work';
 
@@ -34,6 +34,8 @@ export type ChunkKind =
   | 'work_event'
   | 'feature_event'
   | 'gateway_resync'
+  | 'send_receipt'
+  | 'send_receipt_capability'
   | 'ping'
   | 'pong';
 
@@ -59,6 +61,13 @@ export interface SendPayload {
   web_search_enabled?: boolean;
   /** Work 模式：仅本轮不应用的偏好 ID。 */
   work_disabled_preference_ids?: string[];
+}
+
+export type ReceiptedSendPayload = SendPayload & { request_id: string; send_receipt: true };
+export interface SendReceiptAction {
+  action: 'send_receipt_query' | 'send_receipt_cancel';
+  session_id: string;
+  request_id: string;
 }
 
 export interface GatewayCursor {
@@ -128,9 +137,12 @@ export type CrewBridge = {
   }) => void) => () => void;
   gatewayUpload?: (url: string, files: string[]) => Promise<GatewayUploadResult>;
   gatewayWsConnect?: () => Promise<{ ok?: boolean; status?: number; error?: string }>;
-  gatewayWsSend?: (payload: unknown) => Promise<{ ok?: boolean; error?: string }>;
+  gatewayWsSend?: (payload: unknown, outboxScope?: string, outboxStoreId?: string) => Promise<{ ok?: boolean; error?: string }>;
   gatewayWsClose?: () => Promise<{ ok?: boolean }>;
   onGatewayWsEvent?: (cb: (event: unknown) => void) => () => void;
+  chatOutboxList?: () => Promise<DesktopChatOutboxSnapshot>;
+  chatOutboxPut?: (scope: string, entry: DesktopChatOutboxEntry) => Promise<void>;
+  chatOutboxRemove?: (scope: string, requestId: string) => Promise<void>;
 };
 
 export function CrewBridge(): CrewBridge | undefined {

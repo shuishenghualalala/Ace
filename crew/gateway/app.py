@@ -67,6 +67,7 @@ from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.system import create_system_router
 from crew.gateway.routers.tracing import create_tracing_router
 from crew.gateway.ws import create_ws_router
+from crew.gateway.send_inbox import DesktopSendInbox
 from crew.security.settings import strict_security_enabled
 from crew.state.logging import get_logger
 
@@ -408,6 +409,15 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
     api.include_router(create_system_router(crew))
     api.include_router(create_tracing_router(crew))
     api.include_router(create_security_router(crew))
+    session_transaction = getattr(crew.session_store, "transaction", None)
+    session_read_query = getattr(crew.session_store, "read_query", None)
+    ensure_session_row = getattr(crew.session_store, "ensure_session_in_transaction", None)
+    desktop_send_store_id = getattr(crew.session_store, "desktop_send_store_id", None)
+    send_inbox = (
+        DesktopSendInbox(session_transaction, session_read_query, ensure_session_row, desktop_send_store_id)
+        if callable(session_transaction) and callable(session_read_query)
+        and callable(ensure_session_row) and desktop_send_store_id else None
+    )
     api.include_router(
         create_ws_router(
             crew,
@@ -416,6 +426,7 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             channel_manager,
             logout_coordinator=logout_coordinator,
             startup_status=_read_startup_status,
+            send_inbox=send_inbox,
         )
     )
 

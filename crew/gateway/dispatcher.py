@@ -33,6 +33,7 @@ from crew.core.interfaces import MessageHandler, SessionStore
 from crew.core.types import Message
 from crew.features.hooks import hook_registry
 from crew.features.outbound import enrich_error_chunk
+from crew.gateway.send_inbox import current_send_execution
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.dispatcher")
@@ -241,6 +242,10 @@ class SessionDispatcher:
     def owner_is_blocked(self, owner_account_id: str) -> bool:
         """Return whether owner-wide logout cleanup currently blocks admission."""
         return str(owner_account_id or "").strip() in self._blocked_owners
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     async def stop_owner(
         self,
@@ -565,6 +570,9 @@ class SessionDispatcher:
         sid = envelope.session_id
         rid = envelope.request_id
         owner = envelope.user_id
+        send = current_send_execution.get()
+        if send is not None and send.key.values != (owner, sid, rid):
+            send = None
         if owner in self._blocked_owners:
             log.info("Owner 正在退出，拒绝新调度 owner=%s session=%s", owner, sid)
             return
@@ -572,6 +580,18 @@ class SessionDispatcher:
         key = self._key(sid, owner)
         lock = self._lock_for(key)
         current_task = asyncio.current_task()
+
+        async def _claim_send() -> bool:
+            if send is None:
+                return True
+            started = send.started
+            if not await send.begin():
+                return False
+            if self._closed or self._owner_epochs.get(owner, 0) != owner_epoch:
+                if not started:
+                    await send.defer()
+                return False
+            return True
 
         def _runtime_termination_intent(task_id: str) -> tuple[str, str] | None:
             if not task_id or self._task_runtime is None:
@@ -607,8 +627,12 @@ class SessionDispatcher:
         demoted_for_children = False
         queued_status = ""
         if busy and effective_mode == BusyMode.STEER:
+            if not await _claim_send():
+                return
             steered = self.steer(sid, envelope.query, owner_account_id=owner)
             if steered:
+                if send is not None:
+                    await send.finish("completed")
                 yield ResponseChunk.status_event(rid, "补充指令已注入当前回复")
                 self._cleanup_if_idle(key)
                 return
@@ -621,6 +645,8 @@ class SessionDispatcher:
             log.info("session=%s 有活跃子 agent，busy interrupt 降级为 queue", sid)
 
         if busy and effective_mode == BusyMode.INTERRUPT:
+            if not await _claim_send():
+                return
             self.interrupt(sid, "被新消息中断", owner_account_id=owner)
             queued_status = "已请求中断当前回复，新消息将在当前回复停止后开始执行"
 
@@ -629,6 +655,8 @@ class SessionDispatcher:
             prior = self._queued_depth(key)
             if self._max_queue_depth_per_session and prior >= self._max_queue_depth_per_session:
                 msg = f"队列已满（最多 {self._max_queue_depth_per_session} 条），请稍后再试"
+                if send is not None:
+                    await send.finish("failed", "queue_full")
                 yield ResponseChunk.error(rid, msg)
                 try:
                     await self._store_set_status(sid, "failed", owner=owner, error=msg)
@@ -683,15 +711,24 @@ class SessionDispatcher:
                     global_slot = False
                     try:
                         global_slot = await self._acquire_global_slot(key)
-                        if self._closed:
-                            self._release_global_slot(key, global_slot)
+                        if self._closed or owner in self._blocked_owners:
                             raise asyncio.CancelledError
-                    except asyncio.CancelledError:
+                        if send is not None and current_task is not None:
+                            self._settling_tasks.add(current_task)
+                        allowed = await _claim_send()
+                    except (asyncio.CancelledError, Exception):
                         # 等槽期间被取消：回滚已受理标记，行为与「进入 running 前取消」一致。
+                        self._release_global_slot(key, global_slot)
                         self._running_counts.pop(key, None)
                         self._running.discard(key)
                         self._running_request_ids.pop(key, None)
                         raise
+                    if not allowed:
+                        self._release_global_slot(key, global_slot)
+                        self._running_counts.pop(key, None)
+                        self._running.discard(key)
+                        self._running_request_ids.pop(key, None)
+                        return
                     if current_task is not None:
                         self._running_task[key] = current_task
                         # Finish preparing durable state before interrupting the turn.
@@ -867,12 +904,12 @@ class SessionDispatcher:
                             title_fallback=self._convergence_title_fallback(),
                         )
                         parent_history = list(base_history)
-                        parent_history.append(
-                            Message.user(
-                                envelope.query,
-                                is_meta=bool(envelope.params.get("internal_task_resume")),
-                            )
+                        user_message = Message.user(
+                            envelope.query,
+                            is_meta=bool(envelope.params.get("internal_task_resume")),
                         )
+                        user_message.request_id = rid
+                        parent_history.append(user_message)
                         await self._store_save(
                             sid,
                             parent_history,
@@ -1006,6 +1043,7 @@ class SessionDispatcher:
                             except Exception:
                                 log.exception("收尾时关闭回合流失败 session=%s", sid)
                         activity_live = False
+                        history_settled = True
                         if sidechain_id:
                             try:
                                 sidechain_history = await self._store_load(sidechain_id, owner)
@@ -1045,6 +1083,7 @@ class SessionDispatcher:
                                     self._store.clear, sidechain_id, owner_account_id=owner
                                 )
                             except Exception:
+                                history_settled = False
                                 log.exception(
                                     "sidechain 收敛失败 session=%s sidechain=%s",
                                     sid,
@@ -1104,6 +1143,18 @@ class SessionDispatcher:
                             except Exception:
                                 log.exception("完成 agent_turn 任务失败 task=%s", runtime_task_id)
                         try:
+                            if send is not None and deferred_terminal is not None:
+                                try:
+                                    if not history_settled:
+                                        await send.finish("uncertain", "history_commit_unverified")
+                                    elif runtime_terminal_status == "cancelled" or err.startswith("已停止"):
+                                        await send.finish("cancelled", "turn_stopped")
+                                    elif failed:
+                                        await send.finish("failed", "turn_failed")
+                                    else:
+                                        await send.finish("completed")
+                                except Exception:
+                                    log.exception("写入 Desktop 发送终态失败 session=%s request=%s", sid, rid)
                             # 终态帧必须在 running 清理 / agent:end 之前推出：监听者与状态同步
                             # 以 idle 为权威信号，若 idle 先到而 final 未达，前端会提前派出排队
                             # 消息，final 反被回合门拦丢弃（回合永不封口、流式残字）。

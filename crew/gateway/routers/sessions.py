@@ -120,6 +120,8 @@ def _session_messages_to_history_items(
             continue  # 跳过元信息消息
         if message.role == "user" and message.content:
             item = {"role": message.role, "content": message.content}
+            if message.request_id:
+                item["request_id"] = message.request_id
             if source_session_id:
                 item["source_session_id"] = source_session_id
             if message.timestamp is not None:
@@ -127,6 +129,8 @@ def _session_messages_to_history_items(
             items.append(item)
         elif message.role == "assistant":
             item: dict[str, Any] = {"role": message.role, "content": message.content}
+            if message.request_id:
+                item["request_id"] = message.request_id
             if source_session_id:
                 item["source_session_id"] = source_session_id
             if message.timestamp is not None:

@@ -1,0 +1,299 @@
+"""Desktop acknowledgements persist independently of the sending socket."""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from types import SimpleNamespace
+from uuid import UUID
+
+import pytest
+from fastapi import FastAPI
+from starlette.testclient import TestClient
+
+from crew.core.envelope import ResponseChunk
+from crew.gateway.connections import ConnectionManager
+from crew.gateway.dispatcher import SessionDispatcher
+from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey
+from crew.gateway.ws import create_ws_router
+from crew.state.session_store import SQLiteSessionStore
+
+
+def _new_inbox(store):
+    return DesktopSendInbox(
+        store.transaction, store.read_query, store.ensure_session_in_transaction, store.desktop_send_store_id,
+    )
+
+
+def _payload(rid, sid="chat"):
+    return {"session_id": sid, "request_id": rid, "query": f"hello {rid}", "send_receipt": True}
+
+
+def _command(action, rid, sid="chat"):
+    return {"action": action, "session_id": sid, "request_id": rid}
+
+
+def _receive(socket, kind, rid):
+    for _ in range(10):
+        frame = socket.receive_json()
+        if frame["kind"] == kind and frame.get("request_id") == rid:
+            return frame
+    pytest.fail(f"Gateway did not send {kind} for {rid}")
+
+
+def _app(store, inbox, inner):
+    dispatcher = SessionDispatcher(inner, store)
+    crew = SimpleNamespace(
+        active_owner=SimpleNamespace(claim=lambda _owner: None),
+        session_store=store,
+        config=SimpleNamespace(),
+        dispatch=dispatcher.run,
+    )
+    app = FastAPI()
+    app.state.dispatcher = dispatcher
+    app.include_router(create_ws_router(
+        crew, dispatcher, ConnectionManager(min_interval=0),
+        SimpleNamespace(status=lambda _owner: []), send_inbox=inbox,
+    ))
+    return app
+
+
+async def test_accept_dedupe_cancel_tombstone_and_generation(tmp_path):
+    path = tmp_path / "send.db"
+    store = SQLiteSessionStore(path)
+    owner = "account-a"
+    key = SendKey(owner, "chat", "request")
+    revoked = SendKey(owner, "chat", "revoked")
+    other_owner = SendKey("account-b", "chat", "request")
+    try:
+        inbox = _new_inbox(store)
+        store_id = UUID(inbox.store_id)
+        assert (await inbox.query(key)).status == "unknown"
+        assert (await inbox.accept(key, _payload("request"))).status == "accepted"
+        assert store.session_belongs_to("chat", owner)
+        assert (await inbox.accept(key, {**_payload("request"), "query": "changed"})).code == "request_id_conflict"
+        assert (await inbox.query(other_owner)).status == "unknown"
+        assert (await inbox.cancel(revoked)).status == "cancelled"
+        assert (await inbox.accept(revoked, _payload("revoked"))).status == "cancelled"
+        assert await inbox.begin(key)
+        assert not await inbox.begin(key)
+        assert (await inbox.cancel(key)).status == "running"
+    finally:
+        store.close()
+    store = SQLiteSessionStore(path)
+    try:
+        replacement = _new_inbox(store)
+        assert UUID(replacement.store_id) == store_id
+        assert (await replacement.query(key)).status == "uncertain"
+        assert (await replacement.accept(key, _payload("request"))).status == "uncertain"
+        assert not await replacement.begin(key)
+        assert (await replacement.query(revoked)).status == "cancelled"
+    finally:
+        store.close()
+    independent = SQLiteSessionStore(tmp_path / "another.db")
+    try:
+        assert UUID(independent.desktop_send_store_id) != store_id
+    finally:
+        independent.close()
+
+
+async def test_delete_session_tombstones_accepted_receipt(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "send.db")
+    try:
+        inbox = _new_inbox(store)
+        key = SendKey("local", "chat", "request")
+        assert (await inbox.accept(key, _payload("request"))).status == "accepted"
+        store.clear("chat", owner_account_id="local")
+        assert (await inbox.query(key)).code == "session_deleted"
+        assert not await inbox.begin(key)
+    finally:
+        store.close()
+
+
+async def test_overlapping_gateways_claim_exact_request_only_once(tmp_path):
+    path = tmp_path / "send.db"
+    first = SQLiteSessionStore(path)
+    second = SQLiteSessionStore(path)
+    try:
+        inboxes = [_new_inbox(first), _new_inbox(second)]
+        key = SendKey("local", "chat", "same-request")
+        assert [result.status for result in await asyncio.gather(
+            *(inbox.accept(key, _payload("same-request")) for inbox in inboxes),
+        )] == ["accepted", "accepted"]
+        wins = await asyncio.gather(*(inbox.begin(key) for inbox in inboxes))
+        assert wins.count(True) == 1
+        winner = inboxes[wins.index(True)]
+        observing = inboxes[wins.index(False)]
+        assert (await observing.query(key)).status == "uncertain"
+        assert (await winner.query(key)).status == "running"
+        await winner.finish(key, "completed", "", started=True)
+        assert (await observing.query(key)).status == "completed"
+    finally:
+        second.close()
+        first.close()
+
+
+async def test_receipt_query_does_not_require_reserved_sqlite_writer(tmp_path):
+    path = tmp_path / "send.db"
+    first = SQLiteSessionStore(path)
+    second = SQLiteSessionStore(path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_transaction(_conn):
+        entered.set()
+        assert release.wait(timeout=10)
+
+    write = asyncio.create_task(asyncio.to_thread(second.transaction, hold_transaction))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        key = SendKey("local", "chat", "different")
+        receipt = await asyncio.wait_for(_new_inbox(first).query(key), timeout=3)
+        assert receipt.status == "unknown"
+    finally:
+        release.set()
+        await write
+        second.close()
+        first.close()
+
+
+async def test_cancelling_claim_wait_recovers_committed_dispatch_marker(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "send.db")
+    committed = threading.Event()
+    release = threading.Event()
+    key = SendKey("local", "chat", "claim")
+
+    def paused_transaction(write):
+        result = store.transaction(write)
+        if not committed.is_set():
+            committed.set()
+            assert release.wait(timeout=10)
+        return result
+
+    inbox = DesktopSendInbox(
+        paused_transaction, store.read_query, store.ensure_session_in_transaction, store.desktop_send_store_id,
+    )
+    claim = None
+    try:
+        assert (await _new_inbox(store).accept(key, _payload("claim"))).status == "accepted"
+        execution = SendExecution(inbox, key)
+        claim = asyncio.create_task(execution.begin())
+        assert await asyncio.to_thread(committed.wait, 5)
+        claim.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await claim
+        assert execution.started
+        await execution.finish("uncertain", "dispatch_outcome_unverified")
+        assert (await inbox.query(key)).status == "uncertain"
+    finally:
+        release.set()
+        if claim is not None and not claim.done():
+            await asyncio.gather(claim, return_exceptions=True)
+        store.close()
+
+
+def test_websocket_recovers_accepted_before_start_but_never_reexecutes_running(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "send.db")
+    previous = _new_inbox(store)
+    accepted = SendKey("local", "chat", "accepted")
+    started = SendKey("local", "chat", "started")
+    withdrawing = SendKey("local", "chat", "withdrawing")
+    invoked = []
+
+    async def seed():
+        await previous.accept(accepted, _payload(accepted.request_id))
+        await previous.accept(started, _payload(started.request_id))
+        await previous.begin(started)
+        await previous.accept(withdrawing, _payload(withdrawing.request_id))
+
+    async def execute(envelope):
+        invoked.append(envelope.request_id)
+        yield ResponseChunk.final(envelope.request_id, "processed")
+
+    try:
+        asyncio.run(seed())
+        client = TestClient(_app(store, _new_inbox(store), execute))
+        with client.websocket_connect("/ws?send_receipts=1") as socket:
+            capability = socket.receive_json()
+            assert capability["kind"] == "send_receipt_capability"
+            assert capability["body"] == {"version": 1, "store_id": previous.store_id}
+            # A persisted offline withdrawal wins before any query resumes work.
+            socket.send_json(_command("send_receipt_cancel", "withdrawing"))
+            assert _receive(socket, "send_receipt", "withdrawing")["body"]["status"] == "cancelled"
+            socket.send_json(_command("send_receipt_query", "accepted"))
+            assert _receive(socket, "send_receipt", "accepted")["body"]["status"] == "accepted"
+            assert _receive(socket, "final", "accepted")["body"]["text"] == "processed"
+            socket.send_json(_command("send_receipt_query", "started"))
+            assert _receive(socket, "send_receipt", "started")["body"]["status"] == "uncertain"
+            socket.send_json(_payload("accepted"))
+            assert _receive(socket, "send_receipt", "accepted")["body"]["status"] == "completed"
+            assert invoked == ["accepted"]
+    finally:
+        store.close()
+
+
+def test_websocket_acceptance_precedes_execution_and_stop_tombstones_busy_queue(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "send.db")
+    inbox = _new_inbox(store)
+    release = asyncio.Event()
+    invoked = []
+
+    async def execute(envelope):
+        invoked.append(envelope.request_id)
+        yield ResponseChunk.delta(envelope.request_id, "running")
+        await release.wait()
+        yield ResponseChunk.final(envelope.request_id, "processed")
+
+    try:
+        client = TestClient(_app(store, inbox, execute))
+        with client.websocket_connect("/ws?send_receipts=1") as socket:
+            assert socket.receive_json()["kind"] == "send_receipt_capability"
+            socket.send_json(_payload("first"))
+            first = socket.receive_json()
+            assert first["kind"] == "send_receipt" and first["body"]["status"] == "accepted"
+            _receive(socket, "delta", "first")
+            socket.send_json(_payload("second"))
+            assert _receive(socket, "send_receipt", "second")["body"]["status"] == "accepted"
+            socket.send_json(_command("send_receipt_cancel", "second"))
+            assert _receive(socket, "send_receipt", "second")["body"]["status"] == "cancelled"
+            # Stop can win before the original message reaches the Gateway.
+            socket.send_json(_command("send_receipt_cancel", "third"))
+            assert _receive(socket, "send_receipt", "third")["body"]["status"] == "cancelled"
+            socket.send_json(_payload("third"))
+            assert _receive(socket, "send_receipt", "third")["body"]["status"] == "cancelled"
+            socket.portal.call(release.set)
+            _receive(socket, "final", "first")
+            assert invoked == ["first"]
+    finally:
+        store.close()
+
+
+def test_graceful_shutdown_keeps_accepted_queued_turn_for_next_gateway(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "send.db")
+    inbox = _new_inbox(store)
+    invoked = []
+
+    async def execute(envelope):
+        invoked.append(envelope.request_id)
+        yield ResponseChunk.delta(envelope.request_id, "running")
+        await asyncio.Event().wait()
+
+    try:
+        app = _app(store, inbox, execute)
+        client = TestClient(app)
+        with client.websocket_connect("/ws?send_receipts=1") as socket:
+            assert socket.receive_json()["kind"] == "send_receipt_capability"
+            socket.send_json(_payload("running"))
+            _receive(socket, "send_receipt", "running")
+            _receive(socket, "delta", "running")
+            socket.send_json(_payload("queued"))
+            assert _receive(socket, "send_receipt", "queued")["body"]["status"] == "accepted"
+            _receive(socket, "status", "queued")
+            socket.portal.call(app.state.dispatcher.shutdown)
+            socket.send_json(_command("send_receipt_query", "queued"))
+            assert _receive(socket, "send_receipt", "queued")["body"]["status"] == "accepted"
+        assert invoked == ["running"]
+    finally:
+        store.close()

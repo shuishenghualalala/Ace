@@ -18,6 +18,8 @@ import {
 } from '../backend-client';
 import { openDialog, type OverlayHandle } from '../components/overlays';
 import { isChannelSessionId, type ChannelSessionGroup } from './channel-sessions';
+import { chatOutbox } from './chat-outbox';
+import { interactiveOwnerKey } from './interactive-owner';
 import {
   isExternalAgentSession,
   isExternalTeamSession,
@@ -812,6 +814,7 @@ export async function setWorkspaceHidden(
 export async function deleteWorkspaceById(id: string, openSession: OpenSessionFn): Promise<void> {
 
   const ws = state.workspaces.find((w) => w.id === id);
+  const owner = interactiveOwnerKey();
 
   const sessionCount = state.sessions.filter((s) => s.workspaceId === id).length;
 
@@ -827,11 +830,12 @@ export async function deleteWorkspaceById(id: string, openSession: OpenSessionFn
 
   });
 
-  if (!confirmed) return;
-
-  await backendApi.deleteWorkspace(id);
+  if (!confirmed || interactiveOwnerKey() !== owner) return;
 
   const ids = new Set(state.sessions.filter((s) => s.workspaceId === id).map((s) => s.id));
+  await Promise.all(Array.from(ids, (sessionId) => chatOutbox.withdraw(sessionId)));
+  if (interactiveOwnerKey() !== owner) return;
+  await backendApi.deleteWorkspace(id);
 
   ids.forEach((sid) => {
 

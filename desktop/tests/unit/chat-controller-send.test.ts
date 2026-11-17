@@ -11,6 +11,7 @@ import {
 import { createComposerView, type ComposerView } from '../../src/ui/features/composer-view';
 import { createMainComposerActions } from '../../src/ui/features/conversation-panel';
 import { isDraftSession } from '../../src/ui/features/workspaces';
+import { chatOutbox } from '../../src/ui/features/chat-outbox';
 import { appendAttachment, enqueuePending, getPendingQueue, patchBook, setBusy, setEditFrom, state } from '../../src/ui/state';
 import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
 
@@ -25,6 +26,8 @@ vi.mock('../../src/ui/features/native-visual-capability', () => ({ ensureNativeV
 
 let composer: ComposerView | undefined;
 afterEach(() => {
+  chatOutbox.reset();
+  vi.unstubAllGlobals();
   composer?.dispose();
   composer = undefined;
 });
@@ -149,6 +152,61 @@ describe('sendMessage', () => {
     await vi.waitFor(() => expect(getPendingQueue(sid)).toEqual([]));
     expect(sendFrame).toHaveBeenCalledTimes(2);
     expect(state.messages[sid].filter(({ role }) => role === 'user')).toHaveLength(1);
+  });
+
+  it('drains a durable queue item when the previous turn ends during its local write', async () => {
+    const sid = 'queue-write-race';
+    sessionStore.set({ activeSessionId: sid });
+    setBusy(sid, true);
+    appendAttachment(attachment);
+    const staged = Promise.withResolvers<void>();
+    const bridge = {
+      chatOutboxList: vi.fn(async () => ({ scope: 'owner', entries: [] })),
+      chatOutboxPut: vi.fn(async () => {}),
+      chatOutboxRemove: vi.fn(async () => {}),
+    };
+    bridge.chatOutboxPut.mockReturnValueOnce(staged.promise);
+    vi.stubGlobal('Crew', bridge);
+    await chatOutbox.bind(bridge, { onRestored: vi.fn(), onReceipt: vi.fn() });
+    const send = vi.fn(async () => true);
+    chatOutbox.connect(send);
+    chatOutbox.handle({
+      kind: 'send_receipt_capability', body: { version: 1, store_id: '1'.repeat(32) },
+      sequence: 0, is_final: false,
+    });
+
+    const submission = sendMessage('消息写入时上一轮结束');
+    await vi.waitFor(() => expect(bridge.chatOutboxPut).toHaveBeenCalledOnce());
+    expect(getPendingQueue(sid)).toEqual([]);
+    expect(state.attachments).toEqual([attachment]);
+    setBusy(sid, false);
+    consumePending(sid);
+    staged.resolve();
+    await expect(submission).resolves.toBe(true);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+    const [{ request_id }] = send.mock.calls[0] as unknown as [{ request_id: string }];
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      query: '消息写入时上一轮结束', attachments: [attachment], send_receipt: true, request_id,
+    }), 'owner', '1'.repeat(32));
+    expect(getPendingQueue(sid)[0]?.requestId).toBe(request_id);
+    chatOutbox.handle({
+      kind: 'send_receipt', session_id: sid, request_id, body: { status: 'accepted' },
+      sequence: 0, is_final: false,
+    });
+    await vi.waitFor(() => expect(getPendingQueue(sid)).toEqual([]));
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('keeps newly added files when editing a pending message with an attachment', () => {
+    const sid = 'edit-queue-attachments';
+    sessionStore.set({ activeSessionId: sid });
+    const { input } = mountMainComposer();
+    const newAttachment = { ...attachment, id: 'new-file', path: 'files/new.txt' };
+    appendAttachment(newAttachment);
+    enqueuePending(sid, { id: 'pending-one', query: '附件保留', attachments: [attachment] });
+    editQueueItem(sid, 0);
+    expect(input.value).toBe('附件保留');
+    expect(state.attachments).toEqual([newAttachment, attachment]);
   });
 
   it('keeps the first draft and attachments when the socket refuses the message, then submits them once', async () => {

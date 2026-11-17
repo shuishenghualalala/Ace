@@ -46,6 +46,7 @@ import {
 } from '../state';
 import {
   applyChunk,
+  chatOutboxObserver,
   consumePending,
   flushPendingChunks,
   getMessages,
@@ -83,6 +84,7 @@ import { logStream } from '../stream-debug';
 import { authStore, messageStore, sessionStore, uiStore } from '../stores/stores';
 import { hydrateTurnFoldFromStorage } from './fold-state';
 import { canSendToBackend, setBackendTransportState } from './backend-status-guard';
+import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge } from './chat-outbox';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
 let setTabFn: (tab: TabKey) => void = () => {};
@@ -586,6 +588,7 @@ function applyActiveTurnSnapshot(sessionId: string, control: ChatChunk): boolean
 }
 
 function handleGatewayChunk(chunk: ChatChunk): void {
+  if (chatOutbox.handle(chunk)) return;
   const sessionId = chunk.session_id;
   if (chunk.kind === 'gateway_resync') {
     if (!sessionId || (!state.subscribedSessions.has(sessionId) && state.activeSessionId !== sessionId)) return;
@@ -694,6 +697,7 @@ async function reconcileSessionAfterReconnect(
   const status = await backendApi.sessionStatus(sessionId).catch(() => null);
   if (!canApply() || !status?.live) return;
   if (inFlight && status.live !== 'running' && status.live !== 'queued') {
+    if (chatOutbox.hasUnsettledTurn(sessionId)) return;
     // A turn may have settled while disconnected. Read history after observing
     // the terminal state so a replay gap cannot leave a permanently partial turn.
     await loadBackendHistory(sessionId, { canApply });
@@ -723,6 +727,7 @@ export function bootstrapBackend(): void {
   bindChannelSessionListener();
   if (!isRendererLoggedIn()) return;
   state.socket?.dispose();
+  chatOutbox.disconnect();
   setBackendTransportState('unknown');
   recoveryConnection = null;
   let transportVersion = 0;
@@ -731,7 +736,10 @@ export function bootstrapBackend(): void {
     (open, meta) => {
       if (state.socket !== socket) return;
       transportVersion += 1;
-      if (!open) recoveryConnection = null;
+      if (!open) {
+        recoveryConnection = null;
+        chatOutbox.disconnect();
+      }
       logStream('ws-renderer', open ? 'socket-open' : 'socket-close', {
         subscribed: Array.from(state.subscribedSessions),
         activeSessionId: state.activeSessionId,
@@ -747,6 +755,7 @@ export function bootstrapBackend(): void {
       renderWorkspaceHistory(openSession);
     },
     () => {
+      if (desktopOutboxBridge()) chatOutbox.connect((frame, scope, storeId) => socket.send(frame, scope, storeId));
       const version = transportVersion;
       const isCurrentConnection = () => state.socket === socket && transportVersion === version;
       recoveryConnection = isCurrentConnection;
@@ -773,11 +782,45 @@ export function bootstrapBackend(): void {
   installHistoryPagingScroll();
 }
 
+async function resumeOutboxQueues(): Promise<void> {
+  const socket = state.socket;
+  const owner = state.userInfo?.staffCode;
+  const restored = Object.entries(messageStore.get().pendingQueues).filter(
+    ([, items]) => items.some((item) => item.requestId && !item.requiresReview),
+  );
+  await Promise.allSettled(restored.map(async ([sessionId]) => {
+    const status = await backendApi.sessionStatus(sessionId);
+    if (state.socket === socket && state.userInfo?.staffCode === owner && canSubmitDesktopChat()
+      && status.live === 'idle' && !isBusySession(sessionId)) consumePending(sessionId);
+  }));
+}
+
 /** Activate chat for a verified auth session once the renderer is mounted. */
 export function bindBackendAuth(): () => void {
   const sync = (loggedIn: boolean): void => {
     if (loggedIn) {
       if (state.socket) return;
+      const bridge = desktopOutboxBridge();
+      if (bridge) {
+        const owner = authStore.get().userInfo?.staffCode;
+        void chatOutbox.bind(bridge, {
+          onRestored: chatOutboxObserver.onRestored,
+          onReceipt(entry, status, code, restored) {
+            chatOutboxObserver.onReceipt(entry, status, code, restored);
+            if (!restored || (status !== 'completed' && status !== 'failed' && status !== 'cancelled')) return;
+            const socket = state.socket;
+            const currentConnection = recoveryConnection;
+            if (!socket || !currentConnection) return;
+            void reconcileSessionAfterReconnect(entry.sessionId, true, () =>
+              currentConnection() && state.socket === socket && authStore.get().userInfo?.staffCode === owner,
+            ).then(() => {
+              if (currentConnection() && state.activeSessionId === entry.sessionId) renderChat();
+            });
+          },
+        }).catch(() => {
+          if (authStore.get().userInfo?.staffCode === owner) notify('无法加载待发消息，草稿已保留');
+        });
+      }
       bootstrapBackend();
       if (!uiStore.get().backendReadiness) void hydrateBackendState().catch(() => {});
       return;
@@ -785,16 +828,28 @@ export function bindBackendAuth(): () => void {
     const socket = state.socket;
     state.socket = null;
     socket?.dispose();
+    chatOutbox.reset();
     stopStreamWatchdog();
     setBackendTransportState('unknown');
     recoveryConnection = null;
   };
   const unsubscribe = authStore.subscribe((next, previous) => {
-    if (next.isLoggedIn !== previous.isLoggedIn) sync(next.isLoggedIn);
+    if (next.isLoggedIn && previous.isLoggedIn && next.userInfo?.staffCode !== previous.userInfo?.staffCode) {
+      sync(false);
+      messageStore.set({ pendingQueues: {} });
+    }
+    if (next.isLoggedIn !== previous.isLoggedIn || next.userInfo?.staffCode !== previous.userInfo?.staffCode) {
+      sync(next.isLoggedIn);
+    }
+  });
+  const unsubscribeOutbox = uiStore.subscribe((next, previous) => {
+    if (next.backendCanSend && next.backendReceiptsReady
+      && (!previous.backendCanSend || !previous.backendReceiptsReady)) void resumeOutboxQueues();
   });
   sync(authStore.get().isLoggedIn);
   return () => {
     unsubscribe();
+    unsubscribeOutbox();
     sync(false);
   };
 }

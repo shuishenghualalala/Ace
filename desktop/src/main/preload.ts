@@ -12,6 +12,7 @@ import type {
   TrayStatus,
 } from '../shared/types';
 import type { SecurityAuditArgs } from '../shared/ipc-schemas';
+import type { DesktopChatOutboxEntry, DesktopChatOutboxSnapshot } from '../shared/chat-outbox';
 import type { DesktopGatewayReadiness } from './gateway-readiness';
 
 interface BackendStatusSnapshot {
@@ -211,7 +212,13 @@ const api = {
   gatewayUpload: (url: string, files: string[]) =>
     ipcRenderer.invoke('gateway:upload', { url, files }),
   gatewayWsConnect: () => ipcRenderer.invoke('gateway-ws:connect'),
-  gatewayWsSend: (payload: unknown) => ipcRenderer.invoke('gateway-ws:send', payload),
+  gatewayWsSend: (payload: unknown, outboxScope?: string, outboxStoreId?: string) =>
+    ipcRenderer.invoke('gateway-ws:send', payload, outboxScope, outboxStoreId),
+  chatOutboxList: (): Promise<DesktopChatOutboxSnapshot> => ipcRenderer.invoke('chat-outbox:list'),
+  chatOutboxPut: (scope: string, entry: DesktopChatOutboxEntry): Promise<void> =>
+    ipcRenderer.invoke('chat-outbox:put', scope, entry),
+  chatOutboxRemove: (scope: string, requestId: string): Promise<void> =>
+    ipcRenderer.invoke('chat-outbox:remove', scope, requestId),
   gatewayWsClose: () => ipcRenderer.invoke('gateway-ws:close'),
   onGatewayWsEvent: (cb: (event: unknown) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, event: unknown) => cb(event);

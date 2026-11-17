@@ -35,7 +35,6 @@ import { createChatRenderCoalescer } from '../render-utils';
 import { formatFollowupAnswerMessage } from '../followup';
 import {
   escapeHtml,
-  enqueuePending,
   getBookFileChanges,
   newMessageId,
   notify,
@@ -48,7 +47,7 @@ import {
   type SessionRow,
 } from '../state';
 import { sessionStore } from '../stores/stores';
-import { canSendToBackend } from './backend-status-guard';
+import { canSubmitDesktopChat, chatOutbox } from './chat-outbox';
 import {
   bindFileDrop,
   bindFilePaste,
@@ -76,6 +75,7 @@ import {
   applyChunk,
   bookFor,
   dispatchWs,
+  queueChatMessage,
   editQueueItem,
   invokeWikiIngestProgressCallback,
   isBusy,
@@ -515,8 +515,8 @@ async function sendEmbeddedPrompt(
     notifyEmbeddedAttachmentsChanged();
   };
   try {
-    const panel = canSendToBackend() ? await embeddedState(kbId) : null;
-    if (!panel || !canSendToBackend()) {
+    const panel = canSubmitDesktopChat() ? await embeddedState(kbId) : null;
+    if (!panel || !canSubmitDesktopChat()) {
       if (wikiConfirmationId) {
         restoreWikiConfirmation(wikiConfirmationId);
         scheduleEmbeddedRender();
@@ -533,12 +533,12 @@ async function sendEmbeddedPrompt(
         notify('Wiki Agent 正在处理上一条消息');
         return false;
       }
-      enqueuePending(panel.sessionId, {
+      if (!await queueChatMessage(panel.sessionId, {
         id: newMessageId('q'),
         query: query || '(附件)',
         attachments: [...attachments],
         planActive: false,
-      });
+      })) return false;
       settleAttachments();
       setQueueHint(panel.sessionId, '正在排队…');
       setSessionStatus(panel.sessionId, 'queued');
@@ -685,6 +685,7 @@ function closeHistoryPopover(root: HTMLElement): void {
 
 /** 删除指定 Wiki 会话：确认 → 后端删除 → 清本地缓存；删的是当前会话则切到最近一条（无则新建）。 */
 async function deleteEmbeddedConversation(root: HTMLElement, req: WikiAgentEntryRequest, sessionId: string): Promise<void> {
+  const owner = state.userInfo?.staffCode;
   if (isBusy(sessionId)) {
     notify('该对话正在生成，请先停止再删除');
     return;
@@ -697,6 +698,9 @@ async function deleteEmbeddedConversation(root: HTMLElement, req: WikiAgentEntry
   });
   if (!confirmed) return;
   try {
+    if (state.userInfo?.staffCode !== owner) return;
+    await chatOutbox.withdraw(sessionId);
+    if (state.userInfo?.staffCode !== owner) return;
     await backendApi.deleteSession(sessionId);
   } catch (err) {
     notify(`删除 Wiki 对话失败：${(err as Error).message}`);
@@ -988,7 +992,22 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
       },
       // Wiki 会话没有「撤回编辑」入口（编辑横幅不会出现），取消编辑无需动作。
       cancelEdit: () => {},
-      editQueueItem,
+      editQueueItem(sessionId, index) {
+        const input = conversationHost.querySelector<HTMLTextAreaElement>('[data-composer-input]');
+        if (!input) return;
+        editQueueItem(sessionId, index, (restoredSessionId, item) => {
+          if (getEmbeddedSessionId() !== restoredSessionId || !input.isConnected) return;
+          const attachments = embeddedAttachments.get(req.kbId) ?? [];
+          const known = new Set(attachments.map(({ id }) => id));
+          embeddedAttachments.set(req.kbId, [
+            ...attachments, ...(item.attachments ?? []).filter(({ id }) => !known.has(id)),
+          ]);
+          notifyEmbeddedAttachmentsChanged();
+          input.value = item.query;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.focus();
+        });
+      },
       steerQueueItem: steerQueuedItem,
     },
     contextStaging: staging,

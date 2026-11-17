@@ -70,6 +70,8 @@ import type {
 import { GatewayRestartController } from './gateway-restart-controller';
 import { GatewayProcessRetirement, GatewayStopTimeoutError } from './gateway-process-retirement';
 import { DesktopShutdown, waitForShutdownTask, type ShutdownReason } from './desktop-shutdown';
+import { DesktopChatOutbox, desktopChatOutboxScope } from './chat-outbox';
+import { MAX_CHAT_FRAME_BYTES } from '../shared/chat-outbox';
 import { isTrustedRendererFileUrl } from './trusted-renderer-url';
 import type {
   AuthStateSnapshot,
@@ -209,6 +211,9 @@ const gatewayRetirement = new GatewayProcessRetirement({
 let ensureGatewayPromise: Promise<GatewayBinding> | null = null;
 const securityApprovalNonces = new Map<string, string>();
 const gatewaySockets = new Map<number, WebSocket>();
+type GatewaySocketChat = { scope: string | null; capability?: { frame: string; storeId: string } };
+const gatewaySocketChat = new WeakMap<WebSocket, GatewaySocketChat>();
+let desktopChatOutbox: DesktopChatOutbox | undefined;
 const gatewaySocketGenerations = new Map<number, number>();
 const browserSockets = new Map<number, WebSocket>();
 const browserSocketGenerations = new Map<number, number>();
@@ -402,6 +407,23 @@ function currentBrowserOwnerId(): string | null {
   // owner 形如 `<providerId>:<userId>`（remote/email），local 模式为 'local'。
   // 与 crew.gateway.auth 的 LOCAL_OWNER_ACCOUNT_ID / owner_account_id 对齐。
   return loginNewServiceInstance.ownerAccountId() ?? 'local';
+}
+
+function currentChatOutboxScope(): string | null {
+  const owner = currentBrowserOwnerId();
+  return owner ? desktopChatOutboxScope(gatewayIdentityMode, owner, activeGatewayCrewHome()) : null;
+}
+
+function chatOutbox(): DesktopChatOutbox {
+  return desktopChatOutbox ??= new DesktopChatOutbox(path.join(app.getPath('userData'), 'chat-outbox'));
+}
+
+function requireChatOutboxScope(expected?: unknown): string {
+  const scope = currentChatOutboxScope();
+  if (!scope || (expected !== undefined && expected !== scope)) {
+    throw new Error('Chat outbox account changed');
+  }
+  return scope;
 }
 
 function currentBrowserRuntimeKey(): string | null {
@@ -3640,16 +3662,40 @@ function registerIpc() {
     return { ok: true };
   });
 
+  trustedHandle('chat-outbox:list', async () => {
+    const scope = requireChatOutboxScope();
+    const entries = await chatOutbox().list(scope);
+    requireChatOutboxScope(scope);
+    return { scope, entries };
+  });
+
+  trustedHandle('chat-outbox:put', (_event, scope, entry) => {
+    if (typeof scope !== 'string') throw new Error('Invalid chat outbox scope');
+    return chatOutbox().put(requireChatOutboxScope(scope), entry);
+  });
+
+  trustedHandle('chat-outbox:remove', (_event, scope, requestId) => {
+    if (typeof scope !== 'string') throw new Error('Invalid chat outbox scope');
+    return chatOutbox().remove(requireChatOutboxScope(scope), requestId);
+  });
+
   trustedHandle('gateway-ws:connect', async (event) => {
     const senderId = event.sender.id;
     const previous = gatewaySockets.get(senderId);
-    if (previous?.readyState === WebSocket.OPEN) {
+    const previousChat = previous ? gatewaySocketChat.get(previous) : undefined;
+    const scope = currentChatOutboxScope();
+    if (previous?.readyState === WebSocket.OPEN && previousChat?.scope === scope) {
       logMainStream('ws-connect-skip', { senderId, reason: 'already-open' });
       event.sender.send('gateway-ws:event', { type: 'open', gatewayGeneration });
+      if (previousChat.capability) {
+        event.sender.send('gateway-ws:event', {
+          type: 'message', data: previousChat.capability.frame, gatewayGeneration,
+        });
+      }
       if (event.sender === mainWindow?.webContents) setBackendTransportState('connected');
       return { ok: true };
     }
-    if (previous?.readyState === WebSocket.CONNECTING) return { ok: true };
+    if (previous?.readyState === WebSocket.CONNECTING && previousChat?.scope === scope) return { ok: true };
     const gatewayAttempt = gatewayGeneration;
     const primaryTransport = event.sender === mainWindow?.webContents;
     const generation = (gatewaySocketGenerations.get(senderId) ?? 0) + 1;
@@ -3685,7 +3731,8 @@ function registerIpc() {
       setTransport('disconnected');
       throw error;
     }
-    if (!currentAttempt()) {
+    if (!currentAttempt() || currentChatOutboxScope() !== scope) {
+      setTransport('disconnected');
       return { ok: false, error: 'WebSocket 连接已取消' };
     }
     const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
@@ -3698,14 +3745,19 @@ function registerIpc() {
     httpUrl.protocol = httpUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     httpUrl.pathname = '/ws';
     httpUrl.search = '';
+    httpUrl.searchParams.set('send_receipts', '1');
     httpUrl.hash = '';
 
     const socket = new WebSocket(httpUrl.toString(), {
       handshakeTimeout: 12_000,
       ...(usesRemoteAuth ? { headers: { Authorization: `Bearer ${jwt}`, ...identityHeaders } } : {}),
     });
+    const socketChat: GatewaySocketChat = { scope };
+    gatewaySocketChat.set(socket, socketChat);
+    const socketOwner = currentBrowserOwnerId();
     gatewaySockets.set(senderId, socket);
-    const currentSocket = () => currentAttempt() && gatewaySockets.get(senderId) === socket;
+    const currentSocket = () => currentAttempt() && gatewaySockets.get(senderId) === socket
+      && currentBrowserOwnerId() === socketOwner;
     const sendEvent = (payload: Record<string, unknown>): void => {
       if (!currentSocket()) return;
       event.sender.send('gateway-ws:event', { ...payload, gatewayGeneration: gatewayAttempt });
@@ -3732,21 +3784,37 @@ function registerIpc() {
       setTransport('connected');
     });
     socket.on('message', (data) => {
+      if (!currentSocket()) return;
+      const frame = data.toString();
       let kind = 'unknown';
       let request_id: string | undefined;
       let session_id: string | undefined;
+      let receiptStatus: string | undefined;
+      let receiptCode: string | undefined;
       try {
-        const parsed = JSON.parse(data.toString()) as { kind?: string; request_id?: string; session_id?: string };
+        const parsed = JSON.parse(frame) as {
+          kind?: string; request_id?: string; session_id?: string;
+          body?: { version?: number; store_id?: unknown; status?: unknown; code?: unknown };
+        };
         kind = parsed.kind ?? 'unknown';
         request_id = parsed.request_id;
         session_id = parsed.session_id;
+        if (kind === 'send_receipt_capability' && parsed.body?.version === 1) {
+          const storeId = parsed.body.store_id;
+          if (typeof storeId === 'string' && /^[a-f0-9]{32}$/.test(storeId)) socketChat.capability = { frame, storeId };
+        }
+        if (kind === 'send_receipt') {
+          const { status, code } = parsed.body ?? {};
+          if (typeof status === 'string' && /^[a-z]{1,16}$/.test(status)) receiptStatus = status;
+          if (typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code)) receiptCode = code;
+        }
       } catch {
         /* ignore parse for log */
       }
       if (kind !== 'ping' && kind !== 'pong') {
-        logMainStream('ws-message', { kind, request_id, session_id, senderId });
+        logMainStream('ws-message', { kind, request_id, session_id, senderId, receiptStatus, receiptCode });
       }
-      sendEvent({ type: 'message', data: data.toString() });
+      sendEvent({ type: 'message', data: frame });
     });
     socket.on('close', (code, reason) => {
       event.sender.removeListener('destroyed', handleRendererDestroyed);
@@ -3767,16 +3835,27 @@ function registerIpc() {
     return { ok: true };
   });
 
-  trustedHandle('gateway-ws:send', (event, payload: unknown) => {
+  trustedHandle('gateway-ws:send', (event, payload: unknown, outboxScope, outboxStoreId) => {
     const socket = gatewaySockets.get(event.sender.id);
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return { ok: false, error: 'WebSocket 未连接' };
+    }
+    const socketChat = gatewaySocketChat.get(socket);
+    const currentScope = currentChatOutboxScope();
+    if (!socketChat || socketChat.scope !== currentScope) {
+      return { ok: false, error: 'WebSocket 账号已变更' };
+    }
+    if (outboxScope !== undefined || outboxStoreId !== undefined) {
+      if (typeof outboxScope !== 'string' || currentScope !== outboxScope || typeof outboxStoreId !== 'string'
+        || socketChat.capability?.storeId !== outboxStoreId) {
+        return { ok: false, error: 'WebSocket 消息受理不可用或账号已变更' };
+      }
     }
     let data = '';
     try { data = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {}); } catch {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: gateway WebSocket payload must be serializable`);
     }
-    if (Buffer.byteLength(data, 'utf8') > 4 * 1024 * 1024) {
+    if (Buffer.byteLength(data, 'utf8') > MAX_CHAT_FRAME_BYTES) {
       throw new Error(`${IPC_ARG_VALIDATION_FAILED}: gateway WebSocket payload too large`);
     }
     try {

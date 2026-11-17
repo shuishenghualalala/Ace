@@ -17,6 +17,7 @@ export interface UiStoreState {
   backendLoopLagMs: number | null;
   /** 当前发送能力；历史、设置和日志不依赖此字段。 */
   backendCanSend: boolean;
+  backendReceiptsReady: boolean;
   /** BackendChatSocket 实例本身，不参与持久化也不参与订阅通知（避免循环）。 */
   socket: unknown | null;
   feedbackDraft: FeedbackDraft;
@@ -36,6 +37,7 @@ export const uiStore: Store<UiStoreState> = createStore<UiStoreState>(
     backendReadiness: null,
     backendLoopLagMs: null,
     backendCanSend: false,
+    backendReceiptsReady: false,
     socket: null,
     feedbackDraft: { title: '', description: '', images: [] },
     feedbackList: [],

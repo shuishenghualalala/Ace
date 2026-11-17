@@ -168,6 +168,12 @@ export interface ChatMessage {
 
 export interface PendingMessage {
   id: string;
+  requestId?: string;
+  /** A rejected durable submission remains editable, with no automatic replay. */
+  requiresReview?: boolean;
+  reviewReason?: 'rejected' | 'uncertain';
+  workspaceId?: string;
+  wikiKbId?: string;
   query: string;
   attachments?: Attachment[];
   subScenario?: string;
