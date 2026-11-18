@@ -620,78 +620,81 @@ class CrewApp:
             child_builder=self._build_subagent,
             model_resolver=self._resolve_subagent_model,
         )
-        self._install_builtin_feature(agent_factory_feature.definition)
         # 需要宿主事件循环的长生命周期 Feature 在 build_app 仅声明，startup
         # 再由共享 Runtime 按依赖图激活；Sites/Browser 后续复用同一入口。
         self._managed_feature_definitions: OrderedDict[str, FeatureDefinition] = OrderedDict()
         # Subagent Feature 激活后绑定通知队列与路由；这里仅保留兼容属性。
         self._subagent_notifications = None
         self._subagent_router = None
-        self._register_execution_driver_scope(
-            "core.agent-driver",
-            ExecutionDriver(
-                mode="agent",
-                execute=self._run_default_execution_driver,
-                capabilities=("agent.default",),
-                description="Default single-agent execution",
-            ),
-            ExecutionDriver(
-                mode="agent.default",
-                execute=self._run_default_execution_driver,
-                capabilities=("agent.default",),
-                description="Default single-agent execution",
-            ),
-        )
-        self._register_context_contributor_scope(
-            "host.structured-path-context",
-            ContextContributor(
-                contributor_id="host.reference.structured-path",
-                handler=self._structured_path_context,
-                phase=ContextPhase.REQUEST,
-                priority=100,
-                model_visible=False,
-                persistent=False,
-                description="Workspace-bounded structured path grants",
-            ),
-        )
-        self._register_context_contributor_scope(
-            "gateway.session-context",
-            ContextContributor(
-                contributor_id="gateway.session.source",
-                handler=build_session_context_contribution,
-                phase=ContextPhase.REQUEST,
-                priority=300,
-                predicate=lambda envelope: (
-                    envelope.params.get("session_context") is not None
+        # Install intrinsic request capabilities in order on one bootstrap loop.
+        self._install_builtin_features(
+            agent_factory_feature.definition,
+            self._execution_driver_feature(
+                "core.agent-driver",
+                ExecutionDriver(
+                    mode="agent",
+                    execute=self._run_default_execution_driver,
+                    capabilities=("agent.default",),
+                    description="Default single-agent execution",
                 ),
-                model_visible=True,
-                persistent=False,
-                description="Normalized session source and delivery context",
+                ExecutionDriver(
+                    mode="agent.default",
+                    execute=self._run_default_execution_driver,
+                    capabilities=("agent.default",),
+                    description="Default single-agent execution",
+                ),
             ),
-        )
-        # 后台结果提醒由 product.subagent Feature 在自己的 Generation 内注册。
-        self._register_context_contributor_scope(
-            "core.process-context",
-            ContextContributor(
-                contributor_id="process.background.reminder",
-                handler=build_process_notification_handler(process_registry),
-                phase=ContextPhase.PROMPT,
-                priority=20,
-                model_visible=True,
-                persistent=False,
-                description="Background process watch/completion notifications",
+            self._context_contributor_feature(
+                "host.structured-path-context",
+                ContextContributor(
+                    contributor_id="host.reference.structured-path",
+                    handler=self._structured_path_context,
+                    phase=ContextPhase.REQUEST,
+                    priority=100,
+                    model_visible=False,
+                    persistent=False,
+                    description="Workspace-bounded structured path grants",
+                ),
             ),
-        )
-        self._register_context_contributor_scope(
-            "core.task-context",
-            ContextContributor(
-                contributor_id="task.resume.reminder",
-                handler=contribute_task_notifications,
-                phase=ContextPhase.PROMPT,
-                priority=30,
-                model_visible=True,
-                persistent=False,
-                description="Completed background task framing for resume turns",
+            self._context_contributor_feature(
+                "gateway.session-context",
+                ContextContributor(
+                    contributor_id="gateway.session.source",
+                    handler=build_session_context_contribution,
+                    phase=ContextPhase.REQUEST,
+                    priority=300,
+                    predicate=lambda envelope: (
+                        envelope.params.get("session_context") is not None
+                    ),
+                    model_visible=True,
+                    persistent=False,
+                    description="Normalized session source and delivery context",
+                ),
+            ),
+            # 后台结果提醒由 product.subagent Feature 在自己的 Generation 内注册。
+            self._context_contributor_feature(
+                "core.process-context",
+                ContextContributor(
+                    contributor_id="process.background.reminder",
+                    handler=build_process_notification_handler(process_registry),
+                    phase=ContextPhase.PROMPT,
+                    priority=20,
+                    model_visible=True,
+                    persistent=False,
+                    description="Background process watch/completion notifications",
+                ),
+            ),
+            self._context_contributor_feature(
+                "core.task-context",
+                ContextContributor(
+                    contributor_id="task.resume.reminder",
+                    handler=contribute_task_notifications,
+                    phase=ContextPhase.PROMPT,
+                    priority=30,
+                    model_visible=True,
+                    persistent=False,
+                    description="Completed background task framing for resume turns",
+                ),
             ),
         )
         # 对话级 Plan 模式管理器（由 build_app 装配后赋值）
@@ -2085,21 +2088,26 @@ class CrewApp:
         )
 
     def _install_builtin_feature(self, definition: FeatureDefinition) -> FeatureScope:
-        """声明一个内置 Feature 并经共享 FeatureRuntime 激活。
+        return self._install_builtin_features(definition)[0]
 
-        组合根的内置贡献不再手写 FeatureScope，而是声明 FeatureDefinition
-        交给 FeatureRuntime 事务式激活——启动审计与 dump-features 因此覆盖
-        组合根装配的全部能力。返回活跃 Generation 的 scope，供应用关闭时
-        按逆序 stop（关闭路径不变）。
-        """
-        record = run_async_compat(self.plugins.feature_runtime.activate(definition))
-        if record.state is not FeatureState.ACTIVE or record.scope is None:
-            raise RuntimeError(
-                f"内置 Feature 激活失败：{definition.feature_id} "
-                f"state={record.state} error={record.error}"
-            )
-        self._builtin_feature_scopes.append(record.scope)
-        return record.scope
+    def _install_builtin_features(self, *definitions: FeatureDefinition) -> list[FeatureScope]:
+        """Install built-in definitions in order, with one transaction per feature."""
+        runtime = self.plugins.feature_runtime
+
+        async def install() -> list[FeatureScope]:
+            scopes = []
+            for definition in definitions:
+                record = await runtime.activate(definition)
+                if record.state is not FeatureState.ACTIVE or record.scope is None:
+                    raise RuntimeError(
+                        f"内置 Feature 激活失败：{definition.feature_id} "
+                        f"state={record.state} error={record.error}"
+                    )
+                self._builtin_feature_scopes.append(record.scope)
+                scopes.append(record.scope)
+            return scopes
+
+        return run_async_compat(install())
 
     def declare_managed_feature(self, definition: FeatureDefinition) -> None:
         """声明一个需要在宿主事件循环中激活的长生命周期 Feature。"""
@@ -2156,42 +2164,34 @@ class CrewApp:
         """core./host./gateway. 前缀的能力是产品运行必需；product.* 可由产品策略停用。"""
         return not feature_id.startswith("product.")
 
-    def _register_execution_driver_scope(
+    def _execution_driver_feature(
         self,
         feature_id: str,
         *drivers: ExecutionDriver,
-    ) -> FeatureScope:
-        """Declare execution drivers as one feature and activate it via the runtime."""
-
+    ) -> FeatureDefinition:
         def install(ctx) -> None:
             for driver in drivers:
                 ctx.register_execution_driver(driver)
 
-        return self._install_builtin_feature(
-            FeatureDefinition(
-                feature_id,
-                install,
-                required_by_product=self._builtin_feature_required(feature_id),
-            )
+        return FeatureDefinition(
+            feature_id,
+            install,
+            required_by_product=self._builtin_feature_required(feature_id),
         )
 
-    def _register_context_contributor_scope(
+    def _context_contributor_feature(
         self,
         feature_id: str,
         *contributors: ContextContributor,
-    ) -> FeatureScope:
-        """Declare context contributors as one feature and activate it via the runtime."""
-
+    ) -> FeatureDefinition:
         def install(ctx) -> None:
             for contributor in contributors:
                 ctx.register_context_contributor(contributor)
 
-        return self._install_builtin_feature(
-            FeatureDefinition(
-                feature_id,
-                install,
-                required_by_product=self._builtin_feature_required(feature_id),
-            )
+        return FeatureDefinition(
+            feature_id,
+            install,
+            required_by_product=self._builtin_feature_required(feature_id),
         )
 
     def set_team_manager(self, team) -> None:
@@ -2203,7 +2203,7 @@ class CrewApp:
         if self.team is not None:
             raise RuntimeError("team manager is already configured")
         if "team" not in self.execution_drivers.modes():
-            self._register_execution_driver_scope(
+            definition = self._execution_driver_feature(
                 "product.team-driver-adapter",
                 ExecutionDriver(
                     mode="team",
@@ -2212,6 +2212,7 @@ class CrewApp:
                     description="Team coordination execution",
                 ),
             )
+            self._install_builtin_feature(definition)
         self.team = team
 
     def set_dynamic_kanban_manager(self, manager) -> None:

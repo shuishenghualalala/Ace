@@ -295,6 +295,13 @@
 <p>旧用户定制重开后保持原内容。实际元数据修复只在用户目录落盘，发行源字节保持一致。随包没有可选技能样本，另用合成仓库走过安装、编辑和卸载。Windows 相关六模块共 256 项通过、11 项跳过；隔离的 Debian 普通账号通过 9 项文件系统用例。</p>
 <p class="evidence">Ace <code>crew/state/config.py</code>、<code>crew/agent/skills/manage.py</code>、<code>crew/tools/skills_tools.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/app/create-app.ts:249</code>、<code>:864</code> 和 <code>apps/zcode-cli/packages/bootstrap/src/skills.ts:114</code>。</p>
 </article>
+<article id="builtin-feature-startup">
+<h3>F10 · 内建请求能力的重复事件循环</h3>
+<p>同步构建 Gateway 时，内建 Agent Factory、执行 Driver 和四个上下文贡献器分别创建短命 asyncio 事件循环。ZCode 桌面在同一宿主循环内顺序等待启动协调步骤。Ace 将已知内建请求 Feature 顺序装配到同一个兼容循环内，每项仍单独记入启动审计、独立提交激活事务并按原逆序关停。静态内建内容之外的插件与在线激活仍用各自生命周期。</p>
+<p><strong>Windows 原生配对</strong> 两份正式 <code>8165a51b</code> EXE 的解包运行时只替换 <code>crew/app.py</code>，逐一核对 17,399 个文件。构建剖析中的激活次数仍为 15，临时 Proactor 循环从 14 个减至 9 个，唤醒管道累计从 0.759 秒减至 0.292 秒。未开启剖析时，六对首次启动的主端口就绪中位数从 11.147 秒降至 9.991 秒，六对同一配置重开从 10.686 秒降至 9.179 秒。逐对改善的中位数分别为 0.908 和 0.457 秒，两组各 6/6 改善。24 次启动均通过双端口身份、子进程 PID、会话 API 和正常退出验证。</p>
+<p>候选副本的原生 Electron 九阶段首次通过，首聊 1.014 秒，Gateway 故障恢复 11.282 秒，正常退出 1.435、2.271 秒。同步宿主与已有事件循环的嵌入式宿主在旧代码分别创建六个循环，修复后均以一个独立循环按既定顺序完成。Windows 后端分项 63 项通过。该对照使用发行内容副本，冷启动 5 秒目标仍待达到。</p>
+<p class="evidence">Ace <code>crew/app.py</code> 中的内建请求能力与 <code>crew/features/manager.py</code> 的同步桥。ZCode <code>packages/desktop/src/host/index.ts:4155</code>、<code>packages/desktop/src/host/databaseStartupCoordinator.ts:58</code>。</p>
+</article>
 </section>
 
 <section id="handoff">

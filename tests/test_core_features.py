@@ -84,6 +84,43 @@ class TestRequiredByProduct:
 
 
 class TestBuiltinCoreFeatures:
+    @pytest.mark.parametrize("embedded", [False, True])
+    def test_bootstrap_installs_core_features_on_one_loop(self, monkeypatch, embedded) -> None:
+        from crew.app import build_app
+
+        expected = (
+            "core.agent-factory",
+            "core.agent-driver",
+            "host.structured-path-context",
+            "gateway.session-context",
+            "core.process-context",
+            "core.task-context",
+        )
+        loops = {}
+        original_activate = FeatureRuntime.activate
+
+        async def record_loop(runtime, definition):
+            if definition.feature_id in expected:
+                loops[definition.feature_id] = asyncio.get_running_loop()
+            return await original_activate(runtime, definition)
+
+        monkeypatch.setattr(FeatureRuntime, "activate", record_loop)
+
+        async def build_under_running_loop():
+            build_app()
+            return asyncio.get_running_loop()
+
+        if embedded:
+            host_loop = asyncio.run(build_under_running_loop())
+        else:
+            build_app()
+            host_loop = None
+
+        assert tuple(loops) == expected
+        assert len(set(loops.values())) == 1
+        assert host_loop not in loops.values()
+        assert all(loop.is_closed() for loop in loops.values())
+
     def test_build_app_declares_core_features_in_runtime(self) -> None:
         from crew.app import build_app
 
