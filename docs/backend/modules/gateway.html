@@ -56,6 +56,7 @@
   </ul>
 
   <h2>2. 功能拆解</h2>
+  <p><code>GET /api/sessions/status</code> 为桌面侧栏恢复状态点。Gateway 一次读取本账号可见会话及其最近终态，再以调度器内存中的运行和排队状态为准。后台失败的会话显示错误。桌面将整份快照合并为一次状态更新，保留正在处理的本地流和后台完成的未读标记。侧栏只刷新已挂载的对应行。</p>
   <p>WebSocket 回放日志为每个账号和会话保存连续的序列后缀。每个会话最多保存 2,000 帧、2 MiB 编码内容，全部会话合计最多 16 MiB，最多保留 128 个窗口。较旧窗口按最近写入顺序淘汰。单帧超过会话限额时清除旧前缀，序列水位继续递增；带游标的客户端落在保留范围外会收到 <code>gateway_resync</code>，仍位于范围内则只重放缺失的后缀。活跃回合快照与回放共用同一份不可变帧字节。</p>
 
   <p>桌面端的四个 Gateway 启动入口共用 <code>GatewayStartupLog</code>。标准输出和错误输出按 PID、来源与时间写入 <code>userData/logs/gateway-startup.log</code>。活动文件达到 2 MiB 时顺延至 <code>.1</code> 和 <code>.2</code>。轮转使用串行的异步文件操作。首次写入时，旧版本遗留的超大文件各保留最近 2 MiB 内完整的 UTF-8 尾部。</p>
@@ -155,6 +156,7 @@ loop_lag_ms                         业务循环滞后毫秒：哨兵 task 每�
     <tbody>
       <tr><td>2026-11-18</td><td>托管 Gateway 按实时字节数轮转启动日志，共用有界队列并在退出时排空。</td><td>桌面端 Gateway 生命周期、故障诊断与交接。</td></tr>
       <tr><td>2026-09-09</td><td>阶段 4D-1：渠道代码迁入 <code>crew/channels/</code> 包（channel_manager / delivery / platform_registry / channel_sessions / channel_config / channel_presets / broadcast），<code>product.channels</code> Feature Generation 统一拥有 Manager/Router/平台注册/<code>new_conversation</code> 工具并发布 <code>channels</code> Service；Channel ABC 扩展显式生命周期契约；Lifespan 与 LogoutCoordinator 改经 Service 同代 Lease 启停；<code>crew.channel_manager</code>/<code>delivery_router</code> 改动态 compat 属性，Feature 非激活 fail-closed（ADR-0030）。</td><td>渠道装配与启停主权；gateway 不再手工构造渠道运行时</td></tr>
+      <tr><td>2026-11-18</td><td>会话状态批量恢复，合并磁盘终态及实时调度状态。</td><td>桌面侧栏启动与重连。</td></tr>
       <tr><td>2026-09-17</td><td><code>08f746f</code> health 端点独立线程服务（<code>runtime.health_port</code> 默认主端口+1，占用降级不阻止启动）+ 循环活性哨兵 <code>loop_lag_ms</code>；主端点与线程服务共用 <code>build_gateway_health_payload</code>（instance proof fail closed）与 <code>build_health_components</code>。</td><td><code>crew/gateway/health_server.py</code>（新增）、<code>crew/gateway/instance_auth.py</code>、<code>crew/gateway/app.py</code>、<code>routers/misc.py</code>；桌面端优先探测 health 端口。</td></tr>
       <tr><td>2026-09-17</td><td>ADR-0045 批次 3：dispatcher 错误分支类型化收敛——ProviderError/ToolError/CrewError 分支 error 帧带 <code>code=kind</code>/<code>retryable</code>/<code>retry_delay</code>（category 沿用 exc.category / "tool" / kind 映射），新增 CrewError 分支，Exception 文本兜底保留；<code>enrich_error_chunk</code> 无 exc 时可从 body 的 kind code 反推 category。</td><td><code>crew/gateway/dispatcher.py</code>、<code>crew/features/outbound.py</code>。</td></tr>
       <tr><td>2026-09-03</td><td>渠道归属统一（决策⑥⑦）重新落地：<code>ab0d596</code> 的实现曾被 <code>5434708</code> 签名清扫回卷，本次按当前代码契约重放——未绑定渠道注册归本机 owner <code>local</code>（<code>include_env=True</code>），显式绑定渠道 <code>include_env=False</code>；<code>channel_manager</code> 删除 <code>{"", "local", "dev:dev"}</code> 全局特判、register/unregister/record_error/start_all owner 必填；<code>delivery</code> 删除空 owner sender 回退；无绑定渠道入站消息归 <code>local</code>（平台原始 uid 严禁充当 owner）；<code>channel_bindings.get_binding</code> owner 必填、删除首条兼容视图；dispatcher session_end 归一 owner。<code>tools/builtin.py</code> kill 显式传 owner 与 <code>_has_active_children</code> owner 必填维持 5434708 收紧后的形态。</td><td>gateway 渠道注册/投递/入站归属语义；未绑定渠道行为变化：owner="" → local</td></tr>

@@ -854,20 +854,29 @@ export function setBusy(sessionId: string, val: boolean): boolean {
  *  这是治本 spinner 抽搐的关键——同一 running 状态在流式期间被反复写入时短路，
  *  行 DOM 不被重建，CSS 动画连续。 */
 export function setSessionStatus(sessionId: string, status: SessionStatus): boolean {
-  const cur = sessionStore.get().sessionStatuses[sessionId];
-  if (cur === status) return false;
-  const nextStatuses = { ...sessionStore.get().sessionStatuses, [sessionId]: status };
-  if (
-    status === 'idle'
-    && (cur === 'running' || cur === 'queued')
-    && sessionId !== sessionStore.get().activeSessionId
-  ) {
-    const nextUnread = new Set(sessionStore.get().unreadCompletedSessions);
-    nextUnread.add(sessionId);
-    sessionStore.set({ sessionStatuses: nextStatuses, unreadCompletedSessions: nextUnread });
-  } else {
-    sessionStore.set({ sessionStatuses: nextStatuses });
+  if (sessionStore.get().sessionStatuses[sessionId] === status) return false;
+  return mergeSessionStatuses({ [sessionId]: status });
+}
+
+export function mergeSessionStatuses(
+  updates: Record<string, SessionStatus>,
+  preserveBusy = false,
+): boolean {
+  const current = sessionStore.get();
+  let statuses: Record<string, SessionStatus> | undefined;
+  let unread: Set<string> | undefined;
+  for (const [id, next] of Object.entries(updates)) {
+    const previous = current.sessionStatuses[id];
+    if (previous === next || (preserveBusy && current.busySessions[id])) continue;
+    statuses ??= Object.assign(Object.create(null) as Record<string, SessionStatus>, current.sessionStatuses);
+    statuses[id] = next;
+    if (next === 'idle' && (previous === 'running' || previous === 'queued') && id !== current.activeSessionId) {
+      unread ??= new Set(current.unreadCompletedSessions);
+      unread.add(id);
+    }
   }
+  if (!statuses) return false;
+  sessionStore.set({ sessionStatuses: statuses, ...(unread ? { unreadCompletedSessions: unread } : {}) });
   return true;
 }
 

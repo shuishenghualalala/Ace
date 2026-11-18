@@ -1479,6 +1479,13 @@ class SessionDispatcher:
         else:
             await self._store_set_status(session_id, outcome.status, owner=owner, error=error)
 
+    def live_status(self, session_id: str, owner_account_id: str) -> str:
+        """Read only the process-local state of an explicitly owned session."""
+        key = self._resolve_key(session_id, owner_account_id)
+        if key in self._running:
+            return "running"
+        return "queued" if self._queued_depth(key) > 0 else "idle"
+
     def status(self, session_id: str, owner_account_id: str) -> dict:
         """返回会话当前运行态（内存）+ 上一轮 terminal 结果（落库）。"""
         key = self._resolve_key(session_id, owner_account_id)
@@ -1488,12 +1495,6 @@ class SessionDispatcher:
         else:
             last_status, last_error = self._store.get_status(session_id, owner_account_id=key[0])
             last_outcome = None
-        if key in self._running:
-            live = "running"
-        elif self._queued_depth(key) > 0:
-            live = "queued"
-        else:
-            live = "idle"
         active_request_id = self._running_request_ids.get(key)
         if active_request_id is None:
             queued_ids = self._waiting_request_ids.get(key) or []
@@ -1501,7 +1502,7 @@ class SessionDispatcher:
         return {
             "session_id": session_id,
             "owner_account_id": owner_account_id,
-            "live": live,
+            "live": self.live_status(session_id, owner_account_id),
             "active_request_id": active_request_id,
             "queue_depth": self._queued_depth(key),
             "waiting_for_global_slot": self._global_waiting.get(self._label(key), 0),

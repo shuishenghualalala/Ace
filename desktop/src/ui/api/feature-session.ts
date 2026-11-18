@@ -1,4 +1,5 @@
 import type { SettledTurnOutcome, TurnOutcome } from '../turn-outcome';
+import type { SessionStatus } from '../chat-render';
 /**
  * 会话/Agent 客户端：会话生命周期、Agent 配置、外部 Agent/Team、运行时、
  * 浏览器、Cron、Task、Dynamic Kanban、追问，以及 BackendChatSocket。
@@ -1305,7 +1306,7 @@ export const sessionApi = {
         }>;
       }>;
     }>('/api/channel-sessions'),
-  sessionsStatus: () => getJSON<Record<string, string>>('/api/sessions/status'),
+  sessionsStatus: () => getJSON<Record<string, SessionStatus>>('/api/sessions/status'),
   history: (id: string) => getJSON<BackendHistoryItem[]>(`/api/session/${encodeURIComponent(id)}`),
   /** Read the tail, an older page, or new durable rows from a previous head. */
   historyWindow: (id: string, options: {

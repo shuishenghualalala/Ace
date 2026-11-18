@@ -1748,13 +1748,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         result: dict[str, str] = {}
         for s in crew.session_store.list_sessions(owner_account_id=owner):
             sid = s["session_id"]
-            st = dispatcher.status(sid, owner_account_id=owner)
-            if st["live"] in ("running", "queued"):
-                result[sid] = st["live"]
-            elif st["last_status"] == "failed":
-                result[sid] = "error"
-            else:
-                result[sid] = "idle"
+            live = dispatcher.live_status(sid, owner_account_id=owner)
+            result[sid] = "error" if live == "idle" and s["last_status"] == "failed" else live
         return JSONResponse(result)
 
     @router.get("/api/usage")

@@ -235,3 +235,30 @@ async def test_sessions_list_sync_handler_runs_in_threadpool(tmp_path, auth_head
     assert all(t is not threading.main_thread() for t in seen_threads), (
         "纯同步 handler 未走线程池：事件循环会被 SQLite 阻塞"
     )
+
+
+@pytest.mark.asyncio
+async def test_sidebar_status_reads_one_owner_snapshot_without_per_session_queries(tmp_path, auth_headers):
+    from httpx import ASGITransport, AsyncClient
+
+    from crew.app import build_app
+    from crew.gateway.server import create_app
+    from crew.state.config import Config
+
+    crew = build_app(config=Config(db_path=str(tmp_path / "status.db"), cron_enabled=False), enable_team=False)
+    store = crew.session_store
+    for index in range(64):
+        store.ensure_session(f"s{index}", owner_account_id=OWNER)
+    store.set_status("s0", "failed", owner_account_id=OWNER)
+    store.ensure_session("other-only", owner_account_id="other")
+    app = create_app(crew)
+    reads: list[str] = []
+    store._conn.set_trace_callback(reads.append)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=auth_headers) as client:
+            response = await client.get("/api/sessions/status")
+    finally:
+        store._conn.set_trace_callback(None)
+    assert response.status_code == 200
+    assert response.json() == {f"s{i}": "error" if i == 0 else "idle" for i in range(64)}
+    assert len([sql for sql in reads if "FROM SESSIONS " in sql.upper()]) == 1

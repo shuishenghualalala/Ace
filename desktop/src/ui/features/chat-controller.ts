@@ -155,6 +155,7 @@ import {
   setHistoryLoading as setHistoryLoadingState,
   setQueueHint,
   setSessionStatus,
+  mergeSessionStatuses,
   state,
   type PendingFollowup,
   type Bookkeeping,
@@ -2388,10 +2389,6 @@ export async function refreshSessions(): Promise<void> {
   renderWorkspaceHistory(openSessionFn);
 }
 
-export function seedStatuses(seed: Record<string, string>): void {
-  for (const [sid, st] of Object.entries(seed)) {
-    if (isBusy(sid)) continue;
-    setSessionStatus(sid, (st as SessionStatus) ?? 'idle');
-  }
-  renderWorkspaceHistory(openSessionFn);
+export function seedStatuses(seed: Record<string, SessionStatus>): void {
+  mergeSessionStatuses(seed, true);
 }

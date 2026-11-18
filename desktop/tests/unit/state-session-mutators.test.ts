@@ -17,6 +17,7 @@ import {
   setActiveSessionId,
 } from '../../src/ui/state';
 import { __resetAllStoresForTest, messageStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
+import { seedStatuses } from '../../src/ui/features/chat-controller';
 
 describe('session mutators', () => {
   beforeEach(() => {
@@ -50,6 +51,24 @@ describe('session mutators', () => {
     setBusy('sid-1', true);
     expect(isBusySession('sid-1')).toBe(true);
     expect(sessionStore.get().busySessions['sid-1']).toBe(true);
+  });
+
+  it('publishes one sidebar status snapshot, keeping live busy and unread completion semantics', () => {
+    setActiveSessionId('open');
+    setSessionStatus('busy', 'running');
+    setBusy('busy', true);
+    setSessionStatus('background', 'queued');
+    setSessionStatus('open', 'running');
+    let updates = 0;
+    const unsubscribe = sessionStore.subscribe(() => updates++);
+    try {
+      const snapshot = { busy: 'idle', background: 'idle', open: 'idle', other: 'error' } as const;
+      seedStatuses(snapshot);
+      seedStatuses(snapshot);
+      expect(sessionStore.get().sessionStatuses).toEqual({ ...snapshot, busy: 'running' });
+      expect([...sessionStore.get().unreadCompletedSessions]).toEqual(['background']);
+      expect(updates).toBe(1);
+    } finally { unsubscribe(); }
   });
 
   it('per-session setters write their respective store maps', () => {

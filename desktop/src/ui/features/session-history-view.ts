@@ -650,10 +650,11 @@ export function createSessionHistoryView(
 
   const patchSessionStatus = (sessionId: string, status: SessionStatus): void => {
     const row = rows.get(sessionId);
+    if (!row || !list.contains(row)) return;
     const session = state.sessions.find((item) => item.id === sessionId)
       ?? state.channelSessionGroups.flatMap((group) => group.sessions)
         .find((item) => item.id === sessionId);
-    if (!row || !session) return;
+    if (!session) return;
     setStatusContent(row.querySelector<HTMLElement>('[data-session-status]')!, session, status);
   };
 
@@ -775,13 +776,9 @@ export function createSessionHistoryView(
       }
       return;
     }
-    const ids = new Set([
-      ...Object.keys(previous.sessionStatuses),
-      ...Object.keys(next.sessionStatuses),
-      ...previous.unreadCompletedSessions,
-      ...next.unreadCompletedSessions,
-    ]);
-    for (const id of ids) {
+    if (previous.sessionStatuses === next.sessionStatuses &&
+        previous.unreadCompletedSessions === next.unreadCompletedSessions) return;
+    for (const id of rows.keys()) {
       if (
         previous.sessionStatuses[id] !== next.sessionStatuses[id]
         || previous.unreadCompletedSessions.has(id) !== next.unreadCompletedSessions.has(id)
