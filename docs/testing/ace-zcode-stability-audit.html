@@ -322,6 +322,13 @@
 <p>Debian 12.15 普通用户从独立候选源码副本运行发行 Python 3.11.9，在内建能力和多模态两组共 29 项测试通过。另一干净进程的应用构建、Wiki 媒体类型识别均未装载 HTTP 客户端，首次图片理解才加载。回环服务逐字节核对 PNG 及指定模型，仅收到一次请求，随后宿主正常关闭。</p>
 <p class="evidence">Ace <code>packages/crew-wiki/src/crew/wiki/multimodal.py</code>、<code>tests/wiki/test_multimodal.py</code>。ZCode <code>packages/services/src/bots/providers/feishuProvider.ts:1836</code>。</p>
 </article>
+<article id="composer-stream-subs">
+<h3>F12 · 正文流片反复刷新 Composer</h3>
+<p>正文片段会更新回合记录、正文和队列提示。旧 Composer 同时订阅两个 store 的全部变化，对同一忙回合反复重写发送、停止与状态。ZCode 的编辑器过滤未变更的文本，活跃时间线仅在内容高度变化时进行追底。Ace 仍同步处理实例会话的切换、忙碌、编辑、附件、鉴权及发送就绪。队列和看板模式变动只驱动队列。纯正文、记账和其他会话的待发变化跳过 Composer 的控件更新。主对话和 Wiki 使用原附件适配器与各自的会话解析器。</p>
+<p><strong>Windows 正式包对照</strong> 以 <code>8165a51b</code> 的两份 EXE 解包树运行同一测试驱动，候选只改变 ASAR 中两份相同的 renderer bundle。实际 Gateway 同一忙回合两段各发 60 个 SSE 片段。空草稿时发送控件的同值写入从 1,080 次减至零，固定一份草稿时发送和停止控件从 870 次减至零。候选正文两段均逐字节写入历史，原有提交、排队、停止及草稿状态变化通过。</p>
+<p>候选另在原生界面把旧稿加入忙回合的队列，撤回编辑后重新排队。释放首回合后新稿自动发送。模型请求和用户历史中，首回合、撤回的旧稿、改写后的新稿分别为 1、0、1 条。实际显示了新回复，队列恢复为空。三次应用均正常退出并释放两个端口。双 Composer 和发送控制器定向回归 30 项通过。桌面全量 205 个文件、2,287 项通过、2 项跳过，TypeScript 检查通过。该组测量限定为 DOM 写入及功能，输入到下一绘制的收益还需同条件配对。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/composer-view.ts</code>、<code>desktop/src/ui/features/conversation-panel.ts</code>、<code>desktop/src/ui/reducers/store-bus.ts</code>。ZCode <code>packages/ui/src/LexicalChatInput.tsx:853</code>、<code>packages/ui/src/v4/ConversationTimeline.tsx:1340</code>。</p>
+</article>
 </section>
 
 <section id="handoff">
@@ -476,6 +483,16 @@
 <tr><td>2,000</td><td>100</td><td>159</td><td>1.2 / 6.5</td><td>40 / 48</td></tr>
 </tbody></table></div>
 <p>同一帧只累加引起聊天正文变化的 <code>requestAnimationFrame</code> 同步回调，浏览器之后的布局及绘制尚未计入，完整更新的 8 毫秒门槛仍需测量。每组 52 个可信 <code>keydown</code> 全部匹配 Chromium Event Timing，四组 P95 高于 50 毫秒。每档仅一次，未给第二个连接施加背压。导航期间的节点计数未纳入分档比较。</p>
+<h3>Windows 流式输入延迟分解 · <code>56eb6de6</code></h3>
+<p>在同一正式包与 2,000 轮历史、同一前景输入框中，按空闲、20、100、100、20、空闲各采 60 次键入，共 360 个可信 <code>keydown</code>。各档键入覆盖八个动画帧相位，采样间隔带固定种子抖动。四次实际流式回复均与持久历史逐字节相同。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">状态</th><th scope="col">排队 P50/P95（毫秒）</th><th scope="col"><code>keydown</code> 处理 P50/P95（毫秒）</th><th scope="col">处理后至绘制估计 P50/P95（毫秒）</th><th scope="col">总时延 P50/P95（毫秒）</th></tr></thead>
+<tbody>
+<tr><td>空闲</td><td>0.3 / 0.9</td><td>0.1 / 0.3</td><td>23.6 / 31.7</td><td>24 / 32</td></tr>
+<tr><td>20 片/秒</td><td>0.9 / 7.1</td><td>0.1 / 0.2</td><td>47.2 / 59.1</td><td>48 / 64</td></tr>
+<tr><td>100 片/秒</td><td>0.8 / 7.8</td><td>0.1 / 0.2</td><td>55.7 / 62.0</td><td>56 / 64</td></tr>
+</tbody></table></div>
+<p>Chromium Event Timing 的总时延按 8 毫秒量化，处理后绘制估计按总时延减去排队和事件处理，继承约 ±4 毫秒量化误差。差异主要发生在 <code>keydown</code> 处理结束后。此区间仍包含之后的 <code>beforeinput</code>、<code>input</code> 和浏览器帧管线，尚缺这些事件、布局、绘制和合成的分段计时。20 片/秒的两批总 P95 分别为 64、48 毫秒；两端时钟映射精度不足以确定每个输入和 SSE 片段的精确相位。</p>
 <h3>30 次桌面首正文呈现实验 · <code>56eb6de6</code></h3>
 <p>Windows 正式包依次完成 30 条带唯一首片的公开聊天请求。回环模型端在写入首个 SSE 正文前记录单调时钟，每轮用 Chromium DevTools 握手换算浏览器时间范围，所选往返耗时 1.19–3.03 毫秒。前 11 轮在终态之前得到匹配正文的 <code>PerformanceElementTiming</code>，所见范围为 52.8–126 毫秒。后 19 轮的第一条匹配记录出现在终态重绘，直接把 30 条记录并入分位数会得到约 570–572 毫秒。</p>
 <p>第二组 30 轮将终态延迟到首文被观测到或 1.5 秒上限，同样在第 12 轮起缺失流中记录，对应分位数随终态延迟到约 1,654–1,656 毫秒。第三组 15 轮同步观测 DOM 和视口。所有轮次窗口均可见且有焦点。其中复现缺失记录的四轮，正文在 23.7–42.3 毫秒已挂载，文字几何在窗口边界内，但刚挂载时仍可能超出聊天滚动容器。浏览器直到终态重绘才给出元素呈现记录。三组均核对了实际回复和退出回收。</p>

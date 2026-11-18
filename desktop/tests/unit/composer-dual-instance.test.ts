@@ -9,8 +9,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Attachment } from '../../src/ui/backend-client';
 import { createComposerView } from '../../src/ui/features/composer-view';
 import type { PanelAttachments } from '../../src/ui/features/attachments';
-import { __resetAllStoresForTest, authStore, sessionStore, uiStore } from '../../src/ui/stores/stores';
-import { enqueuePending, getPendingQueue } from '../../src/ui/state';
+import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore } from '../../src/ui/stores/stores';
+import { enqueuePending, getPendingQueue, patchBook } from '../../src/ui/state';
 import { syncRunningIntroSlot } from '../../src/ui/features/running-intro';
 
 /** 内存态 PanelAttachments stub：行为对齐 wiki-agent 的 per-KB adapter。 */
@@ -64,6 +64,57 @@ beforeEach(() => {
 });
 
 describe('双 Composer 实例隔离', () => {
+  it('稳定流更新跳过无关按钮写入，队列、忙碌和编辑状态仍同步更新', () => {
+    const host = document.getElementById('host-a')!;
+    sessionStore.set({ activeSessionId: 'sid-a', busySessions: { 'sid-a': true } });
+    const view = createPanelComposer(host, 'sid-a', stubAttachments());
+    const send = host.querySelector<HTMLButtonElement>('[data-composer-send]')!;
+    const write = vi.spyOn(send, 'setAttribute');
+    try {
+      patchBook('sid-a', { assistantId: 'answer' });
+      messageStore.set({ messages: { 'sid-a': [
+        { id: 'answer', role: 'assistant', content: '继续', streaming: true, timestamp: 1 },
+      ] }, queueHints: { 'sid-a': '' } });
+      enqueuePending('sid-b', { id: 'other', query: '另一会话', attachments: [] });
+      expect(write).not.toHaveBeenCalled();
+      enqueuePending('sid-a', { id: 'queued', query: '当前会话', attachments: [] });
+      expect(host.querySelector('[data-queue-steer]')).not.toBeNull();
+      configStore.set({ mode: 'dynamic_kanban' });
+      expect(host.querySelector('[data-queue-steer]')).toBeNull();
+      sessionStore.set({ activeSessionId: 'sid-b' });
+      expect(host.querySelector('[data-queue-steer]')).not.toBeNull();
+      sessionStore.set({ busySessions: {}, editFromIdx: { 'sid-a': 0 } });
+      expect(send.hidden).toBe(false);
+      expect(host.querySelector<HTMLElement>('[data-composer-edit-banner]')!.hidden).toBe(false);
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it('面板 resolver 换会话后在下一次 store 通知同步刷新，全局附件仍可使发送就绪', () => {
+    const host = document.getElementById('host-b')!;
+    let selected = 'sid-b';
+    sessionStore.set({ busySessions: { 'sid-c': true } });
+    const view = createComposerView(host, {
+      getSessionId: () => selected, submit: vi.fn(), stop: vi.fn(), cancelEdit: vi.fn(),
+      editQueueItem: vi.fn(), steerQueueItem: vi.fn(),
+    });
+    const send = host.querySelector<HTMLButtonElement>('[data-composer-send]')!;
+    try {
+      expect(send.hidden).toBe(false);
+      selected = 'sid-c';
+      messageStore.set({ queueHints: {} });
+      expect(send.hidden).toBe(true);
+      messageStore.set({ attachments: [
+        { id: 'image', name: 'photo.png', path: 'photo.png', type: 'image', size: 10 },
+      ] });
+      expect(send.hidden).toBe(false);
+      expect(send.disabled).toBe(false);
+    } finally {
+      view.dispose();
+    }
+  });
+
   it('两个 Composer 按各自 sessionId 渲染待发队列', () => {
     const hostA = document.getElementById('host-a')!;
     const hostB = document.getElementById('host-b')!;

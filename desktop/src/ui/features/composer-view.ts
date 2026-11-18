@@ -9,6 +9,7 @@ import {
 } from '../state';
 import {
   authStore,
+  configStore,
   messageStore,
   sessionStore,
   uiStore,
@@ -236,6 +237,7 @@ export function createComposerView(
   let submitting = false;
   let submitError = '';
   let draftRevision = 0;
+  let renderedSessionId: string | null = null;
   let queueSignature = '';
   const imeState = createComposerImeState();
   const unbindIme = bindComposerIme(input, imeState);
@@ -326,6 +328,7 @@ export function createComposerView(
     const session = sessionStore.get();
     const messages = messageStore.get();
     const sessionId = getSessionId();
+    renderedSessionId = sessionId;
     const busy = Boolean(sessionId && session.busySessions[sessionId]);
     // hasDraft 的附件部分走面板注入的 adapter（缺省 = 主对话全局附件流）。
     const attachmentCount = options.attachments
@@ -431,8 +434,32 @@ export function createComposerView(
   }, { signal: controller.signal });
   const unsubscribeAuth = authStore.subscribe(refresh);
   const unsubscribeUi = uiStore.subscribe(refresh);
-  const unsubscribeSession = sessionStore.subscribe(refresh);
-  const unsubscribeMessages = messageStore.subscribe(refresh);
+  const unsubscribeSession = sessionStore.subscribe((next, prev) => {
+    const id = getSessionId();
+    if (id !== renderedSessionId || (id && (
+      next.busySessions[id] !== prev.busySessions[id]
+      || next.editFromIdx[id] !== prev.editFromIdx[id]
+    ))) {
+      refresh();
+    } else if (id && (next.activeSessionId === id) !== (prev.activeSessionId === id)
+      && configStore.get().mode === 'dynamic_kanban') {
+      renderQueue();
+    }
+  });
+  const unsubscribeMessages = messageStore.subscribe((next, prev) => {
+    const id = getSessionId();
+    if (id !== renderedSessionId || (!options.attachments && next.attachments !== prev.attachments)) {
+      refresh();
+    } else if (id && next.pendingQueues[id] !== prev.pendingQueues[id]) {
+      renderQueue();
+    }
+  });
+  const unsubscribeMode = configStore.subscribe((next, prev) => {
+    if ((next.mode === 'dynamic_kanban') !== (prev.mode === 'dynamic_kanban')
+      && getSessionId() === sessionStore.get().activeSessionId) {
+      renderQueue();
+    }
+  });
   // running-intro 槽位按本实例自己的会话来源注册：主对话与 Wiki 面板各自独立显示。
   const unregisterRunningIntro = registerRunningIntroTarget(runningSlot, getSessionId);
   refresh();
@@ -451,6 +478,7 @@ export function createComposerView(
       unsubscribeUi();
       unsubscribeSession();
       unsubscribeMessages();
+      unsubscribeMode();
       unregisterRunningIntro();
       for (const { source, nodes } of movedContext) source.append(...nodes);
       host.replaceChildren();
