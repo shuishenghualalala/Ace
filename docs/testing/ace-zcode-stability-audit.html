@@ -33,8 +33,8 @@
 <h2>1. 修复顺序</h2>
 <p><strong>接手目标与真实模型验收（2026-11-18）</strong> 在现有审计工作树上合入安全模块，按 Agent 基础能力、工具与提示词、桌面稳定性和性能继续核对 ZCode 源码。每项修复做定向回归、端到端验证并独立提交。真实模型测试使用维护者指定的本机配置文件 <code>D:\Codes\env</code>，以其中当前的模型和接口为准，测试数据放在隔离目录。故障、断连与重复请求用可控端点注入，分别记录两种验证的结果。</p>
 <h3>2026-11-18 接手后的实测结果</h3>
-<p>真实模型经本地 Gateway 和 WebSocket 完成了文件读取、遵守项目指令的搜索和保留 Unicode 的精确编辑。Windows 的升级旧库、独立 Gateway 与后台任务归属、两种浏览器入口的审批重连已做过端到端核对。以下各节保留发现问题时的基线，复验使用的版本和结果在<a href="#handoff">合并后复核</a>逐项列出。</p>
-<p>Windows 万会话场景的单次首行时间从 73.26 秒降到 15.005 秒。后者对应 32 行首页，30 次 HTTP 首页请求的 P95 为 24.1 毫秒。首行可见与聊天可发送是两个测量点。Windows 另完成 180 次启动，分档的发送可用和目录挂载 P50/P95 见末章。跨平台的故障恢复 P95 仍待补齐。</p>
+<p>真实模型经本地 Gateway 和 WebSocket 完成了文件读取、遵守项目指令的搜索、保留 Unicode 的精确编辑及 Plan 审批执行。Windows 正式包也完成真实模型首聊和重开历史。Windows 的升级旧库、独立 Gateway 与后台任务归属、两种浏览器入口的审批重连已做过端到端核对。以下各节保留发现问题时的基线，复验使用的版本和结果在<a href="#handoff">合并后复核</a>逐项列出。</p>
+<p>Windows 万会话场景的单次首行时间从 73.26 秒降到 15.005 秒。后者对应 32 行首页，30 次 HTTP 首页请求的 P95 为 24.1 毫秒。首行可见与聊天可发送是两个测量点。Windows 另完成 180 次启动，分档的发送可用和目录挂载 P50/P95 见末章。Windows 和 Linux 另各完成 30 轮渲染及网关故障恢复。macOS 与单独断开 WebSocket 的重复分布仍待补齐。</p>
 <p>在日常开发场景，Ace 首先要保证一轮请求能被明确受理、在故障后恢复，并保留完整结果。当前应优先处理网关卡死后的替换流程、回放游标失效后的状态恢复和 Plan 工具契约。应用层已有会话事件日志、写入意图与恢复、工具隔离、Markdown 合帧及历史分页，可以沿用这些模块。</p>
 <div class="table"><table>
 <thead><tr><th scope="col">批次</th><th scope="col">影响和代码归属</th><th scope="col">提交验收条件</th></tr></thead>
@@ -211,7 +211,12 @@
 <p><strong>修复</strong> 候选产物运行安装或解包、首次启动、发送/停止、后台重启恢复、renderer 恢复、退出清理及有旧数据的升级。Ace 已有事务化会话存储及写租约，在现有模块上增加迁移提交前后异常退出、文件系统空间不足与重新打开用例。ZCode 自带迁移前后中断的用例。覆盖 Windows 非 ASCII 用户目录、macOS arm64/x64、Linux 发布支持的包格式和桌面环境。将阶段耗时及失败阶段纳入产物报告。</p>
 <p><strong>发布门禁</strong> <code>release-desktop.yml</code> 在上传之前启动候选桌面，Windows 用新编译的 EXE 静默安装至带空格和中文的临时目录，macOS 两个架构通过 LaunchServices 打开只读 DMG 内的应用，Linux 在私有挂载空间分别只读挂载 UOS、Kylin 的 <code>/opt</code> 并以普通用户启动。<code>desktop/scripts/smoke-packaged-desktop.mjs</code> 为每轮创建独立用户目录和本地 SSE 模型，从实际输入框验证首聊、精确停止、后继回合、Renderer 与 Gateway 故障恢复、重启历史，以及退出后两个端口可重新绑定。每个阶段单独计时。</p>
 <p><strong>Windows 包态验收</strong> 从 <code>30e6cb78</code> 以 Inno Setup 6.7.1 编译的 EXE 为 291,089,105 字节，SHA-256 为 <code>abfdcc7cd7b4bd757f7dc87ff0933e5e49b2ca9d9422f157bab4a6bb46f47fdd</code>。解包目录与 staging 的 17,403 个文件逐个校验一致，其中 133 个一方 wheel 资源另与源码核对。两份桌面分别跑通九阶段，EXE 解包桌面的首退和重开后退出为 1.770、1.992 秒。另从同一 EXE 复跑旧库的五种故障和六次实际 HTTP 重开，均保留唯一旧正文。额外一轮在 8000/8001 运行时，Gateway 遇到正在关闭的 WebSocket，返回退出码 1，桌面记录本次 Gateway 清理失败，门禁拦截该轮。Windows 本机使用解包发行程序。静默安装步骤在全新 CI 账号中执行，本地通过实际编译的 Inno 规则及非安装参数夹具验证；macOS 原生结果待对应 runner。</p>
-<p><strong>Windows 最终复验</strong> 使用 <code>56eb6de6</code> 重编的 EXE 为 291,101,005 字节，SHA-256 为 <code>cad921e83fe7358910538c7d0c8370a76c96413542f73695fc53ac38c94d2fdc</code>。解包后的 17,404 个发行文件与 staging 完全一致，实际安装规则包含 <code>skipifsilent</code>。两份桌面各自通过九阶段。staging 两次正常退出耗时 1.637、2.661 秒，EXE 解包桌面为 3.106、2.656 秒。四次均有 Gateway 退出码 0、桌面清理失败列表为空，业务和健康端口均可重新绑定。两轮故障注入分别拉起新 Gateway 并恢复历史。用该 EXE 的内嵌 Python 另跑 10 轮双 WebSocket 客户端与服务端同时关闭，开放连接每次收到 1012，应用生命周期清理均完成。同一 EXE 的旧库五项故障和六次 HTTP 历史重开也全部通过。</p>
+<p><strong>Windows WebSocket 关停修复复验</strong> 使用 <code>56eb6de6</code> 重编的 EXE 为 291,101,005 字节，SHA-256 为 <code>cad921e83fe7358910538c7d0c8370a76c96413542f73695fc53ac38c94d2fdc</code>。解包后的 17,404 个发行文件与 staging 完全一致，实际安装规则包含 <code>skipifsilent</code>。两份桌面各自通过九阶段。staging 两次正常退出耗时 1.637、2.661 秒，EXE 解包桌面为 3.106、2.656 秒。四次均有 Gateway 退出码 0、桌面清理失败列表为空，业务和健康端口均可重新绑定。两轮故障注入分别拉起新 Gateway 并恢复历史。用该 EXE 的内嵌 Python 另跑 10 轮双 WebSocket 客户端与服务端同时关闭，开放连接每次收到 1012，应用生命周期清理均完成。同一 EXE 的旧库五项故障和六次 HTTP 历史重开也全部通过。</p>
+<h4>包含首次打开与技能修复的 Windows 正式包</h4>
+<p>使用 <code>ef997e1c</code> 重编的 EXE 为 291,098,353 字节，SHA-256 为 <code>54824e273643b8d4fbe94336c5698c0d5b950d4e06ffd041b8f611c75519297e</code>。解包后逐一核对 17,399 个发行文件，全部与 staging 一致。两份桌面分别通过九阶段。staging 两次正常退出为 2.485、2.598 秒，EXE 解包桌面为 2.181、2.314 秒。第一轮 staging 在重开期间收到提前退出，Gateway 返回 0，桌面验收失败。成功复跑和首次失败分别保留。</p>
+<p>解包原生桌面使用本地 SSE 压测时，F8 首字四阶段依次为 477、478、501、519 毫秒。使用 <code>D:\Codes\env</code> 提供的真实 <code>deepseek-flash</code> 模型另行测试，模型发起两次上游调用，工具读取新生成的随机文件并呈现精确正文。关停重开后，历史接口与可见聊天均保留同一回复。冷启 15.763 秒，真实读文件并显示正文 3.789 秒，重开后显示历史 0.258 秒，两次正常退出为 2.636 和 1.683 秒。</p>
+<h4>包含端口竞争修复的 Windows 正式包</h4>
+<p><code>8165a51b</code> 的 EXE 为 291,100,902 字节，SHA-256 为 <code>08fdd30a1ac026f1634b3039f94e8afa5726790ef39ac28bf9c7304cef616ea5</code>。17,399 个安装目录文件与 staging 逐一一致，另核对 128 个第一方 wheel 文件。staging 与真实 EXE 解包内容各自一次通过九阶段，四次正常退出均返回 0。解包桌面首次与末次正常退出 1.556、2.644 秒，Gateway 故障恢复及历史检查 11.986 秒。另在正式 EXE 运行 D2 端口争用夹具，26.843 秒内换至 8002/8003 并允许发送，首聊 1.432 秒，正常退出 2.097 秒，占用方继续响应。F8 首字四阶段为 493、495、513、528 毫秒。</p>
 <h4>Linux 发行包与实际安装</h4>
 <p>固定 <code>56eb6de6</code> 构建 UOS、Kylin 两个 amd64 发行包。门禁各执行两次：先在只读 <code>/opt</code> 中测试解包内容，再在全新 Debian 12.15 用户态执行 <code>dpkg -i</code> 并从实际安装目录启动。四次均通过九个阶段，每次核对三代 Gateway 的实例签名、会话历史、正常退出及双端口释放。桌面使用普通用户（UID 1000、有效 capabilities 为零）、Xvfb、DBus 和发行版自带的 Chromium 沙箱，内核为 WSL2 6.18.58.1。UOS 和 Kylin 表示包的目标与应用内渠道标识，实际运行主机使用相同的 Debian 用户态。</p>
 <div class="table"><table>
@@ -328,6 +333,9 @@
 <li><strong>关闭中的 WebSocket · <code>56eb6de6</code></strong> 在 <code>30e6cb78</code> Windows 安装树多次执行正常退出时，发现客户端的连接已关闭，Gateway 在同一事件循环再次发送关闭帧，返回退出码 1。受管与独立 Gateway 现在复用一套 WebSocket 关闭逻辑，正在排空的连接继续原关闭流程。用两条真实 WebSocket 验证，一条先主动关闭，尚开放的另一条收到 1012，服务的 lifespan 正常完成。网关连接、健康及退出回归共 104 项通过。ZCode <code>packages/desktop/src/host/windowRemoteConnectionRegistry.ts</code> 的 dispose 复用同一次关闭操作。</li>
 <li><strong>全后端首次快照与复验</strong> <code>00cbdc8e</code> 的隔离 Windows 默认 pytest 得到 5,239 项通过、15 项失败、36 项跳过和 20 项取消选取。逐条排查发现普通 Windows 账户安装本地技能的问题，以及 <code>migrate orphans</code> 将六张核心表误报为孤儿。后者由 <code>d71e45cc</code> 修复，真实 CLI 在空白安装返回空列表，新增测试表后只返回该表，81 项通过。<code>845fec96</code> 的浏览器目录链接测试在 Windows 检查两层下载路径边界；<code>bc758ded</code> 验证 Windows 工具链可读范围，并在 Debian 运行两项文件符号链接用例。原生安全复测见本节。</li>
 <li><strong>完整后端复核 · <code>56eb6de6</code></strong> 在可由本机测试账号访问的 Windows 虚拟环境中从新配置运行。正常加载 pywin32 和 MCP 后，默认 pytest 通过 5,262 项、跳过 37 项、取消选取 20 项真实服务 E2E，另有 3 项失败。两项为同一 Apple Silicon 预编译产物的源码证明；另一项在并行负载下，Python 测试 helper 未在 0.5 秒内返回完整首行，该用例立即独立重跑三次均通过。本轮用时 41 分 58 秒。</li>
+<li><strong>包含 F9 的 Windows 全后端 · <code>ef997e1c</code></strong> 默认 pytest 在隔离环境用时 41 分 39 秒。5,281 项通过，37 项跳过，20 项真实服务 E2E 取消选取，两项失败都来自 Apple Silicon 安全运行时清单。清单记录源码哈希 <code>db79aeec…</code>，此提交的计算值为 <code>0ea0e07c…</code>。<code>9f843437</code> 的冷启动修正后，256 KiB stderr 排空测试通过。</li>
+<li><strong>同提交的 Debian 全后端</strong> 使用发行 Python 3.11.9 和普通用户运行，共选取 5,320 项。4,219 项通过，23 项跳过，251 项失败，839 项出错，另有 20 项真实服务用例取消选取。审批夹具把外部路径建在 POSIX 允许写入的 <code>/tmp</code> 下，相关五项单跑稳定复现。<code>b91bd834</code> 调整测试路径后五项通过，相关模块在 Debian 89 项通过、1 项跳过，Windows 91 项通过、1 项跳过。两条 Linux 真隔离用例要求 bubblewrap 进入用户命名空间，测试宿主返回 <code>EPERM</code>。全量中段的旧夹具累积 SQLite 文件描述符，在 1,024 个软限制下触发大量 <code>Errno 24</code>。这些样本来自修复前的代码。</li>
+<li><strong>测试宿主与生产通知库关闭</strong> <code>456f6b01</code> 使用例结束时走 <code>CrewApp.shutdown()</code>，并用受强引用的 Work 状态确认活跃 scope 被关闭。旧夹具三轮留下 27、49、71 个 SQLite 文件描述符。修复后重复走完整生命周期，Work 数据库句柄每轮归零。Windows 分项 171 项通过，Linux 170 项通过，另有一条需要用户命名空间的原生用例未选取。实际应用的通知库另有独立残留，<code>93631f3d</code> 由创建它的 <code>CrewApp</code> 在关停时释放。Windows、Debian 各通过 141 项通知和生命周期回归，各用真实调度器完成前台与后台恢复两条通知端到端，两个情形都只生成一条通知。Linux 的三次重复关停不再留下通知库文件描述符。</li>
 <li><strong>并行 Gateway 的后台终端归属 · <code>85951895</code></strong> ZCode 的 <code>apps/zcode-cli/packages/adapters/src/exec/node-execution-adapter-lifecycle.ts</code> 按 adapter 实例持有活跃任务。Ace 的每个实例原来会覆盖同一个 JSON 文件，重启仅凭 PID 认领。现在每个后台任务各占一条 SQLite 记录，宿主退出后先核对子进程启动身份，再以原宿主标识原子认领。两个真实 Windows Gateway 共用一个临时主目录并各自启动终端，均未取走对方任务；退出第二个后，第一个任务继续存活，退出两端后均已清理。Linux 实际 fork 的两个实例共用 SQLite，原宿主在运行时认领数为零，退出后两个并发接管者分别认领 1 和 0 项。损坏记录、旧 JSON、PID 复用和账号隔离均有回归。终端和网关相关 99 项通过、1 项跳过。</li>
 <li><strong>原生执行与安装目录 · <code>43857f1d</code>、<code>f7921a3d</code></strong> Windows 的管道用例按运行平台选择取首行命令，实际检查两行输入只返回第一行。六个历史失败在隔离的 Windows Python 和本地原生 helper 上重跑，四项通过。两项仍指向 Apple Silicon 清单的源码哈希 <code>db79aeec…</code> 与合并源码 <code>c1312db7…</code> 不符。二进制自身摘要通过；Apple Rust 目标通过 <code>cargo check</code>，尚需 Apple Silicon 机器重建和运行。Linux 沙箱测试的协议 nonce 改为在 PID 1 时也满足长度要求，实际 Debian 容器中通过。</li>
 <li><strong>精简服务环境的账号识别 · <code>4fa38196</code></strong> 去除四个用户名环境变量后，原 Windows Python 会查找 POSIX 的 <code>pwd</code> 模块而中断对话。现在可从系统登录身份获取账号，无法确认时返回安全上下文错误。原有账号键继续有效。Windows 实际 Electron→Gateway 设置请求、41 项安全回归及 Debian 原生身份测试均通过。在相同精简环境下，<code>ede4091c</code> 的真实模型 Plan 测试完成审批、实际修改临时 CLI、启动程序获取版本号并正常结束。</li>
@@ -358,6 +366,23 @@
 <tr><td>发行与工作集</td><td>Windows、macOS、Linux 的支持矩阵，干净 profile 与已有会话升级。记录 30 分钟空闲和长会话连续输出 RSS、队列驻留字节、退出残留，以及恢复后的历史。</td><td>零数据丢失和自有子进程残留；队列和 DOM 规模在稳定工作集下收敛。绝对内存门槛用各平台同条件首轮结果设定。</td></tr>
 </tbody>
 </table></div>
+<h3>Windows 发行包的重复故障恢复</h3>
+<p>对 <code>ef997e1c</code> 正式 EXE 的解包程序顺序执行 30 轮原版九阶段测试。每轮新建用户配置，各有两次正常退出和一次故障后 Gateway 替换。30 轮全部通过，核对 90 个 Gateway 代次和 60 次正常退出。原版脚本验证了所有会话请求 ID、停止目标、后续回合、持久化历史、进程退出与双端口释放。Windows 初次 staging 重开失败保留在 D8，计时组固定使用已核验的同一份 EXE 内容。P95 取第 29 个升序样本。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">阶段</th><th scope="col">P50（毫秒）</th><th scope="col">P95（毫秒）</th><th scope="col">最大值（毫秒）</th></tr></thead>
+<tbody>
+<tr><td>冷启动</td><td>11,168</td><td>13,727</td><td>13,841</td></tr>
+<tr><td>首次聊天</td><td>1,089</td><td>1,210</td><td>1,492</td></tr>
+<tr><td>精确停止及后续回合</td><td>1,961</td><td>2,310</td><td>7,792</td></tr>
+<tr><td>Renderer 恢复</td><td>1,571</td><td>1,832</td><td>1,921</td></tr>
+<tr><td>Gateway 重启及历史检查</td><td>11,455.5</td><td>13,360</td><td>13,569</td></tr>
+<tr><td>首次退出</td><td>1,822.5</td><td>2,308</td><td>2,533</td></tr>
+<tr><td>重开</td><td>10,348</td><td>11,364</td><td>12,240</td></tr>
+<tr><td>重开后历史</td><td>430</td><td>538</td><td>596</td></tr>
+<tr><td>末次退出</td><td>2,405.5</td><td>2,556</td><td>2,609</td></tr>
+</tbody>
+</table></div>
+<p>本组从注入故障计时，Gateway 阶段包含新进程启动和历史检查。原审计的 5 秒冷启目标在该 Windows 环境未达到。</p>
 <h3>Linux 发行包的重复故障恢复</h3>
 <p>对 <code>56eb6de6</code> UOS amd64 发行包顺序执行 30 次完整九阶段桌面测试。每轮从独立用户配置启动，共核对 90 个受管 Gateway 代次的主端口和健康端口签名。正式组使用只启用回环的独立网络、只读 <code>/opt</code>、普通用户和原 Chromium 沙箱。30 轮全部通过。共享网络的先导组完成 10 轮，其中 9 轮通过，另一次触发 D2 的健康端口冲突。正式组运行 18 分 35 秒，同一 WSL 虚拟机也在执行后端回归，CPU 使用中位数 7.8%，P95 为 14.6%。</p>
 <div class="table"><table>
