@@ -936,10 +936,16 @@ class SingleAgent(Agent):
         user_message.request_id = envelope.request_id
         history.append(user_message)
 
+        evolution_incarnation = None
         if not self.lightweight:
             # 用户边界先提交，再进入 prompt 构建和工具执行。这样即使进程在
             # LLM/工具阶段退出，重启后仍能恢复到最后一个确定的用户输入。
-            await self.session_store.save_async(
+            save_user_history = self.session_store.save_async
+            if self.evolution_queue is not None and not self.evolution_visible:
+                save_user_history = getattr(
+                    self.session_store, "save_with_incarnation_async", save_user_history,
+                )
+            evolution_incarnation = await save_user_history(
                 task_sid,
                 history,
                 workspace_id=envelope.workspace_id,
@@ -1229,7 +1235,9 @@ class SingleAgent(Agent):
                 # ── 异步模式：drain 上一轮的 pending evolution 结果，再入队本周任务 ──
                 # evolution 在后台按序执行，不阻塞当前轮响应；
                 # 结果在下一轮交互的 evolution_footer 中体现。
-                pending = self.evolution_queue.drain_results(task_sid)
+                pending = await self.evolution_queue.drain_results(
+                    task_sid, owner, incarnation=evolution_incarnation,
+                )
                 for result in pending:
                     yield ResponseChunk.evolution_footer(
                         envelope.request_id,
@@ -1245,6 +1253,7 @@ class SingleAgent(Agent):
                     conversation_id=task_sid,
                     manager=self.evolution_manager,
                     full_cycle=self.evolution_full_cycle,
+                    incarnation=evolution_incarnation,
                 )
             else:
                 # 兼容模式：无队列时走原有 fire-and-forget 后台任务

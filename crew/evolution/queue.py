@@ -1,19 +1,21 @@
 """异步进化队列：按 session 串行处理 evolution 任务，结果在下一轮交互中体现。
 
 设计要点：
-  - 每个 session 一个 worker，FIFO 依次执行 evolution 任务
-  - evolution 完成后，结果存入 _pending_results[session_id]
-  - 下一轮交互调用 drain_results(session_id) 取走并清空
+  - 同一账号和会话代次的工作按入队顺序执行
+  - 后续回合只领取同一账号和会话代次的结果
   - worker 通过 asyncio.to_thread 调用同步的 EvolutionManager 方法，不阻塞事件循环
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+_EvolutionScope = tuple[str, str, str | None]
 
 
 class EvolutionQueue:
@@ -27,7 +29,7 @@ class EvolutionQueue:
         await queue.enqueue(sid, owner, conv_id, mgr, full_cycle=True)
 
         # Turn N+1 开始时：取出上一轮的结果（可能为空）
-        results = queue.drain_results(sid)
+        results = await queue.drain_results(sid, owner)
         for r in results:
             yield ResponseChunk.evolution_footer(..., r["text"], ...)
 
@@ -35,10 +37,13 @@ class EvolutionQueue:
         await queue.shutdown()
     """
 
-    def __init__(self) -> None:
-        self._queues: dict[str, asyncio.Queue] = {}
-        self._workers: dict[str, asyncio.Task] = {}
-        self._pending_results: dict[str, list[dict]] = {}
+    def __init__(
+        self, get_history_incarnation: Callable[[str, str], str | None] | None = None,
+    ) -> None:
+        self._get_history_incarnation = get_history_incarnation
+        self._queues: dict[_EvolutionScope, asyncio.Queue] = {}
+        self._workers: dict[_EvolutionScope, asyncio.Task] = {}
+        self._pending_results: dict[_EvolutionScope, list[dict]] = {}
 
     # ── 公开接口 ──────────────────────────────────────────────────────
 
@@ -49,58 +54,90 @@ class EvolutionQueue:
         conversation_id: str,
         manager: Any,
         full_cycle: bool,
+        *,
+        incarnation: str | None = None,
     ) -> None:
-        """入队一个 evolution 任务，自动启动 session 级 worker。"""
-        queue = self._queues.get(session_id)
+        """入队一个 evolution 任务，自动启动会话代次的 worker。"""
+        scope = (owner_account_id, session_id, incarnation)
+        queue = self._queues.get(scope)
         if queue is None:
-            queue = self._queues[session_id] = asyncio.Queue()
-        queue.put_nowait((owner_account_id, conversation_id, manager, full_cycle))
-        if session_id not in self._workers:
-            self._workers[session_id] = asyncio.create_task(self._worker(session_id, queue))
+            queue = self._queues[scope] = asyncio.Queue()
+        queue.put_nowait((conversation_id, manager, full_cycle))
+        if scope not in self._workers:
+            self._workers[scope] = asyncio.create_task(self._worker(scope, queue))
 
-    def drain_results(self, session_id: str) -> list[dict]:
-        """取出并清空该 session 的 pending evolution 结果。"""
-        return self._pending_results.pop(session_id, [])
+    async def drain_results(
+        self, session_id: str, owner_account_id: str, *, incarnation: str | None = None,
+    ) -> list[dict]:
+        """取出同一账号和会话代次的结果。"""
+        scope = (owner_account_id, session_id, incarnation)
+        if not self._pending_results.get(scope):
+            return []
+        current = await self._is_current(scope)
+        results = self._pending_results.pop(scope, [])
+        return results if current else []
 
-    def has_pending(self, session_id: str) -> bool:
+    def has_pending(
+        self, session_id: str, owner_account_id: str, *, incarnation: str | None = None,
+    ) -> bool:
         """是否有未取走的 evolution 结果。"""
-        return bool(self._pending_results.get(session_id))
+        return bool(self._pending_results.get((owner_account_id, session_id, incarnation)))
 
     async def shutdown(self) -> None:
         """等待已接纳的工作，包括关停期间进入队列的任务。"""
         while self._workers:
-            for session_id, task in tuple(self._workers.items()):
+            for scope, task in tuple(self._workers.items()):
                 try:
                     await asyncio.wait_for(task, timeout=10)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     task.cancel()
-                    if self._workers.get(session_id) is task:
-                        self._workers.pop(session_id)
-                        self._queues.pop(session_id)
+                    if self._workers.get(scope) is task:
+                        self._workers.pop(scope)
+                        self._queues.pop(scope)
 
     # ── 内部实现 ──────────────────────────────────────────────────────
 
-    async def _worker(self, session_id: str, queue: asyncio.Queue) -> None:
-        """单 session 串行处理：取任务 → 执行 → 存结果。"""
+    async def _is_current(self, scope: _EvolutionScope) -> bool:
+        reader = self._get_history_incarnation
+        if reader is None:
+            return True
+        owner_account_id, session_id, incarnation = scope
+        if incarnation is None:
+            return False
+        try:
+            return await asyncio.to_thread(reader, session_id, owner_account_id) == incarnation
+        except Exception as exc:
+            log.warning("[EVOLUTION] 会话代次读取失败: session=%s err=%s", session_id, exc)
+            return False
+
+    async def _worker(self, scope: _EvolutionScope, queue: asyncio.Queue) -> None:
+        """单会话代次串行处理：取任务、执行、存结果。"""
+        owner_account_id, session_id, _ = scope
         try:
             while not queue.empty():
-                owner_account_id, conversation_id, manager, full_cycle = queue.get_nowait()
+                conversation_id, manager, full_cycle = queue.get_nowait()
                 try:
+                    if not await self._is_current(scope):
+                        self._pending_results.pop(scope, None)
+                        continue
                     result = await self._run_evolution(
                         manager, session_id, owner_account_id,
                         conversation_id, full_cycle,
                     )
                     if result is not None:
-                        self._pending_results.setdefault(session_id, []).append(result)
+                        if await self._is_current(scope):
+                            self._pending_results.setdefault(scope, []).append(result)
+                        else:
+                            self._pending_results.pop(scope, None)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("[EVOLUTION] 队列任务失败: session=%s err=%s", session_id, exc)
                 finally:
                     queue.task_done()
         finally:
             # 同一事件循环中，检查队列为空到移除注册之间不让出执行权。
-            if self._queues.get(session_id) is queue:
-                self._queues.pop(session_id)
-                self._workers.pop(session_id, None)
+            if self._queues.get(scope) is queue:
+                self._queues.pop(scope)
+                self._workers.pop(scope, None)
             log.debug("[EVOLUTION] worker 退出: session=%s", session_id)
 
     async def _run_evolution(

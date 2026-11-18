@@ -1529,7 +1529,7 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens_source: str | None,
         expected_cursor: tuple[int, int] | None = None,
         branch_from: tuple[int, int] | None = None,
-    ) -> Callable[[Any], tuple[int, int]]:
+    ) -> Callable[[Any], tuple[int, int, int]]:
         now = time.time()
         # title_fallback=None 保持旧行为（首条 user 消息截断），兼容未传该参数的调用方；
         # title_fallback="" 显式留空占位，等 set_title 写入摘要标题（enable_title=True 时
@@ -1730,6 +1730,48 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
     ) -> None:
+        await self._save_history_async(
+            session_id, messages, workspace_id, owner_account_id=owner_account_id,
+            title_fallback=title_fallback, last_prompt_tokens=last_prompt_tokens,
+            last_prompt_tokens_source=last_prompt_tokens_source, after_write=lambda _: None,
+        )
+
+    async def save_with_incarnation_async(
+        self,
+        session_id: str,
+        messages: list[Message],
+        workspace_id: str = "default",
+        *,
+        owner_account_id: str,
+        title_fallback: str | None = None,
+        last_prompt_tokens: int | None = None,
+        last_prompt_tokens_source: str | None = None,
+    ) -> str:
+        """保存消息并返回本次写入的会话实例。删除并重建同名会话会更换实例。"""
+        def capture(conn: sqlite3.Connection) -> str:
+            incarnation = self._read_history_incarnation(conn, session_id, owner_account_id)
+            if incarnation is None:
+                raise SessionEventLogError(f"写入后缺少会话实例：{session_id}")
+            return incarnation
+
+        return await self._save_history_async(
+            session_id, messages, workspace_id, owner_account_id=owner_account_id,
+            title_fallback=title_fallback, last_prompt_tokens=last_prompt_tokens,
+            last_prompt_tokens_source=last_prompt_tokens_source, after_write=capture,
+        )
+
+    async def _save_history_async(
+        self,
+        session_id: str,
+        messages: list[Message],
+        workspace_id: str,
+        *,
+        owner_account_id: str,
+        title_fallback: str | None,
+        last_prompt_tokens: int | None,
+        last_prompt_tokens_source: str | None,
+        after_write: Callable[[sqlite3.Connection], T],
+    ) -> T:
         queue = self._get_write_queue((owner_account_id, session_id))
         # flush barrier：leaf 与事件批次同事务提交、ack 往返完成后才视为持久化。
         async with queue.lock:
@@ -1743,10 +1785,15 @@ class SQLiteSessionStore(SessionStore):
                 last_prompt_tokens=last_prompt_tokens,
                 last_prompt_tokens_source=last_prompt_tokens_source,
             )
-            new_leaf, _, new_generation = await queue.enqueue(fn)
+            def write(conn: sqlite3.Connection) -> tuple[int, int, T]:
+                leaf, _, generation = fn(conn)
+                return leaf, generation, after_write(conn)
+
+            new_leaf, new_generation, result = await queue.enqueue(write)
         self._apply_saved_projection(
             owner_account_id, session_id, messages, new_leaf, new_generation
         )
+        return result
 
     async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
         return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
@@ -2495,6 +2542,20 @@ class SQLiteSessionStore(SessionStore):
             """,
             (session_id, owner_account_id, "[]", now, now, workspace_id or "default", "" if is_placeholder_title(title) else title),
         )
+
+    @staticmethod
+    def _read_history_incarnation(
+        conn: sqlite3.Connection, session_id: str, owner_account_id: str
+    ) -> str | None:
+        row = conn.execute(
+            "SELECT history_incarnation FROM sessions WHERE owner_account_id = ? AND session_id = ?",
+            (owner_account_id, session_id),
+        ).fetchone()
+        return row[0] if row else None
+
+    def get_history_incarnation(self, session_id: str, owner_account_id: str) -> str | None:
+        with self._lock:
+            return self._read_history_incarnation(self._conn, session_id, owner_account_id)
 
     def session_belongs_to(self, session_id: str, owner_account_id: str) -> bool:
         """Return whether a session row belongs to the given owner."""

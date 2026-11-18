@@ -724,7 +724,9 @@ class CrewApp:
         # 后台子 agent 的 asyncio 任务强引用（防 GC），完成后自动移除
         self._subagent_bg_tasks: set[asyncio.Task] = set()
         # 异步进化队列：按 session 串行处理 evolution 任务，结果在下一轮交互中体现
-        self._evolution_queue = EvolutionQueue()
+        self._evolution_queue = EvolutionQueue(
+            getattr(self.session_store, "get_history_incarnation", None)
+        )
         # App-owned global Providers retired by model switching wait for every task that
         # entered before the switch. This covers agent/team/kanban and detached children.
         self._provider_retirement_tasks: set[asyncio.Task] = set()

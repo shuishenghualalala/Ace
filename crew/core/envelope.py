@@ -258,6 +258,28 @@ class ResponseChunk:
         return ResponseChunk(request_id, kind="status", body=body, sequence=sequence)
 
     @staticmethod
+    def evolution_footer(
+        request_id: str,
+        message: str,
+        *,
+        evolution_status: Literal["active", "done"],
+        phase: str | None = None,
+        created_skills: list[dict] | None = None,
+        evolved_skills: list[dict] | None = None,
+    ) -> "ResponseChunk":
+        """Deliver skill evolution progress or results through the status channel."""
+        body: dict[str, Any] = {"message": message, "evolution_status": evolution_status}
+        if evolution_status == "active":
+            body["activity"] = "skill_evolution"
+        if phase is not None:
+            body["phase"] = phase
+        if created_skills:
+            body["created_skills"] = created_skills
+        if evolved_skills:
+            body["evolved_skills"] = evolved_skills
+        return ResponseChunk(request_id, kind="status", body=body)
+
+    @staticmethod
     def compaction_event(request_id: str, active: bool, sequence: int = 0) -> "ResponseChunk":
         """上下文摘要的瞬时状态，供输入框上方提示条展示。"""
         return ResponseChunk(

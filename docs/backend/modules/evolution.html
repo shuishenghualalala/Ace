@@ -51,7 +51,8 @@
 
   <h2>2. 后台队列</h2>
   <p><code>EvolutionQueue.enqueue</code> 为有待处理任务的会话建立队列和 worker。同一会话按加入顺序执行，不同会话可并行。worker 通过 <code>asyncio.to_thread</code> 运行同步管理器。队列排空后，worker 在同一个事件循环执行段内注销自己的队列和注册。会话再有任务时新建 worker。</p>
-  <p>结果保存在独立的待取集合中。后续回合调用 <code>drain_results</code> 取出一次。应用关闭时等待已接纳的工作，等待期间接纳的新任务也会纳入回收。</p>
+  <p>SQLite 在提交当前回合的首条用户消息时一并返回 <code>history_incarnation</code>。队列、worker 和待取结果按账号、会话 ID 和该代次隔离。worker 执行前和交付结果前核对原代次，后续回合也核对后才取出结果。应用关闭时等待已接纳的工作，等待期间接纳的新任务也会纳入回收。</p>
+  <p>前台阶段进度和当前代次的后台结果通过已有 <code>status</code> 帧传输，保留阶段或结果数据，并继续发送正常回合终态。</p>
 
   <h2>3. 关键文件</h2>
   <table>

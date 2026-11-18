@@ -2365,37 +2365,135 @@ async def test_evolution_queue_preserves_fifo_results_across_idle_restart_and_sh
     try:
         await enqueue("first", gate=first)
         await asyncio.wait_for(first[0].wait(), 5)
-        worker = pool._workers["session"]
+        scope = ("owner", "session", None)
+        worker = pool._workers[scope]
         await enqueue("second")
-        assert pool._workers["session"] is worker
+        assert pool._workers[scope] is worker
         first[1].set()
-        await asyncio.wait_for(pool._queues["session"].join(), 5)
+        await asyncio.wait_for(pool._queues[scope].join(), 5)
         assert worker.done()
-        assert pool.has_pending("session")
+        assert pool.has_pending("session", "owner")
 
         await enqueue("third", gate=restarted)
         await asyncio.wait_for(restarted[0].wait(), 5)
-        assert pool._workers["session"] is not worker
+        assert pool._workers[scope] is not worker
         closing = asyncio.create_task(pool.shutdown())
         await asyncio.sleep(0)
         await enqueue("fourth")
         await enqueue("independent", sid="other", gate=other)
         await asyncio.wait_for(other[0].wait(), 5)
-        same_session = pool._queues["session"]
+        same_session = pool._queues[scope]
         restarted[1].set()
         await asyncio.wait_for(same_session.join(), 5)
         assert not closing.done()
         other[1].set()
         await asyncio.wait_for(closing, 5)
         assert [label for sid, label in calls if sid == "session"] == ["first", "second", "third", "fourth"]
-        assert [result["evolved_skills"][0]["slug"] for result in pool.drain_results("session")] == [
+        assert [result["evolved_skills"][0]["slug"] for result in (await pool.drain_results("session", "owner"))] == [
             "first", "second", "third", "fourth",
         ]
-        assert not pool.has_pending("session")
-        assert [result["evolved_skills"][0]["slug"] for result in pool.drain_results("other")] == ["independent"]
+        assert not pool.has_pending("session", "owner")
+        assert [result["evolved_skills"][0]["slug"] for result in (await pool.drain_results("other", "owner"))] == ["independent"]
         assert not pool._workers
         assert not pool._queues
     finally:
         for _, release in (first, restarted, other):
             release.set()
         await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_evolution_results_are_scoped_to_owner_and_session_incarnation(monkeypatch):
+    import asyncio
+
+    from crew.evolution import EvolutionQueue
+
+    incarnations = {"owner-a": "original", "owner-b": "other"}
+    pool = EvolutionQueue(lambda _session_id, owner: incarnations[owner])
+    old_started = asyncio.Event()
+    release_old = asyncio.Event()
+    current_finished = asyncio.Event()
+    processed = []
+
+    async def evolve(_manager, _session_id, owner, marker, _full_cycle):
+        processed.append((owner, marker))
+        if marker == "old-running":
+            old_started.set()
+            await release_old.wait()
+        if marker == "new-result":
+            current_finished.set()
+        return {"text": marker}
+
+    monkeypatch.setattr(pool, "_run_evolution", evolve)
+
+    async def enqueue(owner, incarnation, marker):
+        await pool.enqueue("shared-id", owner, marker, None, True, incarnation=incarnation)
+
+    try:
+        await enqueue("owner-a", "original", "old-completed")
+        await pool.shutdown()
+        assert pool.has_pending("shared-id", "owner-a", incarnation="original")
+
+        await enqueue("owner-a", "original", "old-running")
+        await asyncio.wait_for(old_started.wait(), 5)
+        await enqueue("owner-a", "original", "old-queued")
+        incarnations["owner-a"] = "recreated"
+        await enqueue("owner-a", "recreated", "new-result")
+        await enqueue("owner-b", "other", "other-owner")
+
+        await asyncio.wait_for(current_finished.wait(), 5)
+        assert await pool.drain_results("shared-id", "owner-a", incarnation="original") == []
+        release_old.set()
+        await pool.shutdown()
+
+        assert await pool.drain_results("shared-id", "owner-a", incarnation="recreated") == [
+            {"text": "new-result"},
+        ]
+        assert await pool.drain_results("shared-id", "owner-b", incarnation="other") == [
+            {"text": "other-owner"},
+        ]
+        assert await pool.drain_results("shared-id", "owner-a", incarnation="original") == []
+        assert ("owner-a", "old-queued") not in processed
+    finally:
+        release_old.set()
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_evolution_drain_keeps_current_results_if_validation_is_cancelled(monkeypatch):
+    import asyncio
+    import threading
+
+    from crew.evolution import EvolutionQueue
+
+    loop = asyncio.get_running_loop()
+    checking = asyncio.Event()
+    release = threading.Event()
+    block_reads = False
+
+    def incarnation(_session_id, _owner):
+        if block_reads:
+            loop.call_soon_threadsafe(checking.set)
+            release.wait(5)
+        return "current"
+
+    pool = EvolutionQueue(incarnation)
+
+    async def evolve(*_args):
+        return {"text": "ready result"}
+
+    monkeypatch.setattr(pool, "_run_evolution", evolve)
+    await pool.enqueue("session", "owner", "session", None, True, incarnation="current")
+    await pool.shutdown()
+    block_reads = True
+    drain = asyncio.create_task(pool.drain_results("session", "owner", incarnation="current"))
+    try:
+        await asyncio.wait_for(checking.wait(), 5)
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+    finally:
+        release.set()
+
+    assert await pool.drain_results("session", "owner", incarnation="current") == [{"text": "ready result"}]
+    assert await pool.drain_results("session", "owner", incarnation="current") == []

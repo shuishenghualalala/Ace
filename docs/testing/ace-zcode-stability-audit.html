@@ -158,6 +158,13 @@
 <p><strong>修复</strong> 停止绑定具体回合，记录已请求停止、已确认退出或结果待核实。持续收尾和注销超时的任务，必要时隔离可杀死的执行单元。分别测量从停止到界面反馈、终端或 MCP 实际退出的时间，并验证停止后无新增写入、相邻新回合不被误停。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts:2030</code>，<code>crew/gateway/ws.py:744</code>，<code>crew/agent/loop/tool_runner.py:859</code>。</p>
 </article>
+<article id="evolution-result-scope">
+<h3>后台进化结果的账号与会话代次</h3>
+<p>SQLite 允许两个账号各自持有相同的会话 ID。旧进化队列仅按会话 ID 保存任务和结果。真实 Windows Gateway 经公开删除接口及 WebSocket 重建同一会话后，已完成的旧结果和重建后才返回的旧结果均被新回合取出，随后因缺少响应构造返回错误。新实现从首条用户消息的同一 SQLite 写事务取得 <code>history_incarnation</code>，并把任务和答复绑定账号、会话 ID 及该代次。worker 执行和写入结果前核对代次，读取也核对后才消费。SQLite 校验中途取消时可重试读取。进化进度和结果沿用既有状态帧。</p>
+<p><strong>运行时对照</strong> 在 Windows 正式运行时上，两组隔离会话的实际 DELETE 和同 ID 重建都产生新代次。两个新回合都正常结束、保存新历史且没有取得各自的旧进化标记。各自下一回合收到且仅收到一次本代次的结果状态，再正常结束。六次模型调用都来自回环测试端点。Gateway 正常退出，双端口释放。</p>
+<p>可见模式通过真实同步轨迹提取、优化和生成，依次收到提取、优化、生成三个进度状态，再收到正常终态并读回所属账号的轨迹。两组最终打包测试使用相同的五份覆盖文件。Windows 后端组合 220 项通过、8 项跳过。最终队列四项通过，覆盖同 ID 跨账号、同账号重建、迟到任务、校验等待取消后的结果重取和空闲回收。SQLite 存储两项新增回归验证同 ID 的不同账号分别持有代次，以及旧提交回执返回前重建时仍能取得旧写事务实际保存的代次。</p>
+<p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>crew/evolution/queue.py</code>、<code>crew/agent/runtime.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime-task/registry.ts:140</code> 在任务登记时取分支代次，<code>apps/zcode-cli/packages/core/src/runtime/methods/background-notifications.ts:32</code> 在发送后台通知前核对代次。</p>
+</article>
 </section>
 
 <section id="desktop">
