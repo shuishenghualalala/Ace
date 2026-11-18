@@ -66,7 +66,8 @@
   </ul>
 
   <h2>5. Desktop 错误契约</h2>
-  <p><code>DesktopAuthSession.refreshConfig()</code> 验证 Cookie 失败时仍清理本地 Cookie 和持久化会话，但保存 Gateway 返回的 JSON <code>error</code>、<code>code</code> 与 HTTP 状态。<code>loginWithEmail()</code> 将这些字段返回给现有登录 UI，因此账号冲突、Gateway 清理中或其它认证错误不会被统一改写为“邮箱会话验证失败，请重试”。</p>
+  <p>Desktop 在主进程读取 Gateway 的认证模式，并用当前账号的 Cookie 请求 <code>/api/auth/session</code>。HTTP 401 或 403 会清除缓存。遇到网络错误、服务暂不可用或 Owner 正在清理时，Desktop 暂停提供 Cookie 和账号身份，保留待验证的凭据。主进程在 2 秒后重新证明 Gateway 身份并验证会话，重复失败逐次延长至 30 秒。重新验证成功后恢复原账号。系统密钥存储可用时，重启后也可继续验证。</p>
+  <p>登录和退出按请求顺序执行。Owner 发生变化时，主进程关闭旧的 Gateway 连接并释放该身份的浏览器资源。后台验证携带版本号，只有当前版本可以修改身份或删除本地凭据。邮箱登录在 Gateway 确认认证模式后绑定凭据，验证失败时保留响应中的 <code>error</code>、<code>code</code> 与 HTTP 状态，供登录界面说明原因。</p>
 
   <h2>6. 测试记录</h2>
   <p class="ok">2026-08-17 · 后端定向回归：253 passed，5 skipped。</p>
@@ -75,8 +76,9 @@
     <li>Gateway：邮箱 A/B 同时登录、独立 <code>/api/auth/session</code>、A 退出不影响 B、HTTP/WS Owner 门禁。</li>
     <li>Cron：多 Owner 同时挂载、到期执行和独立卸载。</li>
     <li>渠道：复合绑定迁移、同平台双 Owner 实例、独立停止、入站 Owner 绑定和出站 sender 路由。</li>
-    <li>Desktop：<code>auth-session.test.ts</code> 验证失败会话清理及 Gateway 错误透传。</li>
+    <li>Desktop：<code>auth-session.test.ts</code> 以本地 HTTP 服务覆盖 503 后恢复、401/403 后清理、旧验证迟于退出或换账号，以及 Gateway 错误透传。</li>
   </ul>
+  <p>2026-11-18，Windows Electron 用隔离账号和本地 Gateway 协议测试服务验证三个场景。会话验证返回 503 后界面自动恢复；退出后放行旧的成功响应，账号仍为已退出；切换到 B 并重载窗口后，A 的迟到 401 未改写 B 的内存身份和加密会话。共收到 9 次会话验证请求。</p>
   <p>Desktop 全量 Vitest 当前工作区仍有其它既有模块失败；本次交付使用认证定向测试、TypeScript typecheck、构建和相关检查作为认证改动的验收依据，失败明细不归因于本次认证模块。</p>
 
   <div class="nav">返回：<a href="index.html">后端模块索引</a> · <a href="../../frontend/desktop-frontend.html">Desktop 前端文档</a></div>

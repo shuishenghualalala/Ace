@@ -63,6 +63,8 @@ export class DesktopAuthSession {
   private providerId = 'custom';
   private cookie = '';
   private user: AuthUserSnapshot | null = null;
+  private refreshRevision = 0;
+  private identityChange: Promise<unknown> | null = null;
   private sessionVerificationError: Record<string, unknown> | null = null;
 
   private endpoint(baseUrl: string, pathname: string): string {
@@ -74,6 +76,20 @@ export class DesktopAuthSession {
   }
 
   async refreshConfig(baseUrl: string, signal?: AbortSignal): Promise<AuthStateSnapshot> {
+    // An explicit login or logout owns the identity until its effects have settled.
+    while (this.identityChange) await this.identityChange.catch(() => {});
+    signal?.throwIfAborted();
+    return this.verifyConfig(baseUrl, { revision: ++this.refreshRevision, signal });
+  }
+
+  private async verifyConfig(
+    baseUrl: string,
+    { revision, signal, emailLogin }: {
+      revision?: number;
+      signal?: AbortSignal | undefined;
+      emailLogin?: { cookie: string; user: AuthUserSnapshot };
+    },
+  ): Promise<AuthStateSnapshot> {
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/config'), {
       method: 'GET',
       redirect: 'error',
@@ -88,10 +104,13 @@ export class DesktopAuthSession {
       ? payload.providerId.trim()
       : 'custom';
     signal?.throwIfAborted();
-    let { cookie, user } = this;
+    if (revision !== undefined && revision !== this.refreshRevision) return this.state();
+    if (emailLogin && mode !== 'email') throw new Error('Gateway 邮箱认证配置已变更');
+    let cookie = emailLogin?.cookie ?? this.cookie;
+    let user = emailLogin?.user ?? this.user;
     let verificationError: Record<string, unknown> | null = null;
     if (mode === 'remote' || mode === 'email') {
-      if (this.mode !== mode || this.providerId !== providerId || !cookie || !user) {
+      if (!emailLogin && (this.mode !== mode || this.providerId !== providerId || !cookie || !user)) {
         ({ cookie, user } = this.readRemoteSession(providerId));
       }
       if (cookie && user) {
@@ -102,7 +121,7 @@ export class DesktopAuthSession {
           ...(signal ? { signal } : {}),
         }).catch(() => null);
         const sessionPayload = sessionResponse
-          ? parseJson(await sessionResponse.text())
+          ? parseJson(await sessionResponse.text().catch(() => ''))
           : {};
         if (!sessionResponse || !sessionResponse.ok || sessionPayload.ok !== true) {
           verificationError = {
@@ -110,8 +129,10 @@ export class DesktopAuthSession {
             ok: false,
             status: sessionResponse?.status || 0,
           };
-          cookie = '';
-          user = null;
+          if (sessionResponse?.status === 401 || sessionResponse?.status === 403) {
+            cookie = '';
+            user = null;
+          }
         }
       }
     } else {
@@ -119,13 +140,15 @@ export class DesktopAuthSession {
       user = syntheticUser(mode === 'dev' ? 'dev' : 'local');
     }
     signal?.throwIfAborted();
+    if (revision !== undefined && revision !== this.refreshRevision) return this.state();
     this.mode = mode;
     this.providerId = providerId;
     this.configured = payload.configured !== false;
     this.cookie = cookie;
     this.user = user;
     this.sessionVerificationError = verificationError;
-    if (verificationError) this.clearPersistedSession();
+    if (verificationError && !cookie) this.clearPersistedSession();
+    else if (emailLogin) this.persistRemoteSession();
     return this.state();
   }
 
@@ -134,21 +157,22 @@ export class DesktopAuthSession {
     return {
       mode: this.mode,
       configured: this.configured,
+      ...(this.sessionVerificationError && this.cookie ? { verificationPending: true } : {}),
       providerId: this.providerId,
-      isLoggedIn: this.mode !== 'unknown' && (!requiresSession || Boolean(this.cookie && this.user)),
-      user: this.user,
+      isLoggedIn: this.mode !== 'unknown' && (!requiresSession || Boolean(this.cookieHeader() && this.user)),
+      user: this.sessionVerificationError ? null : this.user,
     };
   }
 
   ownerAccountId(): string | null {
-    if (this.mode === 'unknown') return null;
+    if (this.mode === 'unknown' || this.sessionVerificationError) return null;
     if (this.mode === 'dev') return 'dev:dev';
     if (this.mode === 'local') return 'local';
     return this.user ? `${this.providerId}:${this.user.userId}` : null;
   }
 
   cookieHeader(): string {
-    return this.mode === 'remote' || this.mode === 'email' ? this.cookie : '';
+    return !this.sessionVerificationError && (this.mode === 'remote' || this.mode === 'email') ? this.cookie : '';
   }
 
   private readRemoteSession(providerId: string): { cookie: string; user: AuthUserSnapshot | null } {
@@ -204,29 +228,33 @@ export class DesktopAuthSession {
     phoneNumber: string,
     code: string,
   ): Promise<Record<string, unknown>> {
-    const response = await fetch(this.endpoint(baseUrl, '/api/auth/login'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phoneNumber, code }),
-      redirect: 'error',
-    });
-    const payload = parseJson(await response.text());
-    const user = normalizedUser(payload.user);
-    const cookie = cookiePair(response.headers.get('set-cookie'));
-    if (!response.ok || payload.ok !== true || !user || !cookie) {
-      return { ...payload, ok: false, status: response.status };
-    }
-    this.cookie = cookie;
-    this.user = user;
-    this.persistRemoteSession();
-    return { ok: true, status: response.status, user };
+    return this.changeIdentity(() => this.submitLogin(baseUrl, { phoneNumber, code }));
   }
 
   async loginWithEmail(baseUrl: string, email: string): Promise<Record<string, unknown>> {
+    return this.changeIdentity(() => this.submitLogin(baseUrl, { email }));
+  }
+
+  private async changeIdentity<T>(operation: () => Promise<T>): Promise<T> {
+    this.refreshRevision++;
+    const previous = this.identityChange;
+    const change = previous ? previous.then(operation, operation) : operation();
+    this.identityChange = change;
+    try {
+      return await change;
+    } finally {
+      if (this.identityChange === change) this.identityChange = null;
+    }
+  }
+
+  private async submitLogin(
+    baseUrl: string,
+    credentials: { email: string } | { phoneNumber: string; code: string },
+  ): Promise<Record<string, unknown>> {
     const response = await fetch(this.endpoint(baseUrl, '/api/auth/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
+      body: JSON.stringify(credentials),
       redirect: 'error',
     });
     const payload = parseJson(await response.text());
@@ -235,18 +263,20 @@ export class DesktopAuthSession {
     if (!response.ok || payload.ok !== true || !user || !cookie) {
       return { ...payload, ok: false, status: response.status };
     }
-    this.cookie = cookie;
-    this.user = user;
-    this.persistRemoteSession();
-    this.mode = 'email';
-    this.providerId = 'email';
-    const verified = await this.refreshConfig(baseUrl);
+    if (!('email' in credentials)) {
+      this.cookie = cookie;
+      this.user = user;
+      this.sessionVerificationError = null;
+      this.persistRemoteSession();
+      return { ok: true, status: response.status, user };
+    }
+    const verified = await this.verifyConfig(baseUrl, { emailLogin: { cookie, user } });
     if (!verified.isLoggedIn) {
       const failure = this.sessionVerificationError;
       return {
         ...(failure || {}),
         ok: false,
-        status: Number(failure?.status) || 401,
+        status: failure?.status ?? 401,
         error: typeof failure?.error === 'string' && failure.error.trim()
           ? failure.error
           : '邮箱会话验证失败，请重试',
@@ -256,6 +286,10 @@ export class DesktopAuthSession {
   }
 
   async logout(baseUrl: string): Promise<Record<string, unknown>> {
+    return this.changeIdentity(() => this.releaseSession(baseUrl));
+  }
+
+  private async releaseSession(baseUrl: string): Promise<Record<string, unknown>> {
     if ((this.mode !== 'remote' && this.mode !== 'email') || !this.cookie) {
       this.cookie = '';
       this.user = null;

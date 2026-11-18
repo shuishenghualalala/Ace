@@ -78,6 +78,7 @@ export interface AuthUserSnapshot {
 }
 
 export interface AuthStateSnapshot {
+  verificationPending?: boolean;
   mode: 'unknown' | 'local' | 'email' | 'remote' | 'dev';
   configured: boolean;
   providerId: string;

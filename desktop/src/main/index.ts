@@ -1139,8 +1139,48 @@ function rendererAuthState(): AuthStateSnapshot {
   return loginNewServiceInstance.getState();
 }
 
-function pushSessionState(): void {
+let publishedSessionOwner: string | null = null;
+let authRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let authRetryDelay = 2_000;
+
+function clearAuthRetry(): void {
+  if (authRetryTimer) clearTimeout(authRetryTimer);
+  authRetryTimer = null;
+  authRetryDelay = 2_000;
+}
+
+function scheduleAuthVerification(): void {
+  if (isQuitting || !rendererAuthState().verificationPending) {
+    clearAuthRetry();
+    return;
+  }
+  if (authRetryTimer) return;
+  const generation = gatewayGeneration;
+  authRetryTimer = setTimeout(() => {
+    authRetryTimer = null;
+    if (isQuitting || generation !== gatewayGeneration || !rendererAuthState().verificationPending) return;
+    authRetryDelay = Math.min(authRetryDelay * 2, 30_000);
+    // Re-prove the endpoint before supplying a saved identity to a new request.
+    void ensureGateway().then(async ({ baseUrl }) => {
+      if (!isQuitting && generation === gatewayGeneration) await refreshGatewayAuth(baseUrl);
+    }).catch(() => {}).finally(() => {
+      if (generation === gatewayGeneration) scheduleAuthVerification();
+    });
+  }, authRetryDelay);
+}
+
+function pushSessionState(resetReason?: string): Promise<void> {
+  const owner = currentBrowserOwnerId();
+  const reason = resetReason ?? (publishedSessionOwner && publishedSessionOwner !== owner ? 'auth-state-changed' : null);
+  publishedSessionOwner = owner;
+  let cleanup = Promise.resolve();
+  if (reason) {
+    closeGatewaySockets(reason);
+    cleanup = resetBrowserHost(reason).catch((error: unknown) => console.warn('[browser-host]', error));
+  }
   sendToMainRenderer('auth:session-state', rendererAuthState());
+  scheduleAuthVerification();
+  return cleanup;
 }
 
 function refreshGatewayAuth(baseUrl: string): Promise<void> {
@@ -1159,6 +1199,7 @@ function refreshGatewayAuth(baseUrl: string): Promise<void> {
 }
 
 function resetGatewayAuthRefresh(): void {
+  clearAuthRetry();
   gatewayAuthAbort.abort();
   gatewayAuthAbort = new AbortController();
   gatewayAuthRefresh = null;
@@ -3305,23 +3346,15 @@ function registerIpc() {
     const result = authState.mode === 'email'
       ? await loginNewServiceInstance.loginWithEmail(baseUrl, identifier)
       : await loginNewServiceInstance.login(baseUrl, identifier, code);
-    if (result.ok) {
-      closeGatewaySockets('login-changed');
-      await resetBrowserHost('login-changed').catch((error: unknown) => console.warn('[browser-host]', error));
-      pushSessionState();
-      scheduleBrowserHostConnection();
-    }
+    await pushSessionState(result.ok ? 'login-changed' : undefined);
+    if (result.ok) scheduleBrowserHostConnection();
     return result;
   });
 
   trustedHandle('auth:logout', async () => {
     const { baseUrl } = await ensureGateway();
     const result = await loginNewServiceInstance.logout(baseUrl);
-    if (result.ok) {
-      closeGatewaySockets('logout');
-      await resetBrowserHost('logout').catch((error: unknown) => console.warn('[browser-host]', error));
-    }
-    pushSessionState();
+    await pushSessionState(result.ok ? 'logout' : undefined);
     return result;
   });
 
@@ -4184,9 +4217,7 @@ function registerIpc() {
     mainWindow?.webContents.send('version-update-available', payload);
   });
   loginNewServiceInstance.setSessionExpiredHandler(async () => {
-    closeGatewaySockets('session-expired');
-    await resetBrowserHost('session-expired').catch((error: unknown) => console.warn('[browser-host]', error));
-    pushSessionState();
+    await pushSessionState('session-expired');
   });
 }
 
