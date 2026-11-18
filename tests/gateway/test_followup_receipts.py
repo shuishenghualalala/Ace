@@ -557,3 +557,131 @@ def test_tool_permission_runs_only_after_durable_confirmation(tmp_path, monkeypa
                 socket.send_json({**command, "action": "followup_receipt_query"})
                 assert _receive(socket, "interaction_receipt")["body"]["status"] == "uncertain"
             assert all(message.role != "user" for message in messages)
+
+
+async def _record_indexed_answer(store, owner, sid, request, question, text):
+    journal = FollowupReceiptJournal(store.transaction, store.read_query, store.append_followup_answer_in_transaction)
+    key = FollowupKey(owner, sid, request, question, "submit")
+    answer = FollowupAnswerMessage(f"followup:{question}", text)
+    assert await journal.claim(key, followup_decision_hash("followup_answer", _ANSWERS)) is None
+    await journal.finish(FollowupReceipt(key, "applied", answer_history_id=answer.history_id), answer=answer)
+    return journal, key
+
+
+async def test_receipt_index_resolves_reordered_answers_in_current_event_order(tmp_path):
+    path, owner, sid, request = str(tmp_path / "reorder.db"), "owner", "parent", "turn"
+    with closing(SQLiteSessionStore(path)) as store:
+        user = replace(Message.user("Start"), request_id=request)
+        store.save(sid, [user], owner_account_id=owner)
+        await _record_indexed_answer(store, owner, sid, request, "one", "First")
+        await _record_indexed_answer(store, owner, sid, request, "two", "Second")
+        first, second = store.accepted_followup_answers(sid, request, owner_account_id=owner)
+        store.save(sid, [user, Message.assistant("Before"), second, first], owner_account_id=owner)
+    with closing(SQLiteSessionStore(path)) as cold:
+        answers, cursor = cold.accepted_followup_snapshot(sid, request, owner_account_id=owner)
+        assert answers == [second, first]
+        assert cursor == cold._read_event_cursor(owner, sid)
+
+
+async def test_receipt_index_excludes_inactive_tail_and_reappears_on_return(tmp_path):
+    path, owner, sid = str(tmp_path / "rewind.db"), "owner", "parent"
+    with closing(SQLiteSessionStore(path)) as store:
+        user = Message.user("Start")
+        store.save(sid, [user], owner_account_id=owner)
+        await _record_indexed_answer(store, owner, sid, "r", "q", "Choice")
+        answers, original_cursor = store.accepted_followup_snapshot(sid, "r", owner_account_id=owner)
+        assert len(answers) == 1
+        fork = store.fork(sid, original_cursor[0], owner_account_id=owner)
+        await _record_indexed_answer(store, owner, fork, "r", "q", "Fork choice")
+        assert [m.content for m in store.accepted_followup_answers(fork, "r", owner_account_id=owner)] == ["Fork choice"]
+        store.rewind(fork, 1, owner_account_id=owner)
+        assert store.load(fork, owner)[-1] == answers[0]
+        assert store.accepted_followup_answers(fork, "r", owner_account_id=owner) == []
+        store.rewind(sid, 1, owner_account_id=owner)
+        store.save(sid, [user, Message.assistant("Alternative")], owner_account_id=owner)
+        hidden, active_cursor = store.accepted_followup_snapshot(sid, "r", owner_account_id=owner)
+        assert active_cursor[0] > original_cursor[0]
+        assert hidden == []
+        store.rewind(sid, original_cursor[0], owner_account_id=owner)
+        assert store.accepted_followup_answers(sid, "r", owner_account_id=owner) == answers
+
+
+@pytest.mark.parametrize("hint", ["original", "absent", "other_request", "other_role"])
+async def test_receipt_index_scopes_duplicate_ids_and_uncertain_commit(tmp_path, hint):
+    with closing(SQLiteSessionStore(str(tmp_path / "ids.db"))) as store:
+        owner, sid, request = "A", "parent", "r"
+        for other_owner, other_sid, other_request in [(owner, sid, request), ("B", sid, request), (owner, "child", request)]:
+            store.save(other_sid, [Message.user("Start")], owner_account_id=other_owner)
+            journal, key = await _record_indexed_answer(store, other_owner, other_sid, other_request, "q", other_owner + other_sid)
+            await journal.abandon(key)
+        stored = store.load(sid, owner)
+        answer = stored[-1]
+        duplicate = replace(answer, content="Later copy")
+        wrong_request = replace(answer, content="Another turn", request_id="other")
+        wrong_role = replace(answer, role="assistant", content="Assistant event")
+        store.save(sid, stored + [duplicate, wrong_request, wrong_role], owner_account_id=owner)
+        if hint != "original":
+            seq = {"absent": None, "other_request": 4, "other_role": 5}[hint]
+            store.transaction(lambda conn: conn.execute(
+                "UPDATE followup_receipts SET answer_seq=? WHERE owner_account_id=? AND session_id=? AND request_id=?",
+                (seq, owner, sid, request),
+            ))
+        assert store.accepted_followup_answers(sid, request, owner_account_id=owner) == [answer if hint == "original" else duplicate]
+        assert store.accepted_followup_answers(sid, "other", owner_account_id=owner) == []
+        assert [m.content for m in store.accepted_followup_answers(sid, request, owner_account_id="B")] == ["Bparent"]
+        assert [m.content for m in store.accepted_followup_answers("child", request, owner_account_id=owner)] == ["Achild"]
+
+
+async def test_receipt_index_queries_only_the_pending_request_tail(tmp_path, monkeypatch):
+    with closing(SQLiteSessionStore(str(tmp_path / "long.db"))) as store:
+        sid, owner = "parent", "owner"
+        history = [Message.user(str(i)) for i in range(1000)]
+        store.save(sid, history, owner_account_id=owner)
+        await _record_indexed_answer(store, owner, sid, "r", "q", "Choice")
+        store.save(sid, store.load(sid, owner) + [Message.assistant("Continued")], owner_account_id=owner)
+        sizes = []
+        read = store._fetch_rows_desc
+
+        def count(*args, **kwargs):
+            rows = read(*args, **kwargs)
+            sizes.append(len(rows))
+            return rows
+
+        monkeypatch.setattr(store, "_fetch_rows_desc", count)
+        assert store.accepted_followup_answers(sid, "other", owner_account_id=owner) == []
+        assert sizes == []
+        assert [m.content for m in store.accepted_followup_answers(sid, "r", owner_account_id=owner)] == ["Choice"]
+        assert sum(sizes) <= 2
+        store.transaction(lambda conn: conn.execute(
+            "UPDATE followup_receipts SET answer_history_id='' WHERE owner_account_id=? AND session_id=?",
+            (owner, sid),
+        ))
+        sizes.clear()
+        assert store.accepted_followup_answers(sid, "r", owner_account_id=owner) == []
+        store.ensure_session("empty", owner_account_id=owner)
+        assert store.accepted_followup_snapshot("empty", "r", owner_account_id=owner) == ([], (0, 0))
+        assert sizes == []
+
+
+async def test_receipt_snapshot_observes_one_cut_during_a_separate_connection_rewind(tmp_path, monkeypatch):
+    path, owner, sid = str(tmp_path / "snapshot.db"), "owner", "parent"
+    with closing(SQLiteSessionStore(path)) as creator:
+        creator.save(sid, [Message.user("Start")], owner_account_id=owner)
+        await _record_indexed_answer(creator, owner, sid, "r", "q", "Choice")
+    with closing(SQLiteSessionStore(path)) as reader, closing(SQLiteSessionStore(path)) as writer:
+        read_cursor = reader._read_event_cursor
+        changed = False
+
+        def rewind_after_cursor(*args, **kwargs):
+            nonlocal changed
+            cut = read_cursor(*args, **kwargs)
+            if not changed:
+                changed = True
+                writer.rewind(sid, 1, owner_account_id=owner)
+            return cut
+
+        monkeypatch.setattr(reader, "_read_event_cursor", rewind_after_cursor)
+        old_answers, old_cut = reader.accepted_followup_snapshot(sid, "r", owner_account_id=owner)
+        assert [m.content for m in old_answers] == ["Choice"] and old_cut[0] == 2
+        current_answers, current_cut = reader.accepted_followup_snapshot(sid, "r", owner_account_id=owner)
+        assert current_answers == [] and current_cut[0] == 1

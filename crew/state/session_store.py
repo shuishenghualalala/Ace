@@ -1094,14 +1094,15 @@ class SQLiteSessionStore(SessionStore):
             hop = source[0]
 
     def _fetch_rows_desc(
-        self, owner: str, session_id: str, from_seq: int, limit: int
+        self, owner: str, session_id: str, from_seq: int, limit: int, *, user_payload_only: bool = False,
     ) -> dict[int, tuple[int | None, str, str]]:
         """取 seq <= from_seq 的最后 limit 行 {seq: (parent_seq, type, payload)}（含非角色事件）。"""
+        payload = "CASE WHEN type='user_message' THEN payload ELSE '' END" if user_payload_only else "payload"
         with self._lock:
             return {
                 int(r[0]): (r[1], str(r[2]), str(r[3]))
                 for r in self._conn.execute(
-                    "SELECT seq, parent_seq, type, payload FROM session_events "
+                    f"SELECT seq, parent_seq, type, {payload} FROM session_events "
                     "WHERE owner_account_id = ? AND session_id = ? AND seq <= ? "
                     "ORDER BY seq DESC LIMIT ?",
                     (owner, session_id, from_seq, limit),
@@ -3018,6 +3019,48 @@ class SQLiteSessionStore(SessionStore):
             session_id, request_id, owner_account_id=owner_account_id,
         )[0]
 
+    def _active_followup_answers(self, owner: str, sid: str, request_id: str, leaf: int) -> list[Message]:
+        if not leaf:
+            return []
+        hints = dict(self._conn.execute(
+            "SELECT answer_history_id, answer_seq FROM followup_receipts "
+            "WHERE owner_account_id=? AND session_id=? AND request_id=? AND answer_history_id!=''",
+            (owner, sid, request_id),
+        ))
+        if not hints:
+            return []
+        # 正常位置提示在叶附近。第一次仅取到最近提示，移位或分叉后才扩展读窗口。
+        positions = [seq for seq in hints.values() if isinstance(seq, int) and 0 < seq <= leaf]
+        limit = min(32, leaf - max(positions) + 1) if positions else 32
+        earliest_hint = min(positions, default=leaf)
+        found: dict[str, tuple[int, Message]] = {}
+        batch = {}
+        current = leaf
+        while current:
+            if current not in batch:
+                batch = self._fetch_rows_desc(owner, sid, current, limit, user_payload_only=True)
+                limit = self.WINDOW_FETCH_BATCH
+                if current not in batch:
+                    raise SessionEventLogError(f"追问历史事件链断裂：{sid}#{current}")
+            _, kind, payload = batch[current]
+            if kind == SessionEventType.END_SEED.value:
+                break
+            if kind == SessionEventType.USER_MESSAGE.value:
+                data = json.loads(payload)
+                history_id = data.get("followup_history_id")
+                same_request = data.get("role") == "user" and data.get("request_id") == request_id
+                if (same_request and isinstance(history_id, str) and history_id in hints
+                        and (history_id not in found or current == hints[history_id])):
+                    found[history_id] = (current, self._message_from_dict(data))
+            parent = self._effective_parent(batch, current) or 0
+            if parent >= current or parent < 0:
+                raise SessionEventLogError(f"追问历史事件父指针无效：{sid}#{current}")
+            # 若尚未经过最早的有效位置，需继续核对它是否属于本分支。
+            if len(found) == len(hints) and parent < earliest_hint:
+                break
+            current = parent
+        return [message for _, message in sorted(found.values(), key=lambda entry: entry[0])]
+
     def accepted_followup_snapshot(
         self, session_id: str, request_id: str, *, owner_account_id: str,
         expected_incarnation: str | None = None,
@@ -3029,17 +3072,10 @@ class SQLiteSessionStore(SessionStore):
                 cursor = self._read_event_cursor(owner_account_id, session_id, expected_incarnation)
                 if cursor is None:
                     raise SessionWriteConflict(f"会话已删除：{session_id}")
-                rows = self._conn.execute(
-                    "SELECT e.payload FROM followup_receipts r JOIN session_events e "
-                    "ON e.owner_account_id=r.owner_account_id AND e.session_id=r.session_id AND e.seq=r.answer_seq "
-                    "WHERE r.owner_account_id=? AND r.session_id=? AND r.request_id=? "
-                    "AND r.answer_seq IS NOT NULL "
-                    "AND json_extract(e.payload,'$.followup_history_id')=r.answer_history_id ORDER BY e.seq",
-                    (owner_account_id, session_id, request_id),
-                ).fetchall()
+                answers = self._active_followup_answers(owner_account_id, session_id, request_id, cursor[0])
             finally:
                 self._conn.rollback()
-        return [self._message_from_dict(json.loads(row[0])) for row in rows], cursor
+        return answers, cursor
 
     def load_plan_state(self, owner_account_id: str, session_id: str) -> dict[str, Any] | None:
         with self._lock:
