@@ -56,18 +56,6 @@ def _get_user_config_dir() -> Path:
     return ROOT / "config"
 
 
-def _skills_copy_ignore(_dir: str, names: list[str]) -> list[str]:
-    """copytree 忽略规则：跳过 node_modules 等运行时依赖目录，避免首装复制巨量无关文件。
-
-    背景：html-to-pdf 这类 skill 自带 node_modules（含 puppeteer 等，~16MB），
-    占内置 skills 体积的 ~80%。这些是 skill 运行时按需解析的依赖，不应进入
-    用户配置目录（用户目录里只需 SKILL.md + 脚本本体即可被 scan_skills 发现与执行）。
-    跳过后首装复制量从 ~20MB 降到 ~3MB。
-    """
-    _SKIP = {"node_modules", "__pycache__", ".pytest_cache", ".git", ".venv", "venv"}
-    return [n for n in names if n in _SKIP]
-
-
 def _init_user_config_dir() -> Path:
     """Ensure writable config exists, initialized from the publishable example."""
     user_dir = _get_user_config_dir()
@@ -83,26 +71,12 @@ def _init_user_config_dir() -> Path:
 
     from crew.state.home import is_packaged
     if is_packaged():
-        # 1. 从空模板生成用户私有 .env；发布包绝不携带真实密钥
+        # 从空模板生成用户私有 .env。
         bundled_env = ROOT / "config" / ".env.example"
         user_env = user_dir / ".env"
         if bundled_env.is_file() and not user_env.exists():
             shutil.copy2(bundled_env, user_env)
             log.info("首次运行：已从 .env.example 复制 .env 到 %s", user_env)
-
-        # 2. 释放 skills 目录（跳过 node_modules 等运行时依赖，见 _skills_copy_ignore）
-        bundled_skills = ROOT / "crew" / "skills"
-        user_skills = user_dir / "skills"
-        if bundled_skills.is_dir() and not user_skills.exists():
-            shutil.copytree(bundled_skills, user_skills, ignore=_skills_copy_ignore)
-            log.info("首次运行：已释放 skills 目录到 %s（已跳过 node_modules 等依赖）", user_skills)
-
-        # 3. 释放 optional-skills 目录
-        bundled_opt_skills = ROOT / "optional-skills"
-        user_opt_skills = user_dir / "optional-skills"
-        if bundled_opt_skills.is_dir() and not user_opt_skills.exists():
-            shutil.copytree(bundled_opt_skills, user_opt_skills, ignore=_skills_copy_ignore)
-            log.info("首次运行：已释放 optional-skills 目录到 %s", user_opt_skills)
 
     return user_dir
 

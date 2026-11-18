@@ -335,6 +335,91 @@ def _replace_skill_tree(staged: Path, target: Path, *, target_root: Path) -> Pat
         raise
     return backup
 
+
+def get_skill_repair_target(original: Path) -> Path:
+    """Packaged resources are immutable. A bundled skill may acquire a user override."""
+    from crew.state.home import is_packaged
+
+    original = original.resolve()
+    if not is_packaged():
+        return original
+    builtin = _patched("get_builtin_skills_dir")().resolve()
+    if original.is_relative_to(builtin):
+        return _patched("get_user_skills_dir")().resolve() / original.relative_to(builtin)
+    if original.is_relative_to(builtin.parent.parent):
+        user = _patched("get_user_skills_dir")().resolve()
+        if not original.is_relative_to(user):
+            raise SkillPathError("skill_read_only", original, "发行资源只读，请先在用户技能目录安装可写副本")
+    return original
+
+
+@contextlib.contextmanager
+def _publish_skill_repair(staged: Path, original: Path, target: Path):
+    """Keep the previous tree until the repair audit succeeds."""
+    backup = None
+    published = target
+    member_entry = staged.lstat()
+    entry = member_entry
+    if target == original:
+        backup = _replace_skill_tree(staged, target, target_root=target.parent)
+    else:
+        user_root = _patched("get_user_skills_dir")().resolve()
+        if target.parent != user_root:
+            # A package member keeps its qualified name. Publish the manifest with
+            # the first repaired member; leave its other members in the bundled root.
+            package = target.parent
+            if package.parent != user_root or _is_link_or_reparse(package):
+                raise SkillPathError("skill_path_outside", package, "用户技能包路径不可安全发布")
+            manifest = read_skill_text(original.parent / "PACKAGE.md", original.parent)
+            if not package.exists():
+                prepared = staged.parent / "package"
+                prepared.mkdir()
+                (prepared / "PACKAGE.md").write_text(manifest, encoding="utf-8")
+                staged.rename(prepared / target.name)
+                package_entry = prepared.lstat()
+                try:
+                    _rename_directory_noreplace(prepared, package)
+                    published = package
+                    entry = package_entry
+                except FileExistsError:
+                    staged = prepared / target.name
+            if published != package:
+                if _is_link_or_reparse(package) or read_skill_text(package / "PACKAGE.md", package) != manifest:
+                    raise SkillPathError("skill_target_changed", package, "用户技能包配置已变化，拒绝覆盖")
+        if published == target:
+            _rename_directory_noreplace(staged, target)
+    try:
+        yield
+    except OSError:
+        retired = _retire_published_skill_if_same(
+            published, target_root=published.parent, identity=(entry.st_dev, entry.st_ino), label="audit-failed"
+        )
+        if retired is not None and published != target:
+            member = _retire_published_skill_if_same(
+                retired / target.name,
+                target_root=retired,
+                identity=(member_entry.st_dev, member_entry.st_ino),
+                label="audit-failed",
+            )
+            if member is not None:
+                shutil.rmtree(member)
+            # Inspect the detached package before cleanup: another process might
+            # already have published a different member under the same manifest.
+            if set(retired.iterdir()) != {retired / "PACKAGE.md"}:
+                _rename_directory_noreplace(retired, published)
+                retired = None
+        if backup is not None:
+            _rename_directory_noreplace(backup, target)
+        if retired is not None:
+            shutil.rmtree(retired, ignore_errors=True)
+        raise
+    if backup is not None:
+        try:
+            shutil.rmtree(backup)
+        except OSError as exc:
+            logger.warning("repair 已提交但旧树清理失败 path=%s: %s", backup, exc)
+
+
 def _set_metadata(frontmatter: dict, generated: dict[str, Any]) -> list[str]:
     """写入缺失的中文 metadata，返回被写入字段名。"""
     meta = frontmatter.get("metadata")
@@ -1418,12 +1503,14 @@ async def repair_skills(
     dry_run: bool = False,
     operator_account_id: str | None = None,
     source: str = "agent-tool",
+    authorized_targets: set[Path] | None = None,
 ) -> dict[str, Any]:
     """修复 skill 展示 metadata 和分类。
 
     - 缺少中文 metadata 或合法分类时调用当前 Crew 模型生成并写回 SKILL.md。
     - 可识别的旧顶层 category 会直接迁移到 metadata.skillCategoryName。
     - 非 dry-run 在隐藏 staging 树完成全部写入，发布前检测并发变化并可回滚替换。
+    - 打包内置技能以用户覆盖发布；调用方提供授权路径时逐项核对实际目标。
     """
     before = audit_skills(include_optional=include_optional, only=only)
     repaired: list[dict[str, Any]] = []
@@ -1461,6 +1548,7 @@ async def repair_skills(
             })
             continue
         skill_dir = original_skill_dir
+        destination = original_skill_dir
         skill_md = original_skill_md
         staging_root: Path | None = None
         original_fingerprint: str | None = None
@@ -1477,11 +1565,18 @@ async def repair_skills(
                     result="started",
                 )
                 with _SKILL_MUTATION_LOCK:
+                    destination = get_skill_repair_target(original_skill_dir)
+                    if authorized_targets is not None and destination not in authorized_targets:
+                        raise SkillPathError("skill_target_changed", destination, "Skill 修复目标未经授权")
+                    staging_parent = original_skill_dir.parent
+                    if destination != original_skill_dir:
+                        staging_parent = _patched("get_user_skills_dir")()
+                        staging_parent.mkdir(parents=True, exist_ok=True)
                     original_fingerprint = _skill_tree_fingerprint(original_skill_dir)
                     staging_root = Path(
                         tempfile.mkdtemp(
                             prefix=f".{original_skill_dir.name}-repair-",
-                            dir=original_skill_dir.parent,
+                            dir=staging_parent,
                         )
                     )
                     staged_skill_dir = staging_root / "skill"
@@ -1511,7 +1606,7 @@ async def repair_skills(
         skill_changes: dict[str, Any] = {
             "slug": item["slug"],
             "name": item["name"],
-            "skill_dir": str(original_skill_dir),
+            "skill_dir": str(destination),
             "metadata_fields": [],
             "metadata_sources": [],
             "metadata_errors": [],
@@ -1586,12 +1681,7 @@ async def repair_skills(
                 with _SKILL_MUTATION_LOCK:
                     if _skill_tree_fingerprint(original_skill_dir) != original_fingerprint:
                         raise RuntimeError("Skill 在 repair 期间被其他操作修改，已拒绝覆盖")
-                    backup = _replace_skill_tree(
-                        skill_dir,
-                        original_skill_dir,
-                        target_root=original_skill_dir.parent,
-                    )
-                    try:
+                    with _publish_skill_repair(skill_dir, original_skill_dir, destination):
                         _patched("_append_global_skill_audit")(
                             action="repair",
                             slug=str(item["slug"]),
@@ -1600,24 +1690,12 @@ async def repair_skills(
                             version=version,
                             result="success",
                         )
-                    except OSError:
-                        failed = original_skill_dir.parent / (
-                            f".{original_skill_dir.name}.audit-failed-{uuid.uuid4().hex}"
-                        )
-                        original_skill_dir.rename(failed)
-                        backup.rename(original_skill_dir)
-                        shutil.rmtree(failed, ignore_errors=True)
-                        raise
-                    try:
-                        shutil.rmtree(backup)
-                    except OSError as exc:
-                        logger.warning("repair 已提交但旧树清理失败 path=%s: %s", backup, exc)
                 original_prefix = str(skill_dir)
                 for change in skill_changes["path_changes"]:
                     if isinstance(change, dict) and isinstance(change.get("file"), str):
                         change["file"] = change["file"].replace(
                             original_prefix,
-                            str(original_skill_dir),
+                            str(destination),
                             1,
                         )
 

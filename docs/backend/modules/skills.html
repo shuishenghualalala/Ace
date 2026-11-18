@@ -101,6 +101,8 @@
 
   <h2>4. 安装机制</h2>
   <h3>4.1 Optional（仓库随附）</h3>
+  <p>打包首启直接扫描发行目录中的内置技能和可选目录。用户目录只存放已安装技能和用户覆盖。升级沿用已有用户文件，同名用户技能优先。</p>
+  <p>显式元数据修复仅发布选中的技能到用户目录。包内成员沿用包名，首次修复同时发布包清单。其他成员仍从发行目录加载。工具对最终可写目标申请授权，发布时核对路径、原文版本与目标是否已被占用。审计写入失败时回收本次发布。未安装的可选技能可以审阅，写入前须先安装。</p>
   <p><code>install_skill</code> 从 <code>list_optional_skills()</code> 解析源，<code>_install_skill_tree</code> 在 user dir 内分阶段 <code>copytree</code> + <code>_validate_skill_tree</code> 校验后同文件系统 <code>rename</code> 原子发布。失败回滚 tombstone。</p>
   <h3>4.2 本地（软链）</h3>
   <p>从 <code>list_local_skills()</code> 安装时，先在用户技能目录内创建暂存链接。Windows 普通账户缺少符号链接特权时通过本机 junction 连接本地源目录。校验通过后，原子重命名发布链接。源文件的更新会出现在已安装技能中。卸载删除链接入口，保留源文件。</p>

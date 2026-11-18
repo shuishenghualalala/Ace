@@ -716,6 +716,39 @@ def test_frozen_config_initializes_crew_home_from_example(tmp_path, monkeypatch)
     assert cfg.active_model.model == "packaged-model"
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_packaged_config_keeps_skill_catalogs_at_their_source(tmp_path, monkeypatch, existing):
+    from concurrent.futures import ThreadPoolExecutor
+
+    install = tmp_path / "release"
+    home = tmp_path / "user"
+    templates = install / "config"
+    templates.mkdir(parents=True)
+    (templates / "config.yaml.example").write_text("runtime: {}\n", encoding="utf-8")
+    (templates / ".env.example").write_text("CREW_API_KEY=\n", encoding="utf-8")
+    bundled = (install / "crew/skills", install / "optional-skills")
+    user = (home / "skills", home / "optional-skills")
+    for root in bundled:
+        root.mkdir(parents=True)
+        (root / "SKILL.md").write_text("from distribution", encoding="utf-8")
+    if existing:
+        for root in user:
+            root.mkdir(parents=True)
+            (root / "SKILL.md").write_text("edited by user", encoding="utf-8")
+    monkeypatch.setattr(config_module, "ROOT", install)
+    monkeypatch.setenv("CREW_PACKAGED", "1")
+    monkeypatch.setenv("CREW_HOME", str(home))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert list(pool.map(lambda _: config_module._init_user_config_dir(), range(8))) == [home] * 8
+    assert (home / "config.yaml").read_bytes() == (templates / "config.yaml.example").read_bytes()
+    assert (home / ".env").read_bytes() == (templates / ".env.example").read_bytes()
+    for root in user:
+        if existing:
+            assert (root / "SKILL.md").read_text(encoding="utf-8") == "edited by user"
+        else:
+            assert not root.exists()
+
+
 def test_load_config_user_crew_env_overrides_system_config_env(tmp_path, monkeypatch):
     root = tmp_path / "project"
     config_dir = root / "config"

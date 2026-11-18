@@ -435,12 +435,22 @@ async def test_skills_repair_tool_fixes_skill(registry, tmp_path, monkeypatch):
     assert "技能正文" in content
 
 
-async def test_skills_repair_authorizes_registered_directory_before_mutation(monkeypatch):
+@pytest.mark.parametrize("packaged", [False, True])
+async def test_skills_repair_authorizes_registered_directory_before_mutation(tmp_path, monkeypatch, packaged):
+    import crew.agent.skills as skills
     from crew.tools import skills_tools
 
+    builtin = tmp_path / "release/crew/skills"
+    registered = builtin / "demo"
+    registered.mkdir(parents=True)
+    user = tmp_path / "user/skills"
+    monkeypatch.setattr(skills, "get_builtin_skills_dir", lambda: builtin)
+    monkeypatch.setattr(skills, "get_user_skills_dir", lambda: user)
+    monkeypatch.setenv("CREW_PACKAGED", "1" if packaged else "0")
+    expected = user / "demo" if packaged else registered
     pending = {
         "skills": [{
-            "skill_dir": "/registered/skill",
+            "skill_dir": str(registered),
             "findings": [{"code": "missing_metadata_zh_name"}],
         }]
     }
@@ -451,7 +461,8 @@ async def test_skills_repair_authorizes_registered_directory_before_mutation(mon
     async def authorize(args, **kwargs):
         authorized.append((args, kwargs))
 
-    async def repair(**_kwargs):
+    async def repair(**kwargs):
+        assert kwargs["authorized_targets"] == {expected}
         return {"ok": True, "skills": []}
 
     monkeypatch.setattr(skills_tools, "authorize_file_tool", authorize)
@@ -464,7 +475,7 @@ async def test_skills_repair_authorizes_registered_directory_before_mutation(mon
     )
 
     assert len(authorized) == 1
-    assert authorized[0][0] == {"path": "/registered/skill"}
+    assert authorized[0][0] == {"path": str(expected)}
     assert authorized[0][1]["operation"] == "write"
     assert authorized[0][1]["tool_name"] == "skills_repair"
 

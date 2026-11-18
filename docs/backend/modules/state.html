@@ -136,6 +136,8 @@ runtime.health_port                     # 独立线程 health 服务端口，默
   <p>追问默认上限由装配层（<code>crew/app.py</code> 的 <code>set_followup_default_timeout</code>）注入 core/followup，core 不反向依赖配置实现；<code>wait_for_answer</code> 未传 timeout 时用该默认值，超时按「用户未回答」收尾（返回空答案）。</p>
 
   <h2>7. 变更记录</h2>
+  <p>打包态 <code>_init_user_config_dir</code> 仅为缺失的 <code>config.yaml</code> 和 <code>.env</code> 复制模板。内置、可选和用户技能目录由技能模块分别发现，启动时保留用户已有覆盖。</p>
+  <p>Windows 发行包私有副本分两轮各做三组交错的新用户启动对照。合计六组的配置初始化中位数由 1.657 秒降至 0.015 秒，Gateway 业务就绪由 12.663 秒降至 10.563 秒，首次读取技能商店由 0.749 秒降至 0.282 秒。两边均发现 23 个已激活技能，用户目录新增的内置技能文件由 397 个降至 0 个。</p>
   <p><code>crew migrate orphans</code> 只读检查主库表名归属。会话存储管理桌面发送队列及身份、追问与计划回执、计划状态，以及 <code>store_meta</code> 回填标记。插件数据库保留各自业务表，主库中未登记的表会单独列出。</p>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>

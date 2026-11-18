@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from crew.agent.skills import (
+    SkillPathError,
     aget_package_members,
     aget_skill_body,
     aget_skill_packages,
@@ -19,6 +20,7 @@ from crew.agent.skills import (
     aresolve_package,
     aresolve_skill_any,
     audit_skills,
+    get_skill_repair_target,
     repair_skills,
 )
 from crew.core.errors import ToolError
@@ -352,6 +354,7 @@ async def handle_skills_repair(
     workspace_store: Any | None = None,
     security_service: Any | None = None,
 ) -> str:
+    authorized_targets: set[Path] = set()
     if not bool(args.get("dry_run", False)):
         from crew.agent.skills import _is_metadata_finding
 
@@ -367,17 +370,23 @@ async def handle_skills_repair(
                 for finding in findings
             ):
                 continue
+            try:
+                target = get_skill_repair_target(Path(item["skill_dir"]))
+            except SkillPathError:
+                continue
             await authorize_file_tool(
-                {"path": str(item.get("skill_dir") or "")},
+                {"path": str(target)},
                 operation="write",
                 tool_name="skills_repair",
                 workspace_store=workspace_store,
                 security_service=security_service,
             )
+            authorized_targets.add(target)
     result = await repair_skills(
         include_optional=bool(args.get("include_optional", False)),
         only=str(args.get("only") or "").strip() or None,
         dry_run=bool(args.get("dry_run", False)),
+        authorized_targets=authorized_targets,
     )
     return tool_result(success=True, **result)
 

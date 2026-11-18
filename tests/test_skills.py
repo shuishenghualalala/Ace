@@ -604,6 +604,109 @@ def test_audit_skills_reports_missing_metadata(tmp_path, monkeypatch):
     assert good_item["ok"] is True
 
 
+@pytest.mark.parametrize("package", [False, True])
+@pytest.mark.parametrize(
+    "outcome", ["success", "audit-failure", "concurrent-user", "audit-with-sibling", "wrong-approval"]
+)
+async def test_packaged_repair_publishes_only_selected_skill(tmp_path, monkeypatch, package, outcome):
+    import crew.agent.skills as skills
+
+    builtin = tmp_path / "release/crew/skills"
+    user = tmp_path / "user/skills"
+    builtin.mkdir(parents=True)
+    user.mkdir(parents=True)
+    relative = Path("writing/selected" if package else "selected")
+    source = builtin / relative
+    target = user / relative
+    source.mkdir(parents=True)
+    if package:
+        (source.parent / "PACKAGE.md").write_text("---\nname: writing\n---\n", encoding="utf-8")
+    original = "---\nname: selected\ndescription: English description\n---\noriginal body\n"
+    (source / "SKILL.md").write_text(original, encoding="utf-8")
+    (source / "asset.txt").write_text("payload", encoding="utf-8")
+    sibling = source.parent / "sibling"
+    sibling.mkdir()
+    (sibling / "SKILL.md").write_text("---\nname: sibling\n---\n", encoding="utf-8")
+    monkeypatch.setenv("CREW_PACKAGED", "1")
+    monkeypatch.setattr(skills, "get_builtin_skills_dir", lambda: builtin)
+    monkeypatch.setattr(skills, "get_user_skills_dir", lambda: user)
+    monkeypatch.setattr(skills, "get_plugin_skill_roots", lambda: [])
+    skills._invalidate_cache()
+    original_audit = skills._append_global_skill_audit
+
+    def audit(**event):
+        if event["result"] == "success" and outcome == "audit-failure":
+            raise OSError("audit unavailable")
+        if event["result"] == "success" and outcome == "audit-with-sibling":
+            other = target.parent / "other"
+            other.mkdir()
+            (other / "SKILL.md").write_text("other publisher", encoding="utf-8")
+            raise OSError("audit unavailable")
+        return original_audit(**event)
+
+    async def generate(*args):
+        if outcome == "concurrent-user":
+            target.mkdir(parents=True)
+            if package:
+                (target.parent / "PACKAGE.md").write_bytes((source.parent / "PACKAGE.md").read_bytes())
+            (target / "SKILL.md").write_text("concurrent user edit", encoding="utf-8")
+        return {
+            "zh_name": "测试技能", "zh_description": "处理测试文档",
+            "query_examples": ["整理测试文档"], "skillCategoryName": "通用办公",
+        }
+
+    monkeypatch.setattr(skills, "_append_global_skill_audit", audit)
+    monkeypatch.setattr(skills, "generate_skill_metadata_with_model", generate)
+    assert (await skills.repair_skills(only="selected", dry_run=True))["repaired_count"] == 1
+    assert list(user.iterdir()) == []
+    allowed = {source} if outcome == "wrong-approval" else {target}
+    result = await skills.repair_skills(only="selected", authorized_targets=allowed)
+    assert (source / "SKILL.md").read_text(encoding="utf-8") == original
+    assert not (user / sibling.relative_to(builtin)).exists()
+    if outcome == "success":
+        assert result["ok"], result["errors"]
+        key = "/writing/selected" if package else "/selected"
+        assert Path(skills.get_skills()[key]["skill_dir"]) == target
+        if package:
+            assert [s["base_slug"] for s in skills.get_package_members("writing")] == ["selected", "sibling"]
+        assert (target / "asset.txt").read_text() == "payload"
+        assert "测试技能" in (target / "SKILL.md").read_text(encoding="utf-8")
+    elif outcome == "concurrent-user":
+        assert result["error_count"] == 1
+        assert (target / "SKILL.md").read_text() == "concurrent user edit"
+    elif outcome == "audit-with-sibling":
+        assert result["error_count"] == 1
+        assert not target.exists()
+        assert (target.parent / "other/SKILL.md").read_text() == "other publisher"
+        if package:
+            assert (target.parent / "PACKAGE.md").read_bytes() == (source.parent / "PACKAGE.md").read_bytes()
+    else:
+        assert result["error_count"] == 1
+        assert list(user.iterdir()) == []
+
+
+async def test_packaged_optional_repair_requires_user_install(tmp_path, monkeypatch):
+    import crew.agent.skills as skills
+
+    release = tmp_path / "release"
+    optional = release / "optional-skills"
+    source = optional / "available"
+    source.mkdir(parents=True)
+    original = "---\nname: available\ndescription: Optional skill\n---\nbody\n"
+    (source / "SKILL.md").write_text(original, encoding="utf-8")
+    monkeypatch.setenv("CREW_PACKAGED", "1")
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(skills, "get_builtin_skills_dir", lambda: release / "crew/skills")
+    monkeypatch.setattr(skills, "get_optional_skills_dir", lambda: optional)
+    monkeypatch.setattr(skills, "get_plugin_skill_roots", lambda: [])
+    skills._invalidate_cache()
+    result = await skills.repair_skills(only="available", include_optional=True)
+    assert result["error_count"] == 1
+    assert "发行资源只读" in result["errors"][0]["error"]
+    assert (source / "SKILL.md").read_text(encoding="utf-8") == original
+    assert not (tmp_path / "home/skills/available").exists()
+
+
 async def test_repair_skills_generates_metadata(tmp_path, monkeypatch):
     from crew.agent.skills import repair_skills
 

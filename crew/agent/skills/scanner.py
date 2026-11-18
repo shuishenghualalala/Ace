@@ -234,7 +234,7 @@ def scan_all() -> tuple[dict[str, dict], dict[str, dict], dict[str, list[str]]]:
         skills.update(result)
         packages.update(local_packages)
         for pkg_slug, members in local_members.items():
-            package_members.setdefault(pkg_slug, []).extend(members)
+            package_members[pkg_slug] = list(dict.fromkeys([*package_members.get(pkg_slug, ()), *members]))
 
     merge(*scan_dir(patched("get_builtin_skills_dir")(), set()))
     for root in patched("get_plugin_skill_roots")():
