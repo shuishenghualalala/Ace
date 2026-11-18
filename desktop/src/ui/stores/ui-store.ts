@@ -1,13 +1,12 @@
 /**
- * ui-store：当前 tab / system 子面板 / 网关连接状态 / 反馈草稿等 UI 状态
+ * ui-store：当前 tab / 网关连接状态 / 反馈草稿等 UI 状态
  */
 import { createStore, type Store } from '../reducers/store-bus';
-import type { TabKey, SystemPanelKey, FeedbackDraft, FeedbackListItem } from '../state';
+import type { TabKey, FeedbackDraft, FeedbackListItem } from '../state';
 import type { BackendStartupReadiness } from '../api/transport';
 
 export interface UiStoreState {
   activeTab: TabKey;
-  activeSystemPanel: SystemPanelKey;
   backendConnected: boolean;
   /** 健康探针、进程监督和 WS 传输的拆分状态；backendConnected 保留兼容语义。 */
   backendProcessState: 'starting' | 'ready' | 'restarting' | 'offline' | 'error';
@@ -29,7 +28,6 @@ export interface UiStoreState {
 export const uiStore: Store<UiStoreState> = createStore<UiStoreState>(
   {
     activeTab: 'chat',
-    activeSystemPanel: 'overview',
     backendConnected: false,
     backendProcessState: 'starting',
     backendHealthState: 'unknown',

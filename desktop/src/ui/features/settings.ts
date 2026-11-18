@@ -34,6 +34,7 @@ import {
 import { createSettingsShell, type SettingsShell } from './settings-shell';
 import { mountSettingsDataPanes } from './settings-data';
 import { disposeMcpPane } from './settings-mcp';
+import { setSystemSettingsPane } from './system-page';
 import { productModeStore } from '../stores/product-mode-store';
 
 const STORAGE_KEY = 'crew.settings';
@@ -314,9 +315,10 @@ function mountSettingsShell(): void {
   staging.replaceWith(settingsShell.element);
 }
 
-function openSettingsModal(): void {
+export function openSettingsPane(paneId?: string): void {
   mountSettingsShell();
   settingsShell?.setPaneVisible('work', productModeStore.get().productMode === 'work');
+  if (paneId) setActivePane(paneId);
   settingsShell?.open();
   syncControlsToState();
   const pane = document.querySelector<HTMLElement>('.set-v2-nav__item.is-active')?.dataset.settingsPane;
@@ -328,6 +330,7 @@ function openSettingsModal(): void {
 
 function closeSettingsModal(): void {
   settingsShell?.close();
+  setSystemSettingsPane(null);
   helpDocOverlay?.close();
   closeContactModal(false);
   $('#settings-btn')?.focus();
@@ -549,14 +552,12 @@ export function registerConfigPaneRenderers(r: {
 }
 
 function onSettingsPaneOpened(pane: string): void {
+  setSystemSettingsPane(pane);
   if (pane === 'account') {
     renderAuthAccount();
   }
   if (pane === 'model' && configRenderers) void configRenderers.renderConfigModels();
   if (pane === 'channel' && configRenderers) void configRenderers.renderPlatforms();
-  if (pane === 'sys-logs') {
-    void import('./system-page').then((m) => void m.renderSystemLogs());
-  }
   if (pane === 'sys-usage') {
     void import('./usage-panel').then((m) => m.renderUsagePage());
   }
@@ -575,7 +576,7 @@ function onSettingsPaneOpened(pane: string): void {
 export function bindSettingsUi(): void {
   mountSettingsDataPanes();
   mountSettingsShell();
-  $('#settings-btn')?.addEventListener('click', openSettingsModal);
+  $('#settings-btn')?.addEventListener('click', () => openSettingsPane());
   bindSettingsNav();
   bindSettingsLibraryUi();
   bindContactModal();
@@ -584,11 +585,7 @@ export function bindSettingsUi(): void {
   bindControls();
   setActivePane('account');
   // 用户头像按钮：打开设置并切换到账户面板
-  window.addEventListener('user:open-account', () => {
-    openSettingsModal();
-    setActivePane('account');
-    renderAuthAccount();
-  });
+  window.addEventListener('user:open-account', () => openSettingsPane('account'));
   // 启动时应用持久化的设置
   applyAll();
   void syncAutoStartFromSystem();

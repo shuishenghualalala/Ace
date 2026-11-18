@@ -77,7 +77,6 @@ export type TabKey =
   | 'audit'
   | 'tracing'
   | 'system';
-export type SystemPanelKey = 'overview' | 'logs' | 'usage';
 export type ComposerMode = 'craft' | 'plan' | 'ask';
 
 export interface SessionRow {
@@ -302,7 +301,6 @@ function buildSnapshot(): AppState {
     userInfo: a.userInfo,
     isLoggedIn: a.isLoggedIn,
     activeTab: u.activeTab,
-    activeSystemPanel: u.activeSystemPanel,
     backendConnected: u.backendConnected,
     backendProcessState: u.backendProcessState,
     backendHealthState: u.backendHealthState,
@@ -365,7 +363,6 @@ const FIELD_TO_STORE: Record<string, () => unknown> = {
   userInfo: () => authStore,
   isLoggedIn: () => authStore,
   activeTab: () => uiStore,
-  activeSystemPanel: () => uiStore,
   backendConnected: () => uiStore,
   socket: () => uiStore,
   feedbackDraft: () => uiStore,

@@ -1,7 +1,7 @@
 /**
  * Crew desktop v2 — 渲染层入口（网关对话 + crew 能力接入）。
  *
- * X2 重构后本文件是薄壳：只保留 init / bindGlobalEvents / setTab / setSystemPanel /
+ * X2 重构后本文件是薄壳：只保留 init / bindGlobalEvents / setTab /
  * 频道弹窗 / 历史工作区 dock 挂载等顶层编排。会话与聊天流式逻辑已迁出至：
  *  - features/chat-controller.ts   流式 dispatch / 渲染 / 发送 / 撤回 / 召唤
  *  - features/session-controller.ts 打开会话 / 历史回填 / 网关引导 / 状态水合
@@ -42,7 +42,7 @@ import { setNotificationClickHandler } from './features/work/notifications';
 import { initSystemTrayStatus } from './features/system-tray';
 import { disposeTeamKanbanBoards, installTeamKanbanBoards } from './features/board-capability';
 import { refreshKanbanBoard, renderKanbanBoard } from './features/board-hooks';
-import { bindSystemTab, disposeSystemTab, renderSystemLogs, renderSystemOverview } from './features/system-page';
+import { bindSystemTab } from './features/system-page';
 import { initUsagePage } from './features/usage-panel';
 import { createCronPageContribution, renderCronTaskBoard, setCronCallbacks } from './features/cron-page';
 import {
@@ -72,7 +72,7 @@ import {
   setOpenSessionCallback,
 } from './features/session-manage';
 import { mountSessionHistoryView } from './features/session-history-view';
-import { bindSettingsUi, registerConfigPaneRenderers } from './features/settings';
+import { bindSettingsUi, openSettingsPane, registerConfigPaneRenderers } from './features/settings';
 import { mountSettingsDataPanes } from './features/settings-data';
 import { isRendererLoggedIn, requireRendererLogin } from './features/auth-gate';
 import { initAuthFlow } from './features/login';
@@ -109,7 +109,6 @@ import {
   patchBook,
   setActiveSessionId,
   state,
-  type SystemPanelKey,
   type TabKey,
 } from './state';
 import {
@@ -176,6 +175,10 @@ export async function refreshTracingGateAvailability(): Promise<void> {
 }
 
 function setTab(tab: TabKey): boolean {
+  if (tab === 'system') {
+    openSettingsPane('system');
+    return true;
+  }
   // 认证状态由主进程异步恢复；在恢复完成前不要触发 Wiki 的受保护请求。
   if (tab === 'wiki' && !isRendererLoggedIn()) return false;
   if (tab === 'wiki' && !canNavigateToWiki(state.config)) return false;
@@ -203,22 +206,11 @@ function setTab(tab: TabKey): boolean {
       renderKanbanBoard();
     }
   }
-  if (tab === 'system') {
-    setSystemPanel('overview');
-  }
   return true;
 }
 
 function activateTab(tab: TabKey): boolean {
   return setTab(tab);
-}
-
-function setSystemPanel(panel: SystemPanelKey): void {
-  state.activeSystemPanel = panel;
-  // 修复 I-7：overview / logs / usage 三个面板都要渲染，否则点击 logs / usage 会显示空。
-  if (panel === 'overview') renderSystemOverview();
-  else if (panel === 'logs') void renderSystemLogs();
-  else if (panel === 'usage') void import('./features/usage-panel').then((m) => m.renderUsagePage?.());
 }
 
 /**
@@ -486,9 +478,6 @@ function bindGlobalEvents(): () => void {
   const disposeComposerToolbar = bindComposerToolbar();
   bindComposerContextRing();
   mountSettingsDataPanes();
-  // D10: capture disposers so we can tear these listeners + the 8s system
-  // refresh interval down on page hide (they previously leaked for the
-  // renderer's whole lifetime).
   const disposeSystem = bindSystemTab();
   const disposeSkillsLifecycle = bindSkillsPageLifecycle(() => {
     activateTab('chat');
@@ -561,7 +550,6 @@ function bindGlobalEvents(): () => void {
     disposeSystem();
     disposeSkillsLifecycle();
     disposeHistoryToggle();
-    disposeSystemTab();
     disposeSecurityApproval();
     disposeNotificationCenter();
     disposeAttachments();
@@ -644,7 +632,6 @@ async function init(
 
   // Phase 2: 首屏（必须执行——独立两步，不要在同一行，避免隐式耦合）
   setTab('chat');
-  setSystemPanel('overview');
   renderWorkspaceHistory(openSession);
   renderChat();
   updateGatewayDot();

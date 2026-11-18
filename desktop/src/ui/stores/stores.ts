@@ -116,7 +116,6 @@ export function __resetAllStoresForTest(): void {
   authStore.replace({ userInfo: null, isLoggedIn: false });
   uiStore.replace({
     activeTab: 'chat',
-    activeSystemPanel: 'overview',
     backendConnected: false,
     backendProcessState: 'starting',
     backendHealthState: 'unknown',

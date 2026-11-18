@@ -574,8 +574,9 @@ function timePresetHours(): number {
 
 async function render(): Promise<void> {
   const root = $('#usage-page-root');
-  if (!root) return;
+  if (!root || !isUsagePaneVisible()) return;
   const summary = await getSummary();
+  if (!root.isConnected || !isUsagePaneVisible()) return;
   const providers = getProviderOptions();
   const models = getModelOptions();
   // 校正 provider/modelIdx 越界（记录被清空后）
@@ -992,8 +993,9 @@ export function bindUsageTab(): void {
 }
 
 function isUsagePaneVisible(): boolean {
+  const modal = document.getElementById('settings-modal');
   const pane = document.getElementById('settings-pane-sys-usage');
-  return Boolean(pane && !pane.hidden);
+  return Boolean(modal && !modal.hidden && pane && !pane.hidden);
 }
 
 export async function initUsagePage(): Promise<void> {

@@ -95,7 +95,6 @@ function registerCoreNavigation(registry: ShellNavigationRegistry): void {
     id: 'tracing', label: '追踪', icon: 'icon-search', order: 65,
     resolveFeatureState: (features) => features.tracing ?? 'hidden',
   });
-  register({ id: 'system', label: '系统', icon: 'icon-folder', order: 70 });
   register({
     id: 'workbench', label: '工作', icon: 'icon-task', order: 10, productModes: ['work'],
     resolveFeatureState: (features) => features.work?.workbench ?? 'unavailable',

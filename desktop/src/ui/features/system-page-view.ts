@@ -80,7 +80,7 @@ export function createSystemPageView(options: { onRefresh(): void }): SystemPage
   title.className = 'page-header__title';
   title.textContent = '系统总览';
   description.className = 'page-header__desc';
-  description.textContent = '查看运行状态、主机资源、会话负载与平台服务。日志和使用统计在设置中统一管理。';
+  description.textContent = '查看运行状态、主机资源、会话负载与平台服务。';
   headerActions.className = 'page-header__actions';
   refresh.id = 'sys-resources-refresh';
   refresh.type = 'button';

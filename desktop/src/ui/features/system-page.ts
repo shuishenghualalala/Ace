@@ -66,27 +66,36 @@ let lastSessions: SessionsStatus = {};
 let lastMetrics: SystemMetrics | null = null;
 let lastFetchAt = 0;
 let lastError: string | null = null;
+type SystemSettingsPane = 'system' | 'sys-logs';
+let activeSettingsPane: SystemSettingsPane | null = null;
+let settingsPaneRevision = 0;
 let overviewRefreshTimer: number | null = null;
+let overviewRequestRevision: number | null = null;
 let systemPageView: SystemPageView | null = null;
+
+function isSettingsPaneVisible(pane: SystemSettingsPane): boolean {
+  if (activeSettingsPane !== pane) return false;
+  const modal = document.getElementById('settings-modal');
+  const element = document.getElementById(`settings-pane-${pane}`);
+  return Boolean(modal && !modal.hidden && element && !element.hidden);
+}
+
+function isCurrentOverview(revision: number): boolean {
+  return settingsPaneRevision === revision && isSettingsPaneVisible('system');
+}
 
 function ensureSystemPageView(): SystemPageView | null {
   const root = document.getElementById('system-page-root');
   if (!root) return null;
   if (!systemPageView) {
-    systemPageView = createSystemPageView({ onRefresh: () => void refreshBackendData() });
+    systemPageView = createSystemPageView({ onRefresh: renderSystemOverview });
   }
   if (!root.contains(systemPageView.element)) root.replaceChildren(systemPageView.element);
   return systemPageView;
 }
 
-async function refreshBackendData(): Promise<void> {
+async function refreshBackendData(revision: number): Promise<void> {
   const view = ensureSystemPageView();
-  if (!state.backendConnected) {
-    lastError = null;
-    view?.setStatus('offline', '后端未连接，连接恢复后自动刷新');
-    renderOverviewValues();
-    return;
-  }
   view?.setStatus('loading', '');
   const [usage, conc, sessions, metrics] = await Promise.allSettled([
     backendApi.usage(),
@@ -94,6 +103,7 @@ async function refreshBackendData(): Promise<void> {
     backendApi.sessionsStatus(),
     backendApi.systemMetrics(),
   ]);
+  if (!isCurrentOverview(revision) || !state.backendConnected) return;
   const failures: string[] = [];
   if (usage.status === 'fulfilled') lastUsage = usage.value;
   else failures.push(`使用统计：${String(usage.reason)}`);
@@ -106,12 +116,24 @@ async function refreshBackendData(): Promise<void> {
   lastError = failures.length ? failures.join('；') : null;
   lastFetchAt = Date.now();
   renderOverviewValues();
+  await renderServicesTable(revision);
 }
 
 // ── 总览渲染 ────────────────────────────────────────
 export function renderSystemOverview(): void {
-  ensureSystemPageView();
-  void refreshBackendData().then(() => renderOverviewValues());
+  if (!isSettingsPaneVisible('system')) return;
+  const revision = settingsPaneRevision;
+  if (!state.backendConnected) {
+    lastError = null;
+    renderOverviewValues();
+    void renderServicesTable(revision);
+    return;
+  }
+  if (overviewRequestRevision === revision) return;
+  overviewRequestRevision = revision;
+  void refreshBackendData(revision).finally(() => {
+    if (overviewRequestRevision === revision) overviewRequestRevision = null;
+  });
 }
 
 function renderOverviewValues(): void {
@@ -228,13 +250,10 @@ function renderOverviewValues(): void {
     const updated = new Date(lastFetchAt).toLocaleTimeString('zh-CN', { hour12: false });
     view?.setStatus('ready', `系统状态已更新 · ${updated}`);
   }
-
-  // ── 活跃服务表（来自 /api/platforms） ──
-  void renderServicesTable();
 }
 
 // ── 服务表：从 /api/platforms 渲染真实平台状态 ────────
-async function renderServicesTable(): Promise<void> {
+async function renderServicesTable(revision: number): Promise<void> {
   const container = document.getElementById('sys-services-table');
   const hint = document.getElementById('sys-services-hint');
   if (!container) return;
@@ -249,6 +268,7 @@ async function renderServicesTable(): Promise<void> {
   } catch {
     platforms = [];
   }
+  if (!isCurrentOverview(revision) || !state.backendConnected) return;
   let onlineCount = 0;
   container.replaceChildren();
   for (const p of platforms) {
@@ -283,6 +303,8 @@ let logPage = 1;
 let logPageSize = 50;
 let logRefreshTimer: number | null = null;
 let logAutoRefreshTimer: number | null = null;
+let logRequestId = 0;
+let activeLogRequest: number | null = null;
 
 function createLogState(
   stateName: 'empty' | 'offline' | 'error',
@@ -307,10 +329,16 @@ function createLogState(
 }
 
 export async function renderSystemLogs(): Promise<void> {
+  if (!isSettingsPaneVisible('sys-logs')) return;
   const list = document.getElementById('sys-logs-list');
   const countEl = document.getElementById('sys-logs-count');
   const pagerHost = document.getElementById('sys-logs-pager');
   if (!list) return;
+  const requestId = ++logRequestId;
+  const revision = settingsPaneRevision;
+  const isCurrentRequest = (): boolean => (
+    requestId === logRequestId && revision === settingsPaneRevision && isSettingsPaneVisible('sys-logs')
+  );
   if (!state.backendConnected) {
     list.replaceChildren(createLogState(
       'offline',
@@ -322,11 +350,13 @@ export async function renderSystemLogs(): Promise<void> {
     pagerHost?.replaceChildren();
     return;
   }
+  activeLogRequest = requestId;
   try {
     let data: { items: LogEntry[]; total: number };
     if (isObservationDevLaunch()) {
       try {
         const capabilities = await backendApi.tracingCapabilities();
+        if (!isCurrentRequest()) return;
         if (capabilities.available) {
           const tracingLogs = await backendApi.tracingLogs({
             ...(logLevel ? { level: logLevel } : {}),
@@ -350,6 +380,7 @@ export async function renderSystemLogs(): Promise<void> {
           });
         }
       } catch {
+        if (!isCurrentRequest()) return;
         data = await backendApi.systemLogs({
           level: logLevel || undefined,
           q: logKeyword || undefined,
@@ -363,6 +394,7 @@ export async function renderSystemLogs(): Promise<void> {
         limit: 500,
       });
     }
+    if (!isCurrentRequest()) return;
     const items = data.items;
     if (countEl) countEl.textContent = String(items.length);
     if (items.length === 0) {
@@ -395,6 +427,7 @@ export async function renderSystemLogs(): Promise<void> {
       });
     }
   } catch {
+    if (!isCurrentRequest()) return;
     list.replaceChildren(createLogState(
       'error',
       'icon-error',
@@ -402,6 +435,8 @@ export async function renderSystemLogs(): Promise<void> {
       '请稍后重试。',
     ));
     pagerHost?.replaceChildren();
+  } finally {
+    if (activeLogRequest === requestId) activeLogRequest = null;
   }
 }
 
@@ -434,52 +469,56 @@ function levelToClass(level: string): string {
   return 'info';
 }
 
-function bindLogsControls(): void {
+function syncLogAutoRefresh(): void {
+  if (logAutoRefreshTimer != null) {
+    window.clearInterval(logAutoRefreshTimer);
+    logAutoRefreshTimer = null;
+  }
+  const autoRefreshChk = document.getElementById('sys-logs-auto-refresh') as HTMLInputElement | null;
+  if (!autoRefreshChk?.checked || !isSettingsPaneVisible('sys-logs')) return;
+  logAutoRefreshTimer = window.setInterval(() => {
+    if (activeLogRequest === null) void renderSystemLogs();
+  }, 3000);
+}
+
+function bindLogsControls(): () => void {
   const levelSel = document.getElementById('sys-logs-level') as HTMLSelectElement | null;
   const kwInput = document.getElementById('sys-logs-keyword') as HTMLInputElement | null;
   const refreshBtn = document.getElementById('sys-logs-refresh');
-  const autoRefreshChk = document.getElementById('sys-logs-auto-refresh') as HTMLInputElement | null;
-  levelSel?.addEventListener('change', () => {
+  const autoRefreshChk = document.getElementById('sys-logs-auto-refresh');
+  const onLevelChange = (): void => {
+    if (!levelSel) return;
     logLevel = levelSel.value;
     logPage = 1;
     void renderSystemLogs();
-  });
-  kwInput?.addEventListener('input', () => {
+  };
+  const onKeywordInput = (): void => {
+    if (!kwInput || !isSettingsPaneVisible('sys-logs')) return;
     logKeyword = kwInput.value.trim();
     logPage = 1;
     // 防抖：输入停 400ms 再查
-    if (logRefreshTimer) window.clearTimeout(logRefreshTimer);
-    logRefreshTimer = window.setTimeout(() => void renderSystemLogs(), 400);
-  });
-  refreshBtn?.addEventListener('click', () => void renderSystemLogs());
-
-  // 自动刷新：3s 拉一次（仅在勾选时）
-  const applyAuto = (): void => {
-    if (logAutoRefreshTimer != null) {
-      window.clearInterval(logAutoRefreshTimer);
-      logAutoRefreshTimer = null;
-    }
-    if (autoRefreshChk?.checked) {
-      logAutoRefreshTimer = window.setInterval(() => {
-        const logsPane = document.getElementById('settings-pane-sys-logs');
-        if (logsPane && !logsPane.hidden) {
-          void renderSystemLogs();
-        }
-      }, 3000);
-    }
+    if (logRefreshTimer !== null) window.clearTimeout(logRefreshTimer);
+    logRefreshTimer = window.setTimeout(() => {
+      logRefreshTimer = null;
+      void renderSystemLogs();
+    }, 400);
   };
-  autoRefreshChk?.addEventListener('change', applyAuto);
-  applyAuto();
+  const onRefresh = (): void => { void renderSystemLogs(); };
+  levelSel?.addEventListener('change', onLevelChange);
+  kwInput?.addEventListener('input', onKeywordInput);
+  refreshBtn?.addEventListener('click', onRefresh);
+  autoRefreshChk?.addEventListener('change', syncLogAutoRefresh);
+  return () => {
+    levelSel?.removeEventListener('change', onLevelChange);
+    kwInput?.removeEventListener('input', onKeywordInput);
+    refreshBtn?.removeEventListener('click', onRefresh);
+    autoRefreshChk?.removeEventListener('change', syncLogAutoRefresh);
+  };
 }
 
 // ── 绑定 ────────────────────────────────────────────
 
-/**
- * D10: dispose the system-tab refresh interval + the refresh-button listener.
- * Returned by bindSystemTab so the app can clear the 8s interval on teardown
- * (it previously leaked for the lifetime of the renderer).
- */
-export function disposeSystemTab(): void {
+function clearSettingsPaneRefresh(): void {
   if (overviewRefreshTimer != null) {
     window.clearInterval(overviewRefreshTimer);
     overviewRefreshTimer = null;
@@ -494,16 +533,35 @@ export function disposeSystemTab(): void {
   }
 }
 
-export function bindSystemTab(): () => void {
-  bindLogsControls();
-  // 每 8s 刷新总览指标（避免重复创建：setInterval 多次调用 → 多次刷新）
-  if (overviewRefreshTimer != null) window.clearInterval(overviewRefreshTimer);
-  overviewRefreshTimer = window.setInterval(() => {
-    void refreshBackendData();
-  }, 8000);
+export function setSystemSettingsPane(pane: string | null): void {
+  const next = pane === 'system' || pane === 'sys-logs' ? pane : null;
+  if (next === activeSettingsPane) return;
+  clearSettingsPaneRefresh();
+  activeSettingsPane = next;
+  settingsPaneRevision += 1;
+  activeLogRequest = null;
+  if (next === 'system') {
+    renderSystemOverview();
+    overviewRefreshTimer = window.setInterval(renderSystemOverview, 8000);
+  } else if (next === 'sys-logs') {
+    void renderSystemLogs();
+    syncLogAutoRefresh();
+  }
+}
 
-  // D10: return a disposer so the caller can tear the interval + listener down.
+let unbindLogControls: (() => void) | null = null;
+
+export function disposeSystemTab(): void {
+  setSystemSettingsPane(null);
+  unbindLogControls?.();
+  unbindLogControls = null;
+}
+
+export function bindSystemTab(): () => void {
+  unbindLogControls?.();
+  const unbind = bindLogsControls();
+  unbindLogControls = unbind;
   return () => {
-    disposeSystemTab();
+    if (unbindLogControls === unbind) disposeSystemTab();
   };
 }

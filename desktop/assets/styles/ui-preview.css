@@ -192,7 +192,6 @@ body:not(.welcome-active):not(.history-workspace-active) .top-bar-left {
 
 #chat-panel,
 #welcome-panel,
-#system-tab,
 #skills-tab,
 #cron-tab {
   pointer-events: auto;
@@ -256,18 +255,6 @@ body:not(.welcome-active):not(.history-workspace-active) .top-bar-left {
   color: var(--mw-action-primary);
   font-size: var(--mw-type-caption-size);
   font-weight: 700;
-}
-
-#system-tab .config-shell {
-  min-height: 100%;
-}
-
-#system-tab .cfg-pane {
-  display: none;
-}
-
-#system-tab .cfg-pane.active {
-  display: block;
 }
 
 @media (max-width: 760px) {

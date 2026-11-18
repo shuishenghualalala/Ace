@@ -62,8 +62,14 @@ function parseSnapshot(value: string | null): ProductModeStoreState | null {
     return {
       productMode: snapshot.productMode,
       views: {
-        assistant: { ...views.assistant },
-        work: { ...views.work },
+        assistant: {
+          ...views.assistant,
+          lastPosition: views.assistant.lastPosition === 'system' ? 'chat' : views.assistant.lastPosition,
+        },
+        work: {
+          ...views.work,
+          lastPosition: views.work.lastPosition === 'system' ? 'workbench' : views.work.lastPosition,
+        },
       },
     };
   } catch {

@@ -1,82 +1,148 @@
-/**
- * D10 regression: bindSystemTab() returns a disposer that clears the 8s
- * overview refresh interval, and disposeSystemTab() clears it directly.
- *
- * vitest runs in the node environment, so we stub the minimal window/document
- * surface system-page.ts touches (setInterval / clearInterval / getElementById)
- * for the bind path. We do NOT exercise refreshBackendData (network) — only
- * the timer lifecycle, which is the bug.
- */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+/** @vitest-environment happy-dom */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Minimal stubs installed before importing the module each test.
-function installDomStub(): { intervals: number[]; removed: number[] } {
-  const intervals: number[] = [];
-  const removed: number[] = [];
-  let nextId = 1;
-  const g = globalThis as unknown as Record<string, unknown>;
-  g.window = {
-    setInterval: vi.fn((_cb: TimerHandler, _ms?: number) => {
-      intervals.push(nextId);
-      return nextId++;
-    }),
-    clearInterval: vi.fn((id?: number) => {
-      if (id !== undefined) removed.push(id);
-    }),
-    setTimeout: vi.fn(() => 0),
-  };
-  g.document = {
-    getElementById: vi.fn(() => null),
-    querySelector: vi.fn(() => null),
-    querySelectorAll: vi.fn(() => []),
-    addEventListener: vi.fn(),
-  };
-  return { intervals, removed };
-}
+const { backendApi, state, isObservationDevLaunch } = vi.hoisted(() => ({
+  backendApi: {
+    usage: vi.fn(),
+    runtimeConcurrency: vi.fn(),
+    sessionsStatus: vi.fn(),
+    systemMetrics: vi.fn(),
+    platforms: vi.fn(),
+    systemLogs: vi.fn(),
+    tracingCapabilities: vi.fn(),
+    tracingLogs: vi.fn(),
+  },
+  state: { backendConnected: true },
+  isObservationDevLaunch: vi.fn(),
+}));
 
-function clearDomStub(): void {
-  const g = globalThis as unknown as Record<string, unknown>;
-  delete g.window;
-  delete g.document;
-}
+vi.mock('../../src/ui/backend-client', () => ({ backendApi }));
+vi.mock('../../src/ui/state', () => ({ state }));
+vi.mock('../../src/shared/observability', () => ({ isObservationDevLaunch }));
 
-describe('bindSystemTab / disposeSystemTab (D10: interval teardown)', () => {
-  beforeEach(() => {
-    // Reset modules so the module-level overviewRefreshTimer starts null.
+describe('System settings refresh lifecycle', () => {
+  let feature: typeof import('../../src/ui/features/system-page');
+
+  const overview = (): HTMLElement => document.getElementById('settings-pane-system')!;
+  const logs = (): HTMLElement => document.getElementById('settings-pane-sys-logs')!;
+  const modal = (): HTMLElement => document.getElementById('settings-modal')!;
+
+  function open(pane: 'system' | 'sys-logs'): void {
+    modal().hidden = false;
+    overview().hidden = pane !== 'system';
+    logs().hidden = pane !== 'sys-logs';
+    feature.setSystemSettingsPane(pane);
+  }
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
     vi.resetModules();
-    installDomStub();
+    vi.resetAllMocks();
+    state.backendConnected = true;
+    isObservationDevLaunch.mockReturnValue(false);
+    backendApi.usage.mockResolvedValue({ total_tokens: 35 });
+    backendApi.runtimeConcurrency.mockResolvedValue({ max_active_runs: 2, global_active: 1, global_queued: 0 });
+    backendApi.sessionsStatus.mockResolvedValue({});
+    backendApi.systemMetrics.mockResolvedValue({ uptime_s: 7200 });
+    backendApi.platforms.mockResolvedValue([]);
+    backendApi.systemLogs.mockResolvedValue({ items: [], total: 0 });
+    document.body.innerHTML = `
+      <div id="settings-modal" hidden>
+        <section id="settings-pane-system" hidden><div id="system-page-root"></div></section>
+        <section id="settings-pane-sys-logs" hidden>
+          <input id="sys-logs-keyword">
+          <input id="sys-logs-auto-refresh" type="checkbox">
+          <div id="sys-logs-list"></div>
+        </section>
+      </div>
+    `;
+    feature = await import('../../src/ui/features/system-page');
   });
 
   afterEach(() => {
-    clearDomStub();
-    vi.restoreAllMocks();
+    feature.disposeSystemTab();
+    document.body.replaceChildren();
+    vi.useRealTimers();
   });
 
-  it('bindSystemTab creates an interval and the returned disposer clears it', async () => {
-    const { intervals, removed } = installDomStub();
-    vi.resetModules();
-    const mod = await import('../../src/ui/features/system-page');
-    const dom = (globalThis as unknown as { window: any; document: any });
+  it('fetches overview once on entry, skips duplicate activation and stops after disposal', async () => {
+    const dispose = feature.bindSystemTab();
+    feature.renderSystemOverview();
+    await vi.advanceTimersByTimeAsync(16000);
+    expect(backendApi.usage).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-system-page]')).toBeNull();
 
-    // Force getElementById to return a stub element with addEventListener so
-    // the refresh-button bind path doesn't short-circuit (interval still set).
-    dom.document.getElementById = vi.fn(() => ({
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    })) as any;
-
-    const dispose = mod.bindSystemTab();
-    expect(intervals.length).toBe(1);
-    expect(removed.length).toBe(0);
+    open('system');
+    open('system');
+    feature.renderSystemOverview();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backendApi.usage).toHaveBeenCalledTimes(1);
+    expect(backendApi.platforms).toHaveBeenCalledTimes(1);
+    expect(document.getElementById('sys-kpi-memory')?.textContent).toBe('35');
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(backendApi.usage).toHaveBeenCalledTimes(2);
 
     dispose();
-    expect(removed).toContain(intervals[0]);
+    feature.renderSystemOverview();
+    await vi.advanceTimersByTimeAsync(16000);
+    expect(backendApi.usage).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('disposeSystemTab() is a no-op when no interval is running', async () => {
-    installDomStub();
-    vi.resetModules();
-    const mod = await import('../../src/ui/features/system-page');
-    expect(() => mod.disposeSystemTab()).not.toThrow();
+  it('stops log polling and pending search when the setting is hidden or closed', async () => {
+    feature.bindSystemTab();
+    const checkbox = document.getElementById('sys-logs-auto-refresh') as HTMLInputElement;
+    checkbox.checked = true;
+    open('sys-logs');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(backendApi.systemLogs).toHaveBeenCalledTimes(2);
+
+    const keyword = document.getElementById('sys-logs-keyword') as HTMLInputElement;
+    keyword.value = 'new query';
+    keyword.dispatchEvent(new Event('input'));
+    modal().hidden = true;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(backendApi.systemLogs).toHaveBeenCalledTimes(2);
+    feature.setSystemSettingsPane(null);
+    expect(vi.getTimerCount()).toBe(0);
+
+    open('sys-logs');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backendApi.systemLogs).toHaveBeenLastCalledWith(expect.objectContaining({ q: 'new query' }));
+    open('system');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(backendApi.systemLogs).toHaveBeenCalledTimes(3);
+  });
+
+  it('ignores late overview reads from a previous activation', async () => {
+    let completePrevious: (value: { total_tokens: number }) => void = () => {};
+    backendApi.usage.mockReturnValueOnce(new Promise((resolve) => { completePrevious = resolve; }));
+    feature.bindSystemTab();
+    open('system');
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(backendApi.usage).toHaveBeenCalledTimes(1);
+
+    open('sys-logs');
+    open('system');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById('sys-kpi-memory')?.textContent).toBe('35');
+    completePrevious({ total_tokens: 101 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById('sys-kpi-memory')?.textContent).toBe('35');
+    expect(backendApi.platforms).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a pending developer log capability check if the user moves away', async () => {
+    isObservationDevLaunch.mockReturnValue(true);
+    let completeCapabilities: (value: { available: boolean }) => void = () => {};
+    backendApi.tracingCapabilities.mockReturnValueOnce(new Promise((resolve) => { completeCapabilities = resolve; }));
+    feature.bindSystemTab();
+    open('sys-logs');
+    expect(backendApi.tracingCapabilities).toHaveBeenCalledTimes(1);
+    open('system');
+    completeCapabilities({ available: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backendApi.tracingLogs).not.toHaveBeenCalled();
+    expect(backendApi.systemLogs).not.toHaveBeenCalled();
   });
 });

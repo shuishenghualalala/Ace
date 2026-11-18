@@ -14,8 +14,13 @@ import {
 } from '../../src/ui/features/wiki-feature';
 import type { BackendConfig } from '../../src/ui/backend-client';
 import { createApplicationShell } from '../../src/ui/layouts/application-shell';
+import { PRODUCT_MODE_STORAGE_KEY, productModeStore } from '../../src/ui/stores/product-mode-store';
 
 describe('resolveShellNavigation', () => {
+  it.each(['assistant', 'work'] as const)('omits System from the %s navigation rail', (mode) => {
+    expect(resolveShellNavigation(mode).map((item) => item.id)).not.toContain('system');
+  });
+
   it('projects the Wiki contribution only when its capability is available', () => {
     expect(resolveShellNavigation('assistant', { wiki: 'available' }).map((item) => item.id)).toContain('wiki');
     expect(resolveShellNavigation('work', { wiki: 'available' }).map((item) => item.id)).toContain('wiki');
@@ -108,6 +113,30 @@ describe('resolveShellNavigation', () => {
     expect(chat?.children[1]?.textContent).toBe('对话');
 
     shell.dispose();
+  });
+
+  it('restores Chat after a previous version saved System as the active page', () => {
+    localStorage.setItem(PRODUCT_MODE_STORAGE_KEY, JSON.stringify({
+      productMode: 'work',
+      views: {
+        assistant: { lastPosition: 'system', navigationCollapsed: false, historyFilter: 'kept' },
+        work: { lastPosition: 'system', navigationCollapsed: true, historyFilter: '' },
+      },
+    }));
+    const shell = createApplicationShell({ storage: localStorage });
+    try {
+      expect(productModeStore.get()).toEqual({
+        productMode: 'assistant',
+        views: {
+          assistant: { lastPosition: 'chat', navigationCollapsed: false, historyFilter: 'kept' },
+          work: { lastPosition: 'workbench', navigationCollapsed: true, historyFilter: '' },
+        },
+      });
+      expect(shell.element.querySelector('[data-shell-location="chat"]')?.getAttribute('aria-current')).toBe('page');
+    } finally {
+      shell.dispose();
+      localStorage.removeItem(PRODUCT_MODE_STORAGE_KEY);
+    }
   });
 
   it('marks the security item unavailable when the security module is off', () => {

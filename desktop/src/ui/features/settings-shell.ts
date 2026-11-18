@@ -7,6 +7,7 @@ const SETTINGS_NAVIGATION: ReadonlyArray<{ id: string; label: string; icon: Icon
   { id: 'channel', label: '渠道', icon: 'process-web' },
   { id: 'mcp', label: 'MCP', icon: 'process-terminal' },
   { id: 'work', label: '办公助手', icon: 'icon-task' },
+  { id: 'system', label: '系统', icon: 'icon-folder' },
   { id: 'sys-logs', label: '系统日志', icon: 'icon-file' },
   { id: 'sys-usage', label: '使用统计', icon: 'process-clock' },
   { id: 'library', label: '资源库', icon: 'icon-folder' },
