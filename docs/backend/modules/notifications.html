@@ -52,7 +52,7 @@ scheduler 完成点      app.py 完成回调   approvals 审批               fo
     <thead><tr><th>层</th><th>文件</th><th>职责</th></tr></thead>
     <tbody>
       <tr><td>契约</td><td><code>crew/core/interfaces.py</code></td><td><code>Notification</code> dataclass（id/owner/source/kind/title/body/payload/created_at/read_at）与 <code>NotificationCenter</code> ABC：publish / list / unread_count / mark_read / mark_all_read / mark_read_by_payload / clear。</td></tr>
-      <tr><td>实现</td><td><code>crew/notifications/store.py</code></td><td>SQLite <code>notifications</code> 表（共享 <code>crew_data/crew.db</code>，走 <code>connect_sqlite</code> + <code>SQLiteWriteHelper</code> 惯例）；insert 同事务内按 (owner, source) 裁剪到最近 200 条；<code>mark_read_by_payload</code> 用 json_each 匹配 payload 顶层值。</td></tr>
+      <tr><td>实现</td><td><code>crew/notifications/store.py</code></td><td>SQLite <code>notifications</code> 表默认位于 <code>crew_data/notifications.db</code>。首次打开时可从旧主库迁移记录。insert 同事务内按 (owner, source) 保留最近 200 条，<code>mark_read_by_payload</code> 用 json_each 匹配 payload 顶层值。</td></tr>
       <tr><td>实现</td><td><code>crew/notifications/service.py</code></td><td>实现 ABC；publish 写库后经可选 async <code>push_fn(owner, payload)</code> 广播 <code>{"kind":"notification",...}</code>（fire-and-forget，推送失败只记日志不影响写库）。</td></tr>
       <tr><td>装配</td><td><code>crew/app.py</code></td><td>构造 service；<code>set_push</code> 时把 <code>notify_owner</code> 延迟注入为 push_fn；向 cron / security 注入回调；tasks 完成回调处直接 publish。</td></tr>
       <tr><td>网关</td><td><code>crew/gateway/routers/notifications.py</code></td><td>REST 面（见第 5 节）。</td></tr>
@@ -95,6 +95,7 @@ scheduler 完成点      app.py 完成回调   approvals 审批               fo
   <p>desktop 端 <code>features/notification-center.ts</code>（唯一新模块文件）：铃铛按钮挂在 brand 块（<code>application-shell.ts</code>），未读角标 0 隐藏 / 99+ 封顶；面板点外部或 Esc 关闭；<b>面板只展示未读</b>（拉取固定 <code>unreadOnly</code>，单条已读后立即从列表移除，后端历史不动），条目点击按 payload 跳转（session_id → 打开会话，approval → 触发审批弹窗），并支持单条已读 / 全部已读。WS 帧走应用级常驻 <code>BackendChatSocket</code> 的 <code>applyChunk</code> 分发，带 push id 去重。</p>
 
   <h2>8. 测试</h2>
+  <p>每个 CrewApp 持有自己构造的 NotificationStore。关停时关闭这条连接，其他同库实例仍可发布通知。Windows 和 Linux 的回归覆盖两个活跃宿主、更换服务引用、重复关停，以及第三个宿主按账号重读正文。Linux 同进程连续三次启动和关停，原先残留的通知库文件描述符为 4、6、8 个，修复后每轮均为 0 个。</p>
   <div class="ok"><code>tests/test_notifications.py</code> 36 用例：store CRUD / 分页 / 未读过滤 / 裁剪 / payload 往返；service 推送容错；cron 完成失败回调与无回调降级；approval 创建通知与自动已读、复用请求不重复通知；followup 发送发布 / side-channel 不发布 / 回答·取消·超时自动已读 / 钩子容错 / 保活无限等待（选择卡片）；plan 非空发布与截断、empty 不发布、决策自动已读；task 通知语义（agent_turn 终态发布 / <code>_should_notify_task</code> 矩阵 / 中间任务静默 / timed_out 发布 / cancelled 不发布 / 恢复派发 / TaskRuntime notify_completion 抑制）；REST 契约字段形状。前端 <code>desktop/tests/unit/notification-center.test.ts</code> 23 用例。e2e：<code>tests/e2e/notification_semantics_e2e.py</code>（FakeProvider 全链路，前台回合与后台恢复回合各恰好 1 通知）。</div>
 
   <h2>9. 变更记录</h2>

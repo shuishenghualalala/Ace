@@ -544,16 +544,12 @@ class CrewApp:
         # 通知中心：core 契约的默认实现（SQLite + 可选 WS 推送，push_fn 由 gateway 延迟注入）
         from crew.notifications import NotificationCenterService, NotificationStore
 
-        self.notifications = NotificationCenterService(
-            NotificationStore(
-                # notifications 表在独立库（ADR-0038 拆库收尾批）；legacy_db_path
-                # 触发 copy-on-first-activate。本切片只拆库，生命周期形态
-                # （__init__ 直构、随 App 存亡）保持不变。
-                resolve_crew_home_path(config.notifications_db_path),
-                wal_enabled=config.sqlite_wal,
-                legacy_db_path=config.db_path,
-            )
+        self._notification_store = NotificationStore(
+            resolve_crew_home_path(config.notifications_db_path),
+            wal_enabled=config.sqlite_wal,
+            legacy_db_path=config.db_path,
         )
+        self.notifications = NotificationCenterService(self._notification_store)
         self.security_service.set_notification_hooks(
             on_created=self._on_approval_created,
             on_decided=self._on_approval_decided,
@@ -2807,6 +2803,7 @@ class CrewApp:
             self.tasks,
             self.security_rules,
             self.security_audit,
+            self._notification_store,
             self.channel_bindings,
             self.channel_session_routes,
             self.active_owner,

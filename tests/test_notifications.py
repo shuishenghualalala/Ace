@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -46,6 +48,36 @@ def _notification(source: str = "cron", kind: str = "cron_run_completed", **kwar
 
 def _store(tmp_path: Path) -> NotificationStore:
     return NotificationStore(str(tmp_path / "crew.db"))
+
+
+async def test_app_shutdown_closes_only_its_notification_store():
+    from crew.app import build_app
+    from crew.state.config import load_config
+
+    config = load_config()
+    first = build_app(config)
+    await first.startup()
+    owned = first.notifications
+    original = owned.publish(_notification(body="first host"))
+
+    second = build_app(config)
+    await second.startup()
+    first.notifications = second.notifications
+    await first.shutdown()
+    await first.shutdown()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        owned.list(OWNER)
+
+    another_owner = "B:uid-b"
+    second_row = second.notifications.publish(_notification(owner_account_id=another_owner, body="second host"))
+    assert [row.id for row in second.notifications.list(OWNER)] == [original.id]
+    await second.shutdown()
+
+    reopened = build_app(config)
+    await reopened.startup()
+    assert [(row.id, row.body) for row in reopened.notifications.list(OWNER)] == [(original.id, "first host")]
+    assert [(row.id, row.body) for row in reopened.notifications.list(another_owner)] == [(second_row.id, "second host")]
+    await reopened.shutdown()
 
 
 # ---- store ----
