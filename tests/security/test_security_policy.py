@@ -60,21 +60,20 @@ def test_permission_merge_keeps_strongest_same_root_access(tmp_path: Path) -> No
 
 def test_managed_profile_is_broadly_read_only_and_workspace_writable(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    external_write_dir: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(workspace))
     profile = settings_for_mode(ConversationPermissionMode.REQUEST_APPROVAL, workspace).profile
 
     assert filesystem_operation_allowed(
         profile, AdditionalPermissionProfile(), workspace / "src" / "app.py", FilesystemOperation.WRITE
     )
     assert filesystem_operation_allowed(
-        profile, AdditionalPermissionProfile(), tmp_path / "outside.txt", FilesystemOperation.READ
+        profile, AdditionalPermissionProfile(), external_write_dir / "outside.txt", FilesystemOperation.READ
     )
     assert not filesystem_operation_allowed(
-        profile, AdditionalPermissionProfile(), tmp_path / "outside.txt", FilesystemOperation.WRITE
+        profile, AdditionalPermissionProfile(), external_write_dir / "outside.txt", FilesystemOperation.WRITE
     )
 
 

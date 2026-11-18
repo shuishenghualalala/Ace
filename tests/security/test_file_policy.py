@@ -128,13 +128,11 @@ async def test_request_mode_allows_workspace_write_and_traversal_read(secured_ap
 @pytest.mark.asyncio
 async def test_once_external_file_write_approval_is_consumed_only_by_matching_action(
     secured_app,
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
+    external_write_dir: Path,
 ):
     app, project = secured_app
-    outside = tmp_path / "outside.txt"
+    outside = external_write_dir / "outside.txt"
     outside.write_text("initial", encoding="utf-8")
-    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(project))
     with _security_context(project):
         read = await app.registry.execute(ToolCall("read-before-write", "file_read", {"path": str(outside)}))
         assert not read.is_error
@@ -203,13 +201,11 @@ async def test_symlink_read_escape_is_allowed_by_broad_read_policy(secured_app, 
 @pytest.mark.asyncio
 async def test_auto_review_allows_external_read_but_requires_external_write_approval(
     secured_app,
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
+    external_write_dir: Path,
 ):
     app, project = secured_app
-    outside = tmp_path / "outside.txt"
+    outside = external_write_dir / "outside.txt"
     outside.write_text("safe", encoding="utf-8")
-    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(project))
     with _security_context(project):
         context = build_security_context(app.workspace_store)
         app.security_service.set_mode(context, ConversationPermissionMode.AUTO_REVIEW)

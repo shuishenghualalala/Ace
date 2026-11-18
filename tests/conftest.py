@@ -4,9 +4,29 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture
+def external_write_dir(tmp_path: Path):
+    """Allocate a real test directory outside the sandbox's default writable roots."""
+    from crew.security.models import ConversationPermissionMode
+    from crew.security.policy import settings_for_mode
+
+    profile = settings_for_mode(ConversationPermissionMode.REQUEST_APPROVAL, None).profile
+    writable_roots = [entry.root.resolve() for entry in profile.filesystem]
+    for parent in (tmp_path.parent, Path("/var/tmp"), Path.cwd(), Path.home()):
+        parent = parent.resolve()
+        if any(parent.is_relative_to(root) for root in writable_roots):
+            continue
+        if parent.is_dir() and os.access(parent, os.W_OK):
+            with tempfile.TemporaryDirectory(prefix="ace-approval-", dir=parent) as directory:
+                yield Path(directory)
+            return
+    pytest.fail("The test needs a writable directory outside the managed sandbox's temporary roots")
 
 
 @pytest.fixture

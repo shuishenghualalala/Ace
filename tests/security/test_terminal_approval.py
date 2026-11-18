@@ -193,15 +193,13 @@ async def test_full_access_does_not_depend_on_native_classifier_or_permission_ov
 
 def test_terminal_permission_request_is_exact_and_project_metadata_is_escalatable(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    external_write_dir: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
-    outside = tmp_path / "outside"
+    outside = external_write_dir
     metadata = workspace / ".git"
     workspace.mkdir()
-    outside.mkdir()
     metadata.mkdir()
-    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(workspace))
     context = SecurityContext(
         os_user="os-a",
         owner_account_id="owner-a",

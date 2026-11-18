@@ -408,13 +408,11 @@ def test_exact_escalation_grant_preserves_host_execution_request(
 
 def test_terminal_session_directory_permission_is_shared_with_ace_file_tools(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    external_write_dir: Path,
 ) -> None:
     approvals, _grants, _audit, service = _service(tmp_path)
     context = _context(tmp_path)
-    outside = tmp_path.parent / f"{tmp_path.name}-outside"
-    outside.mkdir()
-    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(tmp_path))
+    outside = external_write_dir
     permission = AdditionalPermissionProfile(
         filesystem=(FilesystemEntry(outside, FilesystemAccess.READ_WRITE),),
         sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,

@@ -57,18 +57,16 @@ def _managed(tmp_path: Path) -> ProcessLaunch:
 @pytest.mark.asyncio
 async def test_approved_outside_write_reaches_native_runtime(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    external_write_dir: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
-    outside = tmp_path / "outside"
+    outside = external_write_dir
     workspace.mkdir()
-    outside.mkdir()
     if os.name == "nt":
         from crew.security.workspace import prepare_new_workspace
 
         prepare_new_workspace(workspace)
         prepare_new_workspace(outside)
-    monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(workspace))
     target = outside / "approved.txt"
     context = SecurityContext(
         os_user="tester",
