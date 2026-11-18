@@ -539,6 +539,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
 
     <ol>
       <li><strong>身份。</strong>Gateway 从可信账号、会话、工作区存储与宿主上下文派生 OS 用户、owner、workspace、session、task 和 cwd。</li>
+      <li>Agent 与 Gateway 采用相同的操作系统用户名作为规则键。已有登录环境沿用原用户名优先级。未提供登录变量时，Windows 查询当前线程的系统账户，Linux 和 macOS 按进程 UID 查询。无法确定账户时，两个入口均拒绝构造安全上下文。</li>
       <li><strong>决策。</strong>规范化动作与附加权限，再依据基础边界、规则及临时授权裁决。</li>
       <li><strong>交互。</strong>可授权的超界动作进入审批，审批与动作摘要、上下文及有效期绑定。</li>
       <li><strong>执行。</strong>批准的受管动作由工具策略或原生运行组件执行。完全访问使用宿主操作系统用户权限。</li>

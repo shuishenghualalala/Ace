@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,24 @@ class SecurityContextError(RuntimeError):
     """Raised when trusted runtime facts are absent or inconsistent."""
 
 
+def _host_os_user() -> str:
+    """Keep existing rule identities while supporting services without login variables."""
+    try:
+        if os.name == "nt" and not any(
+            os.environ.get(key) for key in ("LOGNAME", "USER", "LNAME", "USERNAME")
+        ):
+            # Windows os.getlogin reads the current thread's user with GetUserNameW.
+            user = os.getlogin()
+        else:
+            # On POSIX getuser resolves the process UID when the environment is empty.
+            user = getpass.getuser()
+    except (ImportError, KeyError, OSError) as exc:
+        raise SecurityContextError("无法确认宿主操作系统用户") from exc
+    if not user or not user.strip():
+        raise SecurityContextError("无法确认宿主操作系统用户")
+    return user
+
+
 @dataclass(frozen=True)
 class SecurityContext:
     """Host-derived identity and filesystem anchors for one execution decision."""
@@ -83,7 +102,7 @@ def build_security_context(workspace_store: Any) -> SecurityContext:
         except ValueError as exc:
             raise SecurityContextError("可信工作目录不属于已认证工作空间") from exc
     return SecurityContext(
-        os_user=getpass.getuser(),
+        os_user=_host_os_user(),
         owner_account_id=owner,
         workspace_id=workspace_id,
         workspace_root=workspace_root,
@@ -131,7 +150,7 @@ def build_gateway_security_context(
         except ValueError as exc:
             raise SecurityContextError("cwd 不属于已认证工作空间") from exc
     return SecurityContext(
-        os_user=getpass.getuser(),
+        os_user=_host_os_user(),
         owner_account_id=owner,
         workspace_id=workspace_key,
         workspace_root=root,

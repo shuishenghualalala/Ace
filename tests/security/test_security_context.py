@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import getpass
+import os
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,44 @@ def _set_runtime_context(*, owner: str, workspace: str, cwd: Path | None = None)
     current_request_id.set("request-1")
     current_task_runtime_id.set("task-1")
     current_agent_workdir.set(str(cwd) if cwd else "")
+
+
+@pytest.mark.parametrize("identity", ["existing", "native", "unavailable", "empty"])
+def test_agent_and_gateway_share_host_os_identity(tmp_path: Path, monkeypatch, identity: str) -> None:
+    for name in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        monkeypatch.delenv(name, raising=False)
+    store = _WorkspaceStore({("acct", "project"): tmp_path})
+    _set_runtime_context(owner="acct", workspace="project", cwd=tmp_path)
+    if identity == "existing":
+        monkeypatch.setenv("LOGNAME", "existing-rule-user")
+        monkeypatch.setenv("USERNAME", "other-name")
+        expected = "existing-rule-user"
+    elif identity == "native":
+        if os.name == "nt":
+            expected = os.getlogin()
+        else:
+            import pwd
+
+            expected = pwd.getpwuid(os.getuid()).pw_name
+    else:
+        def lookup():
+            if identity == "empty":
+                return " "
+            raise OSError("identity unavailable")
+
+        if os.name == "nt":
+            monkeypatch.setattr(os, "getlogin", lookup)
+        else:
+            monkeypatch.setattr(getpass, "getuser", lookup)
+        with pytest.raises(SecurityContextError, match="操作系统用户"):
+            build_security_context(store)
+        with pytest.raises(SecurityContextError, match="操作系统用户"):
+            build_gateway_security_context(store, owner_account_id="acct", workspace_id="project", session_id="s")
+        return
+    assert build_security_context(store).os_user == expected
+    assert build_gateway_security_context(
+        store, owner_account_id="acct", workspace_id="project", session_id="s"
+    ).os_user == expected
 
 
 def test_context_uses_owner_scoped_store_root(tmp_path: Path) -> None:
