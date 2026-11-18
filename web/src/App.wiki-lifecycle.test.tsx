@@ -1,5 +1,7 @@
 /** @vitest-environment happy-dom */
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { act, type ComponentProps } from "react";
+import type Sidebar from "./components/Sidebar";
 import type { AppConfig } from "./types";
 import type { FeatureEventRegistry } from "./lib/feature-event-dispatcher";
 import {
@@ -25,14 +27,19 @@ vi.mock("./hooks/useChat", async (importOriginal) => ({
 } }));
 vi.mock("./hooks/useSessions", () => ({ useSessions: () => ({ sessions: [], refresh: vi.fn() }) }));
 vi.mock("./hooks/useWorkspaces", () => ({ useWorkspaces: () => ({ workspaces: [], refresh: vi.fn() }) }));
-vi.mock("./components/Sidebar", () => ({ default: () => null }));
+vi.mock("./components/Sidebar", () => ({ default: ({ onViewChange }: ComponentProps<typeof Sidebar>) => (
+  <nav>{(["chat", "agents", "wiki"] as const).map((view) =>
+    <button key={view} onClick={() => onViewChange(view)}>{view}</button>)}</nav>
+) }));
 vi.mock("./components/TopBar", () => ({ default: () => null }));
-vi.mock("./components/ChatPanel", () => ({ default: () => null }));
+vi.mock("./components/ChatPanel", () => ({ default: () => <section>chat page</section> }));
+vi.mock("./components/AgentsHub", () => ({ default: () => <section>agents page</section> }));
+vi.mock("./components/WikiHub", () => ({ default: () => <section>wiki page</section> }));
 vi.mock("./components/SkillsHub", () => ({ default: () => null }));
 vi.mock("./components/TaskBoard", () => ({ default: () => null }));
 vi.mock("./components/WorkspaceModal", () => ({ default: () => null }));
 vi.mock("./components/Composer", () => ({ teamMemberMentionId: () => "leader" }));
-vi.mock("./api", () => ({ api: { config: vi.fn(async () => appHostState.responses.shift() ?? { wiki: { enabled: true } }), sessionsStatus: vi.fn(async () => ({})), externalTeams: vi.fn(async () => []), tasks: vi.fn(async () => []), sessions: vi.fn(async () => []), workspaces: vi.fn(async () => []), switchModel: vi.fn(async () => ({ wiki: { enabled: true } })), setSessionAgentConfig: vi.fn(async () => ({})) }, ApiError: class extends Error { status = 500; } }));
+vi.mock("./api", () => ({ api: { wikiAgentSession: vi.fn(async () => ({ session_id: "wiki-session" })), config: vi.fn(async () => appHostState.responses.shift() ?? { wiki: { enabled: true } }), sessionsStatus: vi.fn(async () => ({})), externalTeams: vi.fn(async () => []), tasks: vi.fn(async () => []), sessions: vi.fn(async () => []), workspaces: vi.fn(async () => []), switchModel: vi.fn(async () => ({ wiki: { enabled: true } })), setSessionAgentConfig: vi.fn(async () => ({})) }, ApiError: class extends Error { status = 500; } }));
 
 const ctx = { sessionId: "s1", now: 1, startLocalTurn: () => 1, newId: () => "m1", book: { toolMap: new Map(), assistantId: null, turnStartedAt: null, awaitingAssistantAfterTool: false, deltaSpans: [], legacyDeltaText: "", hadTeamInternal: false, fileChanges: [], fileChangeSignatures: {}, prevTurnFileSignature: {} }, messages: [] };
 
@@ -45,6 +52,17 @@ describe("real App Wiki host lifecycle", () => {
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
   afterEach(() => { unmountAppHosts(); warnSpy.mockRestore(); });
+
+  it("keeps chat, agents and Wiki reachable when both features are installed", async () => {
+    enqueueHostConfig(appConfig(true));
+    const { container } = await mountAppHost();
+    expect(container.querySelector("main")?.textContent).toContain("chat page");
+    for (const view of ["agents", "wiki", "chat"]) {
+      const button = Array.from(container.querySelectorAll<HTMLButtonElement>("nav button")).find((node) => node.textContent === view);
+      await act(async () => button!.click());
+      expect(container.querySelector("main")?.textContent).toContain(view + " page");
+    }
+  });
 
   it("applies each host's loaded wiki config to its committed registry", async () => {
     enqueueHostConfig(appConfig(false));

@@ -589,7 +589,7 @@ export default function App() {
     installAgentsPageContribution(registry);
     return registry;
   }, []);
-  const agentsPage = agentsPages.project("agents", {
+  const agentsPage = agentsPages.project(view, {
     agentsEnabled: externalAgentsEnabled,
     props: {
       onAssignAgent: async (agent) => {
