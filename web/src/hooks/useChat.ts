@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api } from "../api";
-import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails, toolExitUnconfirmed, type ToolResultMetadata, type BackendHistoryItem } from "../lib/historyMap";
+import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails, settleFollowupAnswer, toolExitUnconfirmed, type ToolResultMetadata, type BackendHistoryItem } from "../lib/historyMap";
 import { backendSecondsToMs } from "../lib/backendTime";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
@@ -567,6 +567,7 @@ function projectActiveTurn(
 }
 
 function matchesSnapshotHistory(canonical: UiMessage, local: UiMessage): boolean {
+  if (canonical.id.startsWith("followup:") || local.id.startsWith("followup:")) return canonical.id === local.id;
   if (canonical.role !== local.role || canonical.text !== local.text) return false;
   if (canonical.requestId && local.requestId) return canonical.requestId === local.requestId;
   return canonical.timestamp == null || local.timestamp == null || canonical.timestamp === local.timestamp;
@@ -726,11 +727,10 @@ export function useChat(
       return { ...prev, [sid]: { ...cur, ...patch } };
     });
 
-  const setFollowup = (sid: string, question: FollowupQuestion | null) =>
-    setFollowupMap((prev) => {
-      followupMapRef.current[sid] = question;
-      return { ...prev, [sid]: question };
-    });
+  const setFollowup = (sid: string, question: FollowupQuestion | null) => {
+    followupMapRef.current[sid] = question;
+    setFollowupMap(prev => ({ ...prev, [sid]: question }));
+  };
   const setPendingQueue = (sid: string, queue: PendingMessage[]) => {
     pendingQueueRef.current[sid] = queue;
     setPendingQueueMap((prev) => ({ ...prev, [sid]: queue }));
@@ -852,9 +852,13 @@ export function useChat(
   // 用 ref 固定消息操作，避免它们进入 useEffect 依赖导致 WS 重连
   const appendRef = useRef(
     (sid: string, role: MsgRole, text: string, extra?: Partial<UiMessage>): string => {
-      const id = newId();
+      const id = extra?.id ?? newId();
       loadedSessionsRef.current.add(sid);
-      setMessagesMap((prev) => ({ ...prev, [sid]: [...(prev[sid] ?? []), { id, role, text, ...extra }] }));
+      setMessagesMap((prev) => {
+        const messages = prev[sid] ?? [];
+        if (extra?.id && messages.some(message => message.id === id)) return prev;
+        return { ...prev, [sid]: [...messages, { id, role, text, ...extra }] };
+      });
       return id;
     },
   );
@@ -910,10 +914,27 @@ export function useChat(
       if (closedFollowupStatuses.includes(status)) {
         const current = followupMapRef.current[sid];
         const questionId = typeof c.body.question_id === "string" ? c.body.question_id : "";
-        if (!questionId || current?.question_id === questionId) setFollowup(sid, null);
+        const sameQuestion = current?.question_id === questionId;
+        if (sameQuestion && current?.request_id && c.request_id && c.request_id !== current.request_id) return true;
+        if (questionId && !(sameQuestion && current?.record_history === false)) {
+          if (sameQuestion && status === "resolved" && c.request_id
+            && c.request_id === current?.request_id && c.request_id === activeRequests.current.get(sid)
+            && c.body.answer_history_id === `followup:${questionId}`
+            && typeof c.body.answer_text === "string" && c.body.answer_text.trim()) {
+            const book = bookFor(sid);
+            startAssistantSegment(book);
+            book.hadTeamInternal = false;
+          }
+          setMessagesMap(prev => {
+            const rows = prev[sid] ?? [];
+            const next = settleFollowupAnswer(rows, c.body);
+            return next === rows ? prev : { ...prev, [sid]: next };
+          });
+        }
+        if (!questionId || sameQuestion) setFollowup(sid, null);
         return true;
       }
-      setFollowup(sid, parseFollowupQuestion(c.body, status));
+      setFollowup(sid, { ...parseFollowupQuestion(c.body, status), request_id: c.request_id });
       return false;
     };
 
@@ -1488,9 +1509,8 @@ export function useChat(
   /** 提交追问答案。 */
   const answerFollowup = useCallback(
     (sessionId: string, questionId: string, answers: { question_id: string; answers: string[] }[]) => {
-      const ok = sockRef.current?.followupAnswer(sessionId, questionId, answers);
-      if (!ok) return false;
       const question = followupMapRef.current[sessionId];
+      if (question?.question_id !== questionId || !sockRef.current?.followupAnswer(sessionId, questionId, answers)) return false;
       const waitsForPermissionAck = question?.record_history === false
         && ["acp_permission", "team_control"].includes(question.origin?.type ?? "");
       if (!waitsForPermissionAck) {
@@ -1498,12 +1518,11 @@ export function useChat(
         if (question?.record_history !== false) {
           // Ordinary follow-ups become a new user turn.
           const book = bookFor(sessionId);
-          book.assistantId = null;
-          book.toolMap.clear();
-          book.awaitingAssistantAfterTool = false;
-          resetDeltaBook(book);
+          startAssistantSegment(book);
           book.hadTeamInternal = false;
-          appendRef.current(sessionId, "user", `已选择：${formatFollowupAnswers(question, answers)}`);
+          appendRef.current(sessionId, "user", `已选择：${formatFollowupAnswers(question, answers)}`, {
+            id: `followup:${questionId}`, pendingFollowupAnswer: true,
+          });
         }
       }
       // External ACP permission prompts stay visible until the gateway

@@ -13,6 +13,7 @@ export function toolExitUnconfirmed(metadata?: ToolResultMetadata) {
 export interface BackendHistoryItem {
   role: string;
   content: string;
+  history_id?: string;
   timestamp?: number;
   turn_started_at?: number;
   turn_duration?: number;
@@ -108,7 +109,7 @@ export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
       ? item.role
       : item.role === "error" ? "error" : "status";
   const base: UiMessage = {
-    id: newId(),
+    id: role === "user" && item.history_id?.startsWith("followup:") ? item.history_id : newId(),
     role,
     text: item.content,
     timestamp: backendSecondsToMs(item.timestamp),
@@ -160,18 +161,48 @@ export function mapHistoryItems(items: BackendHistoryItem[]): UiMessage[] {
   return messages;
 }
 
+export function settleFollowupAnswer(messages: UiMessage[], body: {
+  question_id?: string; status?: string; answer_history_id?: string; answer_text?: string; record_history?: boolean;
+}): UiMessage[] {
+  if (!body.question_id || body.record_history === false) return messages;
+  const id = `followup:${body.question_id}`;
+  const existing = messages.find(message => message.role === "user" && message.id === id);
+  if (body.status === "expired" || body.status === "cancelled") {
+    return existing?.pendingFollowupAnswer ? messages.filter(message => message !== existing) : messages;
+  }
+  if (body.status !== "resolved") return messages;
+  const canonical = body.answer_history_id === id && typeof body.answer_text === "string" && body.answer_text.trim()
+    ? body.answer_text : undefined;
+  if (!existing) return canonical ? [...messages, { id, role: "user", text: canonical }] : messages;
+  const text = canonical ?? existing.text;
+  if (!existing.pendingFollowupAnswer && text === existing.text) return messages;
+  return messages.map(message => message === existing ? { ...message, text, pendingFollowupAnswer: false } : message);
+}
+
 export function mergeHistoryWithLiveMessages(
   history: UiMessage[],
   live: UiMessage[],
 ): UiMessage[] {
-  return live.reduce(
-    (messages, message) => message.role === "team_internal"
-      ? mergeTeamInternalMessage(messages, message)
-      : messages.some((existing) => isDuplicateAssistantOfTeamResult(existing, message))
-        ? messages
-      : [...messages, message],
-    history,
-  );
+  const savedAnswers = new Set(history.filter(m => m.role === "user" && m.id.startsWith("followup:")).map(m => m.id));
+  const shared = live.filter(m => savedAnswers.has(m.id));
+  let nextAnswer = 0;
+  return live.reduce((messages, message) => {
+    const anchor = shared[nextAnswer];
+    if (message === anchor) {
+      nextAnswer += 1;
+      return messages;
+    }
+    if (message.role === "user" && message.id.startsWith("followup:")
+      && messages.some(existing => existing.id === message.id)) return messages;
+    if (message.role !== "team_internal" && messages.some(existing => isDuplicateAssistantOfTeamResult(existing, message))) return messages;
+    const merged = message.role === "team_internal"
+      ? mergeTeamInternalMessage(messages, message) : [...messages, message];
+    // The answer may already be durable while the preceding live segment isn't.
+    // Team messages reconciled in place keep their original timeline position.
+    if (!anchor || merged.at(-1) !== message) return merged;
+    const at = merged.findIndex(row => row.id === anchor.id);
+    return [...merged.slice(0, at), message, ...merged.slice(at, -1)];
+  }, history);
 }
 
 function sameAssistantTurn(history: UiMessage, local: UiMessage): boolean {

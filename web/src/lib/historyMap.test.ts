@@ -4,6 +4,7 @@ import {
   mergeHistoryWithLiveMessages,
   normalizeTurnFileChanges,
   preserveLocalProcessDetails,
+  settleFollowupAnswer,
   type BackendHistoryItem,
 } from "./historyMap";
 import { mergeTeamInternalMessage } from "./teamMessageMerge";
@@ -20,6 +21,41 @@ const teamItem = (overrides: Partial<BackendHistoryItem>): BackendHistoryItem =>
   display_mode: "stream",
   timestamp: 1,
   ...overrides,
+});
+
+describe("follow-up answer recovery", () => {
+  const id = "followup:q2";
+  const pending: UiMessage = { id, role: "user", text: "已选择：红；样本", pendingFollowupAnswer: true };
+  const other: UiMessage = { id: "another", role: "user", text: pending.text };
+  const resolved = { status: "resolved", question_id: "q2", answer_history_id: id, answer_text: "已补充：颜色：红；备注：样本" };
+
+  it("replaces only the matched pending answer and keeps one stable history row through replay", () => {
+    const settled = settleFollowupAnswer([other, pending], resolved);
+    expect(settled.map(m => [m.id, m.text])).toEqual([[other.id, other.text], [id, resolved.answer_text]]);
+    expect(settleFollowupAnswer(settled, resolved)).toBe(settled);
+    const history = mapHistoryItems([{ role: "user", history_id: id, content: resolved.answer_text }]);
+    expect(history[0].id).toBe(id);
+    expect(mergeHistoryWithLiveMessages(history, [pending, other])).toEqual([...history, other]);
+    expect(settleFollowupAnswer([], resolved)[0].id).toBe(id);
+  });
+
+  it("retains old Gateway answers, removes only expired pending answers and omits permission replies", () => {
+    const old = settleFollowupAnswer([other, pending], { status: "resolved", question_id: "q2" });
+    expect(old.map(m => m.text)).toEqual([other.text, pending.text]);
+    expect(settleFollowupAnswer(old, {status: "expired", question_id:"q2"})).toBe(old);
+    expect(settleFollowupAnswer([other, pending], {status:"expired",question_id:"q2"})).toEqual([other]);
+    expect(settleFollowupAnswer([], {...resolved, record_history:false})).toEqual([]);
+    expect(settleFollowupAnswer([], {status:"resolved",question_id:"permission"})).toEqual([]);
+  });
+
+  it("uses the shared question ID to keep live segments on their original side of the saved answer", () => {
+    const first: UiMessage = { id: "first", role: "assistant", text: "before question" };
+    const last: UiMessage = { id: "last", role: "assistant", text: "after question" };
+    const history = mapHistoryItems([{ role: "user", history_id: id, content: resolved.answer_text }]);
+    expect(mergeHistoryWithLiveMessages(history, [other, first, pending, last])).toEqual([other, first, ...history, last]);
+    const team: UiMessage = { id: "team", role: "team_internal", text: first.text, eventType: "team_summary" };
+    expect(mergeHistoryWithLiveMessages([first, ...history], [team, pending, last])).toEqual([team, ...history, last]);
+  });
 });
 
 describe("backendDurationToMs", () => {

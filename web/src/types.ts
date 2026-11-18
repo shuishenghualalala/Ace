@@ -95,6 +95,7 @@ export interface PlanReview {
 
 export interface FollowupQuestion {
   question_id: string;
+  request_id?: string;
   title: string;
   record_history?: boolean;
   status?: "pending" | "expired" | "cancelled" | "resolved" | string;
@@ -680,6 +681,7 @@ export interface TurnFileChangeSummary {
 
 export interface UiMessage {
   id: string;
+  pendingFollowupAnswer?: boolean;
   role: MsgRole;
   text: string;
   /** 思考过程（assistant 消息） */

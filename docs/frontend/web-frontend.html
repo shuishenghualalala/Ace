@@ -358,6 +358,7 @@ cd web && npm run build
   <p>仅改 web 端展示层，未动 <code>useChat.ts</code> 计时记账逻辑与后端契约。</p>
 
   <h2>23. 追问选择框：desktop 端补齐 + 取消通知后端（2026-06-24）</h2>
+  <p>独立 Web 的普通追问用原问题 ID 标记本地答复。收到 Gateway 的已解决帧后按 <code>answer_history_id</code> 应用权威正文。历史回读和在途快照保留这个 ID，重复确认只保留一条。另一标签页首次收到当前请求的有效答复时，从下一条助手消息继续。同批问题和回执同步更新当前题号，旧卡片的点击不会提交下一题。活动历史与实时片段重叠时，共有的答复 ID 将其前后的正文放回原顺序。未带正文的旧回应保留已有显示，取消或过期清理未确认的本地答复。权限确认沿用独立呈现。<code>useChat.ts</code> 处理当前卡片和回执，<code>historyMap.ts</code> 合并实时答复与持久历史。</p>
   <p><code>ask_followup_question</code>（追问选择框）此前仅 web 端有 UI，desktop 端连
     <code>followup_question</code> ChunkKind 都未识别，收到追问帧会被静默丢弃。本次把该能力补到 desktop，
     并把「取消」按钮从「只清前端」改为「通知后端放弃等待」（web/desktop 统一）。</p>

@@ -91,6 +91,50 @@ afterEach(async () => {
 });
 
 describe("Web Gateway recovery", () => {
+  it("splits both tabs at the accepted question exactly once, even without a tool result", async () => {
+    let peer!: ReturnType<typeof useChat>;
+    function Peer() { peer = useChat(sid, afterFinal, registry); return null; }
+    const peerRoot = createRoot(document.createElement("div"));
+    await act(async () => peerRoot.render(createElement(Peer)));
+    const [sender, observer] = TestWebSocket.instances;
+    const send = (socket: TestWebSocket, kind: Chunk["kind"], seq: number, body: Chunk["body"], request = "turn") =>
+      socket.receive({ ...frame(kind, seq, body), request_id: request });
+    const question = { question_id: "q", questions: [{ id: "choice", question: "Pick", options: ["red"] }] };
+    const resolution = { status: "resolved", question_id: "q", answer_history_id: "followup:q", answer_text: "Chosen red" };
+    try {
+      await act(async () => observer.open());
+      await act(async () => {
+        for (const socket of [sender, observer]) {
+          send(socket, "delta", 1, { text: "before" });
+          send(socket, "tool", 2, { phase: "start", name: "ask_followup_question", tool_call_id: "ask" });
+        }
+        send(sender, "followup_question", 3, question);
+      });
+      await act(async () => {
+        expect(chat.answerFollowup(sid, "q", [{ question_id: "choice", answers: ["red"] }])).toBe(true);
+        send(observer, "followup_question", 3, question);
+        for (const socket of [sender, observer]) {
+          send(socket, "followup_question", 4, resolution);
+          send(socket, "delta", 5, { text: "after" });
+          send(socket, "followup_question", 6, { ...question, question_id: "new" });
+          send(socket, "followup_question", 7, resolution);
+          send(socket, "followup_question", 8, { ...resolution, question_id: "new", answer_history_id: "followup:new" }, "old-turn");
+          send(socket, "delta", 9, { text: " suffix" });
+        }
+      });
+      for (const tab of [chat, peer]) {
+        expect(tab.messages.map(message => [message.role, message.text])).toEqual([
+          ["assistant", "before"], ["user", "Chosen red"], ["assistant", "after suffix"],
+        ]);
+        expect(tab.messages[1].id).toBe("followup:q");
+        expect(tab.messages[0].toolCalls?.map(call => call.toolCallId)).toEqual(["ask"]);
+        expect(tab.messages[2].toolCalls?.length ?? 0).toBe(0);
+        expect(tab.followupQuestion?.question_id).toBe("new");
+      }
+      await act(async () => { expect(chat.answerFollowup(sid, "q", [])).toBe(false); });
+      expect(sender.sent.filter(payload => payload.action === "followup_answer")).toHaveLength(1);
+    } finally { await act(async () => peerRoot.unmount()); }
+  });
   it("subscribes with the old epoch, holds the visible prefix, then replaces it from persisted history", async () => {
     vi.mocked(api.sessionStatus)
       .mockResolvedValueOnce(status("running"))
