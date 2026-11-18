@@ -15,9 +15,15 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 use windows_sys::Win32::Security::Authorization::{
-    BuildExplicitAccessWithNameW, BuildSecurityDescriptorW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
+    BuildExplicitAccessWithNameW, BuildSecurityDescriptorW, BuildTrusteeWithSidW,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS,
 };
-use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::{
+    EqualSid, GetAce, GetSecurityDescriptorDacl, IsValidSecurityDescriptor, ACCESS_ALLOWED_ACE,
+    ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+};
+
+use super::token::{sid_string_for_account, LocalSid};
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
 use windows_sys::Win32::System::Threading::INFINITE;
 
@@ -33,6 +39,7 @@ const ONLINE_BLOCK_V6: GUID = GUID::from_u128(0xd07399a9_a34e_4858_84ed_dd9f323f
 
 pub fn install(offline_account: &str, online_account: &str) -> Result<(), String> {
     let engine = Engine::open()?;
+    let filter_security = FilterSecurity::for_installing_user(&engine)?;
     let mut transaction = engine.transaction()?;
     ensure_provider(engine.handle)?;
     ensure_sublayer(engine.handle)?;
@@ -42,19 +49,19 @@ pub fn install(offline_account: &str, online_account: &str) -> Result<(), String
         (OFFLINE_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
         (OFFLINE_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &offline, false, false)?;
+        replace_filter(engine.handle, key, layer, &offline, false, &filter_security)?;
     }
     for (key, layer) in [
         (ONLINE_PERMIT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
         (ONLINE_PERMIT_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &online, true, true)?;
+        replace_filter(engine.handle, key, layer, &online, true, &filter_security)?;
     }
     for (key, layer) in [
         (ONLINE_BLOCK_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
         (ONLINE_BLOCK_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &online, false, false)?;
+        replace_filter(engine.handle, key, layer, &online, false, &filter_security)?;
     }
     transaction.commit()
 }
@@ -79,87 +86,143 @@ pub fn uninstall() -> Result<(), String> {
     transaction.commit()
 }
 
-/// Verify all Ace WFP filters exist **and** have the expected action,
-/// condition count, and layer key. A filter that exists but was externally
-/// modified (wrong action, missing conditions, wrong layer) must be detected
-/// so the caller can trigger re-install (audit M6).
-pub fn verify_installed() -> Result<(), String> {
+/// Verify the filters for the account about to execute a restricted command.
+pub fn verify_installed(account: &str, proxy: bool) -> Result<(), String> {
     let engine = Engine::open()?;
-    // (name, key, layer, action, expected numFilterConditions)
-    let expected: [(&str, GUID, GUID, u32, u32); 6] = [
+    let account_sid = LocalSid::from_string(&sid_string_for_account(account)?)?;
+    let layers = [
         (
-            "OFFLINE_V4",
+            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
             OFFLINE_V4,
-            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            FWP_ACTION_BLOCK,
-            1,
-        ),
-        (
-            "OFFLINE_V6",
-            OFFLINE_V6,
-            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWP_ACTION_BLOCK,
-            1,
-        ),
-        (
-            "ONLINE_PERMIT_V4",
-            ONLINE_PERMIT_V4,
-            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            FWP_ACTION_PERMIT,
-            3,
-        ),
-        (
-            "ONLINE_PERMIT_V6",
-            ONLINE_PERMIT_V6,
-            FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWP_ACTION_PERMIT,
-            3,
-        ),
-        (
-            "ONLINE_BLOCK_V4",
             ONLINE_BLOCK_V4,
-            FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            FWP_ACTION_BLOCK,
-            1,
+            ONLINE_PERMIT_V4,
         ),
         (
-            "ONLINE_BLOCK_V6",
-            ONLINE_BLOCK_V6,
             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            FWP_ACTION_BLOCK,
-            1,
+            OFFLINE_V6,
+            ONLINE_BLOCK_V6,
+            ONLINE_PERMIT_V6,
         ),
     ];
-    for (name, key, layer, action, conditions) in expected {
-        let mut filter: *mut FWPM_FILTER0 = null_mut();
-        check(
-            unsafe { FwpmFilterGetByKey0(engine.handle, &key, &mut filter) },
-            "FwpmFilterGetByKey0",
-        )?;
-        let result = unsafe {
-            let f = &*filter;
-            let layer_match = (
-                f.layerKey.data1,
-                f.layerKey.data2,
-                f.layerKey.data3,
-                f.layerKey.data4,
-            ) == (layer.data1, layer.data2, layer.data3, layer.data4);
-            let action_match = f.action.r#type == action;
-            let cond_match = f.numFilterConditions == conditions;
-            if layer_match && action_match && cond_match {
-                Ok(())
-            } else {
-                Err(format!(
-                    "WFP filter {name} mismatch: action=0x{:X} (expected 0x{action:X}), \
-                     conditions={} (expected {conditions}), layer_match={layer_match}",
-                    f.action.r#type, f.numFilterConditions
-                ))
-            }
-        };
-        unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
-        result?;
+    for (layer, offline, online_block, online_permit) in layers {
+        if proxy {
+            verify_filter(&engine, layer, online_block, &account_sid, false)?;
+            verify_filter(&engine, layer, online_permit, &account_sid, true)?;
+        } else {
+            verify_filter(&engine, layer, offline, &account_sid, false)?;
+        }
     }
     Ok(())
+}
+
+fn verify_filter(
+    engine: &Engine,
+    layer: GUID,
+    key: GUID,
+    account_sid: &LocalSid,
+    permit_proxy: bool,
+) -> Result<(), String> {
+    let mut filter: *mut FWPM_FILTER0 = null_mut();
+    check(
+        unsafe { FwpmFilterGetByKey0(engine.handle, &key, &mut filter) },
+        "FwpmFilterGetByKey0; run Windows sandbox setup or repair",
+    )?;
+    let matches = unsafe { filter.as_ref() }
+        .is_some_and(|filter| filter_matches(filter, &layer, account_sid, permit_proxy));
+    unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
+    if matches {
+        Ok(())
+    } else {
+        Err("Windows sandbox firewall policy does not match the sandbox account; run setup or repair"
+            .to_string())
+    }
+}
+
+fn filter_matches(
+    filter: &FWPM_FILTER0,
+    layer: &GUID,
+    account_sid: &LocalSid,
+    permit_proxy: bool,
+) -> bool {
+    let (action, count, weight) = if permit_proxy {
+        (FWP_ACTION_PERMIT, 3, 15)
+    } else {
+        (FWP_ACTION_BLOCK, 1, 0)
+    };
+    if !same_key(&filter.layerKey, layer)
+        || !same_key(&filter.subLayerKey, &SUBLAYER_KEY)
+        || filter.flags & FWPM_FILTER_FLAG_DISABLED != 0
+        || filter.action.r#type != action
+        || filter.weight.r#type != FWP_UINT8
+        || unsafe { filter.weight.Anonymous.uint8 } != weight
+        || filter.numFilterConditions != count
+        || filter.filterCondition.is_null()
+    {
+        return false;
+    }
+    let conditions = unsafe { std::slice::from_raw_parts(filter.filterCondition, count as usize) };
+    let user_matches = conditions.iter().any(|condition| {
+        same_key(&condition.fieldKey, &FWPM_CONDITION_ALE_USER_ID)
+            && condition.matchType == FWP_MATCH_EQUAL
+            && condition.conditionValue.r#type == FWP_SECURITY_DESCRIPTOR_TYPE
+            && unsafe { condition.conditionValue.Anonymous.sd.as_ref() }
+                .is_some_and(|blob| user_condition_matches(blob, account_sid))
+    });
+    if !permit_proxy || !user_matches {
+        return user_matches;
+    }
+    let port_matches = conditions.iter().any(|condition| {
+        same_key(&condition.fieldKey, &FWPM_CONDITION_IP_REMOTE_PORT)
+            && condition.matchType == FWP_MATCH_EQUAL
+            && condition.conditionValue.r#type == FWP_UINT16
+            && unsafe { condition.conditionValue.Anonymous.uint16 } == PROXY_PORT
+    });
+    let loopback_matches = conditions.iter().any(|condition| {
+        same_key(&condition.fieldKey, &FWPM_CONDITION_FLAGS)
+            && condition.matchType == FWP_MATCH_FLAGS_ALL_SET
+            && condition.conditionValue.r#type == FWP_UINT32
+            && unsafe { condition.conditionValue.Anonymous.uint32 }
+                == FWP_CONDITION_FLAG_IS_LOOPBACK
+    });
+    port_matches && loopback_matches
+}
+
+fn user_condition_matches(blob: &FWP_BYTE_BLOB, account_sid: &LocalSid) -> bool {
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    let descriptor = blob.data.cast();
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl: *mut ACL = null_mut();
+    if blob.data.is_null()
+        || unsafe { IsValidSecurityDescriptor(descriptor) } == 0
+        || unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }
+            == 0
+        || present == 0
+        || !unsafe { dacl.as_ref() }.is_some_and(|dacl| dacl.AceCount == 1)
+    {
+        return false;
+    }
+    let mut ace = null_mut();
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
+        return false;
+    }
+    unsafe { ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() }.is_some_and(|ace| {
+        ace.Header.AceType == ACCESS_ALLOWED_ACE_TYPE
+            && ace.Mask == FWP_ACTRL_MATCH_FILTER
+            && unsafe {
+                EqualSid(
+                    (&raw const ace.SidStart).cast_mut().cast(),
+                    account_sid.as_ptr(),
+                ) != 0
+            }
+    })
+}
+
+fn same_key(left: &GUID, right: &GUID) -> bool {
+    left.data1 == right.data1
+        && left.data2 == right.data2
+        && left.data3 == right.data3
+        && left.data4 == right.data4
 }
 
 struct Engine {
@@ -225,6 +288,68 @@ impl Drop for Transaction<'_> {
                 FwpmTransactionAbort0(self.engine.handle);
             }
         }
+    }
+}
+
+struct FilterSecurity(PSECURITY_DESCRIPTOR);
+
+impl FilterSecurity {
+    fn for_installing_user(engine: &Engine) -> Result<Self, String> {
+        // A normal host token can open BFE but needs FWPM_ACTRL_READ on each
+        // filter. Preserve the filter container's default permissions and add
+        // only that read right for the trusted Windows user who runs Ace.
+        let mut descriptor = null_mut();
+        check(
+            unsafe {
+                FwpmFilterGetSecurityInfoByKey0(
+                    engine.handle,
+                    null(),
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    &mut descriptor,
+                )
+            },
+            "FwpmFilterGetSecurityInfoByKey0",
+        )?;
+        let result = Self::with_user_read(descriptor);
+        unsafe { FwpmFreeMemory0(&mut descriptor) };
+        result
+    }
+
+    fn with_user_read(descriptor: PSECURITY_DESCRIPTOR) -> Result<Self, String> {
+        let mut user = super::state::current_user_sid()?;
+        let mut access: EXPLICIT_ACCESS_W = unsafe { zeroed() };
+        access.grfAccessPermissions = FWPM_ACTRL_READ;
+        access.grfAccessMode = GRANT_ACCESS;
+        unsafe { BuildTrusteeWithSidW(&mut access.Trustee, user.as_mut_ptr().cast()) };
+        let mut length = 0;
+        let mut updated = null_mut();
+        check(
+            unsafe {
+                BuildSecurityDescriptorW(
+                    null(),
+                    null(),
+                    1,
+                    &access,
+                    0,
+                    null(),
+                    descriptor,
+                    &mut length,
+                    &mut updated,
+                )
+            },
+            "BuildSecurityDescriptorW for Ace WFP filter",
+        )?;
+        Ok(Self(updated))
+    }
+}
+
+impl Drop for FilterSecurity {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0 as HLOCAL) };
     }
 }
 
@@ -324,7 +449,7 @@ fn replace_filter(
     layer: GUID,
     user: &UserCondition,
     permit_proxy: bool,
-    high_weight: bool,
+    security: &FilterSecurity,
 ) -> Result<(), String> {
     delete_filter(engine, &key)?;
     let mut conditions = vec![FWPM_FILTER_CONDITION0 {
@@ -377,7 +502,7 @@ fn replace_filter(
         weight: FWP_VALUE0 {
             r#type: FWP_UINT8,
             Anonymous: FWP_VALUE0_0 {
-                uint8: if high_weight { 15 } else { 0 },
+                uint8: if permit_proxy { 15 } else { 0 },
             },
         },
         numFilterConditions: conditions.len() as u32,
@@ -402,7 +527,7 @@ fn replace_filter(
     };
     let mut id = 0;
     check(
-        unsafe { FwpmFilterAdd0(engine, &filter, null_mut(), &mut id) },
+        unsafe { FwpmFilterAdd0(engine, &filter, security.0, &mut id) },
         "FwpmFilterAdd0",
     )
 }
@@ -470,6 +595,47 @@ mod tests {
             assert!(!dup, "duplicate WFP filter key at index {index}");
         }
     }
+    #[test]
+    fn filter_security_grants_only_metadata_read_to_the_installing_user() {
+        let security = FilterSecurity::with_user_read(null_mut()).unwrap();
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = null_mut();
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(security.0, &mut present, &mut dacl, &mut defaulted)
+            },
+            0
+        );
+        assert_ne!(present, 0);
+        assert_eq!(unsafe { (*dacl).AceCount }, 1);
+        let mut ace = null_mut();
+        assert_ne!(unsafe { GetAce(dacl, 0, &mut ace) }, 0);
+        let ace = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+        assert_eq!(ace.Mask, FWPM_ACTRL_READ);
+        let mut user = super::super::state::current_user_sid().unwrap();
+        assert_ne!(
+            unsafe {
+                EqualSid(
+                    (&raw const ace.SidStart).cast_mut().cast(),
+                    user.as_mut_ptr().cast(),
+                )
+            },
+            0
+        );
+    }
+
+    #[test]
+    fn verification_rejects_a_filter_bound_to_another_account() {
+        let account = std::env::var("USERNAME").unwrap();
+        let rule = UserCondition::new(&account).unwrap();
+        let account_sid =
+            LocalSid::from_string(&sid_string_for_account(&account).unwrap()).unwrap();
+        let everyone = LocalSid::from_string("S-1-1-0").unwrap();
+        assert!(user_condition_matches(&rule.blob, &account_sid));
+        assert!(!user_condition_matches(&rule.blob, &everyone));
+    }
+
     #[test]
     fn account_identity_not_desktop_session_is_filter_boundary() {
         assert_eq!(PROXY_PORT, 43119);

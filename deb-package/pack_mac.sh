@@ -319,6 +319,8 @@ rm -rf "$APP_GW"
 cp -R "$STAGE_GW" "$APP_GW"
 chmod -R 755 "$APP_GW/runtimes"
 echo "✓ gateway 已嵌入 $APP_GW"
+APP_RESOURCES="$APP_PATH/Contents/Resources"
+APP_SECURITY_RUNTIME="$APP_RESOURCES/ace-security-runtime"
 
 # electron-builder 在上一步生成的签名只覆盖当时的 .app 内容。嵌入 gateway、
 # Python/Node 运行时以及裁剪 locales 后，必须重新封存整个 bundle；否则
@@ -332,6 +334,15 @@ if [ -n "$CURRENT_TEAM_ID" ] && [ "$CURRENT_TEAM_ID" != 'not set' ]; then
     exit 1
 fi
 codesign --force --deep --sign - --timestamp=none "$APP_PATH"
+
+# 清单绑定签名后的 helper 字节。最后只重新封存外层应用，
+# 以免再次签名嵌套组件后让清单失效。
+codesign --force --sign - --timestamp=none "$APP_SECURITY_RUNTIME"
+SIGNED_SECURITY_STAGE="$STAGE_DIR/signed-security-runtime"
+node desktop/scripts/prepare-security-runtime.mjs \
+    --runtime "$APP_SECURITY_RUNTIME" --output "$SIGNED_SECURITY_STAGE"
+cp "$SIGNED_SECURITY_STAGE/runtime-manifest.json" "$APP_RESOURCES/runtime-manifest.json"
+codesign --force --sign - --timestamp=none "$APP_PATH"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 # 签名校验只检查封存，不会发现 Hardened Runtime 与嵌套 Framework
 # 的 Team ID 不匹配；用真实打包主程序启动一次，但不启动 Gateway。
@@ -365,8 +376,17 @@ echo "✓ .app 签名完整，Electron 主进程启动探针通过"
 
 STAGE_DMG="$(mktemp -d /tmp/crew-dmg-stage.XXXXXX)"
 trap 'rm -rf "$STAGE_DMG"' EXIT
-cp -R "$APP_PATH" "$STAGE_DMG/crew-desktop.app"
-codesign --verify --deep --strict "$STAGE_DMG/crew-desktop.app"
+DMG_APP="$STAGE_DMG/crew-desktop.app"
+cp -R "$APP_PATH" "$DMG_APP"
+codesign --verify --deep --strict "$DMG_APP"
+DMG_RESOURCES="$DMG_APP/Contents/Resources"
+DMG_SECURITY_RUNTIME="$DMG_RESOURCES/ace-security-runtime"
+DMG_GW="$DMG_RESOURCES/crew-gateway"
+codesign --verify --strict "$DMG_SECURITY_RUNTIME"
+node desktop/scripts/verify-security-runtime.mjs "$DMG_RESOURCES"
+PATH="/usr/bin:/bin:/usr/sbin:/sbin" PYTHONPATH="$DMG_GW" CREW_PACKAGED=1 PYTHONDONTWRITEBYTECODE=1 \
+    "$DMG_GW/runtimes/python/bin/python3" -s "$ROOT_DIR/tests/security/security_matrix.py" \
+    --platform macos --runtime "$DMG_SECURITY_RUNTIME"
 ln -s /Applications "$STAGE_DMG/Applications"
 rm -f "$DMG_NAME"
 hdiutil create -volname "Crew" -srcfolder "$STAGE_DMG" -ov -format UDZO "$DMG_NAME" >/dev/null

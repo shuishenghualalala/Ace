@@ -44,6 +44,7 @@ from crew.security.models import (
     NetworkEntry,
     SandboxPermissions,
     additional_permissions_cover,
+    default_conversation_permission_mode,
     merge_additional_permissions,
     serialize_additional_permissions,
 )
@@ -165,6 +166,7 @@ class SecurityApprovalService:
         *,
         db_path: str | Path,
         security_enabled: bool = True,
+        workspace_network_access: bool = False,
     ) -> None:
         self.approvals = approvals
         self.grants = grants
@@ -172,6 +174,7 @@ class SecurityApprovalService:
         self.audit = audit
         self.db_path = Path(db_path)
         self.security_enabled = bool(security_enabled)
+        self.workspace_network_access = workspace_network_access is True
         self._mode_lock = threading.Lock()
         # Serializes approval-decide (grant issue → durable audit → rollback) against
         # grant consumption in authorize_*. Without this, a concurrent authorize could
@@ -276,11 +279,7 @@ class SecurityApprovalService:
 
     @property
     def _default_mode(self) -> ConversationPermissionMode:
-        return (
-            ConversationPermissionMode.REQUEST_APPROVAL
-            if self.security_enabled
-            else ConversationPermissionMode.FULL_ACCESS
-        )
+        return default_conversation_permission_mode(self.security_enabled)
 
     def revoke_owner(self, owner_account_id: str) -> int:
         """Drop owner-scoped in-memory modes, pending approvals, and transient grants."""

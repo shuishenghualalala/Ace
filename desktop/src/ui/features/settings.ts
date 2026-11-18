@@ -35,6 +35,8 @@ import { createSettingsShell, type SettingsShell } from './settings-shell';
 import { mountSettingsDataPanes } from './settings-data';
 import { disposeMcpPane } from './settings-mcp';
 import { setSystemSettingsPane } from './system-page';
+import { createSecurityPageContribution } from './security-center';
+import { renderSecurityPermissionSettings } from './security-permission-settings';
 import { productModeStore } from '../stores/product-mode-store';
 
 const STORAGE_KEY = 'crew.settings';
@@ -44,6 +46,8 @@ const HELP_DOC_VERSION_LABEL = `文档版本 ${__HELP_DOC_VERSION__}`;
 
 const SYSTEM_THEME_QUERY = '(prefers-color-scheme: dark)';
 const systemThemeMedia = window.matchMedia?.(SYSTEM_THEME_QUERY) ?? null;
+const settingsSecurityPage = createSecurityPageContribution();
+let settingsSecurityController: AbortController | null = null;
 
 function loadSettings(): Settings {
   try {
@@ -207,17 +211,6 @@ async function syncCloseBehaviorFromMain(): Promise<void> {
   }
 }
 
-async function syncStrictSecurityFromMain(): Promise<void> {
-  try {
-    const result = await window.Crew?.getStrictSecurityEnabled?.();
-    if (!result || typeof result.strictSecurityEnabled !== 'boolean') return;
-    const toggle = document.querySelector<HTMLInputElement>('#set-strict-security');
-    if (toggle) toggle.checked = result.strictSecurityEnabled;
-  } catch {
-    // 主进程不可用时保留 fail-closed 的 checked 默认值。
-  }
-}
-
 function updateRangeValue(id: string, px: number): void {
   const el = document.getElementById(id);
   if (el) el.textContent = `${px}px`;
@@ -302,6 +295,7 @@ function setActivePane(pane: string): void {
 
 function mountSettingsShell(): void {
   if (settingsShell?.element.isConnected) return;
+  disposeSettingsSecurityPane();
   settingsShell?.dispose();
   settingsShell = null;
   const staging = document.getElementById('settings-pane-staging');
@@ -325,12 +319,12 @@ export function openSettingsPane(paneId?: string): void {
   if (pane) onSettingsPaneOpened(pane);
   void syncAutoStartFromSystem();
   void syncCloseBehaviorFromMain();
-  void syncStrictSecurityFromMain();
 }
 
 function closeSettingsModal(): void {
   settingsShell?.close();
   setSystemSettingsPane(null);
+  disposeSettingsSecurityPane();
   helpDocOverlay?.close();
   closeContactModal(false);
   $('#settings-btn')?.focus();
@@ -418,23 +412,6 @@ function bindControls(): void {
       } catch {
         checkbox.checked = current.autoStart;
         notify('开机自启设置失败');
-      }
-    })();
-  });
-  document.querySelector<HTMLInputElement>('#set-strict-security')?.addEventListener('change', (e) => {
-    const checkbox = e.target as HTMLInputElement;
-    const previous = !checkbox.checked;
-    void (async (): Promise<void> => {
-      try {
-        const result = await window.Crew?.setStrictSecurityEnabled?.(checkbox.checked);
-        if (!result || typeof result.strictSecurityEnabled !== 'boolean') {
-          throw new Error('invalid strict security preference');
-        }
-        checkbox.checked = result.strictSecurityEnabled;
-        notify(result.strictSecurityEnabled ? '已开启严格安全约束，网关正在重启以应用' : '已启用兼容模式，网关正在重启以应用');
-      } catch {
-        checkbox.checked = previous;
-        notify('安全策略设置失败');
       }
     })();
   });
@@ -551,8 +528,37 @@ export function registerConfigPaneRenderers(r: {
   configRenderers = r;
 }
 
+export function disposeSettingsSecurityPane(): void {
+  if (!settingsSecurityController) return;
+  settingsSecurityController.abort();
+  settingsSecurityController = null;
+  void settingsSecurityPage.deactivate();
+}
+
+function syncSettingsSecurityPane(): void {
+  const active = settingsShell?.element.querySelector('[data-settings-pane="security"][aria-current="page"]');
+  if (!active || settingsShell?.element.hidden) {
+    disposeSettingsSecurityPane();
+    return;
+  }
+  const permissionRoot = document.getElementById('settings-security-permissions-root');
+  if (permissionRoot) renderSecurityPermissionSettings(permissionRoot);
+  if (settingsSecurityPage.isAvailable?.() === false) {
+    disposeSettingsSecurityPane();
+    return;
+  }
+  if (settingsSecurityController) return;
+  settingsSecurityController = new AbortController();
+  void settingsSecurityPage.activate({ signal: settingsSecurityController.signal });
+}
+
 function onSettingsPaneOpened(pane: string): void {
   setSystemSettingsPane(pane);
+  if (pane === 'security') {
+    syncSettingsSecurityPane();
+  } else {
+    disposeSettingsSecurityPane();
+  }
   if (pane === 'account') {
     renderAuthAccount();
   }
@@ -581,6 +587,8 @@ export function bindSettingsUi(): void {
   bindSettingsLibraryUi();
   bindContactModal();
   window.addEventListener('pagehide', disposeSettingsLibraryPane, { once: true });
+  window.addEventListener('pagehide', disposeSettingsSecurityPane, { once: true });
+  window.addEventListener('security:config-change', syncSettingsSecurityPane);
   bindSessionPreviewModal();
   bindControls();
   setActivePane('account');
@@ -590,7 +598,6 @@ export function bindSettingsUi(): void {
   applyAll();
   void syncAutoStartFromSystem();
   void syncCloseBehaviorFromMain();
-  void syncStrictSecurityFromMain();
   systemThemeMedia?.addEventListener('change', () => {
     if (current.themeMode === 'system') applyTheme('system');
   });

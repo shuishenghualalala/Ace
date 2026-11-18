@@ -324,8 +324,11 @@ class Config:
     health_port: int = 0   # 独立线程 health 服务端口（runtime.health_port）；0 = 主端口+1
 
     # --- security ---
-    # 默认关闭：工具以当前宿主用户权限运行，不启用沙箱或审批链路。
+    # Gateway、渠道和其他宿主兼容策略。
     security_enabled: bool = False
+    # 内建工具的原生沙箱与会话级审批。
+    security_sandbox_enabled: bool = True
+    security_workspace_network_access: bool = False
 
     # --- authentication ---
     # local：本机免登录；email：本机邮箱租户入口；remote：通过用户配置的认证服务登录。
@@ -1981,6 +1984,17 @@ def load_config(config_path: str | Path | None = None) -> Config:
                 security.get("enabled"),
                 cfg.security_enabled,
             )
+            legacy_sandbox_enabled = _as_bool(
+                security.get("enabled"),
+                cfg.security_sandbox_enabled,
+            )
+            cfg.security_sandbox_enabled = _as_bool(
+                security.get("sandbox_enabled"),
+                legacy_sandbox_enabled,
+            )
+            workspace_write = security.get("sandbox_workspace_write")
+            if isinstance(workspace_write, dict):
+                cfg.security_workspace_network_access = workspace_write.get("network_access") is True
         auth = data.get("auth", {})
         if isinstance(auth, dict):
             mode = str(auth.get("mode", cfg.auth_mode) or cfg.auth_mode).strip().lower()

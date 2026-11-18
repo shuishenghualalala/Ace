@@ -1,18 +1,42 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+/** @vitest-environment happy-dom */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   SECURITY_APPROVAL_CHOICES,
   SECURITY_MODE_OPTIONS,
   assignSecurityMode,
   approvalBoundaryLabel,
+  currentSecurityMode,
   formatApprovalSummary,
   securityModeForSession,
   selectNextConversationMode,
 } from '../../src/ui/features/security-approval';
+import { preferredNewConversationMode } from '../../src/ui/features/security-permission-settings';
+import { discardDraft, setComposerTargetWorkspace } from '../../src/ui/features/workspaces';
+import { authStore } from '../../src/ui/stores/auth-store';
+import { sessionStore } from '../../src/ui/stores/session-store';
+
+vi.mock('../../src/ui/features/security-permission-settings', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/ui/features/security-permission-settings')>(),
+  preferredNewConversationMode: vi.fn(),
+}));
+
+function openSavedSession(id: string): void {
+  sessionStore.set({
+    activeSessionId: id,
+    sessions: [{ id, title: 'Saved', updatedAt: 1, preview: '', badge: '', workspaceId: 'default' }],
+  });
+}
 
 describe('security approval UI model', () => {
-  beforeEach(async () => {
-    await selectNextConversationMode('request_approval', () => true);
+  beforeEach(() => {
+    sessionStore.set({ activeSessionId: null, sessions: [] });
+    authStore.set({ isLoggedIn: true });
+    vi.mocked(preferredNewConversationMode).mockReturnValue(undefined);
+  });
+  afterEach(() => {
+    discardDraft();
+    vi.unstubAllGlobals();
   });
 
   it('offers all four explicit approval outcomes including reject', () => {
@@ -27,38 +51,95 @@ describe('security approval UI model', () => {
     ]);
   });
 
-  it('defaults each new conversation to request approval', async () => {
-    await expect(assignSecurityMode('session-a')).resolves.toBe('request_approval');
-    expect(securityModeForSession('session-a')).toBe('request_approval');
+  it('defaults new conversations to auto-review', async () => {
+    expect(securityModeForSession('not-initialized')).toBe('auto_review');
+    await expect(assignSecurityMode('session-a')).resolves.toBe('auto_review');
+    expect(securityModeForSession('session-a')).toBe('auto_review');
   });
 
   it('requires an explicit confirmation before full access', async () => {
+    openSavedSession('saved-confirmation');
     const reject = vi.fn(() => false);
     await expect(selectNextConversationMode('full_access', reject)).resolves.toBe(false);
-    await expect(assignSecurityMode('session-b')).resolves.toBe('request_approval');
+    await expect(assignSecurityMode('session-b')).resolves.toBe('auto_review');
     expect(reject).toHaveBeenCalledOnce();
   });
 
   it('waits for the styled confirmation result before granting full access', async () => {
+    openSavedSession('saved-async-confirmation');
     const reject = vi.fn(async () => false);
     await expect(selectNextConversationMode('full_access', reject)).resolves.toBe(false);
     expect(reject).toHaveBeenCalledOnce();
   });
 
-  it('does not persist full access as a blank-composer preset', async () => {
-    await expect(selectNextConversationMode('full_access', () => true)).resolves.toBe(true);
-    await assignSecurityMode('full-access-conversation');
-    await assignSecurityMode('after-full-access');
-    expect(securityModeForSession('full-access-conversation')).toBe('request_approval');
-    expect(securityModeForSession('after-full-access')).toBe('request_approval');
+  it('does not prompt for full access when a non-draft session cannot be identified', async () => {
+    const confirm = vi.fn(() => true);
+    const securitySetMode = vi.fn();
+    vi.stubGlobal('Crew', { securitySetMode });
+
+    sessionStore.set({ activeSessionId: 'unknown-session' });
+    await expect(selectNextConversationMode('full_access', confirm)).resolves.toBe(false);
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(securitySetMode).not.toHaveBeenCalled();
   });
 
-  it('assigns an accepted mode only to subsequently created conversations', async () => {
-    await assignSecurityMode('old');
+  it('requires Gateway acknowledgement and keeps full access scoped to the saved conversation', async () => {
+    const securitySetMode = vi.fn()
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({ ok: true, body: { mode: 'full_access' } })
+      .mockResolvedValueOnce({ ok: true, body: { mode: 'auto_review' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+    openSavedSession('full-access-conversation');
+
+    await expect(selectNextConversationMode('full_access', () => true)).resolves.toBe(false);
+    expect(securityModeForSession('full-access-conversation')).toBe('auto_review');
+    await expect(selectNextConversationMode('full_access', () => true)).resolves.toBe(true);
+    await assignSecurityMode('after-full-access');
+
+    expect(securityModeForSession('full-access-conversation')).toBe('full_access');
+    expect(securityModeForSession('after-full-access')).toBe('auto_review');
+  });
+
+  it('does not apply full access after changing conversations during confirmation', async () => {
+    const securitySetMode = vi.fn();
+    vi.stubGlobal('Crew', { securitySetMode });
+    openSavedSession('saved-before-confirmation');
+
+    await expect(selectNextConversationMode('full_access', async () => {
+      openSavedSession('saved-after-confirmation');
+      return true;
+    })).resolves.toBe(false);
+
+    expect(securitySetMode).not.toHaveBeenCalled();
+  });
+
+  it('uses the saved preference for each new conversation and keeps existing sessions on their own mode', async () => {
+    vi.mocked(preferredNewConversationMode).mockReturnValue('request_approval');
+    await expect(assignSecurityMode('new-one', 'project-one')).resolves.toBe('request_approval');
+    await expect(assignSecurityMode('new-two', 'project-two')).resolves.toBe('request_approval');
+    openSavedSession('existing');
+    expect(currentSecurityMode()).toBe('auto_review');
+
+    const securitySetMode = vi.fn().mockResolvedValue({ ok: true, body: { mode: 'auto_review' } });
+    vi.stubGlobal('Crew', { securitySetMode });
     await expect(selectNextConversationMode('auto_review', () => true)).resolves.toBe(true);
-    await assignSecurityMode('new');
-    expect(securityModeForSession('old')).toBe('request_approval');
-    expect(securityModeForSession('new')).toBe('auto_review');
+    expect(securitySetMode).toHaveBeenCalledWith({ sessionId: 'existing', workspaceId: 'default', mode: 'auto_review' });
+    sessionStore.set({ activeSessionId: null });
+    expect(currentSecurityMode()).toBe('request_approval');
+  });
+
+  it('preserves an explicit draft selection until its workspace changes', async () => {
+    vi.mocked(preferredNewConversationMode).mockReturnValue('request_approval');
+    await expect(selectNextConversationMode('request_approval', () => true)).resolves.toBe(true);
+    expect(sessionStore.get().activeSessionId).toBeTruthy();
+    vi.mocked(preferredNewConversationMode).mockReturnValue('auto_review');
+    expect(currentSecurityMode()).toBe('request_approval');
+
+    setComposerTargetWorkspace('other-project');
+    expect(currentSecurityMode()).toBe('auto_review');
+    discardDraft();
+    expect(currentSecurityMode()).toBe('auto_review');
   });
 
   it('shows the specific raw command before final wrapped argv', () => {

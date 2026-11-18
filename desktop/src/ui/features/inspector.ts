@@ -36,6 +36,7 @@ import {
   teamCollaborationTaskCount,
 } from './team-collaboration-board';
 import { isStudioView } from './studio-chrome-state';
+import { rememberBrowserDraftSecurityScope } from './security-approval';
 import { clearRuntimeToken, setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
 import { STORAGE_KEYS } from '../../shared/storage-keys';
 import {
@@ -2318,14 +2319,18 @@ async function prepareBrowserWorkbench(
 ): Promise<void> {
   if (browserOpeningSession === sessionId) return;
   browserOpeningSession = sessionId;
+  const workspaceId = composerWorkspaceId();
+  const owner = state.userInfo;
   try {
     await backendApi.ensureSession(sessionId, {
-      workspace_id: composerWorkspaceId(),
+      workspace_id: workspaceId,
       title: '浏览器',
     });
-    if (state.activeSessionId !== sessionId || revision !== browserOpeningRevision) return;
+    if (state.activeSessionId !== sessionId || revision !== browserOpeningRevision
+      || state.userInfo !== owner || composerWorkspaceId() !== workspaceId) return;
     // Browser-only use turns the renderer draft into a real session, keeping
     // backend ownership, cleanup and later model Browser tools on one identity.
+    rememberBrowserDraftSecurityScope(sessionId, workspaceId);
     commitDraftSession(sessionId, '浏览器', '内置浏览器');
     syncBrowserPanelSession(sessionId);
     // `createTab: false` is the observer-only path used when the first

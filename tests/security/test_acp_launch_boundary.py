@@ -25,6 +25,7 @@ from crew.security.models import (
     FilesystemAccess,
     FilesystemEntry,
     NetworkEntry,
+    NetworkPolicy,
     PermissionProfile,
     PermissionProfileKind,
 )
@@ -116,6 +117,7 @@ def _managed_launch(tmp_path: Path) -> ProcessLaunch:
         PermissionProfile(
             PermissionProfileKind.MANAGED,
             filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
+            network=NetworkPolicy.UNRESTRICTED,
         ),
         ("native-runtime",),
         external_security_enabled=True,
@@ -178,6 +180,8 @@ async def test_managed_external_interactive_compiles_scoped_projection(
 
     assert result == "managed-session"
     request = captured["request"]
+    assert request.permission_profile.network is NetworkPolicy.RESTRICTED
+    assert request.permission_profile.filesystem == _managed_launch(workspace).profile.filesystem
     assert request.home_files == {".codex/auth.json": b'{"token":"test"}'}
     assert request.env_overrides["API_KEY"] == "secret"
     assert not {
@@ -298,6 +302,7 @@ async def test_managed_acp_uses_native_broker_and_preserves_stdio_protocol(
         PermissionProfile(
             PermissionProfileKind.MANAGED,
             filesystem=(FilesystemEntry(tmp_path, FilesystemAccess.READ_WRITE),),
+            network=NetworkPolicy.UNRESTRICTED,
         ),
         ("native-runtime",),
         external_security_enabled=True,
@@ -320,6 +325,7 @@ async def test_managed_acp_uses_native_broker_and_preserves_stdio_protocol(
     assert [event.text for event in events if event.kind == "text"] == ["managed ok"]
     assert captured["request"].command[0] == str(Path(sys.executable).resolve())
     assert captured["request"].permission_profile.kind is PermissionProfileKind.MANAGED
+    assert captured["request"].permission_profile.network is NetworkPolicy.RESTRICTED
 
 
 @pytest.mark.asyncio

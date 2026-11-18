@@ -17,7 +17,6 @@ export type FeatureState = 'available' | 'unavailable' | 'hidden';
 export interface ShellFeatureStates {
   agents?: FeatureState;
   wiki?: FeatureState;
-  security?: FeatureState;
   tracing?: FeatureState;
   work?: Partial<Record<WorkLocation, FeatureState>>;
 }
@@ -87,10 +86,6 @@ function registerCoreNavigation(registry: ShellNavigationRegistry): void {
   register({ id: 'skills', label: '技能', icon: 'process-skill', order: 30, productModes: ['assistant'] });
   register({ id: 'sites', label: '灵感', icon: 'icon-inspiration', order: 40, productModes: ['assistant'] });
   register({ id: 'cron', label: '任务', icon: 'process-clock', order: 50 });
-  register({
-    id: 'security', label: '安全', icon: 'icon-security', order: 60,
-    resolveFeatureState: (features) => features.security ?? 'unavailable',
-  });
   register({
     id: 'tracing', label: '追踪', icon: 'icon-search', order: 65,
     resolveFeatureState: (features) => features.tracing ?? 'hidden',

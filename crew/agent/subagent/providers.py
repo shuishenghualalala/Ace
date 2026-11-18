@@ -22,7 +22,9 @@ from crew.core.runctx import (
     current_owner_account_id,
     current_structured_output_sink,
     current_workspace_id,
+    normalize_owner_account_id,
 )
+from crew.security.launch import current_process_launch
 from crew.state.logging import get_logger
 
 from crew.agent.subagent.service import (
@@ -112,6 +114,18 @@ class InProcessSpawnProvider:
         if factory is None:
             raise ValueError("inprocess-spawn requires a build_child factory")
 
+        owner_account_id = request.owner_account_id or current_owner_account_id.get()
+        workspace_id = request.workspace_id or current_workspace_id.get()
+        user_id = request.user_id or owner_account_id
+        parent_launch = current_process_launch.get()
+        security_context = parent_launch.security_context if parent_launch else None
+        if security_context is not None and (
+            normalize_owner_account_id(owner_account_id) != security_context.owner_account_id
+            or normalize_owner_account_id(user_id) != security_context.owner_account_id
+            or workspace_id != security_context.workspace_id
+        ):
+            raise ValueError("子智能体的账号和工作空间必须与父级执行权限一致")
+
         label = request.label or request.descriptor.label or "subagent"
         child_spec = dict(request.spec)
         child_spec["_delegation_depth"] = request.descriptor.delegation_depth
@@ -154,25 +168,28 @@ class InProcessSpawnProvider:
             if request.session_persistence == "hidden"
             else child_id
         )
-        owner_account_id = request.owner_account_id or current_owner_account_id.get()
-        workspace_id = request.workspace_id or current_workspace_id.get()
+        child_params: dict[str, Any] = {
+            "task_session_id": (
+                child_session_id
+                if request.session_persistence == "hidden"
+                else parent_session_id or child_id
+            ),
+            "parent_session_id": parent_session_id,
+            "agent_id": label,
+            "subagent_id": child_id,
+        }
+        if security_context is not None:
+            child_params["_security_process_launch"] = parent_launch
+            if security_context.workspace_root is not None:
+                child_params["workspace_root_path"] = str(security_context.workspace_root)
         env = Envelope.of(
             request.effective_prompt,
             session_id=child_session_id,
-            params={
-                "task_session_id": (
-                    child_session_id
-                    if request.session_persistence == "hidden"
-                    else parent_session_id or child_id
-                ),
-                "parent_session_id": parent_session_id,
-                "agent_id": label,
-                "subagent_id": child_id,
-            },
+            params=child_params,
             channel="subagent",
             mode="agent",
             workspace_id=workspace_id,
-            user_id=request.user_id or owner_account_id,
+            user_id=user_id,
         )
 
         runtime_options = request.runtime_options
@@ -436,20 +453,11 @@ class InProcessSpawnProvider:
                 continuation = Envelope.of(
                     SUMMARY_CONTINUATION_PROMPT,
                     session_id=child_session_id,
-                    params={
-                        "task_session_id": (
-                            child_session_id
-                            if request.session_persistence == "hidden"
-                            else parent_session_id or child_id
-                        ),
-                        "parent_session_id": parent_session_id,
-                        "agent_id": label,
-                        "subagent_id": child_id,
-                    },
+                    params=child_params,
                     channel="subagent",
                     mode="agent",
                     workspace_id=workspace_id,
-                    user_id=request.user_id or owner_account_id,
+                    user_id=user_id,
                 )
                 _reason, _diag, _kind, continued_text, continued_structured = await consume_turn(
                     continuation

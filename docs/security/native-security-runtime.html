@@ -172,7 +172,7 @@
     <p class="lead">Ace 的安全模块不是一个“危险命令关键词列表”，而是一条由宿主掌握的执行链：先从可信会话状态构造权限上下文，再对具体动作做授权判断。请求批准与替我审批会把命令交给原生运行组件，由操作系统限制文件、网络和进程能力；用户明确选择完全访问权限时则以宿主用户权限执行，仅保留不可覆盖的破坏性 hardline、显式拒绝规则、进程回收与审计。</p>
 
     <div class="callout warn">
-      <strong>2026-08-13 配置变更：</strong><code>config/config.yaml</code> 的 <code>security.enabled</code> 是安全模块总开关，默认值为 <code>false</code>。关闭时所有会话强制使用 <code>full_access</code>，不启动原生沙箱或审批链路；设置为 <code>true</code> 并重启 Gateway 后，才启用请求批准、替我审批和会话级模式切换。该配置在 macOS、Linux 与 Windows 使用同一解析路径。
+      <strong>沙箱配置。</strong>新安装通过 <code>security.sandbox_enabled: true</code> 启用内建沙箱。未保存桌面端偏好时，新会话默认采用「替我审批」。升级如果只有旧的 <code>security.enabled</code>，就沿用该值作为沙箱配置。显式 <code>sandbox_enabled</code> 优先。<code>security.enabled</code> 继续控制 Gateway 和传输等严格安全策略。修改配置后重启 Gateway。
     </div>
 
     <div class="callout ok">
@@ -256,13 +256,13 @@
       <div class="mode-card auto">
         <h3>替我审批</h3>
         <p class="mode-key">在既定边界内自动工作</p>
-        <p>不改变沙箱能力，只把确定处于基础边界内的动作自动放行。</p>
+        <p>基础沙箱内的普通动作直接执行，内置网页工具可自动获准访问经过校验的公开目标。</p>
         <p><span class="tag">MANAGED</span><span class="tag">ApprovalPolicy.AUTO_REVIEW</span></p>
       </div>
       <div class="mode-card full">
         <h3>完全访问权限</h3>
-        <p class="mode-key">显式信任当前会话</p>
-        <p>不启用原生文件或网络沙箱，命令按当前登录用户的宿主权限执行。</p>
+        <p class="mode-key">确认后使用宿主权限</p>
+        <p>命令按当前登录用户的宿主权限执行。可为单个对话选择，也可设为新对话默认值。</p>
         <p><span class="tag">DISABLED</span><span class="tag">ApprovalPolicy.NEVER</span></p>
       </div>
     </div>
@@ -270,11 +270,11 @@
     <h3 id="mode-baseline">3.1 两个受管模式共享什么</h3>
     <p><code>settings_for_mode</code> 会把请求批准和替我审批都编译成 <code>PermissionProfileKind.MANAGED</code>，并设置 <code>full_disk_read=true</code>。这不是“全盘完全访问”，而是<strong>宿主文件广泛可读、只有明确根可写</strong>：</p>
     <ul>
-      <li>macOS/Linux 的普通宿主文件默认只读；Windows 枚举系统目录和用户目录中的非敏感顶层路径作为可读根，不递归改整盘 ACL。</li>
-      <li>当前工作空间、<code>TMPDIR</code>/<code>TEMP</code> 和平台临时目录可写。</li>
+      <li>macOS/Linux 的普通宿主文件默认只读。Windows 使用专用账户的现有 NTFS 读取权限，额外文件读取可按路径授权。</li>
+      <li>当前工作空间可写。Windows 为每次受管命令提供独立临时目录，通过 <code>TEMP</code>、<code>TMP</code> 和 <code>TMPDIR</code> 传递。macOS 与 Linux 使用现有临时目录策略。</li>
       <li><code>.git</code>、<code>.agents</code>、<code>.crew</code> 等项目元数据重新覆盖成只读。</li>
       <li>Ace 数据库、认证、配置、审计、日志和 owner 凭据路径使用更具体的不可升级拒绝。</li>
-      <li>网络是独立能力：能读文件不等于能联网；没有精确网络规则时，命令保持离线。</li>
+      <li>网络权限独立配置。默认离线，可以审批精确目标或在应用配置中启用工作区写入模式的直连网络。</li>
       <li>内置终端的 <code>HOME</code>/<code>USERPROFILE</code> 指向宿主用户目录，因此 <code>~/Desktop</code> 与文件工具看到的是同一位置；这只改变路径语义，不自动赋予写权限。外部智能体若投影凭据文件，仍使用一次性私有 HOME。</li>
     </ul>
 
@@ -298,28 +298,30 @@ Ace 私有路径  ────────────────────�
         <tr><td>工作空间内的结构化写入、补丁、删除</td><td>不询问</td><td>由基础可写根与项目元数据只读覆盖共同约束。</td></tr>
         <tr><td>普通终端命令</td><td>不询问</td><td>以 <code>use_default</code> 留在原生沙箱中执行。</td></tr>
         <tr><td>高风险命令</td><td>明确询问</td><td>批准只允许该动作开始，不会自动扩大沙箱能力。</td></tr>
-        <tr><td>应用内公开 HTTP 或终端联网</td><td>询问</td><td>应用 HTTP 按精确目标放行；终端必须声明精确网络权限后进入受管代理。</td></tr>
-        <tr><td>私网、监听端口、项目外写入、脱离沙箱</td><td>明确询问并展示范围</td><td>只把已展示的路径、目标或命令写入本次启动策略。</td></tr>
+        <tr><td>应用内公开 HTTP 或终端新增联网权限</td><td>询问</td><td>应用 HTTP 按精确目标放行。终端默认离线，可声明精确网络权限，批准后经受管代理访问。</td></tr>
+        <tr><td>终端申请私网目标或监听端口、项目外写入、脱离沙箱</td><td>明确询问并展示范围</td><td>只把已展示的路径、目标或命令写入本次启动策略。内置网页工具拒绝私网和其他非公开目标。</td></tr>
       </tbody>
     </table>
 
     <div class="scenario">
       <strong>示例：Agent 要执行 <code>npm test</code></strong>
-      <p>这条普通命令不弹审批，直接由 Native Runtime 在当前 profile 内启动。它可以读取系统依赖并写工作空间/临时目录，但不能改写项目外文件或直接联网；只有测试流程要求扩大这些能力时才出现审批。</p>
+      <p>这条普通命令由 Native Runtime 在当前 profile 内直接启动。默认配置下，它可以读取系统依赖并写工作空间及临时目录。修改其他路径或新增联网权限时需要另行授权。</p>
     </div>
 
-    <h3 id="mode-auto">3.3 替我审批：自动化的是决策，不是权限</h3>
-    <p>替我审批适合日常可信项目。它和请求批准使用完全相同的受管 profile，差别仅在 <code>ApprovalPolicy.AUTO_REVIEW</code>：安全服务可以自动确认“现有沙箱本来就允许”的低风险动作。</p>
+    <h3 id="mode-auto">3.3 替我审批的判定规则</h3>
+    <p>替我审批与请求批准使用相同的文件和终端沙箱。Gateway 的 <code>SecurityService</code> 按规范化的工具动作、适用的规则和授权、会话模式及目标类别判定，无需调用模型。两种模式中的普通文件操作和沙箱内命令都可由基础策略放行。<code>auto_review</code> 还可自动批准内置网页工具经过校验的公开 HTTP(S) 目标，授权单位是主机、端口和协议。网页工具在连接前校验解析地址，每次重定向都重新检查。</p>
     <table>
       <thead><tr><th>自动放行</th><th>仍需用户批准</th></tr></thead>
       <tbody>
         <tr><td>普通文件读取</td><td>项目外写入或额外文件权限</td></tr>
         <tr><td>工作空间/临时目录内的结构化操作</td><td>终端新增精确网络权限或监听本地端口</td></tr>
-        <tr><td>分类为可在当前沙箱内执行的终端命令</td><td>危险命令分类、私网目标和额外网络能力</td></tr>
+        <tr><td>分类为可在当前沙箱内执行的终端命令</td><td>高风险命令、终端申请的私网目标和其他额外网络能力</td></tr>
         <tr><td>应用内经过公开地址校验的 HTTP 请求</td><td><code>require_escalated</code> 脱离沙箱执行</td></tr>
       </tbody>
     </table>
-    <p>启用替我审批前，Gateway 必须完成真实 Native Runtime live probe。探针会证明项目外普通文件可读、项目外不可写、工作空间可写、项目元数据不可改写；探针失败时模式切换返回错误 ACK，不会只更新界面文字。</p>
+    <p>禁止项优先，已有授权可以覆盖其匹配的请求范围。未覆盖的高风险动作和附加权限请求交给用户确认。网页工具直接拒绝本机、私网及其他非公开目标。终端联网继续遵循受管 profile，不会继承网页工具的自动许可。自动许可会写入审计，长期规则由用户在审批中明确保存。</p>
+    <p>Agent 的工具调度也会读取会话模式。请求批准按顺序派发工具，替我审批可以根据并发配置提前派发或并行执行符合条件的工具，各动作仍经过独立的授权检查。</p>
+    <p>从其他模式切换到替我审批前，Gateway 会执行真实 Native Runtime live probe，验证项目外普通文件可读、项目外不可写、工作空间可写、项目元数据不可改写。探针失败时，Gateway 返回错误并保留原有模式。新会话确认默认模式时可以直接发送文本，受管命令仍需由原生沙箱执行。</p>
 
     <div class="scenario">
       <strong>示例：Agent 修改工作空间代码并运行测试</strong>
@@ -346,7 +348,7 @@ Ace 私有路径  ────────────────────�
         <tr><td>修改项目外普通目录</td><td>询问精确路径权限</td><td>询问精确路径权限</td><td>不询问，宿主权限允许即执行</td></tr>
         <tr><td>终端执行普通测试</td><td>在沙箱内直接执行</td><td>分类安全后在沙箱内直接执行</td><td>不询问，直接宿主执行</td></tr>
         <tr><td>应用内访问公开 HTTPS</td><td>询问精确目标</td><td>公开地址校验后自动放行</td><td>专用工具仍做输入校验；宿主命令可直接联网</td></tr>
-        <tr><td>终端访问网络</td><td>申请精确目标并询问</td><td>申请精确目标并询问</td><td>直接使用宿主网络</td></tr>
+        <tr><td>终端访问网络（默认关闭直连）</td><td>新增目标需申请精确权限</td><td>新增目标需申请精确权限</td><td>直接使用宿主网络</td></tr>
         <tr><td>脱离沙箱运行单条命令</td><td>明确警告并询问</td><td>明确警告并询问</td><td>已经处于宿主执行</td></tr>
       </tbody>
     </table>
@@ -416,7 +418,7 @@ Ace 私有路径  ────────────────────�
 
     <h3 id="mode-lifecycle">3.7 模式切换为什么以 Gateway ACK 为准</h3>
     <p>Desktop 选择模式后不会先假定成功。Gateway 校验上下文与本机能力，更新 <code>SecurityService</code> 中的会话模式并返回 ACK；只有 ACK 成功，界面才展示新模式。模式变化会撤销旧模式下尚未处理的审批，并停止继续使用旧 <code>ProcessLaunch</code> 快照的 turn。下一轮执行重新从安全服务编译策略。</p>
-    <p>模式切换不会撤销用户已经明确授予的本次对话权限；这些 grant 绑定 OS user、owner、workspace 和 session，在真正结束会话、登出或 Gateway 重启时清理。完全访问只作用于当前会话；空白输入框中的选择是即将创建会话的一次性预设，不会静默继承给后续会话。</p>
+    <p>用户已授予的对话权限在切换模式时保留。这些 grant 绑定 OS user、owner、workspace 和 session，在真正结束会话、登出或 Gateway 重启时清理。在输入框选择的模式只作用于当前对话，草稿选择会在首条消息前提交。后续新对话遵循「设置 → 安全」中保存的默认权限。</p>
 
     <h3>3.8 实际使用时怎么选</h3>
     <table>
@@ -429,7 +431,7 @@ Ace 私有路径  ────────────────────�
       </tbody>
     </table>
 
-    <div class="callout ok"><strong>推荐默认值：</strong>陌生任务从“请求批准”开始；确认工作流稳定后切到“替我审批”。只有任务本身需要宿主级能力时才使用“完全访问权限”，不要把它当作修复普通文件权限问题的办法。</div>
+    <div class="callout ok"><strong>陌生任务。</strong>可以先选择“请求批准”，确认工作流稳定后切到“替我审批”。任务本身需要宿主级能力时，可以显式选择“完全访问权限”。</div>
 
     <h2 id="authority">4. 授权模型：动作、规则与临时能力</h2>
 
@@ -446,20 +448,7 @@ Ace 私有路径  ────────────────────�
     </table>
 
     <h3>4.2 判定顺序</h3>
-    <pre><code>不可升级的拒绝
-   ↓ 未命中
-当前 owner + workspace 的永久 DENY
-   ↓ 未命中
-基础 profile（受管模式工作空间）
-   ↓ 未覆盖
-最具体的永久 ALLOW
-   ↓ 未覆盖
-once / session 临时 grant
-   ↓ 未覆盖
-替我审批的工作空间内命令自动执行；完全访问直接放行
-   ↓ 否则
-创建审批请求并等待用户</code></pre>
-    <p>规则冲突时先比较具体程度；同等具体时拒绝优先。这个顺序保证一条更宽泛的允许不能盖过明确拒绝，也保证不可升级的 Ace 内部路径不能被后续授权打开。</p>
+    <p>各入口先执行禁止项检查。匹配的显式拒绝优先于放行。安全服务随后根据动作类型检查基础 profile、适用的长期规则和临时授权。未覆盖的内置工具公网请求可由「替我审批」自动放行，完全访问下可用宿主权限执行。其他可授权的动作进入人工审批。</p>
 
     <h3>4.3 四种审批结果</h3>
     <table>
@@ -574,8 +563,8 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     </ul>
 
     <h3>6.3 外部智能体兼容路径</h3>
-    <p>Codex 与 Claude Code 在受管模式下不再尝试启动宿主上的 app-server/stream-json 长连接，而是退化为一次性 captured 调用：先申请一份绑定外部智能体可执行文件与模型服务精确目标的权限 overlay，批准后再通过 Native Runtime 启动。Codex 的 npm 启动脚本会在 macOS、Linux 和 Windows 上解析为随包提供的原生二进制，避免沙箱为了 Node 包管理器而开放整段安装目录；只有 provider 配置与凭据环境进入子进程，HOME、PATH、TMP 和代理变量仍由 Native Runtime 控制。</p>
-    <p>一次性调用会关闭外部 CLI 自己的交互审批和内部沙箱，因为真正的文件、网络和进程上限已经由外层 Native Runtime 执行；该开关只在 <code>ProcessLaunch.managed</code> 为真时注入，兼容模式保持原行为。当前兼容路径能完成基础问答与工作目录内的 Agent 操作，但不会伪装成完整结构化协议：会话恢复、MCP 动态工具、逐条 tool event、细粒度外部权限回调与真正的双向流式输出仍需要后续的 native bidirectional transport。任意 ACP adapter 在此之前继续失败关闭。</p>
+    <p><code>features.external_agents.security_enabled</code> 默认关闭。已配置的 Codex、Claude Code 和 ACP 外援继续使用各自的宿主适配器，包括原生流式协议、会话恢复、MCP 和已有权限回调。此时外援进程用当前操作系统用户身份启动。经 Ace 执行的内建工具仍按 Ace 会话授权。</p>
+    <p>显式启用外援托管后，Ace 的 <code>ProcessLaunch.external_managed</code> 选择原生运行边界。Codex 和 Claude Code 使用现有一次性执行路径，ACP 使用原生双向 stdio。托管外援的网络权限仍由适配器声明及审批的精确目标决定。</p>
 
     <h3>6.4 灵感站点构建</h3>
     <p><code>publish_site</code> 不把模型给出的包管理器字符串直接交给宿主 PATH。host 先限制命令族为 npm/pnpm/yarn/bun，再解析实际 Node 与包管理器脚本入口，以最终 argv/cwd 进入统一 exec 审核；批准后只把解析出的运行时安装根作为可信只读资源加入本次 <code>ProcessLaunch</code>。构建写权限仍只有当前 Workspace，网络仍由会话 overlay 决定。Node 子脚本使用受控 PATH；OpenSSL 不读取宿主全局配置。这样既能让打包 Node、Homebrew、nvm 和 Windows Node 安装工作，也不会把用户 HOME 或任意 PATH 目录整体开放。</p>
@@ -605,8 +594,14 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
       <li>第三阶段建立月度/紧急 CVE 重建通道与 macOS/Linux/Windows 原生矩阵；旧 runtime 与 Skill 依赖层按版本并存、原子切换和可回滚。</li>
     </ul>
 
-    <h2 id="network">7. 受管联网：沙箱只见代理，代理才见目标</h2>
-    <p>命令执行的网络策略不是“设置几个代理环境变量”。环境变量可以被程序忽略，因此操作系统层先切断直接连接，只留下运行组件建立的受管代理路径。</p>
+    <h2 id="network">7. 工作区写入模式的网络权限</h2>
+    <p>默认模式由操作系统阻止直接联网。精确授权后，网络请求通过运行组件建立的受管代理。日常开发如果需要访问依赖仓库、Git 远端或本地开发服务，可以在受信任的 Ace 应用配置中开启直连。</p>
+    <pre><code>security:
+  sandbox_enabled: true
+  sandbox_workspace_write:
+    network_access: true</code></pre>
+    <p>此配置适用于使用工作区写入模式的 Ace 受管命令及其子进程。工作区写入权限、受保护路径和进程回收继续生效。直连由系统网络策略约束，可访问本地和私网服务，代理的逐目标校验仅适用于代理模式。浏览器、网页工具、模型 API 和外援分别沿用各自的网络策略。</p>
+    <p>终端结果的 <code>network_mode</code> 标识本次请求采用的网络策略。直连请求通过握手和启动能力检查，成功后执行审计记录 <code>direct_network</code>。旧运行组件拒绝直连请求。</p>
 
     <pre><code>沙箱内程序
    │ HTTP / HTTPS / TCP（只能到受控本机入口）
@@ -709,17 +704,19 @@ helper 响应
     </table>
 
     <h3>9.1 Linux：namespace + bubblewrap + seccomp</h3>
-    <p>Linux 的 workspace-write profile 先把宿主根目录 <code>ro-bind</code> 为只读，再覆盖工作空间与临时目录的可写 bind，最后重新覆盖项目元数据与 Ace 私有 deny；同时开启 user、PID 与 network namespace，挂载受控 <code>/proc</code>，并设置父进程退出联动。内层在执行命令前应用 <code>no_new_privs</code> 与 seccomp。WSL1 缺少所需 namespace 能力，因此直接拒绝。</p>
+    <p>Linux 的 workspace-write profile 把宿主根目录 <code>ro-bind</code> 为只读，再覆盖工作空间与临时目录的可写 bind，最后施加项目元数据与 Ace 私有路径限制。子进程使用独立 user、PID namespace、受控 <code>/proc</code>、<code>no_new_privs</code> 和 seccomp。离线或代理模式另外使用独立 network namespace。WSL1 缺少所需 namespace 能力，因此直接拒绝。</p>
 
     <h3>9.2 Windows：低权限身份 + ACL + WFP + Job</h3>
-    <p>Windows 不递归修改磁盘根 ACL。Host 枚举 Windows、Program Files、ProgramData、工作目录与用户目录中非敏感顶层路径作为只读根，并排除 <code>.ssh</code>、<code>.aws</code>、<code>.azure</code>、<code>.kube</code>、<code>.docker</code>、<code>.gnupg</code>、<code>.config</code> 等目录；额外读取或写入通过精确 ACL lease 添加，并在进程结束时清理。</p>
-    <p>安装期创建 offline/online 两个技术账户并持久化受保护身份状态。每次命令在跨进程 mutex 内下发临时 ACL lease，使用 restricted token 和 capability SID 启动，只继承显式句柄，再放入 kill-on-close Job Object。可写根内的受保护元数据对账户和 capability SID 都使用“允许读 + 拒绝写/删除”的窄 ACL，避免父目录的写权限向下继承成修改能力。offline 账户不能联网；online 账户由 WFP 只允许到运行组件固定的本机代理端口。命令结束后先关闭代理，再回收 ACL lease。</p>
+    <p>Windows 保留系统与用户目录现有的访问权限。额外读取或写入使用精确 ACL 授权，进程结束后逐条清理。自检只授权临时测试范围。受管 PowerShell 会将工作区挂载为当前会话的 <code>AceCurrentWorkspace:</code>，相对路径从该工作区解析。<code>$PWD.ProviderPath</code> 返回实际文件系统路径。</p>
+    <p>安装期创建专用技术账户并持久化受保护身份状态。各网络模式分别选用离线、代理和直连账户。每次命令在跨进程 mutex 内下发临时 ACL lease，使用 restricted token 和 capability SID 启动，只继承显式句柄，再放入 kill-on-close Job Object。可写根内的受保护元数据对账户和 capability SID 都施加精确 ACL。离线账户由 WFP 阻断联网，代理账户只能连接运行组件固定的本机代理端口。已有安装首次启用直连时，可从安全中心修复安装以创建直连账户。</p>
 
     <h3>9.3 macOS：Seatbelt deny-default profile</h3>
-    <p>macOS 每次运行生成独立 Seatbelt profile，并通过系统 <code>/usr/bin/sandbox-exec</code> 启动。workspace-write profile 开放全局文件读取，但文件写入只开放工作空间、临时目录和精确获批根；随后对 <code>readonly_roots</code> 与 denied roots 重新施加更具体的拒绝。用户路径通过 <code>-D</code> 参数进入策略，避免路径内容成为 profile 语法。在线模式只允许本次代理的精确 loopback 端口；离线模式没有出网 allow。helper 为子命令建立独立进程组，取消或退出时整体清理。</p>
+    <p>macOS 每次运行生成独立 Seatbelt profile，并通过系统 <code>/usr/bin/sandbox-exec</code> 启动。workspace-write profile 开放广泛文件读取，写入只开放工作空间、临时目录和精确获批根；随后对 <code>readonly_roots</code> 与 denied roots 重新施加更具体的拒绝。用户路径通过 <code>-D</code> 参数进入策略。Seatbelt 分别应用离线、精确代理和直连策略。helper 为子命令建立独立进程组，取消或退出时整体清理。</p>
 
     <h2 id="control-plane">10. 安全控制面：为什么普通网页不能替用户授权</h2>
-    <p>安全中心能切换模式、处理审批、启停/删除永久规则、查看和导出审计。这些接口不仅要求 Gateway 登录态，还要求由 Electron main 持有的实例密钥签发 Desktop security proof。</p>
+    <p>安全中心根据本机探针汇总文件和网络防护状态。macOS 与 Linux 直接验证随包运行组件。Windows 交互式安装在启动桌面端前检查沙箱，首次配置时由 Windows 请求一次管理员确认。已就绪的设备直接通过。检测到 Windows 防护需要配置时，安全中心显示设置入口。</p>
+    <p>「设置 → 安全」可为本机的新对话选择默认权限。启用「完全访问」选项后，可以为单个对话确认完全访问，也可以经一次系统确认设为新对话默认值。关闭该选项后，完全访问默认值会重置为「替我审批」。对话输入框旁的选择仅作用于该对话或草稿。Ace 等 Gateway 确认权限后才发送第一条消息。</p>
+    <p>审批在相应对话中处理。在支持长期授权的审批中选择「始终允许此操作」并确认，Ace 会在当前账号和工作空间保存规则。规则匹配审批中显示的完整动作或命令前缀，可以在安全中心禁用或删除。账号全部审计记录的导出和过期记录清理位于审计菜单中。安全接口要求 Gateway 登录态以及由 Electron main 持有的实例密钥签发的 Desktop security proof。</p>
 
     <pre><code>Electron main 持有本机 instance key
        │
@@ -738,7 +735,8 @@ helper 响应
     <table>
       <thead><tr><th>状态</th><th>存储位置/方式</th><th>生命周期</th></tr></thead>
       <tbody>
-        <tr><td>会话模式</td><td>Gateway 内存；前端仅持有界面预设</td><td>当前 Gateway/会话；完全访问只可作为一次性新会话预设。</td></tr>
+        <tr><td>会话模式</td><td>Gateway 内存</td><td>当前 Gateway 与会话。草稿中的模式在首条消息前由 Gateway 确认。</td></tr>
+        <tr><td>新对话默认权限及完全访问选项</td><td>桌面端本地偏好</td><td>跨桌面端重启保存。关闭完全访问选项会重置已保存的完全访问默认值。</td></tr>
         <tr><td>once/session grant</td><td>Gateway 内存，包含动作与额外权限 overlay</td><td>一次消费、会话结束、登出或进程重启。</td></tr>
         <tr><td>always rule</td><td>SQLite <code>security_rules</code>，包含动作与额外权限 overlay</td><td>按 OS user + owner + workspace 隔离，直到禁用/删除。</td></tr>
         <tr><td>审计事件</td><td>SQLite <code>security_audit_events</code></td><td>默认保留 30 天，可筛选、分页、导出 JSONL 和清理。</td></tr>
@@ -770,7 +768,7 @@ helper 响应
       <li><b>永久规则与审计</b>：当前 workspace 的授权状态和当前 owner 的历史记录。</li>
     </ul>
 
-    <p>macOS 防护随应用提供，不需要安装或管理员权限。Windows 安装/修复按钮通过主进程受控 IPC 和 UAC 执行，渲染层不能传入任意命令。能力接口失败时，界面不能把未知状态显示成已受保护。</p>
+    <p>macOS 防护随应用提供，不需要单独安装或授予管理员权限。「设置 Windows 防护」通过主进程受控 IPC 和 UAC 执行，渲染层不能传入任意命令。Windows 上遗留的访问权限记录由原生组件在后台恢复，安全中心等待文件和联网自检通过后才显示就绪。能力接口失败时，界面显示状态无法确认，并提供重新检测。</p>
 
     <h2 id="boundaries">13. 当前边界与维护时不能误写的承诺</h2>
     <table>
@@ -782,7 +780,7 @@ helper 响应
         <tr><td>网页与 Wiki 出站</td><td>搜索、提取和 Wiki URL 统一做公开地址校验、重定向复检、DNS 地址固定、响应上限与网络审批/审计。</td><td>不把应用内 HTTP 请求当成“不是命令所以无需审核”；也不允许它访问本机或内网服务。</td></tr>
         <tr><td>Skill / 视觉 / 远程 MCP 工具</td><td>Skill 元数据与资源读取统一做 registered-root/realpath 前后校验；视觉读取进入文件策略；远程 MCP 调用绑定 endpoint、完整工具名与参数摘要。</td><td>Gateway 进程内工具不受 Native Runtime 自动覆盖，必须在 handler 入口显式授权；缺失会话上下文时失败关闭。</td></tr>
         <tr><td>浏览器上传</td><td>源文件先走广泛只读与保护路径判断，再复制到账号隔离的一次性暂存区；Host 只接受该根下的普通文件/安全目录。</td><td>工作目录外普通文件可以读取并上传；Ace 私有路径和显式拒绝路径仍不可见，Host 也不能直接读取任意宿主路径。</td></tr>
-        <tr><td>替我审批</td><td>基础沙箱内的普通终端命令自动执行；危险动作、权限扩张和监听端口仍询问。</td><td>自动执行只省去不必要的提示，不扩大文件或网络权限。</td></tr>
+        <tr><td>替我审批</td><td>与请求批准共用基础沙箱，内置网页工具可自动获准访问通过校验的公开目标。</td><td>高风险命令和未授权的附加权限仍询问。网页工具和受管终端各自执行其网络策略。</td></tr>
         <tr><td>Codex / Claude Code 外援</td><td>受管模式使用 Native Runtime 内的一次性 captured 兼容路径，并为精确模型服务目标单独审批；不会回退到宿主裸进程。</td><td>基础回答与工作目录内操作可用；结构化工具事件、MCP、恢复与双向流能力在兼容路径中明确降级。</td></tr>
         <tr><td>项目元数据</td><td>三平台受管 shell 都实现可读、不可写的 <code>readonly_roots</code>；旧 helper 不声明能力会失败关闭。</td><td>保护只覆盖进入 Native Runtime 的受管进程，不扩展成宿主上所有进程的系统级防篡改。</td></tr>
         <tr><td>执行结果审计</td><td>授权决定、规则变更与 <code>exec_result</code> 均已入库，结果事件记录 backend、capabilities、exit code 或稳定错误码。</td><td>运行结果与授权原因是两条事件，可通过同一 owner/session/request/action 摘要关联。</td></tr>

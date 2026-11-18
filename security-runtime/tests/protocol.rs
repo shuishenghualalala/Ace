@@ -39,6 +39,7 @@ fn startup_token_and_nonce_replay_are_enforced() {
     assert!(line.contains("\"stdin_once\""));
     assert!(line.contains("\"stream_output\""));
     assert!(line.contains("\"readonly_roots\""));
+    assert!(line.contains("\"direct_network\""));
 
     let request = serde_json::json!({
         "version": 3,
@@ -242,4 +243,56 @@ fn malformed_json_returns_fixed_message() {
     );
     drop(stdin);
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn direct_network_rejects_proxy_and_explicit_network_rules_before_launch() {
+    let rule = serde_json::json!({
+        "host": "example.test",
+        "port": 443,
+        "protocol": "https",
+        "allow": true
+    });
+    for op in ["run", "interactive_open"] {
+        for (network_enabled, network_rules) in [(true, vec![]), (false, vec![rule.clone()])] {
+            let binary = env!("CARGO_BIN_EXE_ace-security-runtime");
+            let token = "direct-network-test-token-longer-than-thirty-two";
+            let mut child = Command::new(binary)
+                .env("ACE_SECURITY_RUNTIME_TOKEN", token)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            stdout.read_line(&mut line).unwrap();
+            let request = serde_json::json!({
+                "version": 3,
+                "token": token,
+                "nonce": "invalid-network-combination",
+                "request": {
+                    "op": op,
+                    "command": ["unused"],
+                    "cwd": ".",
+                    "network_access": true,
+                    "network_enabled": network_enabled,
+                    "network_rules": network_rules,
+                }
+            });
+            writeln!(stdin, "{request}").unwrap();
+            line.clear();
+            stdout.read_line(&mut line).unwrap();
+            let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(event["type"], "error");
+            assert_eq!(event["code"], "sandbox_denied");
+            assert_eq!(event["seq"], 0);
+            assert!(event["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot be combined with a managed proxy or network rules"));
+            drop(stdin);
+            assert!(child.wait().unwrap().success());
+        }
+    }
 }

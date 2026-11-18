@@ -19,18 +19,10 @@ pub fn probe(state_dir: &Path) -> Readiness {
     if let Err(error) = super::acl::protect_legacy_state(state_dir) {
         return not_ready(error);
     }
-    // M5: if a prior AclLease::drop logged ACE revoke failures, the sandbox
-    // may have residue ACEs -- refuse to report ready until cleared.
-    match super::state::read_optional_file(&state_dir.join(ACL_CLEANUP_LOG)) {
-        Ok(Some(_)) => {
-            return not_ready(
-                "ACL cleanup failures detected (windows-acl-cleanup.log); \
-                 re-run setup or manually clear stale ACEs"
-                    .to_string(),
-            )
-        }
-        Ok(None) => {}
-        Err(error) => return not_ready(error),
+    // The lease retries recorded cleanup under the ACL lock. A diagnostic
+    // without its protected recovery manifest requires operator attention.
+    if let Err(error) = super::acl::verify_recovery_state(state_dir) {
+        return not_ready(error);
     }
 
     let credentials = match identity::load(state_dir) {
@@ -90,6 +82,7 @@ fn probe_acl_and_token(state_dir: &Path, account: &str) -> Result<(), String> {
         denied_roots: Vec::new(),
         full_disk_read: false,
         network_enabled: false,
+        network_access: false,
         network_rules: Vec::new(),
         allow_local_binding: false,
         max_output_bytes: 4096,

@@ -50,17 +50,68 @@ fn main() {
 
     #[cfg(windows)]
     if env::args().nth(1).as_deref() == Some("--windows-setup") {
-        let state_dir = env::args().nth(2).map(PathBuf::from).unwrap_or_else(|| {
-            eprintln!("--windows-setup requires an absolute state directory");
-            std::process::exit(2);
-        });
-        match windows::identity::setup(&state_dir) {
+        let (state_dir, expected_owner_sid) = parse_windows_setup_args(env::args_os().skip(2))
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2);
+            });
+        match windows::identity::setup(&state_dir, expected_owner_sid.as_deref()) {
             Ok(()) => {
                 println!("Windows sandbox identity setup completed");
                 return;
             }
             Err(error) => {
                 eprintln!("Windows sandbox identity setup failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    if env::args().nth(1).as_deref() == Some("--windows-check-setup") {
+        let mut args = env::args_os().skip(2);
+        let state_dir = args
+            .next()
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && args.next().is_none())
+            .unwrap_or_else(|| {
+                eprintln!("--windows-check-setup requires exactly one absolute state directory");
+                std::process::exit(2);
+            });
+        match windows::identity::check_setup(&state_dir) {
+            Ok(()) => {
+                println!("Windows sandbox setup is ready");
+                return;
+            }
+            Err(error) => {
+                eprintln!("Windows sandbox setup is not ready: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    if env::args().nth(1).as_deref() == Some("--windows-recover-acl") {
+        let mut args = env::args_os().skip(2);
+        let state_dir = args
+            .next()
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && args.next().is_none())
+            .unwrap_or_else(|| {
+                eprintln!("--windows-recover-acl requires exactly one absolute state directory");
+                std::process::exit(2);
+            });
+        match windows::acl::recover_stale(&state_dir) {
+            Ok(true) => {
+                println!("Windows sandbox ACL recovery completed");
+                return;
+            }
+            Ok(false) => {
+                eprintln!("Windows sandbox ACL recovery busy");
+                std::process::exit(3);
+            }
+            Err(error) => {
+                eprintln!("Windows sandbox ACL recovery failed: {error}");
                 std::process::exit(1);
             }
         }
@@ -88,6 +139,31 @@ fn main() {
         eprintln!("ace-security-runtime: {error}");
         std::process::exit(1);
     }
+}
+
+#[cfg(windows)]
+fn parse_windows_setup_args(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(PathBuf, Option<String>), &'static str> {
+    let state_dir = args
+        .next()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or("--windows-setup requires an absolute state directory")?;
+    let expected_owner_sid = match args.next() {
+        None => None,
+        Some(flag) if flag == "--expected-owner-sid" => Some(
+            args.next()
+                .and_then(|sid| sid.into_string().ok())
+                .filter(|sid| !sid.is_empty())
+                .ok_or("--expected-owner-sid requires a Windows user SID")?,
+        ),
+        Some(_) => return Err("unknown --windows-setup argument"),
+    };
+    if args.next().is_some() {
+        return Err("unexpected --windows-setup argument");
+    }
+    Ok((state_dir, expected_owner_sid))
 }
 
 fn protocol_main() -> Result<(), String> {
@@ -442,6 +518,29 @@ struct RuntimeFailure {
     message: String,
 }
 
+fn validate_network_access(
+    network_access: bool,
+    network_enabled: bool,
+    network_rules: &[protocol::NetworkRule],
+) -> Result<(), RuntimeFailure> {
+    if network_access && (network_enabled || !network_rules.is_empty()) {
+        return Err(RuntimeFailure {
+            code: "sandbox_denied",
+            message:
+                "direct network access cannot be combined with a managed proxy or network rules"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn process_input_failure(error: protocol::InputValidationError) -> RuntimeFailure {
+    RuntimeFailure {
+        code: error.code,
+        message: error.message.to_string(),
+    }
+}
+
 fn execute_interactive_request(
     request: RuntimeRequest,
     control_rx: Receiver<RuntimeControl>,
@@ -457,6 +556,7 @@ fn execute_interactive_request(
             denied_roots,
             full_disk_read,
             network_enabled,
+            network_access,
             network_rules,
             allow_local_binding,
             max_output_bytes,
@@ -464,7 +564,12 @@ fn execute_interactive_request(
             home_files,
         } => {
             let process_input =
-                validate_process_inputs_with_home_files(None, &env_overrides, &home_files);
+                validate_network_access(network_access, network_enabled, &network_rules).and_then(
+                    |()| {
+                        validate_process_inputs_with_home_files(None, &env_overrides, &home_files)
+                            .map_err(process_input_failure)
+                    },
+                );
             let process_input = match process_input {
                 Ok(value) => value,
                 Err(error) => {
@@ -492,6 +597,7 @@ fn execute_interactive_request(
                         denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
                         full_disk_read,
                         network_enabled,
+                        network_access,
                         network_rules,
                         allow_local_binding,
                         proxy_socket_dir: None,
@@ -518,6 +624,7 @@ fn execute_interactive_request(
                         denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
                         full_disk_read,
                         network_enabled,
+                        network_access,
                         network_rules,
                         allow_local_binding,
                         max_output_bytes,
@@ -543,6 +650,7 @@ fn execute_interactive_request(
                         denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
                         full_disk_read,
                         network_enabled,
+                        network_access,
                         network_rules,
                         allow_local_binding,
                         max_output_bytes,
@@ -567,6 +675,7 @@ fn execute_interactive_request(
                         denied_roots,
                         full_disk_read,
                         network_enabled,
+                        network_access,
                         network_rules,
                         allow_local_binding,
                         max_output_bytes,
@@ -621,6 +730,7 @@ fn handle_request(
             denied_roots,
             full_disk_read,
             network_enabled,
+            network_access,
             network_rules,
             allow_local_binding,
             max_output_bytes,
@@ -628,15 +738,13 @@ fn handle_request(
             env_overrides,
             home_files,
         } => {
+            validate_network_access(network_access, network_enabled, &network_rules)?;
             let process_input = validate_process_inputs_with_home_files(
                 stdin_b64.as_deref(),
                 &env_overrides,
                 &home_files,
             )
-            .map_err(|error| RuntimeFailure {
-                code: error.code,
-                message: error.message.to_string(),
-            })?;
+            .map_err(process_input_failure)?;
             if command.is_empty() {
                 return Err(RuntimeFailure {
                     code: "sandbox_denied",
@@ -654,6 +762,7 @@ fn handle_request(
                     denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
                     full_disk_read,
                     network_enabled,
+                    network_access,
                     network_rules,
                     allow_local_binding,
                     proxy_socket_dir: None,
@@ -678,6 +787,7 @@ fn handle_request(
                     denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
                     full_disk_read,
                     network_enabled,
+                    network_access,
                     network_rules,
                     allow_local_binding,
                     max_output_bytes,
@@ -702,6 +812,7 @@ fn handle_request(
                     denied_roots,
                     full_disk_read,
                     network_enabled,
+                    network_access,
                     network_rules,
                     allow_local_binding,
                     max_output_bytes,
@@ -723,6 +834,7 @@ fn handle_request(
                     denied_roots: denied_roots.into_iter().map(PathBuf::from).collect(),
                     full_disk_read,
                     network_enabled,
+                    network_access,
                     network_rules,
                     allow_local_binding,
                     max_output_bytes,
@@ -980,6 +1092,7 @@ mod tests {
             filesystem_sandbox: true,
             process_tree_cleanup: true,
             managed_network: false,
+            direct_network: false,
             full_disk_read: false,
             system_bwrap: false,
             bundled_bwrap: false,

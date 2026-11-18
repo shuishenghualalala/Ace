@@ -10,7 +10,9 @@ import {
 } from '../../src/ui/features/chat-controller';
 import { createComposerView, type ComposerView } from '../../src/ui/features/composer-view';
 import { createMainComposerActions } from '../../src/ui/features/conversation-panel';
-import { isDraftSession } from '../../src/ui/features/workspaces';
+import { currentSecurityMode, rememberBrowserDraftSecurityScope, selectNextConversationMode } from '../../src/ui/features/security-approval';
+import { fullAccessChoiceEnabled, loadFullAccessChoice, preferredNewConversationMode } from '../../src/ui/features/security-permission-settings';
+import { commitDraftSession, createSessionInWorkspace, discardDraft, isDraftSession, setComposerTargetWorkspace } from '../../src/ui/features/workspaces';
 import { chatOutbox } from '../../src/ui/features/chat-outbox';
 import { appendAttachment, enqueuePending, getPendingQueue, patchBook, setBusy, setEditFrom, state } from '../../src/ui/state';
 import { __resetAllStoresForTest, authStore, configStore, messageStore, sessionStore, uiStore, workspaceStore } from '../../src/ui/stores/stores';
@@ -22,6 +24,30 @@ vi.mock('../../src/ui/features/session-model', async (importOriginal) => {
     persistDraftSessionModel: vi.fn(async () => undefined),
   };
 });
+vi.mock('../../src/ui/features/security-permission-settings', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/ui/features/security-permission-settings')>(),
+  fullAccessChoiceEnabled: vi.fn(),
+  loadFullAccessChoice: vi.fn(),
+  preferredNewConversationMode: vi.fn(),
+}));
+
+afterEach(() => {
+  discardDraft();
+  vi.unstubAllGlobals();
+});
+
+function enableSecurity(): void {
+  configStore.set({
+    config: {
+      model: 'test-model', has_key: false, base_url: '', active_model_id: 'test-model', models: [],
+      security: { enabled: true, default_mode: 'request_approval' },
+    },
+  });
+}
+
+function socketSend() {
+  return (uiStore.get().socket as unknown as { send: ReturnType<typeof vi.fn> }).send;
+}
 vi.mock('../../src/ui/features/native-visual-capability', () => ({ ensureNativeVisualCapability: vi.fn(async () => undefined) }));
 
 let composer: ComposerView | undefined;
@@ -51,6 +77,9 @@ function setInput(input: HTMLTextAreaElement, value: string): void {
 const attachment = { id: 'report', name: 'report.txt', path: 'files/report.txt', type: 'file' as const };
 
 beforeEach(() => {
+  vi.mocked(fullAccessChoiceEnabled).mockReset().mockReturnValue(true);
+  vi.mocked(loadFullAccessChoice).mockReset().mockResolvedValue(undefined);
+  vi.mocked(preferredNewConversationMode).mockReset().mockReturnValue(undefined);
   __resetAllStoresForTest();
   state.isLoggedIn = true;
   state.userInfo = { uid: 'test-owner' };
@@ -390,6 +419,202 @@ describe('sendMessage', () => {
       query: '按普通模式发送',
     });
     expect(socket.send.mock.calls.at(-1)?.[0]).not.toHaveProperty('plan_active');
+  });
+
+  it('loads the saved preference before choosing and confirming the mode of the first query', async () => {
+    enableSecurity();
+    let finishLoading!: () => void;
+    vi.mocked(loadFullAccessChoice).mockImplementationOnce(() => new Promise((resolve) => { finishLoading = resolve; }));
+    const securitySetMode = vi.fn().mockResolvedValue({ ok: true, body: { mode: 'auto_review' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+
+    const firstSend = sendMessage('use saved preference');
+    expect(loadFullAccessChoice).toHaveBeenCalledOnce();
+    expect(securitySetMode).not.toHaveBeenCalled();
+    expect(socketSend()).not.toHaveBeenCalled();
+    vi.mocked(preferredNewConversationMode).mockReturnValue('auto_review');
+    finishLoading();
+
+    await expect(firstSend).resolves.toBe(true);
+    expect(securitySetMode).toHaveBeenCalledWith({
+      sessionId: sessionStore.get().activeSessionId, workspaceId: 'default', mode: 'auto_review',
+    });
+  });
+
+  it('keeps the unsent draft when reading the Desktop permission preference fails', async () => {
+    enableSecurity();
+    vi.mocked(loadFullAccessChoice).mockRejectedValueOnce(new Error('IPC unavailable'));
+    const securitySetMode = vi.fn();
+    vi.stubGlobal('Crew', { securitySetMode });
+
+    await expect(sendMessage('keep this draft')).resolves.toBe(false);
+
+    expect(isDraftSession(sessionStore.get().activeSessionId!)).toBe(true);
+    expect(securitySetMode).not.toHaveBeenCalled();
+    expect(socketSend()).not.toHaveBeenCalled();
+  });
+
+  it('requires a scoped Gateway acknowledgement for a trusted Full Access setting on each new conversation', async () => {
+    enableSecurity();
+    vi.mocked(preferredNewConversationMode).mockReturnValue('full_access');
+    const securitySetMode = vi.fn().mockResolvedValue({ ok: true, body: { mode: 'full_access' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+
+    await expect(sendMessage('first conversation')).resolves.toBe(true);
+    const firstSessionId = sessionStore.get().activeSessionId;
+    sessionStore.set({ activeSessionId: null });
+    workspaceStore.set({ currentWorkspaceId: 'other-project' });
+    await expect(sendMessage('second conversation')).resolves.toBe(true);
+    const secondSessionId = sessionStore.get().activeSessionId;
+
+    expect(secondSessionId).not.toBe(firstSessionId);
+    expect(securitySetMode.mock.calls).toEqual([
+      [{ sessionId: firstSessionId, workspaceId: 'default', mode: 'full_access' }],
+      [{ sessionId: secondSessionId, workspaceId: 'other-project', mode: 'full_access' }],
+    ]);
+  });
+
+  it('discards an in-flight acknowledgement for the Full Access default when choice is turned off', async () => {
+    enableSecurity();
+    vi.mocked(preferredNewConversationMode).mockReturnValue('full_access');
+    let acknowledge!: (value: { ok: boolean; body: { mode: string } }) => void;
+    const securitySetMode = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { acknowledge = resolve; }))
+      .mockResolvedValueOnce({ ok: true, body: { mode: 'request_approval' } })
+      .mockResolvedValueOnce({ ok: true, body: { mode: 'auto_review' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+
+    const firstSend = sendMessage('wait for permission');
+    const sessionId = sessionStore.get().activeSessionId;
+    await vi.waitFor(() => expect(securitySetMode).toHaveBeenCalledWith({
+      sessionId, workspaceId: 'default', mode: 'full_access',
+    }));
+    vi.mocked(fullAccessChoiceEnabled).mockReturnValue(false);
+    acknowledge({ ok: true, body: { mode: 'full_access' } });
+
+    await expect(firstSend).resolves.toBe(false);
+    expect(socketSend()).not.toHaveBeenCalled();
+    expect(securitySetMode).toHaveBeenLastCalledWith({ sessionId, workspaceId: 'default', mode: 'request_approval' });
+    await expect(sendMessage('use managed default')).resolves.toBe(true);
+    expect(securitySetMode).toHaveBeenLastCalledWith({ sessionId, workspaceId: 'default', mode: 'auto_review' });
+  });
+
+  it('awaits scoped full-access acknowledgement before the first query and does not apply it to the next draft', async () => {
+    enableSecurity();
+    let acknowledge!: (value: { ok: boolean; body: { mode: string } }) => void;
+    const securitySetMode = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { acknowledge = resolve; }))
+      .mockResolvedValueOnce({ ok: true, body: { mode: 'request_approval' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+    workspaceStore.set({ currentWorkspaceId: 'project-a' });
+
+    await expect(selectNextConversationMode('full_access', () => true)).resolves.toBe(true);
+    const sessionId = sessionStore.get().activeSessionId!;
+    const firstSend = sendMessage('first query');
+    await vi.waitFor(() => expect(securitySetMode).toHaveBeenCalledWith({
+      sessionId, workspaceId: 'project-a', mode: 'full_access',
+    }));
+    expect(socketSend()).not.toHaveBeenCalled();
+    expect(messageStore.get().messages[sessionId]).toEqual([]);
+    acknowledge({ ok: true, body: { mode: 'full_access' } });
+    await expect(firstSend).resolves.toBe(true);
+    expect(socketSend()).toHaveBeenCalledWith(expect.objectContaining({
+      session_id: sessionId, workspace_id: 'project-a', query: 'first query',
+    }));
+    expect(isDraftSession(sessionId)).toBe(false);
+    expect(currentSecurityMode()).toBe('full_access');
+
+    sessionStore.set({ activeSessionId: null });
+    await expect(sendMessage('next conversation')).resolves.toBe(true);
+    const nextSessionId = sessionStore.get().activeSessionId;
+    expect(nextSessionId).not.toBe(sessionId);
+    expect(securitySetMode).toHaveBeenLastCalledWith({
+      sessionId: nextSessionId, workspaceId: 'project-a', mode: 'request_approval',
+    });
+  });
+
+  it('keeps the draft attachments and sends no query when the Gateway does not confirm the mode', async () => {
+    enableSecurity();
+    const securitySetMode = vi.fn().mockResolvedValue({ ok: true, body: { mode: 'request_approval' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+    await selectNextConversationMode('full_access', () => true);
+    const sessionId = sessionStore.get().activeSessionId!;
+    state.attachments = [{ id: 'draft-file', name: 'notes.txt' }] as never;
+
+    await expect(sendMessage('keep this draft')).resolves.toBe(false);
+
+    expect(socketSend()).not.toHaveBeenCalled();
+    expect(isDraftSession(sessionId)).toBe(true);
+    expect(state.attachments[0]?.id).toBe('draft-file');
+    expect(securitySetMode).toHaveBeenLastCalledWith({ sessionId, workspaceId: 'default', mode: 'request_approval' });
+  });
+
+  it('does not dispatch a stale full-access confirmation after its draft switches workspace', async () => {
+    enableSecurity();
+    let acknowledge!: (value: { ok: boolean; body: { mode: string } }) => void;
+    const securitySetMode = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { acknowledge = resolve; }))
+      .mockResolvedValue({ ok: true, body: { mode: 'request_approval' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+    await selectNextConversationMode('full_access', () => true);
+    const sessionId = sessionStore.get().activeSessionId!;
+    const firstSend = sendMessage('old workspace');
+    await vi.waitFor(() => expect(securitySetMode).toHaveBeenCalledOnce());
+
+    setComposerTargetWorkspace('new-project');
+    acknowledge({ ok: true, body: { mode: 'full_access' } });
+
+    await expect(firstSend).resolves.toBe(false);
+    expect(socketSend()).not.toHaveBeenCalled();
+    expect(securitySetMode).toHaveBeenLastCalledWith({ sessionId, workspaceId: 'default', mode: 'request_approval' });
+    await expect(sendMessage('new workspace')).resolves.toBe(true);
+    expect(securitySetMode).toHaveBeenLastCalledWith({ sessionId, workspaceId: 'new-project', mode: 'request_approval' });
+  });
+
+  it('keeps the confirmed mode until the first query if Browser saved the same session first', async () => {
+    enableSecurity();
+    const securitySetMode = vi.fn().mockResolvedValue({ ok: true, body: { mode: 'full_access' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+    await selectNextConversationMode('full_access', () => true);
+    const sessionId = sessionStore.get().activeSessionId!;
+    rememberBrowserDraftSecurityScope(sessionId, 'default');
+    commitDraftSession(sessionId, '浏览器', '内置浏览器');
+
+    expect(securitySetMode).not.toHaveBeenCalled();
+    expect(isDraftSession(sessionId)).toBe(false);
+    await expect(sendMessage('first model turn')).resolves.toBe(true);
+    expect(securitySetMode).toHaveBeenCalledWith({ sessionId, workspaceId: 'default', mode: 'full_access' });
+  });
+
+  it('requires the saved default to be acknowledged before a Browser-created conversation sends its first model query', async () => {
+    enableSecurity();
+    vi.mocked(preferredNewConversationMode).mockReturnValue('auto_review');
+    const sessionId = createSessionInWorkspace('browser-project', vi.fn());
+    rememberBrowserDraftSecurityScope(sessionId, 'browser-project');
+    commitDraftSession(sessionId, '浏览器', '内置浏览器');
+    sessionStore.set({ activeSessionId: null });
+    sessionStore.set({ activeSessionId: sessionId });
+    const securitySetMode = vi.fn()
+      .mockResolvedValueOnce({ ok: true, body: { mode: 'request_approval' } })
+      .mockResolvedValueOnce({ ok: true, body: { mode: 'auto_review' } });
+    vi.stubGlobal('Crew', { securitySetMode });
+
+    expect(currentSecurityMode()).toBe('auto_review');
+    await expect(sendMessage('keep when permission has not been acknowledged')).resolves.toBe(false);
+    expect(socketSend()).not.toHaveBeenCalled();
+    await expect(sendMessage('first browser conversation query')).resolves.toBe(true);
+    expect(securitySetMode).toHaveBeenCalledTimes(2);
+    expect(securitySetMode).toHaveBeenLastCalledWith({
+      sessionId, workspaceId: 'browser-project', mode: 'auto_review',
+    });
+    expect(socketSend()).toHaveBeenCalledWith(expect.objectContaining({
+      workspace_id: 'browser-project', session_id: sessionId, query: 'first browser conversation query',
+    }));
+
+    vi.mocked(preferredNewConversationMode).mockReturnValue('request_approval');
+    expect(currentSecurityMode()).toBe('auto_review');
+    await expect(dispatchWs(sessionId, 'later query', [])).resolves.toBe(true);
+    expect(securitySetMode).toHaveBeenCalledTimes(2);
   });
 });
 

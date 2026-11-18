@@ -87,6 +87,8 @@ export function restoreProductMode(storage: Storage = localStorage): void {
     parseSnapshot(storage.getItem(PRODUCT_MODE_STORAGE_KEY)) ?? defaultProductModeState();
   // ponytail: 办公助手 (work) 模式已移除——把历史里残留的 work 选择强制回落到 assistant。
   if (snapshot.productMode === 'work') snapshot.productMode = 'assistant';
+  if (snapshot.views.assistant.lastPosition === 'security') snapshot.views.assistant.lastPosition = 'chat';
+  if (snapshot.views.work.lastPosition === 'security') snapshot.views.work.lastPosition = 'workbench';
   productModeStore.replace(snapshot);
 }
 

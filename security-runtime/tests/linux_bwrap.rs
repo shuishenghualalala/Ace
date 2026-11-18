@@ -101,6 +101,47 @@ fn managed_proxy_restricts_socket_families() {
     assert_eq!(events.last().unwrap()["exit_code"], 0, "{events:?}");
 }
 
+#[test]
+fn direct_network_connects_with_file_sandbox_applied() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let blocked = outside.path().join("blocked");
+    std::fs::create_dir(workspace.path().join(".git")).unwrap();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let events = run_request(
+        workspace.path(),
+        serde_json::json!({
+            "op": "run",
+            "command": [
+                "/usr/bin/python3",
+                "-c",
+                concat!(
+                    "import pathlib,socket,sys\n",
+                    "with socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=2): pass\n",
+                    "pathlib.Path('allowed').write_text('ok')\n",
+                    "for target in (pathlib.Path('.git/blocked'), pathlib.Path(sys.argv[2])):\n",
+                    " try: target.write_text('denied')\n",
+                    " except OSError: pass\n",
+                    " else: sys.exit(1)\n",
+                ),
+                port,
+                blocked,
+            ],
+            "cwd": workspace.path(),
+            "writable_roots": [workspace.path()],
+            "network_access": true,
+        }),
+    );
+    assert_eq!(events[0]["type"], "started", "{events:?}");
+    assert_eq!(events[0]["capabilities"]["direct_network"], true);
+    assert_eq!(events[0]["capabilities"]["managed_network"], false);
+    assert_eq!(events.last().unwrap()["exit_code"], 0, "{events:?}");
+    assert!(workspace.path().join("allowed").is_file());
+    assert!(!workspace.path().join(".git/blocked").exists());
+    assert!(!blocked.exists());
+}
+
 fn run_request(cwd: &std::path::Path, request: serde_json::Value) -> Vec<serde_json::Value> {
     let token = "linux-native-test-token-longer-than-thirty-two";
     let binary = env!("CARGO_BIN_EXE_ace-security-runtime");

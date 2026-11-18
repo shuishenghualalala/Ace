@@ -14,7 +14,7 @@ import {
 } from '../../src/ui/features/wiki-feature';
 import type { BackendConfig } from '../../src/ui/backend-client';
 import { createApplicationShell } from '../../src/ui/layouts/application-shell';
-import { PRODUCT_MODE_STORAGE_KEY, productModeStore } from '../../src/ui/stores/product-mode-store';
+import { defaultProductModeState, PRODUCT_MODE_STORAGE_KEY, productModeStore } from '../../src/ui/stores/product-mode-store';
 
 describe('resolveShellNavigation', () => {
   it.each(['assistant', 'work'] as const)('omits System from the %s navigation rail', (mode) => {
@@ -72,7 +72,7 @@ describe('resolveShellNavigation', () => {
     expect(resolveTabAfterWikiCapabilityChange('agents', false)).toBe('agents');
   });
 
-  it('assistant mode keeps Skills, exposes Inspiration/Security and removes Audit', () => {
+  it('keeps Skills and Inspiration while Security and Audit live off the main rail', () => {
     const navigation = resolveShellNavigation('assistant', { agents: 'available' });
     const ids = navigation.map((item) => item.id);
 
@@ -82,7 +82,7 @@ describe('resolveShellNavigation', () => {
       label: '灵感',
       featureState: 'available',
     }));
-    expect(ids).toContain('security');
+    expect(ids).not.toContain('security');
     expect(ids).not.toContain('audit');
   });
 
@@ -139,26 +139,17 @@ describe('resolveShellNavigation', () => {
     }
   });
 
-  it('marks the security item unavailable when the security module is off', () => {
-    const navigation = resolveShellNavigation('assistant', { security: 'unavailable' });
-    expect(navigation).toContainEqual(expect.objectContaining({
-      id: 'security',
-      featureState: 'unavailable',
-    }));
-  });
-
-  it('disables the security nav item and shows the developing hint when off', () => {
+  it('restores a saved standalone Security location to the Chat page', () => {
     localStorage.clear();
-    const shell = createApplicationShell({
-      features: { security: 'unavailable' },
-      storage: localStorage,
-    });
+    const saved = defaultProductModeState();
+    saved.views.assistant.lastPosition = 'security';
+    localStorage.setItem(PRODUCT_MODE_STORAGE_KEY, JSON.stringify(saved));
+    const shell = createApplicationShell({ storage: localStorage });
     document.body.replaceChildren(shell.element);
 
-    const security = shell.element.querySelector<HTMLButtonElement>('[data-shell-location="security"]');
-    expect(security?.disabled).toBe(true);
-    expect(security?.title).toBe('功能正在开发中，敬请期待');
-    expect(security?.querySelector('.mw-shell-nav-item__availability')).toBeNull();
+    expect(productModeStore.get().views.assistant.lastPosition).toBe('chat');
+    expect(shell.element.querySelector('[data-shell-location="security"]')).toBeNull();
+    expect(shell.element.querySelector('[data-shell-location="chat"]')?.getAttribute('aria-current')).toBe('page');
 
     shell.dispose();
   });

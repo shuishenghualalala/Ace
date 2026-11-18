@@ -43,6 +43,7 @@ from crew.agent.external.runtime_profile import RuntimeCapabilities, RuntimeMode
 from crew.core.interfaces import ExternalCliConfig as ExternalCliConfig
 from crew.core.interfaces import ExternalCliError
 from crew.core.timeout_policy import remaining_seconds
+from crew.security.models import EMPTY_ADDITIONAL_PERMISSIONS
 from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
 from crew.state.logging import get_logger
 
@@ -315,7 +316,7 @@ async def _authorized_external_launch(
     from crew.security.outbound import parse_public_http_target
 
     launch = current_process_launch.get()
-    if launch is None or not launch.managed:
+    if launch is None or not launch.external_managed:
         return launch
     provider = _provider_key(provider)
     targets = [
@@ -1098,7 +1099,7 @@ async def stream_claude_events(
     from crew.security.launch import current_process_launch
 
     launch = current_process_launch.get()
-    if launch is not None and launch.managed:
+    if launch is not None and launch.external_managed:
         output = await run_external_cli(
             ExternalCliConfig(
                 provider="claude",
@@ -1238,14 +1239,16 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
             use_process_launch,
         )
 
-        projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
-        additional_permissions = build_external_runtime_network_permissions(
-            projected_home_files,
-            config.network_endpoints,
-        )
-
         launch = current_process_launch.get()
-        managed = launch is not None and launch.managed
+        managed = launch is not None and launch.external_managed
+        projected_home_files = None
+        additional_permissions = EMPTY_ADDITIONAL_PERMISSIONS
+        if managed:
+            projected_home_files = build_external_runtime_home_files(config.credential_home_paths)
+            additional_permissions = build_external_runtime_network_permissions(
+                projected_home_files,
+                config.network_endpoints,
+            )
         executable_path = (
             _managed_external_executable(config.provider, config.executable_path)
             if managed
@@ -1262,7 +1265,7 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
         runtime_env = (
             _managed_runtime_env(config.provider, env, config.custom_env)
             if managed
-            else config.custom_env
+            else None
         )
         with use_process_launch(effective_launch):
             result = await execute_captured(
@@ -1277,7 +1280,7 @@ async def run_external_cli(config: ExternalCliConfig) -> str:
                 on_started=_mark_started,
                 on_output=_mark_first_io,
                 tool_name="external_agent_cli",
-                external=not managed,
+                external=True,
             )
     except FileNotFoundError as exc:
         raise ExternalCliError(f"找不到可执行文件: {config.executable_path}") from exc

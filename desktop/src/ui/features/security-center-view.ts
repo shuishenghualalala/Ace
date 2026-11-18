@@ -1,13 +1,8 @@
-import { createIcon } from '../components/icon';
 import {
-  SECURITY_MODE_OPTIONS,
-  type ConversationSecurityMode,
-} from './security-approval';
-import {
-  formatCapabilitySummary,
   detectedRuntimePlatform,
   isMacOSPlatform,
   isWindowsPlatform,
+  windowsSetupRequired,
   type SecurityCapabilities,
 } from './security-mode';
 import { formatSecurityRule, type SecurityRuleView } from './security-rules';
@@ -21,18 +16,13 @@ import {
   type SecurityAuditView,
 } from './security-audit';
 import { bindPagination, renderPagination } from '../pagination';
-import { openDialog } from '../components/overlays';
-
-// Strict security is the default. Compatibility remains an explicit user choice.
-const STRICT_SECURITY_TOGGLE_VISIBLE = true;
+import { openDialog, openMenu, type MenuItem, type OverlayHandle } from '../components/overlays';
 
 export interface SecurityCenterSnapshot {
   loading: boolean;
-  setupAction?: 'install' | 'uninstall' | null;
+  settingUp?: boolean;
   error: string;
   workspaceId: string;
-  strictSecurityEnabled: boolean;
-  mode: ConversationSecurityMode;
   capabilities: SecurityCapabilities | null;
   rules: SecurityRuleView[];
   audits: SecurityAuditView[];
@@ -44,22 +34,20 @@ export interface SecurityCenterSnapshot {
 
 export interface SecurityCenterActions {
   onRefresh(): void;
-  onStrictSecurityChange(enabled: boolean): void;
-  onModeChange(mode: ConversationSecurityMode): void;
   onInstall(): void;
-  onUninstall(): void;
   onRuleToggle(rule: SecurityRuleView): void;
   onRuleDelete(rule: SecurityRuleView): void;
   onAuditExport(): void;
   onAuditPurge(): void;
   onAuditPageChange?(page: number): void;
   onAuditPageSizeChange?(size: number): void;
-  onAuditQueryChange?(query: SecurityAuditQuery): void;
+  onAuditQueryChange?(query: Partial<SecurityAuditQuery>): void;
 }
 
 export interface SecurityCenterView {
   element: HTMLElement;
   update(snapshot: SecurityCenterSnapshot): void;
+  dispose(): void;
 }
 
 function text(tag: keyof HTMLElementTagNameMap, className: string, value: string): HTMLElement {
@@ -72,7 +60,7 @@ function text(tag: keyof HTMLElementTagNameMap, className: string, value: string
 function button(
   label: string,
   action: string,
-  variant: 'secondary' | 'danger' | 'primary' = 'secondary',
+  variant: 'secondary' | 'primary' = 'secondary',
 ): HTMLButtonElement {
   const element = document.createElement('button');
   element.type = 'button';
@@ -82,178 +70,128 @@ function button(
   return element;
 }
 
-function statusCard(label: string, value: string, detail: string, tone: string): HTMLElement {
-  const card = document.createElement('article');
-  card.className = 'security-center__status-card';
-  card.dataset.tone = tone;
-  card.append(
-    text('span', 'security-center__status-label', label),
-    text('strong', 'security-center__status-value', value),
-    text('span', 'security-center__status-detail', detail),
-  );
-  return card;
+function moreButton(action: string, label: string): HTMLButtonElement {
+  const trigger = button('更多', action);
+  trigger.setAttribute('aria-label', label);
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-expanded', 'false');
+  return trigger;
 }
 
-function renderStrictSecuritySection(snapshot: SecurityCenterSnapshot): HTMLElement {
-  const section = document.createElement('section');
-  const row = document.createElement('label');
-  const copy = document.createElement('span');
-  const toggle = document.createElement('input');
-  section.className = 'security-center__section';
-  row.className = 'security-center__preference';
-  copy.className = 'security-center__preference-copy';
-  toggle.type = 'checkbox';
-  toggle.checked = snapshot.strictSecurityEnabled;
-  toggle.dataset.securityStrictToggle = '';
-  toggle.setAttribute('role', 'switch');
-  copy.append(
-    text('strong', 'security-center__preference-title', '严格安全约束'),
-    text(
-      'span',
-      'security-center__section-description',
-      snapshot.strictSecurityEnabled
-        ? '已阻止不安全传输、未验证安装和宽松默认审批。'
-        : '兼容模式放宽旧传输、完整性校验和默认审批；受管隔离仍保持启用。',
-    ),
-  );
-  row.append(copy, toggle);
-  section.append(
-    text('h2', 'security-center__section-title', '全局安全策略'),
-    row,
-  );
-  return section;
-}
+type SecurityDisclosure = 'rules' | 'audit';
 
-function renderModeSection(snapshot: SecurityCenterSnapshot): HTMLElement {
-  const section = document.createElement('section');
-  const list = document.createElement('div');
-  section.className = 'security-center__section';
-  list.className = 'security-center__mode-grid';
-  section.append(
-    text('h2', 'security-center__section-title', '会话安全模式'),
-    text(
-      'p',
-      'security-center__section-description',
-      `当前工作空间：${snapshot.workspaceId}。完全访问只作用于当前会话，不会静默继承到新会话。`,
-    ),
-  );
-  for (const option of SECURITY_MODE_OPTIONS) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'security-center__mode';
-    item.dataset.securityMode = option.value;
-    item.dataset.selected = String(option.value === snapshot.mode);
-    item.dataset.tone = option.value === 'full_access' ? 'danger' : 'neutral';
-    item.setAttribute('aria-pressed', String(option.value === snapshot.mode));
-    item.append(
-      text('strong', 'security-center__mode-label', option.label),
-      text('span', 'security-center__mode-description', option.desc),
-    );
-    list.append(item);
+function disclosure(id: SecurityDisclosure, title: string, body: HTMLElement, count?: number): HTMLDetailsElement {
+  const details = document.createElement('details');
+  const summary = document.createElement('summary');
+  details.className = 'security-center__section security-center__disclosure';
+  details.dataset.securityDisclosure = id;
+  summary.className = 'security-center__section-title';
+  summary.append(text('span', '', title));
+  if (count !== undefined) {
+    summary.append(text('span', 'security-center__section-count', `共 ${count} 条`));
   }
-  section.append(list);
-  return section;
+  body.className = 'security-center__disclosure-body';
+  details.append(summary, body);
+  return details;
 }
 
 function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement {
   const section = document.createElement('section');
-  const overview = document.createElement('div');
-  const actions = document.createElement('div');
+  const card = document.createElement('div');
+  const copy = document.createElement('div');
   const capabilities = snapshot.capabilities;
-  const capabilitiesLoaded = capabilities !== null;
   const platform = detectedRuntimePlatform(capabilities?.platform);
   const isWindows = isWindowsPlatform(platform);
   const isMacOS = isMacOSPlatform(platform);
-  const helperReady = capabilitiesLoaded && capabilities.helper_present === true;
-  const sandboxReady = helperReady && Boolean(capabilities?.filesystem_sandbox);
-  const networkReady = sandboxReady && Boolean(capabilities?.managed_network);
-  const unsupportedReason = platform
-    ? (isWindows || isMacOS ? '' : '当前设备尚未提供原生防护')
-    : '正在检测本机防护能力';
-
-  section.className = 'security-center__section';
-  overview.className = 'security-center__status-grid';
-  actions.className = 'security-center__actions';
-  overview.append(
-    statusCard(
-      '本机运行组件',
-      helperReady ? '已就绪' : '未就绪',
-      capabilities?.detail ?? '等待能力检测',
-      helperReady ? 'success' : 'warning',
-    ),
-    statusCard(
-      '文件沙箱',
-      sandboxReady ? '已启用' : '未启用',
-      formatCapabilitySummary(capabilities ?? {}),
-      sandboxReady ? 'success' : 'warning',
-    ),
-    statusCard(
-      '联网管控',
-      networkReady ? '受控' : '未受控',
-      networkReady ? '网络请求进入受管规则' : '不能声称出网已受保护',
-      networkReady ? 'success' : 'danger',
-    ),
-  );
-
-  const setupAction = snapshot.setupAction ?? null;
-  const protectionReady = networkReady;
-  const setupBusy = setupAction !== null;
-  const install = button(
-    setupAction === 'install' ? '正在安装…' : '安装 / 修复防护',
-    'install',
-    'primary',
-  );
-  const uninstall = button(
-    setupAction === 'uninstall' ? '正在卸载…' : '卸载防护',
-    'uninstall',
-    'danger',
-  );
-  // 安装/修复与卸载互斥：未完整启用时只允许安装，完整启用后只允许卸载。
-  // setupAction 还会锁住 UAC/IPC 进行中的短窗口，避免重复触发。
-  install.disabled = !isWindows || snapshot.loading || setupBusy || protectionReady;
-  uninstall.disabled = !isWindows || snapshot.loading || setupBusy || !protectionReady;
-  install.setAttribute('aria-busy', String(setupAction === 'install'));
-  uninstall.setAttribute('aria-busy', String(setupAction === 'uninstall'));
-  if (isWindows) actions.append(install, uninstall);
-
-  section.append(
-    text('h2', 'security-center__section-title', '本机防护能力'),
-    overview,
-    actions,
-  );
-  if (unsupportedReason) {
-    section.append(text('p', 'security-center__policy-note', unsupportedReason));
-  } else if (isMacOS) {
-    const macNote = !capabilitiesLoaded
-      ? '安全能力检测未返回，请点击刷新重试。'
-      : !helperReady
-      ? '未找到 macOS 原生安全运行组件，请重新构建或重新安装应用；无需管理员权限。'
-      : !sandboxReady
-        ? 'macOS 原生运行组件存在，但文件沙箱 live probe 未通过；请重启应用或重新构建运行组件。'
-        : !networkReady
-          ? '文件沙箱已启用，但联网管控 live probe 未通过；当前不能声称出网已受保护。'
-          : '系统内置原生防护，运行组件随应用提供，无需手动安装或申请管理员权限。';
-    section.append(text('p', 'security-center__policy-note', macNote));
+  const setupRequired = windowsSetupRequired(capabilities);
+  const networkAccess = capabilities?.workspace_network_access === true;
+  const recovering = capabilities?.status === 'recovering';
+  const ready = capabilities?.status === 'ready' || (capabilities?.status === undefined
+    && capabilities?.helper_present === true
+    && capabilities.runtime_stale !== true
+    && capabilities.filesystem_sandbox === true
+    && (networkAccess ? capabilities.direct_network === true : capabilities.managed_network === true));
+  const backend = capabilities?.backend;
+  const platformName = backend === 'windows_sandbox_account' || isWindows ? 'Windows'
+    : backend === 'macos_seatbelt' || isMacOS ? 'macOS'
+    : backend === 'linux_bwrap' || platform === 'linux' ? 'Linux' : '';
+  let label: string;
+  let description: string;
+  let tone: 'neutral' | 'success' | 'warning';
+  if (snapshot.settingUp) {
+    label = '正在设置本机防护';
+    description = '设置完成后，Ace 会重新检测防护状态。';
+    tone = 'neutral';
+  } else if (snapshot.loading) {
+    label = '正在检测本机防护';
+    description = 'Ace 会自动检测此设备支持的防护。';
+    tone = 'neutral';
+  } else if (recovering) {
+    label = '正在恢复 Windows 沙箱';
+    description = 'Ace 正在撤回上次执行留下的临时权限。若涉及较大的目录，Windows 可能需要几分钟。';
+    tone = 'neutral';
+  } else if (setupRequired) {
+    label = 'Windows 防护需要设置';
+    description = 'Windows 会请求一次管理员确认。完成后，Ace 自动使用本机防护。';
+    tone = 'warning';
+  } else if (ready) {
+    label = '本机防护已就绪';
+    description = `${platformName ? `${platformName} 防护` : '文件沙箱'}已可用于 Ace 的受管命令；${networkAccess ? '允许工作区命令直接联网。' : '工作区命令使用受控联网。'}`;
+    tone = 'success';
+  } else if (capabilities?.reason === 'windows_sandbox_busy') {
+    label = 'Windows 沙箱正忙';
+    description = '请等待当前操作结束，再重新检测。';
+    tone = 'warning';
+  } else if (capabilities?.reason === 'windows_acl_recovery_failed') {
+    label = 'Windows 沙箱恢复未完成';
+    description = '请重新检测本机防护。';
+    tone = 'warning';
+  } else {
+    label = capabilities ? '本机防护暂不可用' : '暂时无法确认本机防护状态';
+    description = !capabilities ? '请重新检测。'
+      : !platformName ? '当前设备尚未提供原生防护。'
+      : capabilities.helper_present === false || capabilities.runtime_stale === true
+        ? '应用的本机防护组件缺失或版本不匹配，请更新或重新安装 Ace。'
+        : '本机防护自检未通过。';
+    tone = 'warning';
   }
+  section.className = 'security-center__section';
+  card.className = 'security-center__protection';
+  card.dataset.tone = tone;
+  copy.className = 'security-center__protection-copy';
+  copy.append(
+    text('strong', 'security-center__protection-title', label),
+    text('p', 'security-center__section-description', description),
+  );
+  card.append(copy);
+  const actions = document.createElement('div');
+  actions.className = 'security-center__actions';
+  if (setupRequired && (!snapshot.loading || snapshot.settingUp)) {
+    const install = button(snapshot.settingUp ? '正在设置…' : '设置 Windows 防护', 'install', 'primary');
+    install.disabled = Boolean(snapshot.settingUp);
+    install.setAttribute('aria-busy', String(Boolean(snapshot.settingUp)));
+    actions.append(install);
+  }
+  if (!snapshot.loading && !snapshot.settingUp && !recovering) {
+    if (!ready && !setupRequired) actions.append(button('重新检测', 'refresh'));
+    else if (snapshot.error) actions.append(button('重试加载', 'refresh'));
+  }
+  if (actions.childElementCount) card.append(actions);
+  section.append(card);
   return section;
 }
 
 function renderRulesSection(snapshot: SecurityCenterSnapshot): HTMLElement {
   const section = document.createElement('section');
   const list = document.createElement('ul');
-  section.className = 'security-center__section';
   list.className = 'security-center__rule-list';
   section.append(
-    text('h2', 'security-center__section-title', '永久授权规则'),
-    text(
-      'p',
-      'security-center__section-description',
-      '规则按当前工作空间生效；禁用可恢复，删除不可撤销。',
-    ),
+    text('p', 'security-center__section-description', '收到审批请求时，选择「始终允许此操作」并确认即可保存规则。'),
+    text('p', 'security-center__section-description', '规则仅在当前账号和工作空间内生效。后续操作须匹配获批的完整动作，或审批时展示的命令前缀。'),
   );
 
   if (!snapshot.rules.length) {
-    list.append(text('li', 'security-center__empty', '没有永久授权规则'));
+    list.append(text('li', 'security-center__empty', '此工作空间还没有已保存的规则。'));
   }
   for (const rule of snapshot.rules) {
     const item = document.createElement('li');
@@ -272,14 +210,14 @@ function renderRulesSection(snapshot: SecurityCenterSnapshot): HTMLElement {
       text(
         'span',
         'security-center__rule-meta',
-        `范围：${snapshot.workspaceId} · ${rule.enabled === false ? '已禁用' : '已启用'}`,
+        rule.enabled === false ? '已禁用' : '已启用',
       ),
     );
     const toggle = button(rule.enabled === false ? '启用' : '禁用', 'toggle-rule');
     toggle.dataset.ruleId = String(rule.rule_id ?? '');
-    const remove = button('删除', 'delete-rule', 'danger');
-    remove.dataset.ruleId = String(rule.rule_id ?? '');
-    actions.append(toggle, remove);
+    const more = moreButton('rule-menu', '授权规则的更多操作');
+    more.dataset.ruleId = String(rule.rule_id ?? '');
+    actions.append(toggle, more);
     item.append(copy, actions);
     list.append(item);
   }
@@ -320,7 +258,7 @@ function appendAuditDetail(
   );
 }
 
-function openAuditDetail(event: SecurityAuditView, trigger: HTMLElement): void {
+function openAuditDetail(event: SecurityAuditView, trigger: HTMLElement): OverlayHandle {
   const content = document.createElement('div');
   const overview = document.createElement('div');
   const metadata = document.createElement('dl');
@@ -369,26 +307,23 @@ function openAuditDetail(event: SecurityAuditView, trigger: HTMLElement): void {
     trigger,
     title: '安全审计详情',
     content,
-    actions: [{ label: '关闭', variant: 'secondary' }],
   });
   const dialog = handle.element.querySelector<HTMLElement>('.mw-dialog');
   dialog?.classList.add('security-center__audit-dialog');
   dialog?.setAttribute('data-security-audit-dialog', '');
+  return handle;
 }
 
 function renderAuditSection(snapshot: SecurityCenterSnapshot): HTMLElement {
   const section = document.createElement('section');
-  const header = document.createElement('div');
   const filters = document.createElement('div');
   const sessionFilter = document.createElement('form');
   const sessionInput = document.createElement('input');
   const list = document.createElement('ol');
   const footerActions = document.createElement('div');
-  const pager = document.createElement('div');
   const total = snapshot.auditTotal ?? snapshot.audits.length;
+  const pageSize = snapshot.auditPageSize ?? 20;
   const query = snapshot.auditQuery ?? EMPTY_SECURITY_AUDIT_QUERY;
-  section.className = 'security-center__section';
-  header.className = 'security-center__section-heading';
   filters.className = 'security-center__audit-filters';
   sessionFilter.className = 'security-center__audit-session-filter';
   sessionInput.type = 'search';
@@ -398,10 +333,6 @@ function renderAuditSection(snapshot: SecurityCenterSnapshot): HTMLElement {
   sessionInput.dataset.securityAuditSession = '';
   list.className = 'security-center__audit-list';
   footerActions.className = 'security-center__actions';
-  header.append(
-    text('h2', 'security-center__section-title', '安全审计记录'),
-    text('span', 'security-center__section-count', `共 ${total} 条`),
-  );
   const applySessionFilter = button('筛选', 'filter-audit');
   applySessionFilter.type = 'submit';
   sessionFilter.append(sessionInput, applySessionFilter);
@@ -461,19 +392,17 @@ function renderAuditSection(snapshot: SecurityCenterSnapshot): HTMLElement {
     item.append(open);
     list.append(item);
   });
-  pager.innerHTML = renderPagination(
-    {
-      page: snapshot.auditPage ?? 1,
-      pageSize: snapshot.auditPageSize ?? 20,
-      total,
-    },
-    { id: 'security-audit', pageSizeChoices: [10, 20, 50, 100] },
-  );
-  footerActions.append(
-    button('导出 JSONL', 'export'),
-    button('清理 30 天前记录', 'purge', 'danger'),
-  );
-  section.append(header, filters, list, pager, footerActions);
+  section.append(filters, list);
+  if (total > pageSize) {
+    const pager = document.createElement('div');
+    pager.innerHTML = renderPagination(
+      { page: snapshot.auditPage ?? 1, pageSize, total },
+      { id: 'security-audit', pageSizeChoices: [10, 20, 50, 100] },
+    );
+    section.append(pager);
+  }
+  footerActions.append(moreButton('audit-menu', '审计记录的更多操作'));
+  section.append(footerActions);
   return section;
 }
 
@@ -484,24 +413,43 @@ export function createSecurityCenterView(
   const element = document.createElement('section');
   const header = document.createElement('header');
   const headerCopy = document.createElement('div');
-  const headerActions = document.createElement('div');
-  const refresh = button('刷新', 'refresh');
   const status = document.createElement('div');
-  const content = document.createElement('main');
+  const content = document.createElement(options.embedded ? 'div' : 'main');
   let snapshot: SecurityCenterSnapshot | null = null;
+  let protection: HTMLElement | undefined;
+  let rulesSection: HTMLDetailsElement | undefined;
+  let auditSection: HTMLDetailsElement | undefined;
+  let menu: OverlayHandle | undefined;
+  let menuAnchor: HTMLButtonElement | undefined;
+  let auditDetail: OverlayHandle | undefined;
+
+  function showActions(anchor: HTMLButtonElement, label: string, items: MenuItem[]): void {
+    const wasOpen = anchor.getAttribute('aria-expanded') === 'true';
+    menu?.close();
+    if (wasOpen) return;
+    menuAnchor = anchor;
+    menu = openMenu({ anchor, label, items, align: 'end', onClose: () => {
+      menu = undefined;
+      menuAnchor = undefined;
+    } });
+  }
+
+  function updateDisclosure(previous: HTMLDetailsElement | undefined, next: HTMLDetailsElement): void {
+    if (!previous) {
+      content.append(next);
+      return;
+    }
+    if (menuAnchor && previous.contains(menuAnchor)) menu?.close();
+    next.open = previous.open;
+    previous.replaceWith(next);
+  }
 
   element.className = `page-shell page-shell--security security-center${options.embedded ? ' security-center--embedded' : ''}`;
   element.dataset.securityCenter = '';
   header.className = 'page-header page-header--hub';
   headerCopy.className = 'page-header__copy';
-  headerActions.className = 'page-header__actions';
-  refresh.prepend(createIcon('icon-refresh', { size: 16 }));
-  headerCopy.append(
-    text('h1', 'page-header__title', '安全中心'),
-    text('p', 'page-header__desc', '安全+不影响使用才是真安全～'),
-  );
-  headerActions.append(refresh);
-  header.append(headerCopy, headerActions);
+  headerCopy.append(text('h1', 'page-header__title', '安全中心'));
+  header.append(headerCopy);
   status.className = 'security-center__load-state';
   status.setAttribute('role', 'status');
   content.className = 'security-center__content';
@@ -509,60 +457,49 @@ export function createSecurityCenterView(
 
   const handleClick = (event: MouseEvent): void => {
     const target = (event.target as Element).closest<HTMLButtonElement>(
-      '[data-security-action], [data-security-mode], [data-security-audit-index]',
+      '[data-security-action], [data-security-audit-index]',
     );
     if (!target || !element.contains(target) || target.disabled) return;
     const auditIndex = target.dataset.securityAuditIndex;
     if (auditIndex !== undefined) {
       const auditEvent = snapshot?.audits[Number(auditIndex)];
-      if (auditEvent) openAuditDetail(auditEvent, target);
-      return;
-    }
-    const mode = target.dataset.securityMode as ConversationSecurityMode | undefined;
-    if (mode) {
-      actions.onModeChange(mode);
+      if (auditEvent) {
+        auditDetail?.close();
+        auditDetail = openAuditDetail(auditEvent, target);
+      }
       return;
     }
     const action = target.dataset.securityAction;
     if (action === 'refresh') actions.onRefresh();
     else if (action === 'install') actions.onInstall();
-    else if (action === 'uninstall') actions.onUninstall();
-    else if (action === 'export') actions.onAuditExport();
-    else if (action === 'purge') actions.onAuditPurge();
-    else if (action === 'toggle-rule' || action === 'delete-rule') {
+    else if (action === 'audit-menu') {
+      showActions(target, '账号审计记录', [
+        { id: 'export', label: '导出账号全部审计记录', onSelect: actions.onAuditExport },
+        { id: 'purge', label: '清理账号内 30 天前的审计记录', danger: true, onSelect: actions.onAuditPurge },
+      ]);
+    } else if (action === 'toggle-rule' || action === 'rule-menu') {
       const rule = snapshot?.rules.find(
         (item) => String(item.rule_id ?? '') === target.dataset.ruleId,
       );
-      if (rule && action === 'toggle-rule') actions.onRuleToggle(rule);
-      if (rule && action === 'delete-rule') actions.onRuleDelete(rule);
+      if (!rule) return;
+      if (action === 'toggle-rule') actions.onRuleToggle(rule);
+      else showActions(target, '授权规则', [
+        { id: 'delete-rule', label: '永久删除授权规则', danger: true, onSelect: () => actions.onRuleDelete(rule) },
+      ]);
     }
   };
   element.addEventListener('click', handleClick);
   element.addEventListener('change', (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    if (target instanceof HTMLInputElement && target.matches('[data-security-strict-toggle]')) {
-      actions.onStrictSecurityChange(target.checked);
-      return;
-    }
     if (target instanceof HTMLSelectElement && target.matches('[data-security-audit-filter]')) {
-      const query = snapshot?.auditQuery ?? EMPTY_SECURITY_AUDIT_QUERY;
       const filter = target.dataset.securityAuditFilter;
       if (filter === 'action-type') {
-        actions.onAuditQueryChange?.({
-          ...query,
-          actionType: target.value as SecurityAuditQuery['actionType'],
-        });
+        actions.onAuditQueryChange?.({ actionType: target.value as SecurityAuditQuery['actionType'] });
       } else if (filter === 'decision') {
-        actions.onAuditQueryChange?.({
-          ...query,
-          decision: target.value as SecurityAuditQuery['decision'],
-        });
+        actions.onAuditQueryChange?.({ decision: target.value as SecurityAuditQuery['decision'] });
       } else if (filter === 'sort') {
-        actions.onAuditQueryChange?.({
-          ...query,
-          sort: target.value as SecurityAuditQuery['sort'],
-        });
+        actions.onAuditQueryChange?.({ sort: target.value as SecurityAuditQuery['sort'] });
       }
     }
   });
@@ -572,39 +509,47 @@ export function createSecurityCenterView(
     );
     if (!form || !element.contains(form)) return;
     event.preventDefault();
-    const query = snapshot?.auditQuery ?? EMPTY_SECURITY_AUDIT_QUERY;
     const input = form.querySelector<HTMLInputElement>('[data-security-audit-session]');
-    actions.onAuditQueryChange?.({ ...query, sessionId: input?.value.trim() ?? '' });
+    actions.onAuditQueryChange?.({ sessionId: input?.value.trim() ?? '' });
   });
 
   return {
     element,
+    dispose() {
+      element.remove();
+      menu?.dispose();
+      auditDetail?.dispose();
+    },
     update(nextSnapshot) {
-      snapshot = nextSnapshot;
-      refresh.disabled = nextSnapshot.loading;
-      refresh.setAttribute('aria-busy', String(nextSnapshot.loading));
-      status.dataset.state = nextSnapshot.error
-        ? 'error'
-        : nextSnapshot.loading
-          ? 'loading'
-          : 'ready';
-      status.hidden = !nextSnapshot.error && !nextSnapshot.loading;
-      status.textContent = nextSnapshot.error
-        ? `安全中心加载失败：${nextSnapshot.error}`
-        : nextSnapshot.loading
-          ? '正在加载安全状态…'
-          : '';
-      content.replaceChildren(
-        ...(STRICT_SECURITY_TOGGLE_VISIBLE ? [renderStrictSecuritySection(nextSnapshot)] : []),
-        renderModeSection(nextSnapshot),
-        renderCapabilitySection(nextSnapshot),
-        renderRulesSection(nextSnapshot),
-        renderAuditSection(nextSnapshot),
-      );
-      bindPagination('security-audit', {
-        onPageChange: (page) => actions.onAuditPageChange?.(page),
-        onPageSizeChange: (size) => actions.onAuditPageSizeChange?.(size),
-      });
+      const previous = snapshot;
+      snapshot = { ...nextSnapshot };
+      status.hidden = !nextSnapshot.error;
+      status.textContent = nextSnapshot.error ? `安全中心加载失败：${nextSnapshot.error}` : '';
+      if (!protection || previous?.capabilities !== nextSnapshot.capabilities
+        || previous.loading !== nextSnapshot.loading || previous.settingUp !== nextSnapshot.settingUp
+        || Boolean(previous.error) !== Boolean(nextSnapshot.error)) {
+        const next = renderCapabilitySection(nextSnapshot);
+        if (protection) protection.replaceWith(next);
+        else content.append(next);
+        protection = next;
+      }
+      if (!rulesSection || previous?.rules !== nextSnapshot.rules || previous.workspaceId !== nextSnapshot.workspaceId) {
+        const next = disclosure('rules', '已保存的授权规则', renderRulesSection(nextSnapshot), nextSnapshot.rules.length || undefined);
+        updateDisclosure(rulesSection, next);
+        rulesSection = next;
+      }
+      if (!auditSection || previous?.audits !== nextSnapshot.audits || previous.auditQuery !== nextSnapshot.auditQuery
+        || previous.auditPage !== nextSnapshot.auditPage || previous.auditPageSize !== nextSnapshot.auditPageSize
+        || previous.auditTotal !== nextSnapshot.auditTotal) {
+        const total = nextSnapshot.auditTotal ?? nextSnapshot.audits.length;
+        const next = disclosure('audit', '安全审计记录', renderAuditSection(nextSnapshot), total);
+        updateDisclosure(auditSection, next);
+        auditSection = next;
+        bindPagination('security-audit', {
+          onPageChange: (page) => actions.onAuditPageChange?.(page),
+          onPageSizeChange: (size) => actions.onAuditPageSizeChange?.(size),
+        });
+      }
     },
   };
 }

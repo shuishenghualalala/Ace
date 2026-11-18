@@ -23,6 +23,7 @@ from crew.security.models import (
     EMPTY_ADDITIONAL_PERMISSIONS,
     AdditionalPermissionProfile,
     ConversationPermissionMode,
+    NetworkPolicy,
     PermissionProfile,
     PermissionProfileKind,
     SandboxPermissions,
@@ -63,6 +64,11 @@ class ProcessLaunch:
     def external_managed(self) -> bool:
         """Whether external runtimes must cross the native managed boundary."""
         return self.managed and self.external_security_enabled
+
+    @property
+    def external_profile(self) -> PermissionProfile:
+        """Use the external adapter's scoped network grants for managed execution."""
+        return replace(self.profile, network=NetworkPolicy.RESTRICTED)
 
 
 current_process_launch: ContextVar[ProcessLaunch | None] = ContextVar(
@@ -155,6 +161,8 @@ async def execute_captured(
             helper_argv=(),
             trusted_readable_roots=(),
         )
+    elif external:
+        launch = replace(launch, profile=launch.external_profile)
     host_env = env
     if env_overrides:
         host_env = {**(env if env is not None else os.environ), **env_overrides}
@@ -534,7 +542,12 @@ def compile_process_launch(
     Built-in tools remain managed whenever ``profile`` is managed.
     """
     protected = _protected_entries(context, db_path)
-    profile = settings_for_mode(mode, context.workspace_root, deny_entries=protected).profile
+    profile = settings_for_mode(
+        mode,
+        context.workspace_root,
+        deny_entries=protected,
+        network_access=getattr(approval_service, "workspace_network_access", False) is True,
+    ).profile
     if (
         additional_permissions.sandbox_permissions
         is SandboxPermissions.REQUIRE_ESCALATED
@@ -557,7 +570,17 @@ def compile_process_launch(
         ),
     ]
     if os.name == "nt" and profile.full_disk_read:
-        trusted_roots.extend(_windows_full_disk_read_roots())
+        # Shared installed programs already expose their ordinary read access
+        # to the sandbox account. Leave administrator-owned ACLs untouched.
+        system_program_roots = tuple(
+            Path(value).resolve(strict=False)
+            for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")
+            if (value := os.environ.get(name))
+        )
+        trusted_roots = [
+            root for root in trusted_roots
+            if not any(root.is_relative_to(programs) for programs in system_program_roots)
+        ]
     trusted_roots = list(dict.fromkeys(trusted_roots))
     return ProcessLaunch(
         profile=profile,
@@ -577,46 +600,6 @@ def compile_process_launch(
     )
 
 
-_WINDOWS_SENSITIVE_TOP_LEVEL = frozenset(
-    {
-        ".ssh",
-        ".tsh",
-        ".brev",
-        ".gnupg",
-        ".aws",
-        ".azure",
-        ".kube",
-        ".docker",
-        ".config",
-        ".npm",
-        ".pki",
-        ".terraform.d",
-        ".crew",
-        ".ace",
-    }
-)
-
-
-def _windows_full_disk_read_roots() -> tuple[Path, ...]:
-    """Enumerate precise Windows read roots without recursive drive ACL changes."""
-    roots: list[Path] = []
-    # The dedicated sandbox account already has ordinary Users read access to
-    # OS/program folders. A request-scoped lease must not rewrite ACLs owned by
-    # TrustedInstaller there. The native runner handles executable access.
-    home = Path.home().expanduser().resolve(strict=False)
-    try:
-        children = tuple(home.iterdir())
-    except OSError:
-        children = ()
-    for child in children:
-        if child.name.lower() in _WINDOWS_SENSITIVE_TOP_LEVEL:
-            continue
-        resolved = child.resolve(strict=False)
-        if resolved.exists() and resolved not in roots:
-            roots.append(resolved)
-    return tuple(roots)
-
-
 def _additional_permissions_summary(launch: ProcessLaunch) -> str:
     if launch.additional_permissions.empty:
         return ""
@@ -630,18 +613,29 @@ def _additional_permissions_summary(launch: ProcessLaunch) -> str:
     )
 
 
-def shell_argv(command: str) -> tuple[str, ...]:
+def shell_argv(command: str, *, cwd: Path | None = None) -> tuple[str, ...]:
     """Represent one terminal string as an explicit platform shell argv."""
     if os.name == "nt":
-        executable = shutil.which("pwsh") or shutil.which("powershell")
+        program_files = Path(os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles", r"C:\Program Files"))
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        installed_shells = (
+            program_files / "PowerShell" / "7" / "pwsh.exe",
+            system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+        )
+        executable = next((str(path) for path in installed_shells if path.is_file()), None)
         if not executable:
             raise RuntimeError("PowerShell is unavailable")
-        script = (
-            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-            "$OutputEncoding=[System.Text.Encoding]::UTF8;"
-            "chcp 65001|Out-Null;"
-            f"{command}"
-        )
+        script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8;"
+        if cwd is not None:
+            location = str(cwd).replace("'", "''")
+            script += (
+                "try { "
+                "New-PSDrive -Name AceCurrentWorkspace -PSProvider FileSystem "
+                f"-Root '{location}' -Scope Local -ErrorAction Stop | Out-Null; "
+                "Set-Location -LiteralPath 'AceCurrentWorkspace:\\' -ErrorAction Stop "
+                "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 };"
+            )
+        script += command
         return (str(Path(executable).resolve()), "-NoProfile", "-Command", script)
     executable = shutil.which("bash") or "/bin/sh"
     # Managed runtimes intentionally set HOME to the host user directory so

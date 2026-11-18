@@ -75,6 +75,7 @@ def _setup_config(spec: dict[str, Any], case_dir: Path) -> Any:
     cfg.plugins_enabled = []
     cfg.mcp_servers = {}
     cfg.security_enabled = False
+    cfg.security_sandbox_enabled = False
     cfg.sqlite_wal = True
     cfg.tasks_auto_background_after_seconds = 0.0
     cfg.max_iterations = min(int(cfg.max_iterations or 30), 30)

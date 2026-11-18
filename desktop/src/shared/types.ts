@@ -30,6 +30,13 @@ export interface FeedbackSubmitResult {
 /** desktop prefs（关闭行为）。 */
 export type CloseBehavior = 'tray' | 'quit' | 'ask';
 
+export type DefaultConversationPermission = 'request_approval' | 'auto_review' | 'full_access';
+
+export interface SecurityPermissionPreferences {
+  enabled: boolean;
+  defaultMode?: DefaultConversationPermission;
+}
+
 /** 菜单栏图标状态，Renderer 只上报语义状态，具体图片由主进程管理。 */
 export type TrayStatus = 'default' | 'working' | 'notification' | 'done' | 'rest';
 

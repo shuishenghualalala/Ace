@@ -37,6 +37,7 @@ async def test_disabled_flag_hides_management_api_and_rejects_new_external_bindi
             db_path=str(tmp_path / "crew.db"),
             cron_enabled=False,
             external_agents_enabled=False,
+            security_sandbox_enabled=False,
             gateway_admin_accounts=["A:uid-a"],
         ),
         enable_team=False,
@@ -69,6 +70,7 @@ async def test_disabled_flag_hides_management_api_and_rejects_new_external_bindi
         assert config_response.json()["security"] == {
             "enabled": False,
             "default_mode": "full_access",
+            "workspace_network_access": False,
         }
 
         external_list = await client.get("/api/external-agents")

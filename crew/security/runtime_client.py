@@ -51,6 +51,7 @@ _REQUIRED_READY_CAPABILITIES = frozenset(
     {"stdin_once", "stream_output", "readonly_roots", "full_disk_read"}
 )
 _INTERACTIVE_READY_CAPABILITIES = _REQUIRED_READY_CAPABILITIES | {"stdin_bidirectional"}
+_DIRECT_NETWORK_READY_CAPABILITY = frozenset({"direct_network"})
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -129,6 +130,7 @@ class RuntimeCapabilities:
     windows_acl: bool = False
     windows_job: bool = False
     windows_wfp: bool = False
+    direct_network: bool = False
 
     @property
     def is_windows_backend(self) -> bool:
@@ -152,6 +154,7 @@ class RuntimeCapabilities:
             windows_acl=value.get("windows_acl") is True,
             windows_job=value.get("windows_job") is True,
             windows_wfp=value.get("windows_wfp") is True,
+            direct_network=value.get("direct_network") is True,
         )
 
 
@@ -195,6 +198,7 @@ class NativeInteractiveSession:
         timeout: float | None,
         max_output_bytes: int,
         full_disk_read: bool,
+        network_access: bool,
     ) -> None:
         self._client = client
         self.process = process
@@ -203,6 +207,7 @@ class NativeInteractiveSession:
         self._timeout = float("inf") if timeout is None else max(0.1, float(timeout or 0.0))
         self._max_output_bytes = max_output_bytes
         self._full_disk_read = full_disk_read
+        self._network_access = network_access
         self._next_seq = 0
         self._output_bytes = 0
         self._write_lock = asyncio.Lock()
@@ -258,6 +263,7 @@ class NativeInteractiveSession:
                         RuntimeErrorCode.SANDBOX_UNAVAILABLE,
                         "native runtime did not apply the requested read boundary",
                     )
+                _validate_direct_network(capabilities, self._network_access)
                 continue
             if frame_type == "stdout" and nonce == self._open_nonce:
                 try:
@@ -430,6 +436,7 @@ class NativeRuntimeClient:
         denied_roots: Sequence[Path] = (),
         full_disk_read: bool = False,
         network_enabled: bool = False,
+        network_access: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
         timeout: float | None = 30.0,
@@ -461,6 +468,7 @@ class NativeRuntimeClient:
             "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
             "full_disk_read": bool(full_disk_read),
             "network_enabled": network_enabled,
+            "network_access": network_access,
             "network_rules": [dict(rule) for rule in network_rules],
             "allow_local_binding": allow_local_binding,
             "max_output_bytes": max_output_bytes,
@@ -491,7 +499,10 @@ class NativeRuntimeClient:
                 process,
                 self._startup_timeout if deadline is None else min(self._startup_timeout, _remaining(deadline)),
             )
-            self._validate_ready(ready)
+            self._validate_ready(
+                ready,
+                required_capabilities=_required_capabilities(network_access),
+            )
             assert process.stdin is not None
             process.stdin.write(request_frame)
             await process.stdin.drain()
@@ -502,6 +513,7 @@ class NativeRuntimeClient:
                 deadline=deadline,
                 max_output_bytes=max_output_bytes,
                 network_enabled=network_enabled,
+                network_access=network_access,
                 allow_local_binding=allow_local_binding,
                 full_disk_read=full_disk_read,
                 on_started=on_started,
@@ -538,6 +550,7 @@ class NativeRuntimeClient:
         denied_roots: Sequence[Path] = (),
         full_disk_read: bool = False,
         network_enabled: bool = False,
+        network_access: bool = False,
         network_rules: Sequence[Mapping[str, Any]] = (),
         allow_local_binding: bool = False,
         timeout: float | None = 120.0,
@@ -563,6 +576,7 @@ class NativeRuntimeClient:
             "denied_roots": [str(path.resolve(strict=False)) for path in denied_roots],
             "full_disk_read": bool(full_disk_read),
             "network_enabled": network_enabled,
+            "network_access": network_access,
             "network_rules": [dict(rule) for rule in network_rules],
             "allow_local_binding": allow_local_binding,
             "max_output_bytes": max_output_bytes,
@@ -595,7 +609,7 @@ class NativeRuntimeClient:
             )
             self._validate_ready(
                 ready,
-                required_capabilities=_INTERACTIVE_READY_CAPABILITIES,
+                required_capabilities=_required_capabilities(network_access, interactive=True),
             )
             session = NativeInteractiveSession(
                 self,
@@ -605,6 +619,7 @@ class NativeRuntimeClient:
                 timeout=timeout,
                 max_output_bytes=max_output_bytes,
                 full_disk_read=full_disk_read,
+                network_access=network_access,
             )
             assert process.stdin is not None
             process.stdin.write(request_frame)
@@ -627,6 +642,7 @@ class NativeRuntimeClient:
         deadline: float | None,
         max_output_bytes: int,
         network_enabled: bool,
+        network_access: bool,
         allow_local_binding: bool,
         full_disk_read: bool,
         on_started: Callable[[int | None], None] | None,
@@ -705,6 +721,7 @@ class NativeRuntimeClient:
                         RuntimeErrorCode.NETWORK_UNAVAILABLE,
                         "native runtime lacks required managed-network capability",
                     )
+                _validate_direct_network(capabilities, network_access)
                 if allow_local_binding and not capabilities.local_binding_control:
                     raise NativeRuntimeError(
                         RuntimeErrorCode.NETWORK_UNAVAILABLE,
@@ -869,6 +886,19 @@ class NativeRuntimeClient:
             raise NativeRuntimeError(
                 RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH, "native runtime handshake mismatch"
             )
+
+
+def _required_capabilities(network_access: bool, *, interactive: bool = False) -> frozenset[str]:
+    required = _INTERACTIVE_READY_CAPABILITIES if interactive else _REQUIRED_READY_CAPABILITIES
+    return required | _DIRECT_NETWORK_READY_CAPABILITY if network_access else required
+
+
+def _validate_direct_network(capabilities: RuntimeCapabilities, expected: bool) -> None:
+    if capabilities.direct_network is not expected or (expected and capabilities.managed_network):
+        raise NativeRuntimeError(
+            RuntimeErrorCode.NETWORK_UNAVAILABLE,
+            "native runtime did not apply the requested network policy",
+        )
 
 
 def _ask_classification(shell_kind: str, raw_command: str, reason: str) -> ShellClassification:

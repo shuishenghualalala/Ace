@@ -25,6 +25,7 @@ def settings_for_mode(
     workspace_root: Path | None,
     *,
     deny_entries: tuple[FilesystemEntry, ...] = (),
+    network_access: bool = False,
 ) -> SecurityModeSettings:
     """Compile one user-facing mode into sandbox permissions and approval policy."""
     if mode not in {
@@ -33,22 +34,6 @@ def settings_for_mode(
         ConversationPermissionMode.FULL_ACCESS,
     }:
         raise ValueError(f"未知对话安全模式: {mode!r}")
-    writable_roots: list[Path] = []
-    if workspace_root is not None:
-        writable_roots.append(workspace_root)
-    temp_candidates = [Path(tempfile.gettempdir())]
-    if os.name != "nt":
-        temp_candidates.append(Path("/tmp"))
-    for candidate in temp_candidates:
-        try:
-            resolved = candidate.expanduser().resolve(strict=False)
-        except (OSError, RuntimeError):
-            continue
-        if resolved not in writable_roots:
-            writable_roots.append(resolved)
-    filesystem = tuple(
-        FilesystemEntry(root, FilesystemAccess.READ_WRITE) for root in writable_roots
-    )
     if mode is ConversationPermissionMode.FULL_ACCESS:
         # 完全访问权限明确选择宿主用户权限，不再编译文件或网络沙箱。
         # 不可逾越的破坏性红线仍由终端 hardline 与结构化文件根目录检查负责。
@@ -60,11 +45,26 @@ def settings_for_mode(
             approval_policy=ApprovalPolicy.NEVER,
         )
 
+    writable_roots: list[Path] = []
+    if workspace_root is not None:
+        writable_roots.append(workspace_root)
+    # The Windows native runtime provisions a scratch directory for each run.
+    temp_candidates = (Path(tempfile.gettempdir()), Path("/tmp")) if os.name != "nt" else ()
+    for candidate in temp_candidates:
+        try:
+            resolved = candidate.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved not in writable_roots:
+            writable_roots.append(resolved)
+    filesystem = tuple(
+        FilesystemEntry(root, FilesystemAccess.READ_WRITE) for root in writable_roots
+    )
     profile = PermissionProfile(
         kind=PermissionProfileKind.MANAGED,
         full_disk_read=True,
         filesystem=(*filesystem, *deny_entries),
-        network=NetworkPolicy.RESTRICTED,
+        network=NetworkPolicy.UNRESTRICTED if network_access else NetworkPolicy.RESTRICTED,
     )
     approval = (
         ApprovalPolicy.REQUEST

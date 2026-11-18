@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import subprocess
 from typing import Literal
 import platform
 import tempfile
 from pathlib import Path
+from collections.abc import Callable
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -23,11 +27,15 @@ from crew.security.context import (
 )
 from crew.security.launch import shell_argv
 from crew.security.models import ConversationPermissionMode
+from crew.security.process_lifecycle import terminate_process_tree
 from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError, RuntimeCapabilities
-from crew.security.settings import strict_security_enabled
+from crew.security.workspace import prepare_new_workspace
+from crew.state.logging import get_logger
 from crew.tools.security_guard import _file_change_preview
 
+log = get_logger("gateway.security")
 _PROOF_HEADER = "X-Crew-Security-Proof"
+_ACL_RECOVERY_TIMEOUT = 600
 AuditActionType = Literal[
     "",
     "approval_requested",
@@ -146,7 +154,9 @@ async def _probe_runtime(
     helper_argv: tuple[str, ...],
     *,
     system: str,
-    network_enabled: bool,
+    network_enabled: bool = False,
+    network_access: bool = False,
+    on_error: Callable[[NativeRuntimeError], None] | None = None,
 ) -> RuntimeCapabilities | None:
     """Run a sandbox canary and return only capabilities backed by a live boundary."""
 
@@ -154,7 +164,10 @@ async def _probe_runtime(
         parent = Path(parent_raw)
         workspace = parent / "workspace"
         workspace.mkdir()
-        host_secret = parent / "host-secret"
+        prepare_new_workspace(workspace)
+        outside_readable = parent / "readable"
+        outside_readable.mkdir()
+        host_secret = outside_readable / "host-secret"
         host_secret.write_text("probe", encoding="ascii")
         outside_marker = parent / "outside-marker"
         marker = workspace / "probe-marker"
@@ -168,8 +181,8 @@ async def _probe_runtime(
                 "cmd.exe",
                 "/d",
                 "/c",
-                f'echo ok>"{marker}" & echo changed>"{metadata_file}" & '
-                f'echo changed>"{outside_marker}" & type "{host_secret}"',
+                r"echo ok>probe-marker & echo changed>.git\config & "
+                r"echo changed>..\outside-marker & type ..\readable\host-secret",
             )
         elif system in {"linux", "darwin"}:
             command = (
@@ -185,11 +198,9 @@ async def _probe_runtime(
             )
         else:
             return None
-        readable_roots: tuple[Path, ...] = ()
-        if system == "windows":
-            from crew.security.launch import _windows_full_disk_read_roots
-
-            readable_roots = _windows_full_disk_read_roots()
+        # Grant exactly the fixture read on Windows. A live probe must not
+        # touch the user's profile tree or require its ACL propagation.
+        readable_roots = (outside_readable,) if system == "windows" else ()
         try:
             result = await NativeRuntimeClient(helper_argv).execute(
                 command=command,
@@ -199,10 +210,17 @@ async def _probe_runtime(
                 readonly_roots=(metadata_root,),
                 full_disk_read=True,
                 network_enabled=network_enabled,
+                network_access=network_access,
                 timeout=10,
                 max_output_bytes=4096,
             )
-        except (NativeRuntimeError, OSError, ValueError):
+        except NativeRuntimeError as exc:
+            log.warning("安全运行组件探针失败 [%s]：%s", exc.code.value, exc)
+            if on_error is not None:
+                on_error(exc)
+            return None
+        except (OSError, ValueError) as exc:
+            log.warning("安全运行组件探针启动失败：%s", type(exc).__name__)
             return None
         # The marker proves the child actually started and could write inside the declared
         # workspace. A Seatbelt/bwrap startup failure also returns non-zero, but leaves no
@@ -229,7 +247,11 @@ async def _probe_runtime(
         )
 
 
-async def _live_filesystem_runtime() -> tuple[RuntimeCapabilities | None, bool, bool, str]:
+async def _live_filesystem_runtime(
+    *,
+    network_access: bool = False,
+    on_error: Callable[[NativeRuntimeError], None] | None = None,
+) -> tuple[RuntimeCapabilities | None, bool, bool, str]:
     """Return the live filesystem boundary plus package diagnostics."""
     from crew.security.launch import packaged_runtime_argv, runtime_source_stale
 
@@ -240,16 +262,173 @@ async def _live_filesystem_runtime() -> tuple[RuntimeCapabilities | None, bool, 
     if not helper_present or stale or system not in {"windows", "linux", "darwin"}:
         return None, helper_present, stale, system
     return (
-        await _probe_runtime(helper_argv, system=system, network_enabled=False),
+        await _probe_runtime(
+            helper_argv, system=system, network_access=network_access, on_error=on_error,
+        ),
         helper_present,
         stale,
         system,
     )
 
 
+async def _recover_windows_acl(helper_argv: tuple[str, ...], state_dir: Path) -> str | None:
+    """Finish a protected native ACL journal outside the short sandbox canary."""
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *helper_argv, "--windows-recover-acl", str(state_dir),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+        )
+        code = await asyncio.wait_for(process.wait(), timeout=_ACL_RECOVERY_TIMEOUT)
+    except asyncio.CancelledError:
+        if process is not None:
+            await terminate_process_tree(process)
+        raise
+    except (OSError, TimeoutError) as exc:
+        if process is not None:
+            await terminate_process_tree(process)
+        log.warning("Windows sandbox ACL recovery failed (%s)", type(exc).__name__)
+        return "windows_acl_recovery_failed"
+    if code == 0:
+        return None
+    if code == 3:
+        return "windows_sandbox_busy"
+    log.warning("Windows sandbox ACL recovery failed (exit=%d)", code)
+    return "windows_acl_recovery_failed"
+
+
+class _WindowsAclRecovery:
+    """Keep one recovery alive between capability requests from the desktop."""
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task[str | None] | None = None
+
+    def status(self, helper_argv: tuple[str, ...], state_dir: Path) -> str | None:
+        if self._task is not None:
+            if not self._task.done():
+                return "windows_acl_recovery"
+            finished = self._task
+            self._task = None
+            return finished.result() if not finished.cancelled() else "windows_acl_recovery_failed"
+        # Presence only schedules the native check. The helper validates the
+        # journal and takes the same lock as normal runs before touching ACLs.
+        journal = state_dir / "windows-acl-state.json"
+        cleanup_log = state_dir / "windows-acl-cleanup.log"
+        try:
+            needs_recovery = journal.exists() or journal.with_suffix(".bak").exists() or cleanup_log.exists()
+        except OSError:
+            return "windows_acl_recovery_failed"
+        if not needs_recovery:
+            return None
+        self._task = asyncio.create_task(_recover_windows_acl(helper_argv, state_dir))
+        return "windows_acl_recovery"
+
+
+async def probe_security_capabilities(*, workspace_network_access: bool) -> dict[str, object]:
+    from crew.security.launch import packaged_runtime_argv
+
+    errors: list[NativeRuntimeError] = []
+    filesystem_probe, helper_present, stale, system = await _live_filesystem_runtime(
+        on_error=errors.append,
+    )
+    filesystem = filesystem_probe is not None
+    network = False
+    direct_network = False
+    local_binding = False
+    detail = "native security runtime 未随包安装"
+    if helper_present and stale:
+        detail = "native security runtime 与当前源码不一致"
+    elif filesystem:
+        helper_argv = packaged_runtime_argv()
+        network_probe = await _probe_runtime(
+            helper_argv, system=system, network_enabled=True, on_error=errors.append,
+        )
+        network = network_probe is not None and network_probe.managed_network
+        local_binding = network and bool(network_probe and network_probe.local_binding_control)
+        detail = (
+            "文件沙箱与联网管控 live probe 已通过"
+            if network
+            else "文件沙箱 live probe 已通过；联网管控探针失败"
+        )
+        if workspace_network_access:
+            direct_probe = await _probe_runtime(
+                helper_argv, system=system, network_access=True, on_error=errors.append,
+            )
+            direct_network = direct_probe is not None and direct_probe.direct_network
+            if direct_network:
+                detail = "文件沙箱与直连模式 live probe 已通过"
+            elif system == "windows":
+                detail = "直连模式的 Windows 沙箱尚未就绪，请安装或修复防护"
+            else:
+                detail = "直连模式的原生文件沙箱探针失败"
+    elif helper_present:
+        detail = "原生安全运行组件已找到，文件沙箱自检未通过"
+    ready = filesystem and (direct_network if workspace_network_access else network)
+    setup_required = (
+        not ready and helper_present and not stale and system == "windows"
+        and any(_windows_sandbox_setup_required(error) for error in errors)
+    )
+    if setup_required:
+        detail = "Windows 沙箱需要完成一次防护设置"
+    return {
+        "platform": system,
+        "backend": filesystem_probe.backend if filesystem_probe is not None else None,
+        "status": "ready" if ready else "setup_required" if setup_required else "unavailable",
+        "setup_required": setup_required,
+        "helper_present": helper_present,
+        "filesystem_sandbox": filesystem,
+        "managed_network": network,
+        "workspace_network_access": workspace_network_access,
+        "direct_network": direct_network,
+        "local_binding_control": local_binding,
+        "runtime_stale": stale,
+        "detail": detail,
+    }
+
+
+def _windows_sandbox_setup_required(error: NativeRuntimeError) -> bool:
+    """Recognize setup failures reported by installed Windows helper versions."""
+    detail = str(error)
+    return detail.startswith((
+        "Windows sandbox identity is not installed:",
+        "Windows sandbox identity is invalid:",
+        "Windows sandbox identity version mismatch",
+        "Windows direct network requires sandbox setup or repair",
+        "Windows sandbox direct network identity is invalid",
+        "FwpmFilterGetByKey0; run Windows sandbox setup or repair",
+        "Windows sandbox firewall policy does not match the sandbox account",
+    ))
+
+
 def create_security_router(crew) -> APIRouter:
     """Create host-authority routes; authentication alone cannot approve actions."""
     router = APIRouter(prefix="/api/security")
+    acl_recovery = _WindowsAclRecovery()
+    active_probes: dict[bool, asyncio.Task[dict[str, object]]] = {}
+
+    async def read_capabilities(network_access: bool) -> dict[str, object]:
+        from crew.security.launch import packaged_runtime_argv, runtime_source_stale
+
+        state_dir = Path(os.environ.get("ACE_SECURITY_STATE_DIR", ""))
+        if platform.system() == "Windows" and state_dir.is_absolute():
+            helper = packaged_runtime_argv()
+            if Path(helper[0]).is_file() and not runtime_source_stale(helper[0]):
+                reason = acl_recovery.status(helper, state_dir)
+                if reason:
+                    return {
+                        "platform": "windows",
+                        "helper_present": True,
+                        "runtime_stale": False,
+                        "filesystem_sandbox": False,
+                        "managed_network": False,
+                        "workspace_network_access": network_access,
+                        "direct_network": False,
+                        "setup_required": False,
+                        "status": "recovering" if reason == "windows_acl_recovery" else "unavailable",
+                        "reason": reason,
+                    }
+        return await probe_security_capabilities(workspace_network_access=network_access)
 
     def context(request: Request, workspace_id: str, session_id: str, task_id: str = "", cwd=None):
         account = account_from_request(request)
@@ -276,17 +455,21 @@ def create_security_router(crew) -> APIRouter:
     async def set_mode(request: Request, payload: SecurityModeInput):
         await _require_desktop_proof(request)
         ctx = context(request, payload.workspace_id, payload.session_id)
+        requested_mode = ConversationPermissionMode(payload.mode)
+        if crew.security_service.mode_for(ctx) is requested_mode:
+            return {"mode": requested_mode.value}
         if (
-            payload.mode == ConversationPermissionMode.AUTO_REVIEW.value
-            and strict_security_enabled()
+            requested_mode is ConversationPermissionMode.AUTO_REVIEW
+            and crew.security_service.security_enabled
         ):
-            runtime, _present, _stale, _system = await _live_filesystem_runtime()
+            runtime, _present, _stale, _system = await _live_filesystem_runtime(
+                network_access=crew.security_service.workspace_network_access,
+            )
             if runtime is None:
                 raise HTTPException(
                     status_code=409,
                     detail="替我审批需要已通过 live probe 的原生文件沙箱",
                 )
-        requested_mode = ConversationPermissionMode(payload.mode)
         changed = crew.security_service.set_mode(
             ctx,
             requested_mode,
@@ -486,47 +669,13 @@ def create_security_router(crew) -> APIRouter:
     async def capabilities(request: Request):
         await _require_desktop_proof(request)
         account_from_request(request)
-        from crew.security.launch import packaged_runtime_argv
-
-        filesystem_probe, helper_present, stale, system = await _live_filesystem_runtime()
-        helper_argv = packaged_runtime_argv()
-        detail = "native security runtime 未随包安装"
-        filesystem = filesystem_probe is not None
-        network = False
-        network_probe: RuntimeCapabilities | None = None
-        if helper_present and stale:
-            detail = "native security runtime 与当前源码不一致"
-        elif filesystem_probe is not None:
-            if filesystem:
-                network_probe = await _probe_runtime(
-                    helper_argv,
-                    system=system,
-                    network_enabled=True,
-                )
-                network = network_probe is not None and network_probe.managed_network
-            detail = (
-                "文件沙箱与联网管控 live probe 已通过"
-                if network
-                else (
-                    "文件沙箱 live probe 已通过；联网管控探针失败"
-                    if filesystem
-                    else "原生防护 live probe 失败或只读基线未生效"
-                )
-            )
-        elif helper_present:
-            detail = "当前设备不支持可用的原生安全运行组件"
-        return {
-            "platform": system,
-            "helper_present": helper_present,
-            "filesystem_sandbox": filesystem,
-            "managed_network": network,
-            "local_binding_control": bool(
-                network and network_probe and network_probe.local_binding_control
-            )
-            if filesystem
-            else False,
-            "runtime_stale": bool(stale),
-            "detail": detail,
-        }
+        network_access = (
+            crew.security_service.security_enabled and crew.security_service.workspace_network_access
+        )
+        probe = active_probes.get(network_access)
+        if probe is None or probe.done():
+            probe = asyncio.create_task(read_capabilities(network_access))
+            active_probes[network_access] = probe
+        return await asyncio.shield(probe)
 
     return router

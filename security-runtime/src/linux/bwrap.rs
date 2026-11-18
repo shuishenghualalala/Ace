@@ -87,9 +87,11 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         "--dir".to_string(),
         "/tmp/ace-home".to_string(),
     ]);
-    // Network is always namespaced. Approved traffic reaches only the host proxy
-    // through a private Unix socket bridge mounted below the masked /run.
-    args.push("--unshare-net".to_string());
+    // Restricted traffic uses a network namespace and, when authorized, a
+    // private Unix socket bridge to the managed proxy.
+    if !request.network_access {
+        args.push("--unshare-net".to_string());
+    }
     args.extend(["--proc".to_string(), "/proc".to_string()]);
 
     let mut created_target_dirs = BTreeSet::from([
@@ -118,6 +120,16 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
     for root in &writable {
         append_bind(&mut args, &mut created_target_dirs, "--bind", root)?;
         visible_roots.push(root.clone());
+    }
+    if request.network_access {
+        // Some distributions link /etc/resolv.conf into the private /run mount.
+        // Expose the single resolver file while keeping host IPC sockets hidden.
+        if let Ok(resolver) = Path::new("/etc/resolv.conf").canonicalize() {
+            if resolver.starts_with("/run") && resolver.is_file() {
+                append_bind(&mut args, &mut created_target_dirs, "--ro-bind", &resolver)?;
+                visible_roots.push(resolver);
+            }
+        }
     }
     if let Some(home_staging) = &home_staging {
         args.extend([
@@ -218,6 +230,9 @@ pub fn build_args(request: &LinuxRunRequest) -> Result<BwrapPlan, String> {
         path_string(&executable)?,
         "--inner-seccomp".to_string(),
     ]);
+    if request.network_access {
+        args.push("--network-access".to_string());
+    }
     if request.network_enabled {
         args.extend([
             "--proxy-socket".to_string(),
@@ -473,6 +488,7 @@ mod tests {
             denied_roots: vec![],
             full_disk_read: false,
             network_enabled: false,
+            network_access: false,
             network_rules: vec![],
             allow_local_binding: false,
             proxy_socket_dir: None,
@@ -503,6 +519,7 @@ mod tests {
             denied_roots: vec![],
             full_disk_read: false,
             network_enabled: false,
+            network_access: false,
             network_rules: vec![],
             allow_local_binding: false,
             proxy_socket_dir: None,
@@ -540,6 +557,7 @@ mod tests {
             denied_roots: vec![],
             full_disk_read: false,
             network_enabled: false,
+            network_access: false,
             network_rules: vec![],
             allow_local_binding: false,
             proxy_socket_dir: None,
@@ -572,6 +590,7 @@ mod tests {
             denied_roots: vec![denied.path().to_path_buf()],
             full_disk_read: true,
             network_enabled: false,
+            network_access: false,
             network_rules: vec![],
             allow_local_binding: false,
             proxy_socket_dir: None,
@@ -641,6 +660,7 @@ mod tests {
                 denied_roots: vec![denied_path.clone()],
                 full_disk_read,
                 network_enabled: false,
+                network_access: false,
                 network_rules: vec![],
                 allow_local_binding: false,
                 proxy_socket_dir: None,
@@ -687,6 +707,7 @@ mod tests {
             denied_roots: vec![],
             full_disk_read: true,
             network_enabled: false,
+            network_access: false,
             network_rules: vec![],
             allow_local_binding: false,
             proxy_socket_dir: None,

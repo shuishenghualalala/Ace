@@ -59,14 +59,27 @@ def test_pack_scripts_exclude_web_frontend() -> None:
         assert "plugins" in source
 
 
+def test_interactive_windows_installer_prepares_sandbox_before_launch() -> None:
+    installer = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8")
+    main = (ROOT / "desktop" / "src" / "main" / "index.ts").read_text(encoding="utf-8")
+    assert "PrivilegesRequired=lowest" in installer
+    assert "CurStep <> ssPostInstall" in installer
+    assert "ExecAsOriginalUser(DesktopPath, '--crew-provision-windows-sandbox'" in installer
+    assert "ewWaitUntilTerminated" in installer
+    assert "packagedSecurityRuntimeEnv({ bundledOnly: true })" in main
+    assert main.index("process.argv.includes('--crew-provision-windows-sandbox')") < main.index(
+        "app.requestSingleInstanceLock()"
+    )
+
+
 def test_mac_pack_script_logs_app_path_with_nounset(posix_bash: str) -> None:
-    script = (ROOT / "deb-package" / "pack_mac.sh").read_text()
+    script = (ROOT / "deb-package" / "pack_mac.sh").read_text(encoding="utf-8")
     log_line = next(line for line in script.splitlines() if "Electron 客户端:" in line)
     result = subprocess.run(
         [posix_bash, "-u", "-c", log_line],
         env={"APP_PATH": "/tmp/crew-desktop.app"},
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -82,6 +95,24 @@ def test_pack_mac_supports_arm64_and_x64() -> None:
     assert "darwin-arm64" in source
     assert "darwin-x64" in source
     assert 'DMG_NAME="crew-desktop_${VERSION}_${ARCH}.dmg"' in source
+
+
+def test_mac_package_verifies_signed_runtime_from_dmg_input() -> None:
+    source = (ROOT / "deb-package" / "pack_mac.sh").read_text(encoding="utf-8")
+
+    finish_signing, dmg = source.split('DMG_APP="$STAGE_DMG/crew-desktop.app"', 1)
+    sign_helper = finish_signing.index('codesign --force --sign - --timestamp=none "$APP_SECURITY_RUNTIME"')
+    stage_manifest = finish_signing.index('--runtime "$APP_SECURITY_RUNTIME"')
+    seal_manifest = finish_signing.index('codesign --force --sign - --timestamp=none "$APP_PATH"')
+    assert sign_helper < stage_manifest < seal_manifest
+    assert 'codesign --force --deep' not in finish_signing[stage_manifest:]
+
+    verify_manifest = dmg.index('verify-security-runtime.mjs "$DMG_RESOURCES"')
+    smoke_runtime = dmg.index('--platform macos --runtime "$DMG_SECURITY_RUNTIME"')
+    build_dmg = dmg.index("hdiutil create")
+    assert 'DMG_SECURITY_RUNTIME="$DMG_RESOURCES/ace-security-runtime"' in dmg
+    assert '"$DMG_GW/runtimes/python/bin/python3" -s "$ROOT_DIR/tests/security/security_matrix.py"' in dmg
+    assert verify_manifest < smoke_runtime < build_dmg
 
 
 def test_release_desktop_workflow_covers_all_platforms() -> None:

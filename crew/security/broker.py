@@ -7,13 +7,14 @@ from dataclasses import dataclass
 import shlex
 import shutil
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 from crew.security.models import (
     EMPTY_ADDITIONAL_PERMISSIONS,
     AdditionalPermissionProfile,
     FilesystemAccess,
     NetworkAccess,
+    NetworkPolicy,
     PermissionProfile,
     PermissionProfileKind,
 )
@@ -305,21 +306,6 @@ class SecurityExecutionBroker:
             for root in readable
             if not any(root == write or write in root.parents for write in writable)
         ]
-        network_entries = (
-            *request.permission_profile.network_entries,
-            *request.additional_permissions.network,
-        )
-        network_rules = [
-            {
-                "host": entry.host,
-                "port": entry.port,
-                "protocol": entry.protocol,
-                "allow": entry.access is NetworkAccess.ALLOW,
-                "allow_private": entry.allow_private,
-                "escalatable": entry.escalatable,
-            }
-            for entry in network_entries
-        ]
         return {
             "command": request.command,
             "cwd": request.cwd,
@@ -328,18 +314,40 @@ class SecurityExecutionBroker:
             "readonly_roots": readonly,
             "denied_roots": denied,
             "full_disk_read": request.permission_profile.full_disk_read,
-            "network_enabled": bool(network_rules),
-            "network_rules": network_rules,
-            "allow_local_binding": (
-                request.permission_profile.allow_local_binding
-                or request.additional_permissions.allow_local_binding
-            ),
+            **compile_runtime_network_options(request.permission_profile, request.additional_permissions),
             "timeout": request.timeout_seconds,
             "max_output_bytes": request.max_output_bytes,
             "stdin": request.stdin,
             "home_files": request.home_files,
             "env_overrides": request.env_overrides,
         }
+
+
+def compile_runtime_network_options(
+    profile: PermissionProfile, additional: AdditionalPermissionProfile,
+) -> dict[str, Any]:
+    """Compile the workspace network policy shared by captured and background commands."""
+    network_access = profile.network is NetworkPolicy.UNRESTRICTED
+    network_entries = () if network_access else (*profile.network_entries, *additional.network)
+    network_rules = [
+        {
+            "host": entry.host,
+            "port": entry.port,
+            "protocol": entry.protocol,
+            "allow": entry.access is NetworkAccess.ALLOW,
+            "allow_private": entry.allow_private,
+            "escalatable": entry.escalatable,
+        }
+        for entry in network_entries
+    ]
+    return {
+        "network_access": network_access,
+        "network_enabled": bool(network_rules),
+        "network_rules": network_rules,
+        "allow_local_binding": not network_access and (
+            profile.allow_local_binding or additional.allow_local_binding
+        ),
+    }
 
 
 def compile_runtime_filesystem_roots(

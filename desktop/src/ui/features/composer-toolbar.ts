@@ -42,8 +42,10 @@ import { showConfirmDialog } from '../ui-feedback';
 import { sessionStore } from '../stores/session-store';
 import { startModelTour } from './model-tour';
 import {
+  DRAFT_FULL_ACCESS_CONFIRMATION,
   FULL_ACCESS_CONFIRMATION,
   SECURITY_MODE_OPTIONS,
+  canSelectFullAccess,
   currentSecurityMode,
   modeLabel,
   selectNextConversationMode,
@@ -55,6 +57,12 @@ import {
   externalAgentTone,
 } from './external-agent-avatar';
 import { securityModuleEnabled } from './security-mode';
+import {
+  DEFAULT_NEW_CONVERSATION_MODE_CHANGED,
+  FULL_ACCESS_CHOICE_CHANGED,
+  fullAccessChoiceEnabled,
+  loadFullAccessChoice,
+} from './security-permission-settings';
 
 type ComposerEntry = ComposerMode | 'external';
 
@@ -707,13 +715,14 @@ function syncComposerModelChip(): void {
 
 /** 安全模式 chip 标签：据当前生效模式（会话绑定优先，否则新对话预设）渲染。 */
 function syncSecurityModeChip(): void {
+  const mode = modeLabel(currentSecurityMode());
   const label = document.getElementById('chat-security-mode-btn-label');
-  if (label) label.textContent = modeLabel(currentSecurityMode());
+  if (label) label.textContent = mode;
   const btn = document.getElementById('chat-security-mode-btn') as HTMLButtonElement | null;
   if (!btn) return;
   const enabled = securityModuleEnabled();
   btn.disabled = !enabled;
-  btn.title = enabled ? '请求批准' : '功能正在开发中，敬请期待';
+  btn.title = enabled ? mode : '功能正在开发中，敬请期待';
 }
 
 function renderSecurityModePopover(): void {
@@ -721,21 +730,26 @@ function renderSecurityModePopover(): void {
   const anchor = $('#chat-security-mode-btn');
   if (!anchor) return;
   const active = currentSecurityMode();
+  const fullAccessAvailable = canSelectFullAccess();
   const popover = document.createElement('div');
   popover.id = 'chat-security-mode-inline-popover';
   popover.innerHTML = `
     <div class="composer-select-popover__section composer-select-popover__section--title">Crew 应如何批准操作？</div>
     <div class="composer-select-popover__list">
-      ${SECURITY_MODE_OPTIONS.map((o) => `
-        <button type="button" class="composer-select-item composer-select-item--security${o.value === active ? ' is-selected' : ''}" data-sec-mode="${o.value}">
-          <span class="composer-select-item__plain-icon">${spriteIcon(o.value === 'full_access' ? 'icon-warning' : 'icon-security')}</span>
-          <span class="composer-select-item__body">
-            <span class="composer-select-item__title">${escapeHtml(o.label)}</span>
-            <span class="composer-select-item__desc">${escapeHtml(o.desc)}</span>
-          </span>
-          ${o.value === active ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
-        </button>
-      `).join('')}
+      ${SECURITY_MODE_OPTIONS.filter((option) => option.value !== 'full_access' || fullAccessChoiceEnabled()).map((o) => {
+        const disabled = o.value === 'full_access' && !fullAccessAvailable;
+        const description = disabled ? '请重新打开当前对话后再试' : o.desc;
+        return `
+          <button type="button" class="composer-select-item composer-select-item--security${o.value === active ? ' is-selected' : ''}" data-sec-mode="${o.value}"${disabled ? ' disabled' : ''}>
+            <span class="composer-select-item__plain-icon">${spriteIcon(o.value === 'full_access' ? 'icon-warning' : 'icon-security')}</span>
+            <span class="composer-select-item__body">
+              <span class="composer-select-item__title">${escapeHtml(o.label)}</span>
+              <span class="composer-select-item__desc">${escapeHtml(description)}</span>
+            </span>
+            ${o.value === active ? selectChevron() : '<span class="composer-select-item__spacer"></span>'}
+          </button>
+        `;
+      }).join('')}
     </div>
   `;
   mountSelectPopover(anchor, popover, 300);
@@ -750,10 +764,9 @@ function renderSecurityModePopover(): void {
         closeSecurityModeInline();
         return;
       }
-      // full_access 仍走二次确认；只有 Gateway ACK 后才提交本地 chip 状态。
-      const accepted = await selectNextConversationMode(m, () => showConfirmDialog({
+      const accepted = await selectNextConversationMode(m, (isNewConversation) => showConfirmDialog({
         title: '启用完全访问权限？',
-        message: FULL_ACCESS_CONFIRMATION,
+        message: isNewConversation ? DRAFT_FULL_ACCESS_CONFIRMATION : FULL_ACCESS_CONFIRMATION,
         confirmText: '仅对此对话启用',
       }));
       if (accepted) syncSecurityModeChip();
@@ -1090,10 +1103,24 @@ export function bindComposerToolbar(): () => void {
   window.addEventListener('craft:mode-change', () => syncCraftLabel(), { signal });
   window.addEventListener('security:mode-change', () => syncSecurityModeChip(), { signal });
   window.addEventListener('security:config-change', () => syncSecurityModeChip(), { signal });
-  window.addEventListener('workspace:context-changed', () => syncComposerWorkspaceLabel(), { signal });
+  window.addEventListener(DEFAULT_NEW_CONVERSATION_MODE_CHANGED, () => {
+    closeSecurityModeInline();
+    syncSecurityModeChip();
+  }, { signal });
+  window.addEventListener(FULL_ACCESS_CHOICE_CHANGED, () => {
+    closeSecurityModeInline();
+    syncSecurityModeChip();
+  }, { signal });
+  void loadFullAccessChoice().catch(() => {});
+  window.addEventListener('workspace:context-changed', () => {
+    syncComposerWorkspaceLabel();
+    syncSecurityModeChip();
+  }, { signal });
+  window.addEventListener('session:changing', closeSecurityModeInline, { signal });
   window.addEventListener('session:changed', () => {
     closeTeamWikiPopover();
     syncComposerWorkspaceLabel();
+    syncSecurityModeChip();
     syncCraftLabel();
   }, { signal });
   window.addEventListener('session:agent-assigned', () => syncCraftLabel(), { signal });

@@ -75,7 +75,7 @@ import {
   setOpenSessionCallback,
 } from './features/session-manage';
 import { mountSessionHistoryView } from './features/session-history-view';
-import { bindSettingsUi, openSettingsPane, registerConfigPaneRenderers } from './features/settings';
+import { bindSettingsUi, disposeSettingsSecurityPane, openSettingsPane, registerConfigPaneRenderers } from './features/settings';
 import { mountSettingsDataPanes } from './features/settings-data';
 import { isRendererLoggedIn, requireRendererLogin } from './features/auth-gate';
 import { initAuthFlow } from './features/login';
@@ -137,7 +137,6 @@ import {
 } from './features/session-controller';
 import { hydrateMissingTurnFileCounts } from './features/turn-file-counts';
 import { bindSecurityApprovalUi } from './features/security-approval';
-import { createSecurityPageContribution, initSecurityPage } from './features/security-center';
 import {
   createTracingPageContribution,
   disposeTracingPage,
@@ -154,10 +153,6 @@ import {
   bindExternalAgentsFeatureUi,
   externalAgentsEnabled,
 } from './features/external-agents-feature';
-import {
-  bindSecurityModuleFeatureUi,
-  securityModuleEnabled,
-} from './features/security-mode';
 import {
   bindWikiFeatureUi,
   canNavigateToWiki,
@@ -617,7 +612,6 @@ async function init(
   }
 
   // Phase 3: 后台慢慢来（失败不影响首屏；用户已能看到 welcome/chat 再补这些）
-  void safe('initSecurityPage', initSecurityPage);
   void safe('initUsagePage', initUsagePage);
   void safe('initAgentsPage', () => initAgentsPage({
     ensureChatSession: () => {
@@ -842,7 +836,6 @@ function mountApplicationShell(
     features: {
       agents: externalAgentsEnabled() ? 'available' : 'hidden',
       wiki: wikiFeatureEnabled() ? 'available' : 'hidden',
-      security: securityModuleEnabled() ? 'available' : 'unavailable',
       tracing: 'hidden',
       work: WORK_FEATURE_STATES,
     },
@@ -895,7 +888,6 @@ function mountApplicationShell(
   const disposeWikiPageContribution = pageRegistry.register(createWikiPageContribution());
   const disposeAgentsPageContribution = pageRegistry.register(createAgentsPageContribution());
   const disposeSkillsPageContribution = pageRegistry.register(createSkillsPageContribution());
-  const disposeSecurityPageContribution = pageRegistry.register(createSecurityPageContribution());
   const disposeSitesPageContribution = pageRegistry.register(createSitesPageContribution());
   const disposeCronPageContribution = pageRegistry.register(createCronPageContribution());
   const disposeTracingPageContribution = pageRegistry.register(createTracingPageContribution());
@@ -969,9 +961,6 @@ function mountApplicationShell(
       activateTab('chat');
     }
   });
-  const disposeSecurityModuleFeature = bindSecurityModuleFeatureUi((enabled) => {
-    shell.setFeatures({ security: enabled ? 'available' : 'unavailable' });
-  });
   const disposeWikiFeature = bindWikiFeatureUi((enabled) => {
     shell.setFeatures({ wiki: enabled ? 'available' : 'hidden' });
     const nextTab = resolveTabAfterWikiCapabilityChange(state.activeTab, enabled);
@@ -988,7 +977,7 @@ function mountApplicationShell(
       void disposeWikiPageContribution();
       void disposeAgentsPageContribution();
       void disposeSkillsPageContribution();
-      void disposeSecurityPageContribution();
+      disposeSettingsSecurityPane();
       void disposeSitesPageContribution();
       void disposeCronPageContribution();
       void disposeTracingPageContribution();
@@ -1006,7 +995,6 @@ function mountApplicationShell(
       shell.slots.historyActions.remove();
       rendererRoot.element.insertBefore(legacyOutlet, rendererRoot.overlayHost);
       disposeExternalAgentsFeature();
-      disposeSecurityModuleFeature();
       disposeWikiFeature();
       setNotificationClickHandler(null);
       shell.dispose();

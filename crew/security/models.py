@@ -16,6 +16,14 @@ class ConversationPermissionMode(StrEnum):
     FULL_ACCESS = "full_access"
 
 
+def default_conversation_permission_mode(sandbox_enabled: bool) -> ConversationPermissionMode:
+    return (
+        ConversationPermissionMode.AUTO_REVIEW
+        if sandbox_enabled
+        else ConversationPermissionMode.FULL_ACCESS
+    )
+
+
 class ApprovalPolicy(StrEnum):
     """Host policy for deciding whether an approval prompt is shown."""
 

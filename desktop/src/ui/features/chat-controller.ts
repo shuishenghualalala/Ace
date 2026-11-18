@@ -83,7 +83,7 @@ import {
 } from './session-busy';
 import { cancelSessionStreamRecovery, getSessionStreamRecovery } from './session-stream-recovery';
 import { clearScenarioChip, getArmedSubScenario } from './scenario-arm';
-import { requireRendererLogin } from './auth-gate';
+import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { interactiveOwnerKey } from './interactive-owner';
 import { readTurnOutcome } from '../turn-outcome';
 import {
@@ -102,6 +102,15 @@ import { makeSessionTitle } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
+import {
+  assignSecurityMode,
+  draftSecurityMode,
+  finishFirstTurnSecurityMode,
+  needsFirstTurnSecurityMode,
+  revokeDraftFullAccess,
+  type ConversationSecurityMode,
+} from './security-approval';
+import { loadFullAccessChoice } from './security-permission-settings';
 import { renderModelFallbackBanner } from './model-fallback-banner';
 import {
   applyMessageUpserts,
@@ -1177,7 +1186,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
     return;
   }
   if (chunk.kind === 'audit_updated') {
-    void import('./security-center').then(({ activateSecurityPage }) => activateSecurityPage());
+    void import('./security-center').then(({ refreshSecurityAudit }) => refreshSecurityAudit());
     return;
   }
   // 通知中心推送：owner 级广播帧，与具体会话无关；只负责唤醒角标与轻提示，
@@ -1787,6 +1796,14 @@ function restorePrimaryQueueDraft(sessionId: string, item: PendingMessage): void
 }
 
 const nativeVisualCapabilitySessions = new Set<string>();
+const pendingFirstDispatches = new Set<string>();
+
+interface DraftDispatch {
+  workspaceId: string;
+  mode: ConversationSecurityMode;
+  isCurrent(): boolean;
+  settingFullAccess: boolean;
+}
 
 export async function dispatchWs(
   sessionId: string,
@@ -1801,20 +1818,70 @@ export async function dispatchWs(
         ...(planActiveOverride !== undefined ? { planActive: planActiveOverride } : {}),
       }
     : subScenarioOrOptions;
-  const subScenario = dispatchOptions.subScenario ?? '';
   if (!requireRendererLogin() || !canSubmitDesktopChat() || getSessionStreamRecovery(sessionId)) return false;
+  if (pendingFirstDispatches.has(sessionId)) return false;
+
+  const workspaceId = workspaceForSessionDispatch(sessionId);
+  if (!needsFirstTurnSecurityMode(sessionId, workspaceId)) {
+    return dispatchQuery(sessionId, query, attachments, dispatchOptions);
+  }
+  const owner = state.userInfo;
+  const socket = state.socket;
+  const generation = state.backendReadiness?.generation;
+  const isCurrentDraft = () => isRendererLoggedIn() && state.userInfo === owner
+    && state.socket === socket && state.backendReadiness?.generation === generation && canSubmitDesktopChat()
+    && state.activeSessionId === sessionId
+    && needsFirstTurnSecurityMode(sessionId, workspaceId)
+    && workspaceForSessionDispatch(sessionId) === workspaceId;
+  if (!isCurrentDraft()) return false;
+  pendingFirstDispatches.add(sessionId);
+  let sent = false;
+  let draft: DraftDispatch | undefined;
+  try {
+    try {
+      await loadFullAccessChoice();
+    } catch {
+      notify('未能读取权限设置，消息未发送。请重试。');
+      return false;
+    }
+    if (!isCurrentDraft()) return false;
+    const mode = draftSecurityMode(sessionId, workspaceId);
+    draft = {
+      workspaceId,
+      mode,
+      isCurrent: () => isCurrentDraft() && draftSecurityMode(sessionId, workspaceId) === mode,
+      settingFullAccess: false,
+    };
+    await persistDraftSessionModel(sessionId);
+    sent = await dispatchQuery(sessionId, query, attachments, dispatchOptions, draft);
+    if (sent) finishFirstTurnSecurityMode(sessionId);
+    return sent;
+  } finally {
+    if (!sent && draft?.settingFullAccess && state.userInfo === owner && isRendererLoggedIn()) {
+      await revokeDraftFullAccess(sessionId, workspaceId);
+    }
+    pendingFirstDispatches.delete(sessionId);
+  }
+}
+
+async function dispatchQuery(
+  sessionId: string,
+  query: string,
+  attachments: NonNullable<ChatMessage['attachments']>,
+  dispatchOptions: DispatchOptions,
+  draft?: DraftDispatch,
+): Promise<boolean> {
+  const workspaceId = draft?.workspaceId ?? workspaceForSessionDispatch(sessionId);
+  const subScenario = dispatchOptions.subScenario ?? '';
   const durable = Boolean(desktopOutboxBridge());
   const socket = state.socket;
   const generation = state.backendReadiness?.generation;
   const canDispatch = () => canSubmitDesktopChat() && state.socket === socket
-    && state.backendReadiness?.generation === generation;
-  if (isDraftSession(sessionId)) {
-    await persistDraftSessionModel(sessionId);
-  }
+    && state.backendReadiness?.generation === generation && (!draft || draft.isCurrent());
   const capabilityKey = JSON.stringify([state.userInfo, sessionId]);
   if (!nativeVisualCapabilitySessions.has(capabilityKey) && state.backendConnected) {
     try {
-      await ensureNativeVisualCapability(sessionId, workspaceForSessionDispatch(sessionId),
+      await ensureNativeVisualCapability(sessionId, workspaceId,
         state.sessions.find((item) => item.id === sessionId)?.title || '新会话');
       nativeVisualCapabilitySessions.add(capabilityKey);
     } catch {
@@ -1828,6 +1895,11 @@ export async function dispatchWs(
     renderChat();
     notify('服务未连接');
     return false;
+  }
+  if (draft) {
+    if (!draft.isCurrent()) return false;
+    draft.settingFullAccess = draft.mode === 'full_access' && state.config?.security?.enabled !== false;
+    if (!await assignSecurityMode(sessionId, workspaceId, draft.mode) || !draft.isCurrent()) return false;
   }
   const planActiveForSend = dispatchOptions.planActive ?? state.composerMode === 'plan';
   const workDisabledPreferenceIds = dispatchOptions.workDisabledPreferenceIds
@@ -1852,7 +1924,7 @@ export async function dispatchWs(
     session_id: sessionId,
     request_id: requestId,
     mode,
-    workspace_id: dispatchOptions.queuedItem?.workspaceId ?? workspaceForSessionDispatch(sessionId),
+    workspace_id: dispatchOptions.queuedItem?.workspaceId ?? workspaceId,
     attachments,
     ...(planActiveForSend ? { plan_active: true } : {}),
     ...(dispatchOptions.clientIntent ? { client_intent: dispatchOptions.clientIntent } : {}),
@@ -1979,6 +2051,7 @@ export async function sendMessage(
   // 无活跃会话（欢迎页）时新建草稿：用 composerWorkspaceId()（即右下角选择器所显示的空间），
   // 而不是裸读 state.currentWorkspaceId——避免二者不一致时消息落到选择器之外的空间。
   const sessionId = state.activeSessionId ?? createSessionInWorkspace(composerWorkspaceId(), openSessionFn);
+  if (!sessionId) return false;
   const activeTeamId = state.activeExternalTeamIdBySession[sessionId] || '';
   const wikiGrant = activeTeamId ? getTeamWikiReadGrant(sessionId, activeTeamId) : null;
   const externalWikiReadKbId = wikiGrant?.kbId || '';

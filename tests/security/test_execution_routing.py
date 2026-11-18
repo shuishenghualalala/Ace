@@ -32,6 +32,7 @@ from crew.security.models import (
     FilesystemAccess,
     FilesystemEntry,
     NetworkEntry,
+    NetworkPolicy,
     PermissionProfile,
     PermissionProfileKind,
     SandboxPermissions,
@@ -62,6 +63,11 @@ async def test_approved_outside_write_reaches_native_runtime(
     outside = tmp_path / "outside"
     workspace.mkdir()
     outside.mkdir()
+    if os.name == "nt":
+        from crew.security.workspace import prepare_new_workspace
+
+        prepare_new_workspace(workspace)
+        prepare_new_workspace(outside)
     monkeypatch.setattr("crew.security.policy.tempfile.gettempdir", lambda: str(workspace))
     target = outside / "approved.txt"
     context = SecurityContext(
@@ -86,7 +92,7 @@ async def test_approved_outside_write_reaches_native_runtime(
         db_path=tmp_path / "crew.db",
     )
     with use_process_launch(denied_launch):
-        denied = await execute_captured(shell_argv(command), cwd=workspace, timeout=10)
+        denied = await execute_captured(shell_argv(command, cwd=workspace), cwd=workspace, timeout=10)
     assert denied.returncode != 0
     assert not target.exists()
 
@@ -100,7 +106,7 @@ async def test_approved_outside_write_reaches_native_runtime(
         additional_permissions=permissions,
     )
     with use_process_launch(approved_launch):
-        approved = await execute_captured(shell_argv(command), cwd=workspace, timeout=10)
+        approved = await execute_captured(shell_argv(command, cwd=workspace), cwd=workspace, timeout=10)
     assert approved.returncode == 0
     assert target.read_text(encoding="utf-8") == "approved"
 
@@ -113,6 +119,10 @@ async def test_default_workspace_inside_runtime_home_remains_writable(
     runtime_home = tmp_path / "runtime-home"
     workspace = runtime_home / "accounts" / "owner" / "task_workspaces" / "default"
     workspace.mkdir(parents=True)
+    if os.name == "nt":
+        from crew.security.workspace import prepare_new_workspace
+
+        prepare_new_workspace(workspace)
     monkeypatch.setenv("CREW_HOME", str(runtime_home))
     context = SecurityContext(
         os_user="tester",
@@ -126,8 +136,7 @@ async def test_default_workspace_inside_runtime_home_remains_writable(
     )
     target = workspace / "result.txt"
     if os.name == "nt":
-        escaped = str(target).replace("'", "''")
-        command = f"Set-Content -LiteralPath '{escaped}' -Value ok -NoNewline"
+        command = "Set-Content -LiteralPath 'result.txt' -Value ok -NoNewline"
     else:
         command = f"printf ok > {shlex.quote(str(target))}"
     launch = compile_process_launch(
@@ -137,7 +146,7 @@ async def test_default_workspace_inside_runtime_home_remains_writable(
     )
 
     with use_process_launch(launch):
-        result = await execute_captured(shell_argv(command), cwd=workspace, timeout=10)
+        result = await execute_captured(shell_argv(command, cwd=workspace), cwd=workspace, timeout=10)
 
     assert result.returncode == 0
     assert target.read_text(encoding="utf-8") == "ok"
@@ -245,6 +254,42 @@ def test_process_launch_defaults_external_security_to_disabled(tmp_path: Path) -
 
     assert launch.external_security_enabled is False
     assert launch.external_managed is False
+
+
+def test_workspace_network_setting_reaches_background_and_keeps_external_restricted(
+    tmp_path, monkeypatch,
+):
+    registry = ProcessRegistry()
+    captured = {}
+    context = SecurityContext(
+        os_user="user", owner_account_id="owner", workspace_id="workspace",
+        workspace_root=tmp_path, session_id="session", task_id="task",
+        request_id="request", cwd=tmp_path,
+    )
+    launch = compile_process_launch(
+        context,
+        ConversationPermissionMode.REQUEST_APPROVAL,
+        db_path=tmp_path / "security.db",
+        external_security_enabled=True,
+        approval_service=SimpleNamespace(workspace_network_access=True),
+        additional_permissions=AdditionalPermissionProfile(
+            network=(NetworkEntry("example.com", 443, "https"),),
+        ),
+    )
+    assert launch.managed
+    assert launch.profile.network is NetworkPolicy.UNRESTRICTED
+    assert launch.external_profile.network is NetworkPolicy.RESTRICTED
+
+    def record(_command, payload, **_kwargs):
+        captured.update(payload)
+        return "session"
+
+    monkeypatch.setattr(registry, "_spawn_managed_bridge", record)
+    registry.spawn_security("echo ok", launch=launch, cwd=str(tmp_path))
+    assert captured["network_access"] is True
+    assert captured["network_enabled"] is False
+    assert captured["network_rules"] == []
+    assert str(tmp_path.resolve()) in captured["writable_roots"]
 
 
 def test_compile_process_launch_uses_explicit_external_security_setting(
@@ -1082,19 +1127,39 @@ async def test_captured_exit_does_not_wait_forever_for_inherited_pipe(
     assert elapsed < 5
 
 
-def test_default_windows_read_roots_do_not_lease_system_acl(tmp_path, monkeypatch):
-    from crew.security.launch import _windows_full_disk_read_roots
-
+@pytest.mark.skipif(os.name != "nt", reason="Windows host ACL contract")
+def test_default_windows_read_roots_do_not_lease_user_libraries(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     documents = home / "Documents"
     documents.mkdir()
-    (home / ".ssh").mkdir()
-    system = tmp_path / "Windows"
-    system.mkdir()
-    monkeypatch.setenv("SystemRoot", str(system))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    system_program = tmp_path / "Program Files" / "nodejs"
+    system_program.mkdir(parents=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setenv("ProgramFiles", str(system_program.parent))
     monkeypatch.setattr(Path, "home", lambda: home)
-    roots = _windows_full_disk_read_roots()
-    assert documents in roots
-    assert system not in roots
-    assert home / ".ssh" not in roots
+    monkeypatch.setattr(
+        "crew.state.home.managed_runtime_read_roots", lambda: [system_program, runtime]
+    )
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="workspace",
+        workspace_root=workspace,
+        session_id="session",
+        request_id="request",
+        task_id="task",
+        cwd=workspace,
+    )
+
+    launch = compile_process_launch(
+        context, ConversationPermissionMode.AUTO_REVIEW, db_path=tmp_path / "crew.db"
+    )
+
+    assert launch.profile.full_disk_read
+    assert runtime.resolve() in launch.trusted_readable_roots
+    assert documents.resolve() not in launch.trusted_readable_roots
+    assert system_program.resolve() not in launch.trusted_readable_roots

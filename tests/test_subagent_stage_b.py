@@ -21,10 +21,14 @@ from crew.agent.subagent.runtime import (
 from crew.agent.subagent.service import (
     StartRequest,
     SubagentDepthError,
+    SubagentPublicationError,
     SubagentResult,
     SubagentRun,
 )
 from crew.agent.subagent.store import SubagentStore
+from crew.security.context import SecurityContext
+from crew.security.launch import ProcessLaunch, use_process_launch
+from crew.security.models import PermissionProfile, PermissionProfileKind
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -354,20 +358,72 @@ class _AttrChild(_TerseChild):
             yield _ChunkLike(chunk)
 
 
+@pytest.fixture
+def parent_launch(tmp_path):
+    return ProcessLaunch(
+        profile=PermissionProfile(PermissionProfileKind.MANAGED),
+        security_context=SecurityContext(
+            os_user="test",
+            owner_account_id="owner",
+            workspace_id="project",
+            workspace_root=tmp_path,
+            session_id="p",
+            request_id="parent-turn",
+            task_id="",
+            cwd=tmp_path,
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_summary_rewrite_appends_one_continuation_turn():
+async def test_summary_rewrite_appends_one_continuation_turn(parent_launch, tmp_path):
     from crew.agent.subagent.providers import SUMMARY_CONTINUATION_PROMPT
 
-    child = _AttrChild()
+    envelopes = []
+
+    class Child(_AttrChild):
+        async def run(self, envelope):
+            envelopes.append(envelope)
+            async for chunk in super().run(envelope):
+                yield chunk
+
+    child = Child()
     runtime = SubagentRuntime(build_child=lambda spec: child)
-    result = await runtime.execute(
-        StartRequest(label="t", goal_text="work", parent_session_id="p"),
-        runtime_options={"summary_policy": {"min_chars": 50, "retries": 1}},
-    )
+    with use_process_launch(parent_launch):
+        result = await runtime.execute(
+            StartRequest(
+                label="t", goal_text="work", parent_session_id="p",
+                owner_account_id="owner", workspace_id="project",
+                spec={"_security_process_launch": "untrusted"},
+            ),
+            runtime_options={"summary_policy": {"min_chars": 50, "retries": 1}},
+        )
     assert result.stop_reason == "completed"
     assert len(result.output) >= 50
     assert len(child.turns) == 2
     assert SUMMARY_CONTINUATION_PROMPT in child.turns[1]
+    assert envelopes[0].request_id != envelopes[1].request_id
+    for envelope in envelopes:
+        assert envelope.params["_security_process_launch"] is parent_launch
+        assert envelope.params["workspace_root_path"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"owner_account_id": "other", "workspace_id": "project"},
+        {"owner_account_id": "owner", "user_id": "other", "workspace_id": "project"},
+        {"owner_account_id": "owner", "workspace_id": "other"},
+    ],
+)
+async def test_subagent_rejects_cross_scope_parent_launch(parent_launch, scope):
+    def build_child(_spec):
+        pytest.fail("应在创建子智能体前核对执行权限范围")
+
+    runtime = SubagentRuntime(build_child=build_child)
+    with use_process_launch(parent_launch), pytest.raises(SubagentPublicationError, match="父级执行权限"):
+        await runtime.start(StartRequest(label="t", goal_text="work", parent_session_id="p", **scope))
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -532,11 +533,12 @@ def test_set_mode_revokes_pending_and_returns_idempotently(tmp_path: Path) -> No
     context = _context(tmp_path)
     approvals.create(context, normalize_exec_action(["git", "diff"], tmp_path), "terminal")
 
-    from crew.security.models import ConversationPermissionMode
-
-    assert service.set_mode(context, ConversationPermissionMode.AUTO_REVIEW) is True
+    assert service.mode_for(context) is ConversationPermissionMode.AUTO_REVIEW
+    assert service.set_mode(context, ConversationPermissionMode.REQUEST_APPROVAL) is True
     assert approvals.list_pending(context) == []
-    assert service.set_mode(context, ConversationPermissionMode.AUTO_REVIEW) is False
+    assert service.set_mode(context, ConversationPermissionMode.REQUEST_APPROVAL) is False
+    assert service.mode_for(context) is ConversationPermissionMode.REQUEST_APPROVAL
+    assert service.mode_for(replace(context, session_id="session-b")) is ConversationPermissionMode.AUTO_REVIEW
 
 
 def test_recent_user_rejection_suppresses_immediate_identical_exec_retry(

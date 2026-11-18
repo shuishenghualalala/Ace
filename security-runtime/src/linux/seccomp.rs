@@ -15,6 +15,7 @@ pub const INNER_READY_MARKER: &[u8] = b"ACE_INNER_SANDBOX_READY\n";
 struct InnerArguments {
     command: Vec<String>,
     proxy_socket: Option<String>,
+    network_access: bool,
     allow_local_binding: bool,
     env_overrides: BTreeMap<String, String>,
 }
@@ -24,6 +25,7 @@ pub fn exec_inner(arguments: Vec<String>) -> ! {
     let InnerArguments {
         command,
         proxy_socket,
+        network_access,
         allow_local_binding,
         env_overrides,
     } = match parse_arguments(arguments) {
@@ -44,7 +46,7 @@ pub fn exec_inner(arguments: Vec<String>) -> ! {
             std::process::exit(INNER_SETUP_FAILURE_EXIT);
         }
     }
-    if let Err(error) = install(proxy_socket.is_some(), allow_local_binding) {
+    if let Err(error) = install(network_access, proxy_socket.is_some(), allow_local_binding) {
         eprintln!("failed to install no_new_privs/seccomp: {error}");
         std::process::exit(INNER_SETUP_FAILURE_EXIT);
     }
@@ -63,7 +65,11 @@ pub fn exec_inner(arguments: Vec<String>) -> ! {
     std::process::exit(127);
 }
 
-fn install(network_proxy: bool, allow_local_binding: bool) -> Result<(), String> {
+fn install(
+    network_access: bool,
+    network_proxy: bool,
+    allow_local_binding: bool,
+) -> Result<(), String> {
     let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if result != 0 {
         return Err(std::io::Error::last_os_error().to_string());
@@ -128,6 +134,19 @@ fn install(network_proxy: bool, allow_local_binding: bool) -> Result<(), String>
         .map_err(|error| error.to_string())?;
         rules.insert(libc::SYS_socket, vec![deny_non_ip_socket]);
         rules.insert(libc::SYS_socketpair, vec![deny_non_unix_socketpair]);
+    } else if network_access {
+        // Keep VM host/guest transport outside the filesystem sandbox's authority.
+        // This also preserves the Windows interop boundary under WSL2.
+        let deny_vm_socket = SeccompRule::new(vec![SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Eq,
+            libc::AF_VSOCK as u64,
+        )
+        .map_err(|error| error.to_string())?])
+        .map_err(|error| error.to_string())?;
+        rules.insert(libc::SYS_socket, vec![deny_vm_socket.clone()]);
+        rules.insert(libc::SYS_socketpair, vec![deny_vm_socket]);
     } else {
         // Offline tasks retain only AF_UNIX process-local IPC.
         let deny_non_unix = SeccompRule::new(vec![SeccompCondition::new(
@@ -141,7 +160,7 @@ fn install(network_proxy: bool, allow_local_binding: bool) -> Result<(), String>
         rules.insert(libc::SYS_socket, vec![deny_non_unix.clone()]);
         rules.insert(libc::SYS_socketpair, vec![deny_non_unix]);
     }
-    if !allow_local_binding {
+    if !network_access && !allow_local_binding {
         rules.insert(libc::SYS_bind, vec![]);
         rules.insert(libc::SYS_listen, vec![]);
     }
@@ -171,6 +190,7 @@ fn parse_arguments(arguments: Vec<String>) -> Result<InnerArguments, String> {
         .position(|value| value == "--")
         .ok_or_else(|| "missing -- command separator".to_string())?;
     let mut proxy_socket = None;
+    let mut network_access = false;
     let mut allow_local_binding = false;
     let mut env_overrides = BTreeMap::new();
     let mut index = 0;
@@ -185,6 +205,7 @@ fn parse_arguments(arguments: Vec<String>) -> Result<InnerArguments, String> {
                         .clone(),
                 );
             }
+            "--network-access" => network_access = true,
             "--allow-local-binding" => allow_local_binding = true,
             "--env-overrides-b64" => {
                 index += 1;
@@ -201,10 +222,14 @@ fn parse_arguments(arguments: Vec<String>) -> Result<InnerArguments, String> {
         }
         index += 1;
     }
+    if network_access && proxy_socket.is_some() {
+        return Err("direct network access cannot use a managed proxy".to_string());
+    }
     let command = arguments.into_iter().skip(split + 1).collect();
     Ok(InnerArguments {
         command,
         proxy_socket,
+        network_access,
         allow_local_binding,
         env_overrides,
     })

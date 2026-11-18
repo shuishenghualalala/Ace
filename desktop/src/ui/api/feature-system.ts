@@ -75,6 +75,7 @@ export interface BackendConfig {
   security?: {
     enabled?: boolean;
     default_mode?: 'request_approval' | 'auto_review' | 'full_access';
+    workspace_network_access?: boolean;
   };
 }
 

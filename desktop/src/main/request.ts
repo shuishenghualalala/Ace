@@ -45,7 +45,7 @@ export function isSecureRemoteUrl(url: string, strictSecurityEnabled: boolean): 
 export function requireSecureRemoteUrl(url: string, strictSecurityEnabled: boolean): void {
   if (!isSecureRemoteUrl(url, strictSecurityEnabled)) {
     throw new Error(
-      '严格安全约束要求认证与凭据请求使用 HTTPS；可在安全中心关闭后启用兼容模式',
+      '认证与凭据请求需要 HTTPS，请使用 HTTPS 服务地址。',
     );
   }
 }

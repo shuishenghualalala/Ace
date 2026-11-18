@@ -119,6 +119,35 @@ async def test_every_managed_terminal_command_crosses_host_authorization(
 
 
 @pytest.mark.asyncio
+async def test_direct_network_is_already_covered_by_the_terminal_profile(monkeypatch, tmp_path):
+    context = SecurityContext(
+        os_user="os-a", owner_account_id="owner-a", workspace_id="project-a",
+        workspace_root=tmp_path, session_id="session-a", request_id="request-a",
+        task_id="task-a", cwd=tmp_path,
+    )
+    service = _ApprovalOnlyService()
+    service.workspace_network_access = True
+    monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+    monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+
+    await handle_terminal(
+        {
+            "command": "echo ready",
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": {
+                "network": [{"host": "example.com", "port": 443, "protocol": "https"}],
+            },
+        },
+        workspace_store=object(),
+        security_service=service,
+    )
+
+    assert len(service.actions) == 1
+    assert service.actions[0][-1]["additional_permissions"].empty
+    assert service.actions[0][-1]["requires_approval"] is False
+
+
+@pytest.mark.asyncio
 async def test_full_access_does_not_depend_on_native_classifier_or_permission_overlay(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

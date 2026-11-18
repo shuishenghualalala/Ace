@@ -1,10 +1,12 @@
 /**
  * @vitest-environment happy-dom
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createComposerContextView } from '../../src/ui/features/composer-context-view';
 import { bindComposerToolbar } from '../../src/ui/features/composer-toolbar';
-import { __resetAllStoresForTest, configStore } from '../../src/ui/stores/stores';
+import { renderSecurityPermissionSettings } from '../../src/ui/features/security-permission-settings';
+import { discardDraft, isDraftSession, setComposerTargetWorkspace } from '../../src/ui/features/workspaces';
+import { __resetAllStoresForTest, authStore, configStore, sessionStore } from '../../src/ui/stores/stores';
 
 function mountComposer(): { disposeToolbar: () => void; disposeView: () => void } {
   document.body.innerHTML = `
@@ -14,6 +16,10 @@ function mountComposer(): { disposeToolbar: () => void; disposeView: () => void 
       <div data-composer-context-target="toolbar-left"></div>
       <div data-composer-context-target="toolbar-right"></div>
     </main>
+    <div id="confirm-dialog" hidden>
+      <span id="confirm-title"></span><span id="confirm-message"></span>
+      <button id="confirm-ok"></button><button id="confirm-cancel"></button>
+    </div>
   `;
   const root = document.getElementById('composer-root') as HTMLElement;
   const view = createComposerContextView(root);
@@ -44,6 +50,8 @@ beforeEach(() => {
   document.body.innerHTML = '';
   localStorage.clear();
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('composer 安全入口与安全模块开关', () => {
   it('安全模块关闭时请求批准 chip 禁用并显示开发中提示', () => {
@@ -84,5 +92,84 @@ describe('composer 安全入口与安全模块开关', () => {
 
     disposeToolbar();
     disposeView();
+  });
+
+  it('欢迎页可在确认后为新草稿选择完全访问，换空间后清除选择', async () => {
+    enableSecurityModule();
+    authStore.set({ isLoggedIn: true, userInfo: { uid: 'composer-owner' } });
+    const securitySetMode = vi.fn();
+    vi.stubGlobal('Crew', { securitySetMode });
+    const { disposeToolbar, disposeView } = mountComposer();
+    const fullAccess = () => document.querySelector<HTMLButtonElement>('[data-sec-mode="full_access"]');
+    try {
+      securityChip().click();
+      expect(fullAccess()?.disabled).toBe(false);
+      expect(document.querySelector<HTMLButtonElement>('[data-sec-mode="request_approval"]')?.disabled).toBe(false);
+      expect(document.querySelector<HTMLButtonElement>('[data-sec-mode="auto_review"]')?.disabled).toBe(false);
+      fullAccess()?.click();
+      expect(document.getElementById('confirm-dialog')?.hidden).toBe(false);
+      expect(sessionStore.get().activeSessionId).toBeNull();
+      document.getElementById('confirm-cancel')?.click();
+      await vi.waitFor(() => expect(fullAccess()).toBeNull());
+      expect(sessionStore.get().activeSessionId).toBeNull();
+
+      securityChip().click();
+      fullAccess()?.click();
+      document.getElementById('confirm-ok')?.click();
+      await vi.waitFor(() => expect(securityChip().title).toBe('完全访问权限'));
+      const draftId = sessionStore.get().activeSessionId;
+      expect(draftId).toBeTruthy();
+      expect(isDraftSession(draftId!)).toBe(true);
+      expect(sessionStore.get().sessions).toEqual([]);
+      expect(securitySetMode).not.toHaveBeenCalled();
+
+      setComposerTargetWorkspace('other-project');
+      window.dispatchEvent(new CustomEvent('workspace:context-changed'));
+      expect(securityChip().title).toBe('请求批准');
+      setComposerTargetWorkspace('default');
+      window.dispatchEvent(new CustomEvent('workspace:context-changed'));
+      expect(securityChip().title).toBe('请求批准');
+    } finally {
+      discardDraft();
+      disposeToolbar();
+      disposeView();
+    }
+  });
+
+  it('关闭设置中的完全访问选项后清除草稿选择，重新开启也不恢复旧授权', async () => {
+    enableSecurityModule();
+    authStore.set({ isLoggedIn: true, userInfo: { uid: 'composer-owner' } });
+    vi.stubGlobal('Crew', {
+      securityGetFullAccessChoice: vi.fn(async () => ({ enabled: true })),
+      securitySetFullAccessChoice: vi.fn(async (enabled: boolean) => ({ enabled })),
+    });
+    const { disposeToolbar, disposeView } = mountComposer();
+    const settings = document.createElement('div');
+    document.body.append(settings);
+    renderSecurityPermissionSettings(settings);
+    const toggle = settings.querySelector<HTMLInputElement>('[role="switch"]')!;
+    const fullAccess = () => document.querySelector<HTMLButtonElement>('[data-sec-mode="full_access"]');
+    try {
+      await vi.waitFor(() => expect(toggle.disabled).toBe(false));
+      securityChip().click();
+      fullAccess()?.click();
+      document.getElementById('confirm-ok')?.click();
+      await vi.waitFor(() => expect(securityChip().title).toBe('完全访问权限'));
+
+      toggle.click();
+      await vi.waitFor(() => expect(securityChip().title).toBe('请求批准'));
+      securityChip().click();
+      expect(fullAccess()).toBeNull();
+
+      toggle.click();
+      await vi.waitFor(() => expect(toggle.disabled).toBe(false));
+      securityChip().click();
+      expect(fullAccess()).not.toBeNull();
+      expect(securityChip().title).toBe('请求批准');
+    } finally {
+      discardDraft();
+      disposeToolbar();
+      disposeView();
+    }
   });
 });

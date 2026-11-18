@@ -339,7 +339,7 @@ async def open_managed_external_interactive(
         ExecutionRequest(
             command=tuple(str(part) for part in command),
             cwd=cwd,
-            permission_profile=launch.profile,
+            permission_profile=launch.external_profile,
             additional_permissions=additional_permissions,
             trusted_readable_roots=launch.trusted_readable_roots,
             home_files=projected_home_files,

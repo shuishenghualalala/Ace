@@ -6,9 +6,12 @@ import { backendApi, type BrowserPageState } from '../../src/ui/backend-client';
 import {
   bindInspectorUi,
   enableInspectorSurfaceAutoWidth,
+  openBrowserWorkbench,
   openInspectorToTab,
 } from '../../src/ui/features/inspector';
-import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
+import { needsFirstTurnSecurityMode } from '../../src/ui/features/security-approval';
+import { isDraftSession } from '../../src/ui/features/workspaces';
+import { __resetAllStoresForTest, authStore, messageStore, sessionStore, workspaceStore } from '../../src/ui/stores/stores';
 import { setActiveSessionId } from '../../src/ui/state';
 import { STORAGE_KEYS } from '../../src/shared/storage-keys';
 
@@ -179,6 +182,27 @@ describe('Inspector browser-style workspace tabs', () => {
     await vi.waitFor(() => {
     expect(backendApi.ensureSession).toHaveBeenCalled();
     });
+    expect(needsFirstTurnSecurityMode('sess-workspace', 'default')).toBe(false);
+  });
+
+  it('keeps a browser-only conversation pending for its original workspace and owner', async () => {
+    authStore.set({ isLoggedIn: true, userInfo: { uid: 'browser-original-owner' } });
+    workspaceStore.set({ currentWorkspaceId: 'browser-project' });
+    setActiveSessionId(null);
+    bindInspectorUi();
+
+    openBrowserWorkbench({ createTab: false });
+    const sessionId = sessionStore.get().activeSessionId!;
+    expect(sessionId).toBeTruthy();
+    await vi.waitFor(() => expect(isDraftSession(sessionId)).toBe(false));
+    expect(backendApi.ensureSession).toHaveBeenCalledWith(sessionId, {
+      workspace_id: 'browser-project', title: '浏览器',
+    });
+    expect(needsFirstTurnSecurityMode(sessionId, 'browser-project')).toBe(true);
+    expect(needsFirstTurnSecurityMode(sessionId, 'other-project')).toBe(false);
+
+    authStore.set({ userInfo: { uid: 'browser-other-owner' } });
+    expect(needsFirstTurnSecurityMode(sessionId, 'browser-project')).toBe(false);
   });
 
   it('sizes generated surfaces with the window and lets the divider take over', () => {

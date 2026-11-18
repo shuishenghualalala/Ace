@@ -113,33 +113,24 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     }
     drop(temporary_file);
 
-    let mut backup = None;
-    if path.exists() {
-        let backup_path = path.with_extension("bak");
-        remove_stale_file(&backup_path, "backup")?;
-        fs::rename(path, &backup_path)
-            .map_err(|error| format!("cannot backup security state: {error}"))?;
-        backup = Some(backup_path);
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        if let Some(backup_path) = &backup {
-            let _ = fs::rename(backup_path, path);
-        }
+    // The temporary file already has the final owner and protected DACL.
+    // Replace it without a window where the previous recovery record is absent.
+    let source = super::identity::wide(temporary.as_os_str());
+    let destination = super::identity::wide(path.as_os_str());
+    let moved = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = fs::remove_file(&temporary);
         return Err(format!("cannot publish security state: {error}"));
     }
-    if let Err(error) = protect_file(path) {
-        let _ = fs::remove_file(path);
-        if let Some(backup_path) = &backup {
-            let _ = fs::rename(backup_path, path);
-        }
-        return Err(format!(
-            "cannot verify published security state protection: {error}"
-        ));
-    }
-    if let Some(backup_path) = backup {
-        fs::remove_file(backup_path)
-            .map_err(|error| format!("cannot remove security state backup: {error}"))?;
-    }
+    verify_protected_host_object(path)?;
     Ok(())
 }
 
@@ -449,7 +440,7 @@ fn well_known_sid(kind: i32) -> Result<Vec<u8>, String> {
     Ok(buffer)
 }
 
-fn current_user_sid() -> Result<Vec<u8>, String> {
+pub(super) fn current_user_sid() -> Result<Vec<u8>, String> {
     let mut token = 0;
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(format!("OpenProcessToken failed: {}", unsafe {

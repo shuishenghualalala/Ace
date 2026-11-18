@@ -5,13 +5,16 @@ use std::fs;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_SUCCESS, HLOCAL};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, LocalFree, ERROR_ACCESS_DENIED, ERROR_SUCCESS, HLOCAL, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::Authorization::{
     GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
     TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE,
+    EqualSid, GetAce, ACCESS_ALLOWED_ACE, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+    OBJECT_INHERIT_ACE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
@@ -77,10 +80,11 @@ pub struct AclLease {
     records: Vec<AclRecord>,
     capability_sids: Vec<String>,
     synthetic_protected: Vec<PathBuf>,
+    manifest_written: bool,
     _mutex: AclMutex,
 }
 
-struct AclMutex(isize);
+pub(super) struct AclMutex(isize);
 
 impl Drop for AclMutex {
     fn drop(&mut self) {
@@ -133,10 +137,12 @@ impl AclLease {
             records: Vec::new(),
             capability_sids,
             synthetic_protected: Vec::new(),
+            manifest_written: false,
             _mutex: mutex,
         };
         lease.plan_records(&account_sid, request)?;
         save_records(state_dir, &lease.records)?;
+        lease.manifest_written = true;
         if let Err(error) = lease.apply_records() {
             drop(lease);
             return Err(error);
@@ -274,6 +280,7 @@ impl AclLease {
                     AclAccess::Deny => (DENY_ACCESS, GENERIC_ALL_MASK),
                 };
                 apply_entry(&record.path, sid.as_ptr(), mode, mask)
+                    .map_err(|error| error.to_string())
             });
             match result {
                 Ok(()) => applied.push(record),
@@ -296,42 +303,34 @@ impl AclLease {
 
 impl Drop for AclLease {
     fn drop(&mut self) {
-        // M5: collect ACE revoke failures instead of silently swallowing them.
-        let mut revoke_failures: Vec<String> = Vec::new();
-        for record in self.records.iter().rev() {
-            match LocalSid::from_string(&record.sid) {
-                Ok(sid) => {
-                    if let Err(error) = revoke_entry(&record.path, sid.as_ptr()) {
-                        // Optional grants are best-effort in both directions:
-                        // a skipped or partially applied grant on a path we do
-                        // not own must not flag ACE residue.
-                        if !record.optional {
-                            revoke_failures.push(format!("{}: {}", record.path.display(), error));
-                        }
-                    }
-                }
-                Err(error) => {
-                    revoke_failures.push(format!("{}: {}", record.path.display(), error));
-                }
-            }
+        if self.manifest_written {
+            let _ = cleanup_stale(&self.state_dir);
         }
         for path in self.synthetic_protected.iter().rev() {
             let _ = fs::remove_dir(path);
         }
-        // Persist revoke failures so readiness can flag ACE residue; clear on success.
-        let log_path = self.state_dir.join(ACL_CLEANUP_LOG);
-        if revoke_failures.is_empty() {
-            let _ = fs::remove_file(self.state_dir.join(ACL_STATE_FILE));
-            let _ = fs::remove_file(&log_path);
-        } else {
-            // Keep the recovery manifest as the fail-closed source of truth. The
-            // human-readable log is supplemental and may itself fail to persist.
-            let _ = super::state::write_file(&log_path, revoke_failures.join("\n").as_bytes());
-        }
     }
 }
 
-fn apply_entry(path: &Path, sid: *mut c_void, mode: u32, mask: u32) -> Result<(), String> {
+struct AclUpdateError {
+    path: PathBuf,
+    operation: &'static str,
+    code: u32,
+}
+
+impl std::fmt::Display for AclUpdateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "cannot {} ACL for {}: {}",
+            self.operation,
+            self.path.display(),
+            self.code
+        )
+    }
+}
+
+fn apply_entry(path: &Path, sid: *mut c_void, mode: u32, mask: u32) -> Result<(), AclUpdateError> {
     let mut path_wide = super::identity::wide(path.as_os_str());
     let mut descriptor = std::ptr::null_mut();
     let mut old_acl: *mut ACL = std::ptr::null_mut();
@@ -348,7 +347,11 @@ fn apply_entry(path: &Path, sid: *mut c_void, mode: u32, mask: u32) -> Result<()
         )
     };
     if status != ERROR_SUCCESS {
-        return Err(format!("cannot read ACL for {}: {status}", path.display()));
+        return Err(AclUpdateError {
+            path: path.to_path_buf(),
+            operation: "read",
+            code: status,
+        });
     }
     let mut entry: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
     entry.grfAccessPermissions = mask;
@@ -389,14 +392,15 @@ fn apply_entry(path: &Path, sid: *mut c_void, mode: u32, mask: u32) -> Result<()
     if result == ERROR_SUCCESS {
         Ok(())
     } else {
-        Err(format!(
-            "cannot update ACL for {}: {result}",
-            path.display()
-        ))
+        Err(AclUpdateError {
+            path: path.to_path_buf(),
+            operation: "update",
+            code: result,
+        })
     }
 }
 
-fn revoke_entry(path: &Path, sid: *mut c_void) -> Result<(), String> {
+fn revoke_entry(path: &Path, sid: *mut c_void) -> Result<(), AclUpdateError> {
     apply_entry(path, sid, REVOKE_ACCESS, 0)
 }
 
@@ -404,52 +408,178 @@ pub(crate) fn protect_legacy_state(state_dir: &Path) -> Result<(), String> {
     for name in [ACL_STATE_FILE, CAPABILITY_STATE_FILE, ACL_CLEANUP_LOG] {
         super::state::protect_optional_file(&state_dir.join(name))?;
     }
+    super::state::protect_optional_file(&state_dir.join(ACL_STATE_FILE).with_extension("bak"))
+}
+
+pub(super) fn verify_recovery_state(state_dir: &Path) -> Result<(), String> {
+    let log = state_dir.join(ACL_CLEANUP_LOG);
+    let manifest = state_dir.join(ACL_STATE_FILE);
+    if super::state::read_optional_file(&log)?.is_some()
+        && super::state::read_optional_file(&manifest)?.is_none()
+        && super::state::read_optional_file(&manifest.with_extension("bak"))?.is_none()
+    {
+        return Err("ACL cleanup failed and the recovery manifest is missing".to_string());
+    }
     Ok(())
+}
+
+/// Recover interrupted leases under the same lock used by managed commands.
+pub(crate) fn recover_stale(state_dir: &Path) -> Result<bool, String> {
+    if !state_dir.is_absolute() {
+        return Err("security state directory must be absolute".to_string());
+    }
+    let Some(_lock) = try_acquire_mutex(0)? else {
+        return Ok(false);
+    };
+    cleanup_stale(state_dir)?;
+    Ok(true)
 }
 
 fn cleanup_stale(state_dir: &Path) -> Result<(), String> {
     let path = state_dir.join(ACL_STATE_FILE);
-    let Some(bytes) = super::state::read_optional_file(&path)? else {
-        return Ok(());
+    let backup = path.with_extension("bak");
+    verify_recovery_state(state_dir)?;
+    let bytes = match super::state::read_optional_file(&path)? {
+        Some(bytes) => bytes,
+        None => match super::state::read_optional_file(&backup)? {
+            Some(bytes) => bytes,
+            None => return Ok(()),
+        },
     };
-    let records: Vec<AclRecord> = serde_json::from_slice(&bytes)
+    let mut records: Vec<AclRecord> = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid stale ACL manifest: {error}"))?;
     let mut failures = Vec::new();
-    for record in records.iter().rev() {
-        if !record.path.exists() {
-            continue;
-        }
-        let sid = match LocalSid::from_string(&record.sid) {
-            Ok(sid) => sid,
-            Err(error) => {
-                failures.push(format!("{}: {error}", record.path.display()));
-                continue;
-            }
-        };
-        if let Err(error) = revoke_entry(&record.path, sid.as_ptr()) {
-            if record.optional {
-                // Best-effort grants on foreign-owned paths may never have
-                // been applied; a failed revoke must not wedge readiness.
-                continue;
-            }
+    for index in (0..records.len()).rev() {
+        let record = &records[index];
+        if let Err(error) = revoke_record(record) {
             failures.push(format!("{}: {error}", record.path.display()));
             continue;
         }
-        if record.synthetic {
-            let _ = fs::remove_dir(&record.path);
-        }
+        records.remove(index);
+        // The API has returned after processing inheritance. Until then keep
+        // this entry durable even if the ACE on the root already disappeared.
+        save_records(state_dir, &records)?;
     }
+    let log = state_dir.join(ACL_CLEANUP_LOG);
     if !failures.is_empty() {
-        let _ = super::state::write_file(
-            &state_dir.join(ACL_CLEANUP_LOG),
-            failures.join("\n").as_bytes(),
-        );
+        let _ = super::state::write_file(&log, failures.join("\n").as_bytes());
         return Err(format!(
             "stale ACL cleanup failed for {} record(s); recovery manifest retained",
             failures.len()
         ));
     }
-    fs::remove_file(path).map_err(|error| format!("cannot clear stale ACL manifest: {error}"))
+    // Remove an older backup first so interruption cannot resurrect it after
+    // clearing the current manifest.
+    remove_recovery_file(&backup)?;
+    remove_recovery_file(&log)?;
+    remove_recovery_file(&path)
+}
+
+fn revoke_record(record: &AclRecord) -> Result<(), String> {
+    match fs::symlink_metadata(&record.path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot inspect ACL root: {error}")),
+    }
+    let sid = LocalSid::from_string(&record.sid)?;
+    if let Err(error) = revoke_entry(&record.path, sid.as_ptr()) {
+        // An older write-ahead manifest can describe a read grant that the
+        // host lacked permission to install. Only accept Access Denied as a
+        // completed revoke when every DACL in the recorded scope confirms
+        // the SID is absent, including any inherited entries on descendants.
+        let read_is_absent = error.code == ERROR_ACCESS_DENIED
+            && matches!(record.access, AclAccess::Read)
+            && scope_has_no_ace(&record.path, &sid).unwrap_or(false);
+        if !read_is_absent {
+            return Err(error.to_string());
+        }
+    }
+    if record.synthetic {
+        let _ = fs::remove_dir(&record.path);
+    }
+    Ok(())
+}
+
+fn scope_has_no_ace(path: &Path, sid: &LocalSid) -> Result<bool, String> {
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("cannot inspect ACL recovery path: {error}"))?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !path_dacl_has_no_ace(&path, sid)?
+        {
+            return Ok(false);
+        }
+        if metadata.is_dir() {
+            let children = fs::read_dir(&path)
+                .map_err(|error| format!("cannot enumerate ACL recovery path: {error}"))?;
+            for child in children {
+                let child =
+                    child.map_err(|error| format!("cannot inspect ACL recovery child: {error}"))?;
+                pending.push(child.path());
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn path_dacl_has_no_ace(path: &Path, sid: &LocalSid) -> Result<bool, String> {
+    let path_wide = super::identity::wide(path.as_os_str());
+    let mut descriptor = std::ptr::null_mut();
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            1,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut acl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(format!("cannot inspect ACL recovery DACL: {status}"));
+    }
+    let result = unsafe { dacl_has_no_ace(acl, sid) };
+    unsafe { LocalFree(descriptor as HLOCAL) };
+    result
+}
+
+unsafe fn dacl_has_no_ace(acl: *mut ACL, sid: &LocalSid) -> Result<bool, String> {
+    // A null DACL allows unrestricted access and cannot prove that recovery
+    // removed the sandbox account's effective grant.
+    let Some(acl) = acl.as_ref() else {
+        return Ok(false);
+    };
+    for index in 0..u32::from(acl.AceCount) {
+        let mut ace = std::ptr::null_mut();
+        if GetAce(acl as *const ACL as *mut ACL, index, &mut ace) == 0 || ace.is_null() {
+            return Err("cannot inspect ACL recovery ACE".to_string());
+        }
+        let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+        // Standard allow/deny ACEs have the same SID offset. Fail safely on
+        // any other ACE format instead of interpreting its SID layout.
+        if !matches!(ace.Header.AceType, 0 | 1) {
+            return Ok(false);
+        }
+        if EqualSid((&raw const ace.SidStart).cast_mut().cast(), sid.as_ptr()) != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn remove_recovery_file(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot clear ACL recovery state {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 fn save_records(state_dir: &Path, records: &[AclRecord]) -> Result<(), String> {
@@ -565,8 +695,10 @@ fn readonly_targets(
 ) -> Result<std::collections::BTreeMap<PathBuf, usize>, String> {
     let mut targets = std::collections::BTreeMap::new();
     for (index, root) in writable.iter().enumerate() {
-        for name in PROTECTED_NAMES {
-            targets.insert(root.join(name), index);
+        if root.is_dir() {
+            for name in PROTECTED_NAMES {
+                targets.insert(root.join(name), index);
+            }
         }
     }
     for path in explicit {
@@ -606,19 +738,30 @@ fn readonly_targets(
     Ok(targets)
 }
 
-fn acquire_mutex() -> Result<AclMutex, String> {
-    let name = super::identity::wide("Local\\AceWindowsSandboxAcl");
+pub(super) fn acquire_mutex() -> Result<AclMutex, String> {
+    try_acquire_mutex(INFINITE)?.ok_or_else(|| "ACL mutex wait timed out".to_string())
+}
+
+fn try_acquire_mutex(wait_ms: u32) -> Result<Option<AclMutex>, String> {
+    acquire_named_mutex(r"Local\AceWindowsSandboxAcl", wait_ms)
+}
+
+fn acquire_named_mutex(name: &str, wait_ms: u32) -> Result<Option<AclMutex>, String> {
+    let name = super::identity::wide(name);
     let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
     if handle == 0 {
         return Err(format!("cannot create ACL mutex: {}", unsafe {
             GetLastError()
         }));
     }
-    let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
+    let wait = unsafe { WaitForSingleObject(handle, wait_ms) };
     if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
-        Ok(AclMutex(handle))
+        return Ok(Some(AclMutex(handle)));
+    }
+    unsafe { CloseHandle(handle) };
+    if wait == WAIT_TIMEOUT {
+        Ok(None)
     } else {
-        unsafe { CloseHandle(handle) };
         Err(format!("cannot acquire ACL mutex: {wait}"))
     }
 }
@@ -626,6 +769,18 @@ fn acquire_mutex() -> Result<AclMutex, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonblocking_recovery_lock_reports_another_thread_as_busy() {
+        let name = format!(r"Local\AceWindowsSandboxAclTest-{}", std::process::id());
+        let lock = acquire_named_mutex(&name, 0).unwrap().unwrap();
+        assert!(
+            std::thread::spawn(move || acquire_named_mutex(&name, 0).unwrap().is_none())
+                .join()
+                .unwrap()
+        );
+        drop(lock);
+    }
 
     #[test]
     fn missing_optional_root_is_skipped() {
@@ -653,6 +808,7 @@ mod tests {
             denied_roots: vec![],
             full_disk_read: false,
             network_enabled: false,
+            network_access: false,
             network_rules: vec![],
             allow_local_binding: false,
             max_output_bytes: 1024,
@@ -682,6 +838,16 @@ mod tests {
     }
 
     #[test]
+    fn writable_file_does_not_get_project_metadata_children() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("approved.txt");
+        fs::write(&file, "approved").unwrap();
+
+        let roots = vec![file.canonicalize().unwrap()];
+        assert!(readonly_targets(&roots, &[]).unwrap().is_empty());
+    }
+
+    #[test]
     fn missing_readonly_root_inside_writable_root_is_accepted() {
         // Readiness-probe regression: the writable root arrives canonicalized
         // (verbatim `\\?\` on Windows) while an explicit read-only root that
@@ -699,6 +865,22 @@ mod tests {
             .join("probe")
             .join(".git");
         assert!(targets.contains_key(&resolved));
+    }
+
+    #[test]
+    fn scope_verification_detects_a_grant_below_a_clean_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("child.txt");
+        fs::write(&child, "test").unwrap();
+        let sid = LocalSid::from_string("S-1-5-21-1-2-3-4").unwrap();
+        assert!(scope_has_no_ace(dir.path(), &sid).unwrap());
+
+        apply_entry(&child, sid.as_ptr(), SET_ACCESS, READ_MASK).unwrap_or_else(|error| {
+            panic!("{error}");
+        });
+
+        assert!(path_dacl_has_no_ace(dir.path(), &sid).unwrap());
+        assert!(!scope_has_no_ace(dir.path(), &sid).unwrap());
     }
 
     #[test]
@@ -726,6 +908,49 @@ mod tests {
     }
 
     #[test]
+    fn recovery_from_legacy_backup_checkpoints_completed_records() {
+        let state = tempfile::tempdir().unwrap();
+        let target = state.path().join("present");
+        fs::create_dir(&target).unwrap();
+        let blocked = AclRecord {
+            path: target,
+            sid: "not-a-windows-sid".to_string(),
+            access: AclAccess::Write,
+            synthetic: false,
+            optional: false,
+        };
+        let completed = AclRecord {
+            path: state.path().join("removed"),
+            sid: "S-1-5-21-1-2-3-4".to_string(),
+            access: AclAccess::Read,
+            synthetic: false,
+            optional: false,
+        };
+        let manifest = state.path().join(ACL_STATE_FILE);
+        let backup = manifest.with_extension("bak");
+        super::super::state::write_file(
+            &backup,
+            &serde_json::to_vec(&[blocked, completed]).unwrap(),
+        )
+        .unwrap();
+
+        assert!(cleanup_stale(state.path()).is_err());
+
+        let records: Vec<AclRecord> =
+            serde_json::from_slice(&super::super::state::read_file(&manifest).unwrap()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, state.path().join("present"));
+        assert!(backup.exists());
+
+        fs::remove_dir(&records[0].path).unwrap();
+        cleanup_stale(state.path()).unwrap();
+
+        assert!(!manifest.exists());
+        assert!(!backup.exists());
+        assert!(!state.path().join(ACL_CLEANUP_LOG).exists());
+    }
+
+    #[test]
     fn lease_drop_keeps_recovery_manifest_when_sid_cannot_be_resolved() {
         let state = tempfile::tempdir().unwrap();
         let target = state.path().join("still-present");
@@ -743,6 +968,7 @@ mod tests {
             records,
             capability_sids: Vec::new(),
             synthetic_protected: Vec::new(),
+            manifest_written: true,
             _mutex: AclMutex(0),
         };
 

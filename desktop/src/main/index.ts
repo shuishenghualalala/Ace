@@ -83,18 +83,18 @@ import type {
   TrayStatus,
 } from '../shared/types';
 import {
+  isFullAccessChoiceEnabled,
   isStrictSecurityEnabled,
   normalizeCloseBehavior,
   readDesktopPrefsFile,
+  readSecurityPermissionPreferences,
   saveCloseBehaviorPreference,
-  saveStrictSecurityPreference,
+  saveDefaultConversationPermissionPreference,
+  saveFullAccessChoicePreference,
   type CloseBehavior,
 } from './desktop-prefs';
 import { logMainStream } from './stream-debug';
-import {
-  confirmCuaDriverInstall,
-  confirmStrictSecurityDisable,
-} from './host-authority-dialog';
+import { confirmCuaDriverInstall, confirmDefaultFullAccess } from './host-authority-dialog';
 import {
   GatewayFetchArgs,
   GatewayUploadArgs,
@@ -123,8 +123,10 @@ import {
 } from '../shared/ipc-schemas';
 import {
   getWindowsUacStatus,
+  provisionInstalledWindowsSandbox,
   runElevatedSecuritySetup,
   runElevatedUacEnable,
+  securityRuntimePlatformKey,
 } from './security-setup';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
@@ -365,9 +367,12 @@ function resolveShellAllowedPath(rawPath: string, extraRoots: string[] = []): st
   }
 }
 
-const MANAGED_GATEWAY_PORT = 28180;
-const AUTOSTART_ARG = '--autostart';
 const IS_DEV_LAUNCH = process.argv.includes('--dev');
+const devGatewayPort = IS_DEV_LAUNCH ? Number(process.env['GATEWAY_PORT']) : NaN;
+const MANAGED_GATEWAY_PORT = Number.isInteger(devGatewayPort) && devGatewayPort > 0 && devGatewayPort < 65535
+  ? devGatewayPort
+  : 28180;
+const AUTOSTART_ARG = '--autostart';
 const RENDERER_LAUNCH_SEARCH = '';
 let gatewayIdentityMode: GatewayIdentityMode = 'local';
 
@@ -1440,21 +1445,22 @@ function activeGatewayCrewHome(): string {
   );
 }
 
-function packagedSecurityRuntimeEnv(): Record<string, string> {
-  const stateDir = path.join(app.getPath('userData'), 'security');
+function packagedSecurityRuntimeEnv({ bundledOnly = false } = {}): Record<string, string> {
+  const devStateDir = IS_DEV_LAUNCH && !app.isPackaged ? process.env['ACE_SECURITY_STATE_DIR']?.trim() : undefined;
+  const stateDir = devStateDir && path.isAbsolute(devStateDir) ? devStateDir : path.join(app.getPath('userData'), 'security');
   const strictSecurity = isStrictSecurityEnabled() ? '1' : '0';
-  const configured = String(process.env['ACE_SECURITY_RUNTIME'] ?? '').trim();
+  const configured = bundledOnly ? '' : String(process.env['ACE_SECURITY_RUNTIME'] ?? '').trim();
   const runtimeName = process.platform === 'win32'
     ? 'ace-security-runtime.exe'
     : 'ace-security-runtime';
-  const platformKey = `${process.platform}-${process.arch}`;
+  const platformKey = securityRuntimePlatformKey(process.platform, process.arch);
   const runtimeCandidates = configured
     ? [configured]
     : app.isPackaged
       ? [path.join(process.resourcesPath, runtimeName)]
       : [
           path.join(repoRoot(), 'desktop', 'security-runtime-bin', runtimeName),
-          path.join(repoRoot(), 'security-runtime', 'prebuilt', platformKey, runtimeName),
+          ...(platformKey ? [path.join(repoRoot(), 'security-runtime', 'prebuilt', platformKey, runtimeName)] : []),
           path.join(repoRoot(), 'security-runtime', 'bin', runtimeName),
         ];
   const runtime = runtimeCandidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate)) ?? '';
@@ -1465,6 +1471,9 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
     };
   }
   const manifestPath = path.join(path.dirname(runtime), 'runtime-manifest.json');
+  if (bundledOnly && !fs.existsSync(manifestPath)) {
+    return { ACE_SECURITY_STATE_DIR: stateDir, ACE_STRICT_SECURITY: strictSecurity };
+  }
   if (fs.existsSync(manifestPath)) {
     try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
@@ -1477,7 +1486,7 @@ function packagedSecurityRuntimeEnv(): Record<string, string> {
       const declaresPlatform = Boolean(manifest.platform || manifest.arch);
       if (
         declaresPlatform
-        && (manifest.platform !== process.platform || manifest.arch !== process.arch)
+        && (!platformKey || securityRuntimePlatformKey(manifest.platform ?? '', manifest.arch ?? '') !== platformKey)
       ) {
         return {
           ACE_SECURITY_STATE_DIR: stateDir,
@@ -1629,16 +1638,6 @@ function startManagedGateway(port: number): void {
     console.error('[gateway] managed gateway process error:', error);
     if (child.pid === undefined) handleManagedGatewayEnd(child, 'managed', { error: String(error) });
   });
-}
-
-/**
- * 回收当前 gateway 进程，使其带着最新的安全偏好（如严格安全约束开关）重启。
- * gateway 仅在 spawn 时读取 ACE_STRICT_SECURITY / ACE_SECURITY_* 等环境变量，
- * 运行中的实例不会热更新；持久化偏好后回收并启动新实例。
- */
-function recycleGatewayForSecurityChange(): void {
-  const child = managedGateway;
-  if (child) recycleOwnedGateway(child, 'security-change-restart');
 }
 
 /**
@@ -2227,7 +2226,7 @@ async function launchGateway(generation: number): Promise<GatewayBinding> {
 
   const firstPort = starter ? GATEWAY_PORT_MIN : MANAGED_GATEWAY_PORT;
   let port = firstPort;
-  const end = firstPort + GATEWAY_PORT_RANGE_SIZE;
+  const end = Math.min(firstPort + GATEWAY_PORT_RANGE_SIZE, 65535);
   for (; port < end; port++) {
     const [gatewayAvailable, healthAvailable] = await Promise.all([
       isPortAvailable(port), isPortAvailable(port + 1),
@@ -2607,7 +2606,7 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
     if (!finalIntegrity.ok) throw new Error(finalIntegrity.message);
     if (isStrictSecurityEnabled()) {
       const publicKey = configuredUpdatePublicKey();
-      if (!publicKey) throw new Error('严格安全约束已阻止安装：未配置更新签名公钥');
+      if (!publicKey) throw new Error('无法验证安装包签名：未配置更新签名公钥');
       const signature = verifyPackageSignature(current.filePath, `${current.filePath}.sig`, publicKey);
       if (!signature.ok) throw new Error(signature.message);
     }
@@ -3193,27 +3192,6 @@ function registerIpc() {
     try { assertTrustedRenderer(event); } catch { return; }
     rendererRecovery.heartbeat(rendererDocumentId);
   });
-  trustedHandle('security:get-strict-security', () => ({
-    strictSecurityEnabled: isStrictSecurityEnabled(),
-  }));
-  trustedHandle('security:set-strict-security', async (event, enabled: unknown) => {
-    if (typeof enabled !== 'boolean') {
-      throw new Error(
-        `${IPC_ARG_VALIDATION_FAILED}: security:set-strict-security expected boolean`,
-      );
-    }
-    const documentIsCurrent = rendererDocumentLease(event);
-    if ((!enabled && !await confirmStrictSecurityDisable(mainWindow)) || !documentIsCurrent()) {
-      return { strictSecurityEnabled: isStrictSecurityEnabled() };
-    }
-    const saved = saveStrictSecurityPreference(enabled);
-    loginNewServiceInstance.setStrictSecurityEnabled(enabled);
-    // 严格安全约束在 gateway 启动时通过 ACE_STRICT_SECURITY 注入；运行中的 gateway
-    // 不会热更新 env，故持久化后回收一次 gateway，使其带着新值重启。
-    recycleGatewayForSecurityChange();
-    return saved;
-  });
-
   trustedHandle('update:start-download', async (_e, raw: unknown) => {
     const args = parseOrThrow(UpdateStartDownloadArgs.parse(raw), 'update:start-download');
     return startUpdateDownload({ version: args.version, type: args.type, url: args.url });
@@ -3685,8 +3663,44 @@ function registerIpc() {
     return { ...result, body: { requests } };
   });
 
+  let updatingDefaultPermission = false;
+  let permissionAvailabilityRevision = 0;
+  trustedHandle('security:get-full-access-choice', () => readSecurityPermissionPreferences());
+  trustedHandle('security:set-full-access-choice', (_e, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: security:set-full-access-choice requires a boolean`);
+    }
+    const preferences = saveFullAccessChoicePreference(enabled);
+    permissionAvailabilityRevision += 1;
+    return preferences;
+  });
+  trustedHandle('security:set-default-conversation-permission', async (event, mode: unknown) => {
+    if (mode !== 'request_approval' && mode !== 'auto_review' && mode !== 'full_access') {
+      throw new Error(`${IPC_ARG_VALIDATION_FAILED}: invalid default conversation permission`);
+    }
+    if (updatingDefaultPermission) return readSecurityPermissionPreferences();
+    if (mode !== 'full_access') return saveDefaultConversationPermissionPreference(mode);
+    const before = readSecurityPermissionPreferences();
+    if (!before.enabled || before.defaultMode === mode) return before;
+    const documentIsCurrent = rendererDocumentLease(event);
+    const revision = permissionAvailabilityRevision;
+    updatingDefaultPermission = true;
+    try {
+      if (!await confirmDefaultFullAccess(mainWindow) || !documentIsCurrent()
+        || revision !== permissionAvailabilityRevision || !isFullAccessChoiceEnabled()) {
+        return readSecurityPermissionPreferences();
+      }
+      return saveDefaultConversationPermissionPreference(mode);
+    } finally {
+      updatingDefaultPermission = false;
+    }
+  });
+
   trustedHandle('security:set-mode', async (_e, raw: unknown) => {
     const args = parseOrThrow(SecurityModeArgs.parse(raw), 'security:set-mode');
+    if (args.mode === 'full_access' && !isFullAccessChoiceEnabled()) {
+      return { ok: false, status: 403, body: { detail: '设置中已关闭完全访问权限选项' } };
+    }
     return securityGatewayRequest('PUT', '/api/security/mode', {
       workspace_id: args.workspaceId,
       session_id: args.sessionId,
@@ -3758,20 +3772,17 @@ function registerIpc() {
     if (process.platform !== 'win32') {
       return { ok: false, exitCode: null, detail: '当前设备无需手动安装安全防护' };
     }
-    const runtime = app.isPackaged
-      ? path.join(process.resourcesPath, 'ace-security-runtime.exe')
-      : String(process.env.ACE_SECURITY_RUNTIME ?? '').trim()
-        || path.join(repoRoot(), 'security-runtime', 'bin', 'ace-security-runtime.exe');
-    if (!path.isAbsolute(runtime) || !fs.existsSync(runtime) || path.basename(runtime) !== 'ace-security-runtime.exe') {
+    const { ACE_SECURITY_RUNTIME: runtime, ACE_SECURITY_STATE_DIR: stateDir } = packagedSecurityRuntimeEnv();
+    if (!runtime || path.basename(runtime) !== 'ace-security-runtime.exe') {
       return {
         ok: false,
         exitCode: null,
         detail: app.isPackaged
           ? '随包 runtime 缺失，请重装或修复'
-          : '未找到 runtime：security-runtime/bin/ 下无预编译 exe，也未设 ACE_SECURITY_RUNTIME',
+          : '未找到可用的 Windows 安全运行组件，请先构建并检查运行组件清单',
       };
     }
-    return runElevatedSecuritySetup(runtime, path.join(app.getPath('userData'), 'security'), args.action);
+    return runElevatedSecuritySetup(runtime, stateDir, args.action);
   });
   // 手动重试接管自动重启，并和已经发起的回收等待同一个退出结果。
   trustedHandle('gateway:retry', async () => {
@@ -4364,10 +4375,28 @@ function exitPreparedApp(): void {
 
 app.on('before-quit', (event) => desktopShutdown.beforeQuit(event));
 
-// 打包流水线的最小启动探针：真正加载 Electron 与主进程并等到 ready，
-// 但不创建窗口、启动 Gateway 或碰单实例锁。它能拦住仅靠 codesign --verify
-// 无法发现的 dyld / Framework 加载失败。
-if (process.argv.includes('--crew-packaging-smoke-test')) {
+if (process.argv.includes('--crew-provision-windows-sandbox')) {
+  app.whenReady().then(async () => {
+    if (!app.isPackaged || process.platform !== 'win32') {
+      app.exit(2);
+      return;
+    }
+    const { ACE_SECURITY_RUNTIME: runtime, ACE_SECURITY_STATE_DIR: stateDir } =
+      packagedSecurityRuntimeEnv({ bundledOnly: true });
+    if (!runtime) {
+      app.exit(2);
+      return;
+    }
+    const result = await provisionInstalledWindowsSandbox(runtime, stateDir);
+    if (!result.ok) console.warn('[security] Windows sandbox setup:', result.detail ?? result.exitCode);
+    app.exit(result.ok ? 0 : 1);
+  }).catch((error: unknown) => {
+    console.error('[security] Windows sandbox setup failed:', error);
+    app.exit(1);
+  });
+} else if (process.argv.includes('--crew-packaging-smoke-test')) {
+  // Load Electron and its main process without a window, Gateway or instance lock.
+  // This catches macOS dyld/framework errors that codesign verification misses.
   app.whenReady().then(() => {
     if (!app.isPackaged) {
       console.error('Packaging smoke test requires a packaged app');

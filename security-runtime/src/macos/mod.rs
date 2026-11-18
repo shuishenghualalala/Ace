@@ -42,6 +42,7 @@ pub struct MacOsRunRequest {
     pub denied_roots: Vec<PathBuf>,
     pub full_disk_read: bool,
     pub network_enabled: bool,
+    pub network_access: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
     pub allow_local_binding: bool,
     pub max_output_bytes: usize,
@@ -144,6 +145,7 @@ fn run_with_control(
                 filesystem_sandbox: true,
                 process_tree_cleanup: true,
                 managed_network: request.network_enabled,
+                direct_network: request.network_access,
                 full_disk_read: request.full_disk_read,
                 system_bwrap: false,
                 bundled_bwrap: false,
@@ -451,6 +453,20 @@ fn build_plan(request: &MacOsRunRequest, proxy_port: Option<u16>) -> Result<Sand
                 ""
             }
         ),
+        None if request.network_access => r#"(allow network-outbound)
+(allow network-inbound)
+(allow network-bind)
+(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))
+(allow mach-lookup
+    (global-name "com.apple.SecurityServer")
+    (global-name "com.apple.networkd")
+    (global-name "com.apple.ocspd")
+    (global-name "com.apple.trustd.agent")
+    (global-name "com.apple.TrustEvaluationAgent")
+    (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+    (global-name "com.apple.SystemConfiguration.configd"))
+"#
+        .to_string(),
         None if request.allow_local_binding => {
             "(allow network-bind (local ip \"localhost:*\"))".to_string()
         }
@@ -821,6 +837,7 @@ mod tests {
             denied_roots: vec![workspace.join(".git")],
             full_disk_read: false,
             network_enabled: false,
+            network_access: false,
             network_rules: vec![],
             allow_local_binding: false,
             max_output_bytes: 1024,

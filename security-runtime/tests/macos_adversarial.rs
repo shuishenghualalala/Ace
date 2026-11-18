@@ -18,6 +18,15 @@ fn seatbelt_available() -> bool {
 
 #[test]
 fn managed_profile_blocks_outside_reads_and_writes() {
+    check_file_boundary(false);
+}
+
+#[test]
+fn direct_network_connects_with_file_sandbox_applied() {
+    check_file_boundary(true);
+}
+
+fn check_file_boundary(direct_network: bool) {
     if !seatbelt_available() {
         assert!(
             !native_tests_required(),
@@ -30,8 +39,15 @@ fn managed_profile_blocks_outside_reads_and_writes() {
     std::fs::create_dir(workspace.path().join(".git")).unwrap();
     std::fs::write(workspace.path().join(".git/config"), "original").unwrap();
     std::fs::write(outside.path().join("host-secret"), "secret").unwrap();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let network_probe = if direct_network {
+        format!("/usr/bin/nc -z -w 2 127.0.0.1 {port} || exit 35; ")
+    } else {
+        String::new()
+    };
     let script = format!(
-        "printf allowed > allowed.txt; test \"$(cat .git/config)\" = original || exit 34; cat '{}/host-secret' >/dev/null 2>&1 && exit 31; printf denied > '{}/denied.txt' 2>/dev/null && exit 32; printf denied > .git/config 2>/dev/null && exit 33; exit 0",
+        "{network_probe}printf allowed > allowed.txt; test \"$(cat .git/config)\" = original || exit 34; cat '{}/host-secret' >/dev/null 2>&1 && exit 31; printf denied > '{}/denied.txt' 2>/dev/null && exit 32; printf denied > .git/config 2>/dev/null && exit 33; exit 0",
         outside.path().display(),
         outside.path().display(),
     );
@@ -42,10 +58,12 @@ fn managed_profile_blocks_outside_reads_and_writes() {
         "writable_roots": [workspace.path()],
         "readonly_roots": [workspace.path().join(".git")],
         "denied_roots": [outside.path()],
-        "network_enabled": false,
+        "network_access": direct_network,
         "max_output_bytes": 65536
     }));
     assert_eq!(events.first().unwrap()["type"], "started", "{events:?}");
+    assert_eq!(events[0]["capabilities"]["direct_network"], direct_network);
+    assert_eq!(events[0]["capabilities"]["managed_network"], false);
     assert_eq!(events.last().unwrap()["type"], "completed", "{events:?}");
     assert_eq!(events.last().unwrap()["exit_code"], 0, "{events:?}");
     assert_eq!(

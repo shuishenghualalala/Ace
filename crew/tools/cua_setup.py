@@ -70,7 +70,7 @@ def _clean_system_env() -> dict[str, str]:
 def _download_verified_installer(url: str, target: Path, expected_sha256: str) -> None:
     """Download a small HTTPS installer script and verify its pinned SHA-256."""
     if not url.lower().startswith("https://"):
-        raise RuntimeError("严格安全约束要求 CUA 安装脚本使用 HTTPS")
+        raise RuntimeError("CUA 安装脚本必须通过 HTTPS 下载")
     expected = expected_sha256.strip().lower()
     if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
         raise RuntimeError("CUA 安装脚本 SHA-256 配置格式无效")
@@ -283,7 +283,7 @@ class CuaDriverSetupService:
             checksum = os.getenv(checksum_env, "").strip()
             if not checksum:
                 raise RuntimeError(
-                    f"严格安全约束已阻止未验证的 CUA 安装；请配置 {checksum_env} SHA-256"
+                    f"无法验证 CUA 安装包。请使用 {checksum_env} 配置 SHA-256 校验值"
                 )
             with tempfile.TemporaryDirectory(prefix="crew-cua-") as temporary_dir:
                 suffix = ".sh" if plat == "linux" else ".ps1"

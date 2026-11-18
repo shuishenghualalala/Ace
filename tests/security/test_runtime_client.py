@@ -36,6 +36,8 @@ version = 999 if mode == "bad-ready" else 3
 ready = {"type":"ready", "version":version, "capabilities":["stdin_once", "stream_output", "readonly_roots", "full_disk_read"]}
 if mode == "missing-ready-capability":
     ready["capabilities"] = ["stdin_once"]
+if mode in {"direct-network-ok", "direct-network-missing"}:
+    ready["capabilities"].append("direct_network")
 print(json.dumps(ready), flush=True)
 if mode == "hang":
     time.sleep(30)
@@ -86,6 +88,7 @@ capabilities = {
     "filesystem_sandbox": mode != "missing-capability",
     "process_tree_cleanup": True,
     "managed_network": mode in {"network-ok", "windows-network-ok"},
+    "direct_network": mode == "direct-network-ok" and payload["network_access"],
     "full_disk_read": bool(payload.get("full_disk_read")),
     "local_binding_control": mode == "local-binding-ok",
     "explicit_handle_inheritance": mode in {"windows-ok", "windows-network-ok"},
@@ -329,6 +332,22 @@ async def test_capabilities_are_enforced_for_the_requested_profile(tmp_path):
             command=("ignored",), cwd=tmp_path, allow_local_binding=True, timeout=1
         )
     assert binding_error.value.code is RuntimeErrorCode.NETWORK_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_direct_network_requires_handshake_and_applied_capability(tmp_path):
+    options = {"command": ("ignored",), "cwd": tmp_path, "network_access": True}
+    with pytest.raises(NativeRuntimeError) as legacy:
+        await _helper(tmp_path, "ok").execute(**options)
+    assert legacy.value.code is RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH
+
+    with pytest.raises(NativeRuntimeError) as mismatch:
+        await _helper(tmp_path, "direct-network-missing").execute(**options)
+    assert mismatch.value.code is RuntimeErrorCode.NETWORK_UNAVAILABLE
+
+    result = await _helper(tmp_path, "direct-network-ok").execute(**options)
+    assert result.capabilities.direct_network
+    assert result.capabilities.filesystem_sandbox
 
 
 @pytest.mark.asyncio
