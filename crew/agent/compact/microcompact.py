@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Callable
 
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
@@ -82,6 +83,87 @@ def _truncate_tool_result(content: str, max_chars: int) -> str:
     marker = f"\n...（tool result 已截断，原长度 {len(content)} 字符）\n"
     half = max(1, (max_chars - len(marker)) // 2)
     return content[:half] + marker + content[-half:]
+
+
+def file_read_result_payload(message: Message) -> dict[str, Any] | None:
+    if message.name not in (None, "file_read") or message.content_parts or not isinstance(message.content, str):
+        return None
+    try:
+        payload = json.loads(message.content)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict) or payload.get("success") is not True or "error" in payload:
+        return None
+    if "unchanged" in payload or "source_tool_call_id" in payload:
+        return None
+    path = payload.get("path")
+    version = payload.get("file_version")
+    offset = payload.get("offset")
+    limit = payload.get("limit")
+    content = payload.get("content")
+    if (
+        not isinstance(path, str) or not Path(path).is_absolute()
+        or not isinstance(version, str) or not version
+        or type(offset) is not int or offset == 0
+        or type(limit) is not int or limit < 1
+        or not isinstance(content, str) or not content
+    ):
+        return None
+    if "context_truncated" in payload:
+        original_chars = payload.get("context_original_content_chars")
+        if payload["context_truncated"] is not True or type(original_chars) is not int or original_chars < len(content):
+            return None
+    return payload
+
+
+def preview_file_read_result(
+    payload: dict[str, Any], max_content_chars: int, *, max_serialized_chars: int | None = None,
+) -> str | None:
+    """Keep reread metadata and leave the source result intact."""
+    content = payload["content"]
+    high = min(max_content_chars, len(content) - 1)
+    if high < 8 or (max_serialized_chars is None and len(content) <= max_content_chars):
+        return None
+    preview = {
+        **payload,
+        "content": "",
+        "context_truncated": True,
+        "context_original_content_chars": payload.get("context_original_content_chars", len(content)),
+        "context_recovery": "需要省略部分时，用 file_read 按 path 和较小的 offset/limit 重新读取，核对 file_version。",
+    }
+
+    def encode(width: int) -> str:
+        marker = "\n…\n"
+        tail = (width - len(marker)) // 3
+        head = width - len(marker) - tail
+        preview["content"] = content[:head] + marker + content[-tail:]
+        return json.dumps(preview, ensure_ascii=False)
+
+    if max_serialized_chars is None:
+        return encode(high)
+    low = 8
+    encoded = None
+    while low <= high:
+        width = (low + high) // 2
+        candidate = encode(width)
+        if len(candidate) <= max_serialized_chars:
+            encoded = candidate
+            low = width + 1
+        else:
+            high = width - 1
+    return encoded
+
+
+def _bound_tool_result(message: Message, tool_name: str, max_chars: int) -> str:
+    if len(message.content) <= max_chars:
+        return message.content
+    if tool_name == "file_read":
+        payload = file_read_result_payload(message)
+        if payload is not None:
+            preview = preview_file_read_result(payload, max_chars, max_serialized_chars=max_chars)
+            if preview is not None:
+                return preview
+    return _truncate_tool_result(message.content, max_chars)
 
 
 def _summarize_tool_result(
@@ -156,6 +238,7 @@ def prune_tool_results(
     threshold_chars: int = OVERFLOW_PRUNE_THRESHOLD_CHARS,
     head_chars: int = OVERFLOW_PRUNE_HEAD_CHARS,
     tail_chars: int = OVERFLOW_PRUNE_TAIL_CHARS,
+    result_policy_resolver: ResultPolicyResolver | None = None,
 ) -> list[Message]:
     """overflow 兜底的无模型剪枝：单条 tool result 超过阈值时保留头/尾片段。
 
@@ -164,14 +247,18 @@ def prune_tool_results(
     """
     if threshold_chars <= 0:
         return messages
+    tool_calls = _build_tool_call_map(messages)
     result: list[Message] = []
     changed = False
     for m in messages:
         if m.role == "tool" and m.content and len(m.content) > threshold_chars:
-            result.append(replace(m, content=_truncate_tool_result(m.content, head_chars + tail_chars)))
-            changed = True
-        else:
-            result.append(m)
+            name, args = tool_calls.get(m.tool_call_id or "", (m.name or "", None))
+            policy = _resolve_result_policy(result_policy_resolver, name, args)
+            if policy.retention is not ToolResultRetention.INSTRUCTION:
+                result.append(replace(m, content=_bound_tool_result(m, name, head_chars + tail_chars)))
+                changed = True
+                continue
+        result.append(m)
     return result if changed else messages
 
 
@@ -225,11 +312,11 @@ def micro_compact(
     changed = False
     for i, m in enumerate(messages):
         content = m.content
-        if m.role == "tool" and content and max_tool_result_chars > 0:
-            content = _truncate_tool_result(content, max_tool_result_chars)
+        detail = details.get(i)
+        if detail is not None and content and max_tool_result_chars > 0 and detail[2].retention is not ToolResultRetention.INSTRUCTION:
+            content = _bound_tool_result(m, detail[0], max_tool_result_chars)
         replacement = content
 
-        detail = details.get(i)
         if detail is not None and content:
             tool_name, arguments, policy = detail
             already_compacted = content.startswith(

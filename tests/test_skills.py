@@ -427,6 +427,38 @@ def test_build_skills_index_prompt_empty(monkeypatch):
     assert prompt == ""
 
 
+def test_skill_index_cache_distinguishes_unrestricted_scope_from_empty_allowlist(skills_dir):
+    assert "/greet" in build_skills_index_prompt()
+    assert build_skills_index_prompt(enabled=[]) == ""
+    assert "/greet" in build_skills_index_prompt()
+
+
+def test_large_skill_index_keeps_complete_identifiers_and_only_offers_visible_discovery(monkeypatch, package_env):
+    from crew.agent.compact.tokens import estimate_text_tokens
+    from crew.agent.skills import index
+    from crew.core.runctx import current_active_skill_packages
+
+    installed = index.get_skills()
+    extra = {
+        f"/fixture-{i:04}": {"slug": f"fixture-{i:04}", "description": "技能说明🚀" * 100}
+        for i in range(300)
+    }
+    monkeypatch.setattr(index, "get_skills", lambda: {**installed, **extra})
+    token = current_active_skill_packages.set({"business-travel"})
+    try:
+        listed = build_skills_index_prompt(max_tokens=140, available_tool_names=frozenset({"skills_list"}))
+        offline = build_skills_index_prompt(max_tokens=140, available_tool_names=frozenset())
+    finally:
+        current_active_skill_packages.reset(token)
+    assert estimate_text_tokens(listed) <= 140
+    assert estimate_text_tokens(offline) <= 140
+    assert "/business-travel/query-flights" in listed and "/fixture-0299" not in listed
+    assert "索引受上下文预算限制" in listed and "skills_list" in listed
+    assert "skills_list" not in offline and "skill_view" not in offline and "skill_package_open" not in offline
+    assert all(row.strip().removeprefix("- ") in installed or row.strip().removeprefix("- ") in extra
+               or row.strip() == "- /business-travel" for row in listed.splitlines() if row.lstrip().startswith("- "))
+
+
 # ── list_skills ───────────────────────────────────────────────────────────
 
 
@@ -2085,6 +2117,26 @@ def test_build_optional_skills_index_prompt(optional_env):
     # 已安装的不再重复出现
     install_skill("opt-skill")
     assert "/opt-skill" not in build_optional_skills_index_prompt()
+
+
+def test_optional_index_reads_only_metadata_prefix_and_honors_its_budget(monkeypatch, optional_env):
+    from crew.agent.compact.tokens import estimate_text_tokens
+    from crew.agent.skills import index
+
+    reads = []
+    real_read = index.read_bounded_markdown
+
+    def record_read(path, max_bytes):
+        reads.append((path.name, max_bytes))
+        return real_read(path, max_bytes)
+
+    monkeypatch.setattr(index, "read_bounded_markdown", record_read)
+    full = index.build_optional_skills_index_prompt()
+    short = index.build_optional_skills_index_prompt(max_tokens=35)
+    assert "/opt-skill" in full
+    assert reads and all(name == "SKILL.md" and maximum == index._OPTIONAL_METADATA_BYTES for name, maximum in reads)
+    assert estimate_text_tokens(short) <= 35
+    assert "skills_list" not in short
 
 
 

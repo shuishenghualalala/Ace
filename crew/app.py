@@ -1686,7 +1686,7 @@ class CrewApp:
         if cfg.compaction_token_budget > 0:
             token_budget = cfg.compaction_token_budget
         else:
-            cw = context_window_override or cfg.context_window or 128000
+            cw = getattr(provider, "context_window", None) or context_window_override or cfg.context_window or 128000
             token_budget = int(cfg.compaction_token_budget_ratio * cw)
         compactor = ContextCompactor(
             provider,
@@ -2919,6 +2919,10 @@ class CrewApp:
         mid = str(binding.get("model_profile_id") or "").strip()
         profile = profiles.get(mid) if mid else None
         cw = profile.context_window if profile is not None else None
+        if not cw and profile is not None:
+            vendor = resolve_vendor(profile.provider, profile.base_url, profile.model)
+            vendor_model = vendor.model(profile.model) if vendor else None
+            cw = vendor_model.context_window if vendor_model else None
         return int(cw or self.config.context_window or 128000)
 
     async def preview_session_context(
@@ -3961,6 +3965,7 @@ def _construct_llm_provider(
     max_tokens: int | None,
     timeout: float,
     vision: bool,
+    context_window: int | None = None,
     api_key_resolver: ApiKeyResolver | None = None,
     allow_vendor_env_key: bool = True,
 ) -> LLMProvider:
@@ -3995,6 +4000,7 @@ def _construct_llm_provider(
             "timeout": timeout,
             "vision": vision,
             "vision_max_pixels": vm.vision_max_pixels if vm else None,
+            "context_window": context_window or (vm.context_window if vm else None),
             "api_key_resolver": api_key_resolver,
         }
         if vendor.protocol == "openai":
@@ -4008,6 +4014,7 @@ def _construct_llm_provider(
         max_tokens=max_tokens,
         timeout=timeout,
         vision=vision,
+        context_window=context_window,
         api_key_resolver=api_key_resolver,
     )
 
@@ -4052,6 +4059,7 @@ def build_provider_for_profile(
         max_tokens=profile.max_tokens,
         timeout=stream_read_timeout if stream_read_timeout is not None else profile.timeout,
         vision=profile.supports_vision,
+        context_window=profile.context_window,
         api_key_resolver=_profile_key_resolver(profile, owner_account_id, config),
         allow_vendor_env_key=not bool(str(owner_account_id or "").strip()),
     )
@@ -4075,6 +4083,7 @@ def build_provider(cfg: Config) -> LLMProvider:
             max_tokens=cfg.max_tokens,
             timeout=cfg.stream_read_timeout,
             vision=cfg.active_model.supports_vision,
+            context_window=active_profile.context_window or cfg.context_window,
             api_key_resolver=lambda: resolve_profile_api_key(
                 active_profile.id,
                 active_profile.api_key_env,

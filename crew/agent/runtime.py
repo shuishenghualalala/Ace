@@ -53,11 +53,18 @@ from crew.agent.loop.history_repair import repair_orphan_tool_calls
 from crew.agent.plan import get_plan_mode_attachment_messages
 from crew.agent.plan.policy import plan_tool_reminder
 from crew.agent.prompt_builder import DEFAULT_AGENT_IDENTITY, build_prompt_parts
+from crew.agent.executor.file_read_projection import project_file_reads
 from crew.plugins.manager import PluginManager, TerminalOutcome
 from crew.state.logging import get_logger, llm_trace
 from crew.state.home import external_session_workspace_path, task_workspace_path, safe_path_segment
 
 log = get_logger("agent")
+
+
+def _turn_prompt_reminder(content: str) -> Message:
+    message = Message.system_reminder(content)
+    message.source_kind = "turn_prompt_context"
+    return message
 
 
 def _session_source_for_run(envelope: Envelope) -> dict[str, Any]:
@@ -410,7 +417,9 @@ class SingleAgent(Agent):
 
     async def _build_prompts(
         self, envelope: Envelope, att_contents: list[str], cwd: str | None = None,
-        *, task_sid: str | None = None,
+        *,
+        task_sid: str | None = None,
+        available_tool_names: frozenset[str] | None = None,
     ) -> tuple[str, str]:
         """组装 system_static + user_reminder 两部分。
 
@@ -426,6 +435,7 @@ class SingleAgent(Agent):
             mem_sid, envelope.query
         )
         ws_instructions = envelope.params.get("workspace_instructions", "")
+        context_window = getattr(self.provider, "context_window", None)
         prompt_parts = await build_prompt_parts(
             workspace_instructions=ws_instructions,
             memory_text=memory_text,
@@ -438,6 +448,8 @@ class SingleAgent(Agent):
             include_optional_skills=self.include_optional_skills,
             user_type=self.user_type,
             delegation_mode=self.delegation_mode,
+            context_window=context_window if type(context_window) is int else None,
+            available_tool_names=available_tool_names,
         )
 
         system_static = prompt_parts["system_static"]
@@ -672,8 +684,12 @@ class SingleAgent(Agent):
         try:
             history = await self.session_store.load_async(session_id, owner_account_id=owner)
             context_messages = await self._contribute_prompt_context(envelope)
+            tool_schemas, _, plan_active = self._request_tool_schemas(
+                session_id, owner, readonly=envelope.params.get("collaboration_readonly") is True,
+            )
             system_static, user_reminder = await self._build_prompts(
-                envelope, [], cwd, task_sid=session_id
+                envelope, [], cwd, task_sid=session_id,
+                available_tool_names=frozenset(map(function_name, tool_schemas)),
             )
 
             view_messages = list(history)
@@ -692,14 +708,11 @@ class SingleAgent(Agent):
             # 计入打开会话预览，出现 190% 但发送前已降到低水位的假象。
             if self.compactor is not None:
                 view_messages = self.compactor.compact_preview_view(view_messages)
-            tool_schemas, _, plan_active = self._request_tool_schemas(
-                session_id, owner, readonly=envelope.params.get("collaboration_readonly") is True,
-            )
             if plan_active:
                 guide = plan_tool_reminder(function_name(schema) for schema in tool_schemas)
                 user_reminder = f"{user_reminder}\n\n{guide}" if user_reminder else guide
             if user_reminder:
-                view_messages = [Message.system_reminder(user_reminder), *view_messages]
+                view_messages = [_turn_prompt_reminder(user_reminder), *view_messages]
             request_view = self.executor.build_request_view(
                 system_static,
                 view_messages,
@@ -714,7 +727,7 @@ class SingleAgent(Agent):
                 request_id=f"context-preview:{session_id}",
                 provider=self.provider,
             )
-            tokens = request_view.estimated_prompt_tokens()
+            tokens = request_view.with_messages(project_file_reads(request_view.messages)).estimated_prompt_tokens(self.provider)
             return {
                 "used_tokens": tokens,
                 "source": "preview",
@@ -916,9 +929,13 @@ class SingleAgent(Agent):
 
         history.extend(await self._contribute_prompt_context(envelope))
 
+        tool_schemas, effective_tool_filter, plan_active = self._request_tool_schemas(
+            task_sid, owner, readonly=envelope.params.get("collaboration_readonly") is True,
+        )
         t = time.perf_counter()
         system_static, user_reminder = await self._build_prompts(
-            envelope, att_contents, cwd, task_sid=task_sid
+            envelope, att_contents, cwd, task_sid=task_sid,
+            available_tool_names=frozenset(map(function_name, tool_schemas)),
         )
         log.info("[PERF] build_prompts      %.3fs  (static=%d, reminder=%d)",
                  time.perf_counter() - t, len(system_static), len(user_reminder))
@@ -926,9 +943,6 @@ class SingleAgent(Agent):
         # 3. 上下文压缩：仅作用于「发给 LLM 的视图」llm_messages，
         #    不破坏 history（旧的详细历史仍完整持久化）。
         #    工具 schema 提前解析：摘要调用的 KV 前缀复用需要复放 tools 块。
-        tool_schemas, effective_tool_filter, plan_active = self._request_tool_schemas(
-            task_sid, owner, readonly=envelope.params.get("collaboration_readonly") is True,
-        )
         if plan_active:
             guide = plan_tool_reminder(function_name(schema) for schema in tool_schemas)
             user_reminder = f"{user_reminder}\n\n{guide}" if user_reminder else guide
@@ -947,7 +961,7 @@ class SingleAgent(Agent):
         # 注入动态上下文：通过 <system-reminder> 作为首条 user 消息插入 llm_messages
         # 注意：不写入 canonical history，不影响持久化
         if user_reminder:
-            reminder_msg = Message.system_reminder(user_reminder)
+            reminder_msg = _turn_prompt_reminder(user_reminder)
             llm_messages = [reminder_msg, *llm_messages]
 
         # skill 展开内容已在 history 中（is_meta=True），llm_messages 是 history 的拷贝，

@@ -335,6 +335,7 @@ class OpenAIProvider(LLMProvider):
         vision_max_pixels: int | None = None,
         compat: VendorCompat | None = None,
         api_key_resolver: ApiKeyResolver | None = None,
+        context_window: int | None = None,
     ) -> None:
         # 延迟导入，避免未装 openai 时整个包不可用
         from openai import AsyncOpenAI
@@ -363,12 +364,17 @@ class OpenAIProvider(LLMProvider):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.context_window = context_window
         self.vision = vision
         # 视觉输入像素预算（装配层按厂商档案注入）；None = 工具层默认预算
         self.vision_max_pixels = vision_max_pixels
         # 厂商差异开关：装配层按 crew.providers.vendors 档案传入；缺省 = 通用 OpenAI 行为
         self._compat = compat if compat is not None else VendorCompat()
         self._api_key_resolver = api_key_resolver
+
+    @property
+    def context_reasoning_echo(self) -> bool:
+        return self._compat.requires_reasoning_echo
 
     def _auth_headers(self) -> dict[str, str] | None:
         """resolver 模式下每次请求取一次凭据快照写进 Authorization 头。

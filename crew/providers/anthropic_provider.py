@@ -170,6 +170,8 @@ def _parse_response(data: dict[str, Any]) -> ChatResponse:
 class AnthropicProvider(LLMProvider):
     """Minimal Anthropic `/v1/messages` adapter for Crew's LLMProvider interface."""
 
+    default_max_output_tokens = _DEFAULT_MAX_TOKENS
+
     def __init__(
         self,
         api_key: str,
@@ -181,6 +183,7 @@ class AnthropicProvider(LLMProvider):
         vision: bool = True,
         vision_max_pixels: int | None = None,
         api_key_resolver: ApiKeyResolver | None = None,
+        context_window: int | None = None,
     ) -> None:
         if isinstance(timeout, (int, float)):
             timeout = httpx.Timeout(connect=10.0, read=float(timeout), write=10.0, pool=5.0)
@@ -203,6 +206,7 @@ class AnthropicProvider(LLMProvider):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.context_window = context_window
         self.vision = vision
         # 视觉输入像素预算（装配层按厂商档案注入）；None = 工具层默认预算
         self.vision_max_pixels = vision_max_pixels
@@ -240,7 +244,7 @@ class AnthropicProvider(LLMProvider):
         system, converted = _messages_payload(messages, vision=self.vision)
         effective_max_tokens = (
             max_tokens_override if max_tokens_override is not None
-            else (self.max_tokens or _DEFAULT_MAX_TOKENS)
+            else (self.max_tokens or self.default_max_output_tokens)
         )
         payload: dict[str, Any] = {
             "model": self.model,

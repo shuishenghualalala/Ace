@@ -52,6 +52,12 @@ def test_profile_missing_window_falls_back_to_global():
     assert app.resolve_session_context_window("sess", owner_account_id="local") == 128000
 
 
+def test_vendor_window_matches_provider_admission_when_profile_does_not_configure_one():
+    profile = ModelProfile(id="vendor", provider="deepseek", model="deepseek-v4-flash", loaded=True)
+    app = _make_app({"vendor": profile}, {"model_profile_id": "vendor"})
+    assert app.resolve_session_context_window("sess", owner_account_id="local") == 1_000_000
+
+
 def test_empty_catalog_falls_back_to_global():
     # catalog 空 → profile None → 回退全局 cfg.context_window
     profiles = {}

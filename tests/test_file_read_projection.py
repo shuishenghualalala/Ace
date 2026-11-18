@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from crew.agent.compact import estimate_prompt_tokens
+from crew.agent.compact.microcompact import micro_compact, prune_tool_results
 from crew.agent.executor import BuiltinExecutor, FinalRequestView
 from crew.agent.executor.file_read_projection import project_file_reads
 from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, append_toolguard_guidance
@@ -114,6 +115,50 @@ def test_forced_result_keeps_text_and_can_anchor_later_read(read_payload):
     assert json.loads(projected[-1].content)["source_tool_call_id"] == "forced"
 
 
+def test_budget_shortened_result_cannot_anchor_a_duplicate(read_payload):
+    read_payload["content"] *= 500
+    first = _call_and_read("first", read_payload)
+    second = _call_and_read("second", read_payload)
+
+    projected = project_file_reads([*first, *second], max_content_chars=100)
+
+    for index in (1, 3):
+        result = json.loads(projected[index].content)
+        assert result["context_truncated"] is True
+        assert result["context_original_content_chars"] == len(read_payload["content"])
+        assert len(result["content"]) == 100
+        assert result["path"] == read_payload["path"]
+        assert result["file_version"] == read_payload["file_version"]
+        assert "source_tool_call_id" not in result
+
+    forced = _call_and_read("forced", {**read_payload, "force_refresh": True})
+    projected = project_file_reads([*forced, *second], max_content_chars=100)
+    assert projected[1] is forced[1]
+    assert json.loads(projected[3].content)["source_tool_call_id"] == "forced"
+
+
+def test_microcompact_preserves_file_result_json_for_final_budget(read_payload):
+    read_payload["content"] = ('first\n"slash\\汉字"\nlast' * 2200)
+    assistant, original = _call_and_read("big-file", read_payload)
+
+    compacted = micro_compact([assistant, original], max_tool_result_chars=20_000)
+    budgeted = project_file_reads(compacted, max_content_chars=500)
+    overflow_pruned = prune_tool_results([assistant, original])
+
+    assert len(compacted[-1].content) <= 20_000
+    for projected in (compacted[-1], budgeted[-1], overflow_pruned[-1]):
+        visible = json.loads(projected.content)
+        assert projected.tool_call_id == "big-file"
+        assert visible["content"].startswith("first")
+        assert visible["content"].endswith("last")
+        assert visible["offset"] == read_payload["offset"]
+        assert visible["file_version"] == read_payload["file_version"]
+        assert visible["context_original_content_chars"] == len(read_payload["content"])
+        assert visible["context_truncated"] is True
+    assert json.loads(original.content) == read_payload
+    assert len(json.loads(budgeted[-1].content)["content"]) == 500
+
+
 def test_projected_repeat_keeps_runtime_loop_warning(read_payload):
     guardrails = ToolCallGuardrailController()
     messages = []
@@ -174,4 +219,24 @@ async def test_projection_is_done_after_execution_middleware(read_payload, keep_
     else:
         assert actual == read_payload
     assert json.loads(original.messages[-1].content) == read_payload
+    assert response["usage"]["request_view_tokens"] == estimate_prompt_tokens(provider.sent_messages, None)
+
+
+async def test_budget_projects_rereadable_result_without_mutating_history(read_payload):
+    provider = _RecordingProvider()
+    provider.context_window = 1100
+    executor = BuiltinExecutor(provider, Registry(), PluginManager(), backoff_seconds=0)
+    read_payload["content"] *= 500
+    assistant, tool = _call_and_read("recent", read_payload)
+    view = FinalRequestView.create([Message.user("use the result"), assistant, tool])
+    response = {}
+
+    events = [event async for event in executor._call_model(view, "request", lambda: 1, response)]
+
+    assert not events
+    assert provider.sent_messages[1] is assistant
+    sent = provider.sent_messages[-1]
+    assert sent.tool_call_id == "recent"
+    assert json.loads(sent.content)["context_truncated"] is True
+    assert json.loads(tool.content) == read_payload
     assert response["usage"]["request_view_tokens"] == estimate_prompt_tokens(provider.sent_messages, None)

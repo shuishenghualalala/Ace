@@ -17,10 +17,10 @@ from datetime import datetime
 from pathlib import Path
 
 from crew.agent.instructions import build_context_files_prompt as build_context_files_prompt
+from crew.agent.prompt_budget import render_prompt_source, source_token_budgets
 from crew.state.home import (
-    load_memory_md,
-    load_soul_md,
-    load_user_md,
+    load_prompt_markdown,
+    read_bounded_markdown,
 )
 from crew.agent.skills import (
     build_optional_skills_index_prompt,
@@ -66,6 +66,31 @@ DEFAULT_TOOL_GUIDELINE = (
     "- 有依赖关系的工具调用必须按顺序执行。"
 )
 
+
+def render_tool_guideline(available_tool_names: frozenset[str] | None) -> str:
+    if available_tool_names is None:
+        return DEFAULT_TOOL_GUIDELINE
+    if not available_tool_names:
+        return ""
+    specialized = (
+        ("glob", "用 glob 按文件名查找。"),
+        ("grep", "用 grep 按内容查找。"),
+        ("file_read", "用 file_read 读取文件。"),
+        ("patch", "用 patch 做局部编辑，参数引用实际读取到的原文。"),
+        ("file_write", "用 file_write 写入文件。"),
+        ("file_delete", "用 file_delete 删除单个文件，传入实际目标路径。"),
+    )
+    actions = [f"- {instruction}" for name, instruction in specialized if name in available_tool_names]
+    if actions and "terminal" in available_tool_names:
+        actions.insert(0, "- 已有专用工具覆盖的操作优先使用专用工具，terminal 用于其它需要执行命令的任务。")
+    if "file_read" in available_tool_names and available_tool_names.intersection({"patch", "file_write"}):
+        actions.append("- 修改已有文件前先 file_read。整文件覆盖需读完同一版本；遇到 stale_file 时重新读取并计算修改。")
+    actions.extend((
+        "- 按工具声明提供参数。无依赖的工具可以并行调用，有依赖时按顺序执行。",
+        "- 直接向用户报告结果。",
+    ))
+    return "## 工具使用规则\n" + "\n".join(actions)
+
 DEFAULT_SAFETY_RULES = (
     "## 操作安全规则\n"
     "- 仔细考虑操作的可逆性和影响范围。\n"
@@ -90,7 +115,8 @@ DEFAULT_OUTPUT_STYLE = (
 # ---------------------------------------------------------------------------
 
 _FILE_CACHE_LOCK = threading.Lock()
-_FILE_CACHE: dict[str, tuple[float, str]] = {}
+_FILE_CACHE: dict[str, tuple[tuple[int, int, int, int], str, bool]] = {}
+_MAX_PROFILE_READ_BYTES = 64 * 1024
 
 
 def _clear_file_cache() -> None:
@@ -99,30 +125,36 @@ def _clear_file_cache() -> None:
         _FILE_CACHE.clear()
 
 
-def _read_text_cached(path: Path) -> str:
+def _read_text_cached(path: Path) -> tuple[str, bool]:
     """读文本文件，mtime 未变时直接返回缓存内容。"""
     key = str(path)
     try:
-        mtime = path.stat().st_mtime
+        info = path.stat()
+        version = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
     except OSError:
-        mtime = None
+        version = None
     with _FILE_CACHE_LOCK:
-        if mtime is not None:
+        if version is not None:
             hit = _FILE_CACHE.get(key)
-            if hit is not None and hit[0] == mtime:
-                return hit[1]
-    content = path.read_text(encoding="utf-8")
-    if mtime is not None:
+            if hit is not None and hit[0] == version:
+                return hit[1], hit[2]
+    content, truncated = read_bounded_markdown(path, _MAX_PROFILE_READ_BYTES)
+    if version is not None:
         with _FILE_CACHE_LOCK:
-            _FILE_CACHE[key] = (mtime, content)
-    return content
+            _FILE_CACHE[key] = (version, content, truncated)
+            if len(_FILE_CACHE) > 128:
+                _FILE_CACHE.pop(next(iter(_FILE_CACHE)))
+    return content, truncated
 
 
-def _load_profile(profile_path: str) -> str:
+def _load_profile(profile_path: str, max_tokens: int = 2_048) -> str:
     """加载 prompt profile markdown 文件。"""
     try:
-        content = _read_text_cached(Path(profile_path)).strip()
-        return content
+        content, truncated = _read_text_cached(Path(profile_path))
+        return render_prompt_source(
+            "", content, max_tokens, "提示词配置已截断；必要时请用户核对其余配置。",
+            truncated=truncated,
+        )
     except Exception as e:
         logger.warning("无法加载 prompt profile %s: %s", profile_path, e)
         return ""
@@ -182,6 +214,41 @@ def _shell_facts_block() -> str:
     return "- 内置 terminal 由 bash 执行，使用 POSIX 语法。"
 
 
+def _tool_available(name: str, available_tool_names: frozenset[str] | None) -> bool:
+    return available_tool_names is None or name in available_tool_names
+
+
+def _workspace_facts(cwd: str, available_tool_names: frozenset[str] | None) -> str:
+    trusted_cwd = Path(cwd).expanduser().resolve()
+    host_home = Path.home().expanduser().resolve(strict=False)
+    facts = [
+        "# 当前工作空间（可信）",
+        f"- 当前工作目录：`{trusted_cwd}`",
+        "- 本地工具以这个目录为起点；直接使用相对路径，不要再次切换到该目录。",
+        "- 该目录由宿主运行时提供；不要用它推导、验证或重建当前工作空间路径。",
+        f"- 宿主用户目录：`{host_home}`。受管模式仍由沙箱分别限制读写。",
+        "- 受管模式可广泛只读；工作区和临时目录可写。工作区外写入必须使用宿主绝对路径申请 "
+        "`with_additional_permissions`；它会在沙箱内生效，不需要 `require_escalated`。",
+        "- 不要把相对文件名与额外路径权限组合，也不要把文件工具称为绕过沙箱。"
+        "用户拒绝任一安全审批后，必须立即停止本轮操作，"
+        "不得改用其他工具重试。",
+        "- runtime_crashed、runtime_protocol_mismatch 和 sandbox_unavailable 表示安全运行时故障，"
+        "不表示目标路径在沙箱外；不得据此改用其他文件工具。",
+    ]
+    if _tool_available("file_delete", available_tool_names):
+        facts.append("- 删除单个文件优先使用 file_delete。")
+    file_tools = [name for name in ("glob", "grep", "file_read") if _tool_available(name, available_tool_names)]
+    if file_tools:
+        facts.append(f"- 可用文件检索工具：{'、'.join(file_tools)}；均服从沙箱文件策略。")
+    if _tool_available("terminal", available_tool_names):
+        facts.append(
+            "- 内置 terminal 的 `$HOME`/`%USERPROFILE%` 指向宿主用户目录。"
+            "terminal 删除命令必须使用宿主绝对路径；文件工具也服从相同的文件策略。"
+        )
+        facts.append(_shell_facts_block())
+    return "\n".join(facts)
+
+
 def _build_prompt_parts_sync(
     workspace_instructions: str = "",
     memory_text: str = "",
@@ -194,6 +261,8 @@ def _build_prompt_parts_sync(
     inject_skills: bool = False,
     include_optional_skills: bool = False,
     delegation_mode: str = "explicit",
+    context_window: int | None = None,
+    available_tool_names: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """组装 prompt 为 system_static / user_reminder 两部分。
 
@@ -206,10 +275,12 @@ def _build_prompt_parts_sync(
     sync 实现：磁盘读取（profile/SOUL/上下文文件/记忆/用户画像）直读，调用方
     （:func:`build_prompt_parts`）负责决定在线程内还是事件循环内执行本函数。
     """
+    budgets = source_token_budgets(context_window)
+    profile_budget = 2_048 if context_window is None else min(2_048, max(0, context_window // 16))
     # ── System Static 层（几乎不变） ──
     static_parts: list[str] = []
     if profile_path:
-        profile_content = _load_profile(profile_path)
+        profile_content = _load_profile(profile_path, profile_budget)
         if profile_content:
             static_parts.append(profile_content)
 
@@ -217,51 +288,46 @@ def _build_prompt_parts_sync(
         if lightweight:
             # 子 agent：用默认身份 + 工具/安全/风格规则，跳过 SOUL 与记忆引导
             static_parts.append(DEFAULT_AGENT_IDENTITY)
-            static_parts.append(DEFAULT_TOOL_GUIDELINE)
+            guideline = render_tool_guideline(available_tool_names)
+            if guideline:
+                static_parts.append(guideline)
             static_parts.append(DEFAULT_SAFETY_RULES)
             static_parts.append(DEFAULT_OUTPUT_STYLE)
         else:
             t = time.perf_counter()
-            soul = load_soul_md()
+            soul, truncated = load_prompt_markdown("SOUL.md", profile_budget * 4 + 12)
             logger.debug("[PERF] load_soul_md       %.3fs", time.perf_counter() - t)
-            if soul:
-                static_parts.append(soul)
+            identity = render_prompt_source(
+                "", soul, profile_budget, "SOUL.md 已截断；必要时请用户核对其余配置。",
+                truncated=truncated,
+            )
+            if identity:
+                static_parts.append(identity)
             else:
                 static_parts.append(DEFAULT_AGENT_IDENTITY)
-            static_parts.append(MEMORY_GUIDANCE)
-            static_parts.append(DEFAULT_TOOL_GUIDELINE)
+            if _tool_available("memory", available_tool_names):
+                static_parts.append(MEMORY_GUIDANCE)
+            guideline = render_tool_guideline(available_tool_names)
+            if guideline:
+                static_parts.append(guideline)
             static_parts.append(DEFAULT_SAFETY_RULES)
             static_parts.append(DEFAULT_OUTPUT_STYLE)
 
-    if not lightweight:
+    if not lightweight and _tool_available("delegate_task", available_tool_names):
         static_parts.append(_delegation_discipline(delegation_mode))
 
     # ── User Reminder 层（每轮可能变） ──
     reminder_parts = []
     if cwd:
-        trusted_cwd = str(Path(cwd).expanduser().resolve())
-        reminder_parts.append(
-            "# 当前工作空间（可信）\n"
-            f"- 当前工作目录：`{trusted_cwd}`\n"
-            "- terminal、文件和搜索工具都以这个目录为起点；直接使用相对路径，不要再次 cd 到该目录。\n"
-            "- 该目录由宿主运行时提供；不要用它推导、验证或重建当前工作空间路径。\n"
-            f"- 宿主用户目录：`{Path.home().expanduser().resolve(strict=False)}`。内置 terminal 的 "
-            "`$HOME`/`%USERPROFILE%` 指向此宿主目录，但受管模式仍由沙箱分别限制读写。\n"
-            "- 受管模式可广泛只读；工作区和临时目录可写。工作区外写入必须使用宿主绝对路径申请 "
-            "`with_additional_permissions`；它会在沙箱内生效，不需要 `require_escalated`。\n"
-            "- 删除单个文件优先使用 file_delete。terminal 删除命令必须使用宿主绝对路径；"
-            "不要把相对文件名与额外路径权限组合，也不要把文件工具称为绕过沙箱。\n"
-            "- 列目录、查找和读取文件时优先使用 glob、grep、file_read；这些工具与 terminal "
-            "服从同一文件策略。用户拒绝任一安全审批后，必须立即停止本轮操作，不得换用其他工具重试。\n"
-            "- runtime_crashed、runtime_protocol_mismatch 和 sandbox_unavailable 表示安全运行时故障，"
-            "不表示目标路径在沙箱外；不得据此改用其他文件工具。\n"
-            f"{_shell_facts_block()}"
-        )
+        reminder_parts.append(_workspace_facts(cwd, available_tool_names))
     # 子 agent（lightweight）：跳过全局 workspace/上下文文件/skills/记忆/用户画像注入，
     # 只保留日期，保持聚焦（用于 skip_memory / skip_context_files）。
     if not lightweight:
         t = time.perf_counter()
-        context_files = build_context_files_prompt(cwd, workspace_instructions=workspace_instructions)
+        context_files = build_context_files_prompt(
+            cwd, workspace_instructions=workspace_instructions, budgets=budgets,
+            allow_file_read=available_tool_names is None or "file_read" in available_tool_names,
+        )
         logger.debug("[PERF] context_files      %.3fs", time.perf_counter() - t)
         if context_files:
             reminder_parts.append(context_files)
@@ -270,11 +336,14 @@ def _build_prompt_parts_sync(
             skills_index = build_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
+                max_tokens=budgets["skills"],
+                available_tool_names=available_tool_names,
             )
             if include_optional_skills:
                 optional_index = build_optional_skills_index_prompt(
                     enabled=enabled_skills,
                     disabled=disabled_skills,
+                    max_tokens=budgets["optional_skills"],
                 )
                 if optional_index:
                     skills_index = f"{skills_index}\n\n{optional_index}" if skills_index else optional_index
@@ -285,17 +354,23 @@ def _build_prompt_parts_sync(
             pass  # skills 索引不影响主流程
 
         t = time.perf_counter()
-        memory_md = load_memory_md()
+        memory_md, memory_truncated = load_prompt_markdown("MEMORY.md", budgets["memory"] * 4 + 12)
         logger.debug("[PERF] load_memory_md     %.3fs", time.perf_counter() - t)
-        if memory_md:
-            reminder_parts.append(f"# 持久记忆\n{memory_md}")
+        reminder_parts.append(render_prompt_source(
+            "# 持久记忆", memory_md, budgets["memory"],
+            "MEMORY.md 已截断；必要时请用户核对其余记忆。", truncated=memory_truncated,
+        ))
         t = time.perf_counter()
-        user_md = load_user_md()
+        user_md, user_truncated = load_prompt_markdown("USER.md", budgets["user"] * 4 + 12)
         logger.debug("[PERF] load_user_md       %.3fs", time.perf_counter() - t)
-        if user_md:
-            reminder_parts.append(f"# 用户画像\n{user_md}")
-        if memory_text.strip():
-            reminder_parts.append(f"# 会话记忆\n{memory_text.strip()}")
+        reminder_parts.append(render_prompt_source(
+            "# 用户画像", user_md, budgets["user"],
+            "USER.md 已截断；必要时请用户核对其余偏好。", truncated=user_truncated,
+        ))
+        reminder_parts.append(render_prompt_source(
+            "# 会话记忆", memory_text, budgets["recall"],
+            "会话记忆已截断；需要其余信息时请核对当前会话记录。",
+        ))
     # 子 agent（lightweight）继承技能时：单独注入 skills 索引，其余全局上下文仍跳过。
     # 对照 delegate_task 的 skills 参数——只放开 skills，不放开 workspace/记忆/用户画像。
     if lightweight and inject_skills:
@@ -303,6 +378,8 @@ def _build_prompt_parts_sync(
             skills_index = build_skills_index_prompt(
                 enabled=enabled_skills,
                 disabled=disabled_skills,
+                max_tokens=budgets["skills"],
+                available_tool_names=available_tool_names,
             )
             if skills_index:
                 reminder_parts.append(skills_index)
@@ -329,6 +406,8 @@ async def build_prompt_parts(
     inject_skills: bool = False,
     include_optional_skills: bool = False,
     delegation_mode: str = "explicit",
+    context_window: int | None = None,
+    available_tool_names: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """在工作线程发现和组装 prompt 文件，避免文件系统探测阻塞 Gateway。"""
     return await asyncio.to_thread(
@@ -344,6 +423,8 @@ async def build_prompt_parts(
         inject_skills=inject_skills,
         include_optional_skills=include_optional_skills,
         delegation_mode=delegation_mode,
+        context_window=context_window,
+        available_tool_names=available_tool_names,
     )
 
 
@@ -359,6 +440,8 @@ async def build_system_prompt_parts(
     enabled_skills: list[str] | None = None,
     disabled_skills: list[str] | None = None,
     user_type: str = "internal",
+    context_window: int | None = None,
+    available_tool_names: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """向后兼容：返回 stable/context/volatile 三层（内部使用新的 build_prompt_parts）。
 
@@ -373,6 +456,8 @@ async def build_system_prompt_parts(
         enabled_skills=enabled_skills,
         disabled_skills=disabled_skills,
         user_type=user_type,
+        context_window=context_window,
+        available_tool_names=available_tool_names,
     )
     # 映射：新接口只有两层，旧接口三层
     return {
@@ -391,6 +476,8 @@ async def build_system_prompt(
     enabled_skills: list[str] | None = None,
     disabled_skills: list[str] | None = None,
     user_type: str = "internal",
+    context_window: int | None = None,
+    available_tool_names: frozenset[str] | None = None,
 ) -> str:
     """组装完整 system prompt（向后兼容旧版调用方式）。
 
@@ -404,5 +491,7 @@ async def build_system_prompt(
         enabled_skills=enabled_skills,
         disabled_skills=disabled_skills,
         user_type=user_type,
+        context_window=context_window,
+        available_tool_names=available_tool_names,
     )
     return "\n\n".join(p for p in (parts["system_static"], parts["user_reminder"]) if p)

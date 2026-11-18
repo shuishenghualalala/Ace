@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from crew.agent.compact.budget import RequestBudget, RequestBudgetExceeded, assess_request_budget
+from crew.agent.compact.tokens import estimate_prompt_tokens
 from crew.agent.loop.resilience import is_context_overflow, is_max_tokens_finish
 from crew.core.interfaces import LLMProvider
 from crew.core.types import Message
@@ -158,17 +160,52 @@ async def _summarize_chat(
     *,
     tools: list[dict[str, Any]] | None,
     max_tokens: int | None,
+    isolated_request: list[Message] | None = None,
 ) -> AuxResult:
     """经 stream_aux 发起摘要调用：purpose 标记 + 超时 + 不重试（PTL 循环自带重试）。"""
+    budget = _summary_budget(provider, request, tools, max_tokens)
+    if budget.over_budget and isolated_request is not None:
+        # Reuse the transcript without replaying the turn's system, media and
+        # tool schemas. The isolated request still covers the same messages.
+        request, tools = isolated_request, None
+        budget = _summary_budget(provider, request, tools, max_tokens)
+    if budget.over_budget:
+        raise RequestBudgetExceeded(budget)
     return await stream_aux(
         provider,
         request,
         purpose=PURPOSE_COMPACTION,
         timeout=_SUMMARY_TIMEOUT,
-        max_tokens=max_tokens,
+        max_tokens=budget.max_output_tokens,
         retry=0,
         tools=tools,
     )
+
+
+def _summary_budget(
+    provider: LLMProvider,
+    messages: list[Message],
+    tools: list[dict[str, Any]] | None,
+    max_tokens: int | None,
+) -> RequestBudget:
+    default_output = getattr(provider, "max_tokens", None) or getattr(provider, "default_max_output_tokens", None)
+    return assess_request_budget(
+        estimate_prompt_tokens(
+            messages, tools,
+            include_images=getattr(provider, "vision", True) is not False,
+            reasoning_echo=getattr(provider, "context_reasoning_echo", False) is True,
+        ),
+        context_window=getattr(provider, "context_window", None),
+        requested_output_tokens=max_tokens,
+        provider_default_output_tokens=default_output,
+    )
+
+
+def _summary_text(response: AuxResult, omitted: int) -> str | None:
+    text = (response.text or "").strip()
+    if text and omitted:
+        return f"有 {omitted} 条较早消息因摘要输入过长未纳入。完整历史仍保留。\n\n{text}"
+    return text or None
 
 
 def supports_prefix_reuse(provider: LLMProvider) -> bool:
@@ -219,24 +256,26 @@ async def summarize_full(
         transcript = _transcript(msgs)
         if not transcript.strip():
             return None
+        isolated = [Message.system(FULL_SUMMARY_PROMPT), Message.user(transcript)]
         if reuse:
             request = _prefix_reuse_messages(system_prompt, msgs, FULL_SUMMARY_PROMPT)
             chat_tools = tools
         else:
-            request = [
-                Message.system(FULL_SUMMARY_PROMPT),
-                Message.user(transcript),
-            ]
+            request = isolated
             chat_tools = None
         try:
             resp = await _summarize_chat(
-                provider, request, tools=chat_tools, max_tokens=max_tokens
+                provider, request, tools=chat_tools, max_tokens=max_tokens,
+                isolated_request=isolated if reuse else None,
             )
             if is_max_tokens_finish(resp.finish_reason):
                 log.warning("L3 全量摘要被 max_tokens 截断，视为失败")
                 return None
-            return (resp.text or "").strip() or None
+            return _summary_text(resp, len(old_messages) - len(msgs))
         except Exception as exc:  # noqa: BLE001 - 压缩失败不影响主流程
+            if isinstance(exc, RequestBudgetExceeded):
+                log.info("L3 摘要输入无法在当前模型窗口中完整处理，保留旧上下文")
+                return None
             if is_context_overflow(exc) and len(msgs) > 2:
                 drop = max(1, len(msgs) // 3)
                 msgs = msgs[drop:]
@@ -269,25 +308,30 @@ async def summarize_incremental(
         transcript = _transcript(msgs)
         if not transcript.strip():
             return previous_summary  # 无新增内容，旧摘要即结果
+        isolated = [
+            Message.system(MERGE_SUMMARY_PROMPT),
+            Message.user(f"【已有摘要】\n{previous_summary}\n\n【新增的对话轮次】\n{transcript}"),
+        ]
         if reuse:
             instruction = f"{MERGE_SUMMARY_PROMPT}\n\n【已有摘要】\n{previous_summary}"
             request = _prefix_reuse_messages(system_prompt, msgs, instruction)
             chat_tools = tools
         else:
-            request = [
-                Message.system(MERGE_SUMMARY_PROMPT),
-                Message.user(f"【已有摘要】\n{previous_summary}\n\n【新增的对话轮次】\n{transcript}"),
-            ]
+            request = isolated
             chat_tools = None
         try:
             resp = await _summarize_chat(
-                provider, request, tools=chat_tools, max_tokens=max_tokens
+                provider, request, tools=chat_tools, max_tokens=max_tokens,
+                isolated_request=isolated if reuse else None,
             )
             if is_max_tokens_finish(resp.finish_reason):
                 log.warning("L2 增量摘要被 max_tokens 截断，视为失败")
                 return None
-            return (resp.text or "").strip() or None
+            return _summary_text(resp, len(new_messages) - len(msgs))
         except Exception as exc:  # noqa: BLE001 - 压缩失败不影响主流程
+            if isinstance(exc, RequestBudgetExceeded):
+                log.info("L2 摘要输入无法在当前模型窗口中完整处理，保留旧上下文")
+                return None
             if is_context_overflow(exc) and len(msgs) > 1:
                 drop = max(1, len(msgs) // 3)
                 msgs = msgs[drop:]

@@ -20,6 +20,7 @@ from crew.agent.compact.summary import (
     SUMMARY_MARKER,
     summarize_full,
 )
+from crew.agent.compact.tokens import estimate_prompt_tokens, estimate_text_tokens
 from crew.core.errors import ProviderError
 from crew.core.interfaces import ToolResultPolicy, ToolResultRetention
 from crew.core.types import ChatResponse, Message, StreamChunk, ToolCall
@@ -1216,6 +1217,47 @@ async def test_summary_prefix_reuse_disabled_by_config():
     req = provider.calls[0]["messages"]
     assert req[0].content == FULL_SUMMARY_PROMPT
     assert provider.calls[0]["tools"] is None
+
+
+async def test_summary_switches_oversized_cached_prefix_to_isolated_request():
+    provider = DeepSeekStyleProvider()
+    provider.context_window = 4096
+    old = [Message.user("保留这个较早请求"), Message.assistant("结果一"), Message.user("保留末尾回复")]
+    text = await summarize_full(provider, old, system_prompt="大段静态内容 " * 8_000, max_tokens=8192)
+
+    assert text == "结构化摘要"
+    assert len(provider.calls) == 1
+    call = provider.calls[0]
+    assert call["messages"][0].content == FULL_SUMMARY_PROMPT
+    assert "保留这个较早请求" in call["messages"][1].content
+    assert "保留末尾回复" in call["messages"][1].content
+    assert call["tools"] is None
+    assert estimate_prompt_tokens(call["messages"]) + call["kwargs"]["max_tokens"] <= provider.context_window
+
+
+async def test_summary_never_sends_irreducible_request_to_known_context_window():
+    provider = DeepSeekStyleProvider()
+    provider.context_window = 1024
+    old = [Message.user("完整需求 带空格的句子 " * 500)]
+    assert await summarize_full(provider, old, max_tokens=512) is None
+    assert provider.calls == []
+
+
+def test_request_estimate_counts_actual_text_parts_reasoning_and_media_without_base64():
+    assistant = Message.assistant("done")
+    assistant.thinking = "原因及推理 " * 50
+    user = Message.user("outbound text placeholder " * 500)
+    user.content_parts = [
+        {"type": "text", "text": "actual request body"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 60_000}},
+    ]
+    request = [user, assistant]
+    plain = estimate_prompt_tokens(request)
+    assert plain < estimate_text_tokens(user.content)
+    assert estimate_prompt_tokens(request, reasoning_echo=True) - plain == estimate_text_tokens(assistant.thinking)
+    assert estimate_prompt_tokens(request, include_images=False) < plain
+    user.content_parts[1]["image_url"]["url"] *= 8
+    assert estimate_prompt_tokens(request) == plain
 
 
 async def test_summary_truncation_is_failure():

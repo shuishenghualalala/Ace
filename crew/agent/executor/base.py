@@ -146,13 +146,15 @@ class FinalRequestView:
             provider_index=self.provider_index,
         )
 
-    def estimated_prompt_tokens(self) -> int:
+    def estimated_prompt_tokens(self, provider: Any = None) -> int:
         """按统一快照计算本地 prompt token；不再接受旁路 messages/tools。"""
         from crew.agent.compact.tokens import estimate_prompt_tokens
 
         return estimate_prompt_tokens(
             list(self.messages),
             list(self.tools) if self.tools is not None else None,
+            include_images=getattr(provider, "vision", True) is not False,
+            reasoning_echo=getattr(provider, "context_reasoning_echo", False) is True,
         )
 
 

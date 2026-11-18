@@ -13,10 +13,12 @@ from crew.state.config import Config, ModelProfile
 
 
 def test_build_provider_for_profile_dispatches_anthropic():
-    profile = ModelProfile(id="claude", provider="anthropic", api_key="sk", model="claude-test")
+    profile = ModelProfile(id="claude", provider="anthropic", api_key="sk", model="claude-test", context_window=32_768)
     provider = build_provider_for_profile(profile)
     assert isinstance(provider, AnthropicProvider)
     assert provider.vision is False
+    assert provider.context_window == 32_768
+    assert provider.default_max_output_tokens == provider._payload([Message.user("Hello")])["max_tokens"]
 
 
 def test_build_provider_uses_profile_capabilities_for_vision():
@@ -35,9 +37,17 @@ def test_build_provider_uses_profile_capabilities_for_vision():
 
 
 def test_build_provider_defaults_openai():
-    cfg = Config(api_key="sk", provider="openai", model="gpt-test")
+    cfg = Config(api_key="sk", provider="openai", model="gpt-test", context_window=16_384)
     provider = build_provider(cfg)
     assert isinstance(provider, OpenAIProvider)
+    assert provider.context_window == 16_384
+
+
+def test_provider_uses_vendor_window_when_profile_has_no_override():
+    profile = ModelProfile(id="deepseek", provider="deepseek", api_key="sk", model="deepseek-v4-flash")
+    provider = build_provider_for_profile(profile)
+    assert isinstance(provider, OpenAIProvider)
+    assert provider.context_window == 1_000_000
 
 
 def test_build_provider_rejects_unknown_provider():

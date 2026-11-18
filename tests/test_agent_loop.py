@@ -14,7 +14,7 @@ from typing import AsyncIterator
 
 import pytest
 
-from crew.agent.compact import estimate_prompt_tokens
+from crew.agent.compact import ContextCompactor, estimate_prompt_tokens
 from crew.agent.executor import BuiltinExecutor, ExecutionContext, FinalRequestView
 from crew.agent.loop import (
     IterationBudget,
@@ -48,6 +48,7 @@ from crew.plugins.manager import (
     PluginManager,
     RequestMiddlewareResult,
 )
+from crew.tools.policy import ToolDisclosureMode
 from crew.tools.registry import Registry, tool_error, tool_result
 from crew.tools.tool_search import TOOL_SEARCH_NAME, ToolSearchConfig
 from crew.state.config import Config
@@ -118,6 +119,19 @@ class RecordingProvider(LLMProvider):
         self.seen_messages = messages
         self.seen_tools = tools
         yield StreamChunk(delta_text="", done=True, finish_reason="stop")
+
+
+class BudgetRecordingProvider(FakeProvider):
+    def __init__(self, context_window: int | None, max_tokens: int | None = None):
+        super().__init__()
+        self.context_window = context_window
+        self.max_tokens = max_tokens
+        self.sent = []
+
+    async def stream_chat(self, messages, tools=None, *, max_tokens=None, **_kwargs):
+        self.sent.append((list(messages), tools, max_tokens))
+        yield StreamChunk(delta_text="answer")
+        yield StreamChunk(done=True, finish_reason="stop", usage={"prompt_tokens": 123})
 
 
 class PausingStreamProvider(LLMProvider):
@@ -258,6 +272,130 @@ async def test_request_view_count_matches_execution_middleware_payload_sent_to_p
         provider.seen_messages,
         provider.seen_tools,
     )
+
+
+async def test_final_budget_rejects_growth_from_hooks_and_tools_before_transport(monkeypatch):
+    provider = BudgetRecordingProvider(context_window=600, max_tokens=100)
+    plugins = PluginManager()
+
+    async def inject_before_model(_session_id, messages):
+        messages.append(Message.system_reminder("hook " * 92))
+
+    def add_request_message(request, **_kwargs):
+        return {"request": {"messages": [*request["messages"], Message.user("request " * 60)]}}
+
+    async def add_execution_tool(request, next_call, **_kwargs):
+        tool = {"type": "function", "function": {"name": "demo", "description": "tool " * 90}}
+        return await next_call({**request, "tools": [tool]})
+
+    monkeypatch.setattr(plugins, "pre_llm_call", inject_before_model)
+    plugins._middleware.setdefault(LLM_REQUEST_MIDDLEWARE, []).append(add_request_message)
+    plugins._middleware.setdefault(LLM_EXECUTION_MIDDLEWARE, []).append(add_execution_tool)
+    ctx = _ctx()
+    chunks = await _collect(BuiltinExecutor(provider, Registry(), plugins, backoff_seconds=0), ctx)
+
+    assert provider.sent == []
+    assert [message.content for message in ctx.messages] == ["hi"]
+    assert chunks[-1].kind == "error"
+    assert chunks[-1].body["code"] == "context_window_exceeded"
+    assert chunks[-1].body["retryable"] is False
+
+
+async def test_final_budget_uses_active_fallback_and_wires_output_limit():
+    small = BudgetRecordingProvider(context_window=256, max_tokens=96)
+    larger = BudgetRecordingProvider(context_window=1200, max_tokens=1200)
+    executor = _executor(small, fallback_providers=[larger])
+    result = {}
+    tool = {"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}
+    view = FinalRequestView.create([Message.user("收件内容" * 80)], [tool])
+
+    chunks = [chunk async for chunk in executor._call_model(view, "rid", lambda: 1, result)]
+
+    assert not small.sent
+    [(messages, tools, wired_limit)] = larger.sent
+    estimated = estimate_prompt_tokens(messages, tools)
+    assert [chunk.kind for chunk in chunks] == ["delta"]
+    assert tools == [tool]
+    assert wired_limit == 1200 - estimated
+    assert result["usage"]["request_view_tokens"] == estimated
+    assert result["usage"]["request_context_window"] == 1200
+    assert result["usage"]["request_output_reserve"] == 300
+    assert result["usage"]["request_max_output_tokens"] == wired_limit
+    assert result["usage"]["prompt_tokens"] == 123
+
+
+async def test_tool_search_auto_uses_active_context_in_preview_and_execution(monkeypatch):
+    monkeypatch.setattr("crew.tools.tool_search.load_config", lambda: ToolSearchConfig(enabled="auto"))
+    provider = BudgetRecordingProvider(context_window=1600, max_tokens=100)
+    executor = _executor(provider)
+    deferred = {
+        "type": "function",
+        "function": {
+            "name": "deferred_example", "description": "query information " * 70,
+            "parameters": {"type": "object"},
+        },
+        "_crew_should_defer": True,
+    }
+    ctx = _ctx(tool_schemas=[deferred])
+    preview = executor.build_request_view(ctx.system_prompt, ctx.messages, ctx.tool_schemas, ctx.session_id)
+    direct = executor.build_request_view(
+        ctx.system_prompt, ctx.messages, ctx.tool_schemas, ctx.session_id, ToolDisclosureMode.DIRECT,
+    )
+
+    chunks = await _collect(executor, ctx)
+
+    assert chunks[-1].kind == "final"
+    assert [tool["function"]["name"] for tool in preview.tools] == [TOOL_SEARCH_NAME]
+    assert [tool["function"]["name"] for tool in direct.tools] == ["deferred_example"]
+    assert provider.sent[0][1] == list(preview.tools)
+
+
+async def test_local_budget_compacts_once_without_mutating_canonical_history(monkeypatch):
+    provider = BudgetRecordingProvider(context_window=1000, max_tokens=200)
+    summary_provider = BudgetRecordingProvider(context_window=None)
+    compactor = ContextCompactor(summary_provider, token_budget=100_000, keep_recent=4)
+    plugins = PluginManager()
+    hook_calls = 0
+
+    async def extra_context(_session_id, messages):
+        nonlocal hook_calls
+        hook_calls += 1
+        messages.append(Message.system_reminder("same context"))
+
+    monkeypatch.setattr(plugins, "pre_llm_call", extra_context)
+    executor = BuiltinExecutor(provider, Registry(), plugins, compactor=compactor, backoff_seconds=0)
+    reminder = Message.system_reminder("Fully preserve project and workspace instructions")
+    reminder.source_kind = "turn_prompt_context"
+    old = [Message.user(f"old {index} " + "a" * 450) for index in range(5)]
+    current = Message.user("current input")
+    current.request_id = "r"
+    recovery_messages = [Message.user("continue"), Message.assistant("partial"), Message.user("finish")]
+    ctx = _ctx([reminder, *old, current, *recovery_messages])
+
+    chunks = await _collect(executor, ctx)
+
+    [(messages, _tools, _limit)] = provider.sent
+    assert hook_calls == 2
+    assert len(summary_provider.sent) == 1
+    assert reminder not in summary_provider.sent[0][0]
+    assert messages[1] is reminder
+    assert current in messages
+    assert ctx.messages[:-1] == [reminder, *old, current, *recovery_messages]
+    assert [chunk.body["active"] for chunk in chunks if chunk.body.get("activity") == "context_compaction"] == [True, False]
+    assert chunks[-1].kind == "final"
+
+
+async def test_local_budget_skips_summary_if_entire_eligible_history_would_not_fit():
+    provider = BudgetRecordingProvider(context_window=256, max_tokens=32)
+    summary_provider = BudgetRecordingProvider(context_window=None)
+    compactor = ContextCompactor(summary_provider, token_budget=100_000, keep_recent=4)
+    ctx = _ctx([*[Message.user("small prior input") for _ in range(6)], Message.user("latest " * 850)])
+
+    chunks = await _collect(_executor(provider, compactor=compactor), ctx)
+
+    assert not provider.sent
+    assert not summary_provider.sent
+    assert chunks[-1].body["code"] == "context_window_exceeded"
 
 
 def test_iteration_budget_consume_refund():

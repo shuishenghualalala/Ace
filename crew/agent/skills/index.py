@@ -19,6 +19,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from crew.agent.compact.tokens import estimate_text_tokens
+from crew.state.home import read_bounded_markdown
+
 from . import scanner
 from .catalog import SkillCatalog
 from .core import (
@@ -567,9 +570,49 @@ def resolve_skill_activation_entrypoint(
 # ── 用于 system prompt 的 skills 索引 ───────────────────────────────────
 
 
+_INSTALLED_INDEX_TOKENS = 4_096
+_OPTIONAL_INDEX_TOKENS = 1_024
+_OPTIONAL_METADATA_BYTES = 16 * 1024
+_INDEX_TOOLS = frozenset({"skill_view", "skill_package_open", "skills_list"})
+_SkillPromptGroup = tuple[str, str, list[tuple[str, str]]]
+
+
+def _render_skill_index(
+    groups: list[_SkillPromptGroup], max_tokens: int, *, discovery: str = "",
+) -> str:
+    """Show whole names and rows when the complete catalog exceeds its budget."""
+    if max_tokens <= 0 or not groups:
+        return ""
+    note = f"\n\n（技能索引受上下文预算限制。{discovery}）"
+    if estimate_text_tokens(note) > max_tokens:
+        note = "\n\n（索引已截断。）"
+
+    def render(*, descriptions: bool, bounded: bool) -> str | None:
+        sections: list[str] = []
+        for heading, hint, rows in groups:
+            lines = [heading, hint] if hint else [heading]
+            for label, description in rows:
+                line = f"{label}: {description}" if descriptions else label
+                candidate = "\n\n".join([*sections, "\n".join([*lines, line])])
+                if estimate_text_tokens(candidate + (note if bounded else "")) > max_tokens:
+                    if not bounded:
+                        return None
+                    break
+                lines.append(line)
+            if len(lines) > (2 if hint else 1):
+                sections.append("\n".join(lines))
+        result = ("\n\n".join(sections) + (note if bounded else "")).strip()
+        return result if estimate_text_tokens(result) <= max_tokens else None
+
+    return render(descriptions=True, bounded=False) or render(descriptions=False, bounded=True) or ""
+
+
 def build_skills_index_prompt(
     enabled: list[str] | None = None,
     disabled: list[str] | None = None,
+    *,
+    max_tokens: int = _INSTALLED_INDEX_TOKENS,
+    available_tool_names: frozenset[str] | None = None,
 ) -> str:
     """构建 compact skills/package 索引，注入到 system prompt context 层。
 
@@ -578,23 +621,28 @@ def build_skills_index_prompt(
     - 通过 skill_package_open 展开 package 后，才暴露其内部 skills；
     - 完整 SKILL.md 必须通过 skill_view(name) 按需加载。
     """
-    return _skills_index_prompt(get_skills(), enabled, disabled)
+    return _skills_index_prompt(get_skills(), enabled, disabled, max_tokens, available_tool_names)
 
 
 async def abuild_skills_index_prompt(
     enabled: list[str] | None = None,
     disabled: list[str] | None = None,
+    *,
+    max_tokens: int = _INSTALLED_INDEX_TOKENS,
+    available_tool_names: frozenset[str] | None = None,
 ) -> str:
     """build_skills_index_prompt 的 async 变体：metadata 经 aget_skills 获取。"""
-    return _skills_index_prompt(await aget_skills(), enabled, disabled)
+    return _skills_index_prompt(await aget_skills(), enabled, disabled, max_tokens, available_tool_names)
 
 
 def _skills_index_prompt(
     skills: dict[str, dict],
     enabled: list[str] | None,
     disabled: list[str] | None,
+    max_tokens: int,
+    available_tool_names: frozenset[str] | None,
 ) -> str:
-    if not skills and not _current_packages():
+    if max_tokens <= 0 or (not skills and not _current_packages()):
         return ""
 
     skill_filter = _configured_skill_filter()
@@ -611,11 +659,14 @@ def _skills_index_prompt(
     except Exception:
         pass
 
+    tools = _INDEX_TOOLS if available_tool_names is None else available_tool_names & _INDEX_TOOLS
     cache_key = (
         _catalog_key(),
-        tuple(enabled or ()),
-        tuple(disabled or ()),
+        None if enabled is None else tuple(enabled),
+        None if disabled is None else tuple(disabled),
         frozenset(active_packages),
+        max_tokens,
+        tools,
     )
     prompt_cache = _index_prompt_cache()
     cached = prompt_cache.get(cache_key)
@@ -651,48 +702,39 @@ def _skills_index_prompt(
             )
             standalone_entries.append((key, desc))
 
-    lines: list[str] = []
-
-    # Package 部分
+    groups: list[_SkillPromptGroup] = []
     if packages_to_show:
-        lines.append("# 可用 Skill Packages")
-        lines.append("")
-        if not active_packages:
-            lines.append(
-                "这是 compact package index。需要使用某个 package 中的 skill 时，"
-                "先调用 skill_package_open(name) 展开；也可以通过 /package-name 或 /package-name/skill-name 激活。"
-            )
-        for pkg_slug in sorted(packages_to_show):
+        hint = (
+            "这是 compact package index。需要使用某个 package 中的 skill 时，"
+            "先调用 skill_package_open(name) 展开；也可以通过 /package-name 或 /package-name/skill-name 激活。"
+        ) if "skill_package_open" in tools and not active_packages else ""
+        package_rows: list[tuple[str, str]] = []
+        for pkg_slug in sorted(packages_to_show, key=lambda key: (key not in active_packages, key)):
             pkg_info = packages_to_show[pkg_slug]
             if pkg_info is None:
                 continue
             desc = _compact_text(
                 str(pkg_info.get("description_zh") or pkg_info.get("description") or ""), 220
             )
-            lines.append(f"- {pkg_slug}: {desc}")
+            package_rows.append((f"- {pkg_slug}", desc))
             if pkg_slug in active_packages:
-                members = expanded_package_entries.get(pkg_slug, [])
-                for member_key, member_desc in members:
-                    lines.append(f"  - {member_key}: {member_desc}")
-        lines.append("")
+                package_rows.extend((f"  - {key}", desc) for key, desc in expanded_package_entries.get(pkg_slug, []))
+        if package_rows:
+            groups.append(("# 可用 Skill Packages", hint, package_rows))
 
     # 独立 skills
     if standalone_entries:
-        lines.append("# 其他可用 Skills")
-        lines.append("")
-        lines.append(
+        hint = (
             "这是 compact skill index。需要使用某个 skill 时，先用 skill_view(name) 加载完整说明；"
             "同一 name/file_path 已成功读取且结果仍在上下文时，直接继续使用，不要重复读取；"
             "只有需要其他文件或有明确证据表明内容已变化时才再次调用。也可以通过 "
             "/skill-name [补充指令] 激活。"
-        )
-        for key, desc in standalone_entries:
-            lines.append(f"- {key}: {desc}")
-
-    if not lines:
-        return ""
-
-    result = "\n".join(lines)
+        ) if "skill_view" in tools else ""
+        groups.append(("# 其他可用 Skills", hint, [(f"- {key}", desc) for key, desc in standalone_entries]))
+    result = _render_skill_index(
+        groups, max_tokens,
+        discovery="可用 skills_list 查询当前允许的其余已安装技能。" if "skills_list" in tools else "",
+    )
     with _SCAN_LOCK:
         prompt_cache[cache_key] = result
         if len(prompt_cache) > 16:
@@ -703,12 +745,19 @@ def _skills_index_prompt(
 def build_optional_skills_index_prompt(
     enabled: list[str] | None = None,
     disabled: list[str] | None = None,
+    *,
+    max_tokens: int = _OPTIONAL_INDEX_TOKENS,
 ) -> str:
     """扫描 optional-skills/ 构建 compact index，供按需技能补充使用。
 
     与主索引分离，避免影响默认 agent 的 skill 列表、安装/卸载等主逻辑。
     已存在于 builtin/user skills 中的同名 skill 不再重复加入。
     """
+    if max_tokens <= 0:
+        return ""
+    skill_filter = _configured_skill_filter()
+    enabled = enabled if enabled is not None else skill_filter["enabled"]
+    disabled = disabled if disabled is not None else skill_filter["disabled"]
     installed_slugs = set(get_skills().keys())
     entries: list[tuple[str, str]] = []
 
@@ -716,7 +765,10 @@ def build_optional_skills_index_prompt(
     for skill_md in _iter_skill_files(optional_root):
         try:
             safe_skill_dir = resolve_skill_path(skill_md.parent, optional_root)
-            content = read_skill_text(skill_md, safe_skill_dir)
+            target = resolve_skill_path(skill_md, safe_skill_dir)
+            content, _ = read_bounded_markdown(target, _OPTIONAL_METADATA_BYTES)
+            if resolve_skill_path(skill_md, safe_skill_dir) != target:
+                continue
             fm, body = _parse_frontmatter(content)
             name = str(fm.get("name") or skill_md.parent.name).strip()
             slug = _slugify(name) or _slugify(skill_md.parent.name)
@@ -742,18 +794,20 @@ def build_optional_skills_index_prompt(
     if not entries:
         return ""
 
-    lines = ["# 可选 Skills", ""]
-    for key, desc in sorted(entries):
-        lines.append(f"- {key}: {desc}")
-    return "\n".join(lines)
+    return _render_skill_index(
+        [("# 可选 Skills", "", [(f"- {key}", desc) for key, desc in sorted(entries)])],
+        max_tokens,
+    )
 
 
 async def abuild_optional_skills_index_prompt(
     enabled: list[str] | None = None,
     disabled: list[str] | None = None,
+    *,
+    max_tokens: int = _OPTIONAL_INDEX_TOKENS,
 ) -> str:
     """build_optional_skills_index_prompt 的 async 变体：listing 走磁盘，进线程池。"""
-    return await asyncio.to_thread(build_optional_skills_index_prompt, enabled, disabled)
+    return await asyncio.to_thread(build_optional_skills_index_prompt, enabled, disabled, max_tokens=max_tokens)
 
 
 def get_skill_packages() -> dict[str, dict]:

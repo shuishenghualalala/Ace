@@ -19,6 +19,7 @@ CREW_TASK_WORKSPACE_ROOT 覆盖。
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hashlib
 import logging
 import os
@@ -988,6 +989,33 @@ def load_user_md(owner_account_id: str | None = None) -> str:
     except Exception as e:
         logger.debug("无法读取 USER.md: %s", e)
         return ""
+
+
+def read_bounded_markdown(path: Path, max_bytes: int, *, errors: str = "strict") -> tuple[str, bool]:
+    """Read a UTF-8 prefix without allocating the rest of a prompt source."""
+    with path.open("rb") as handle:
+        data = handle.read(max_bytes + 1)
+    truncated = len(data) > max_bytes
+    decoder = codecs.getincrementaldecoder("utf-8-sig")(errors=errors)
+    text = decoder.decode(data[:max_bytes], final=not truncated)
+    return text.replace("\r\n", "\n").replace("\r", "\n"), truncated
+
+
+def load_prompt_markdown(source: str, max_bytes: int) -> tuple[str, bool]:
+    """Read the same built-in identity/owner files as the full-text loaders."""
+    if source == "SOUL.md":
+        path = get_crew_home() / source
+    elif source in ("MEMORY.md", "USER.md"):
+        path = get_owner_runtime_home(create=False) / "memories" / source
+    else:
+        raise ValueError("Unknown prompt markdown source")
+    try:
+        return read_bounded_markdown(path, max_bytes)
+    except FileNotFoundError:
+        return "", False
+    except (OSError, UnicodeError) as exc:
+        logger.debug("无法读取提示词来源 %s: %s", source, type(exc).__name__)
+        return "", False
 
 
 # ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ from crew.agent.compact.summary import (
     summarize_full,
     summarize_incremental,
 )
-from crew.agent.compact.tokens import estimate_tokens
+from crew.agent.compact.tokens import estimate_prompt_tokens, estimate_tokens
 from crew.core.interfaces import LLMProvider
 from crew.core.runctx import current_owner_account_id
 from crew.core.observability import SYSTEM_OWNER_ACCOUNT_ID, span
@@ -402,6 +402,43 @@ class ContextCompactor:
             result_policy_resolver=self.result_policy_resolver,
         )
 
+    @_observed_compaction("context.compact.request")
+    async def compact_for_request(
+        self,
+        messages: list[Message],
+        session_id: str,
+        *,
+        required_savings: int,
+        request_id: str = "",
+    ) -> list[Message]:
+        """Compact the current outbound history after the final request exceeded its budget."""
+        if not self.enabled or required_savings <= 0:
+            return messages
+        projected = micro_compact(
+            messages,
+            max(2, self.keep_recent_tools // 2),
+            result_policy_resolver=self.result_policy_resolver,
+        )
+        saved = 0 if projected is messages else estimate_prompt_tokens(messages) - estimate_prompt_tokens(projected)
+        if saved >= required_savings:
+            return projected
+
+        keep = max(2, self.keep_recent // 2)
+        user_indices = [index for index, message in enumerate(projected) if message.role == "user" and not message.is_meta]
+        if user_indices:
+            current_user = next((
+                index for index in reversed(user_indices) if request_id and projected[index].request_id == request_id
+            ), user_indices[-1])
+            keep = max(keep, len(projected) - current_user)
+        split = self._safe_split(projected, keep)
+        if split < _MIN_OLD_FOR_SUMMARY or estimate_prompt_tokens(projected[:split]) <= required_savings - saved:
+            # Even removing the entire eligible prefix cannot make this request fit.
+            return projected
+        result, _state, _skipped = await self._summarize_old(
+            projected, None, keep, session_id=session_id,
+        )
+        return result
+
     def _emit_compaction_event(
         self,
         session_id: str | None,
@@ -500,7 +537,7 @@ class ContextCompactor:
         """
         if not self.enabled:
             return messages
-        messages = prune_tool_results(messages)
+        messages = prune_tool_results(messages, result_policy_resolver=self.result_policy_resolver)
         keep_tools = max(2, self.keep_recent_tools // 2)
         messages = micro_compact(
             messages,

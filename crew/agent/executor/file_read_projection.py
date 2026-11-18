@@ -6,44 +6,14 @@ import json
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import replace
-from pathlib import Path
-from typing import Any
 
+from crew.agent.compact.microcompact import file_read_result_payload, preview_file_read_result
 from crew.agent.loop.tool_guardrails import IDEMPOTENT_NO_PROGRESS_WARNING
 from crew.core.types import Message
 
 
-def _read_payload(message: Message) -> dict[str, Any] | None:
-    if message.name not in (None, "file_read") or message.content_parts:
-        return None
-    if not isinstance(message.content, str):
-        return None
-    try:
-        payload = json.loads(message.content)
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(payload, dict) or payload.get("success") is not True or "error" in payload:
-        return None
-    if "unchanged" in payload or "source_tool_call_id" in payload:
-        return None
-    path = payload.get("path")
-    version = payload.get("file_version")
-    offset = payload.get("offset")
-    limit = payload.get("limit")
-    content = payload.get("content")
-    if (
-        not isinstance(path, str) or not Path(path).is_absolute()
-        or not isinstance(version, str) or not version
-        or type(offset) is not int or offset == 0
-        or type(limit) is not int or limit < 1
-        or not isinstance(content, str) or not content
-    ):
-        return None
-    return payload
-
-
-def project_file_reads(messages: Sequence[Message]) -> list[Message]:
-    """Reference earlier intact results that remain in this exact request."""
+def project_file_reads(messages: Sequence[Message], *, max_content_chars: int | None = None) -> list[Message]:
+    """Reference intact results, or bound a rereadable result during budget recovery."""
     call_counts = Counter(
         call.id
         for message in messages if message.role == "assistant"
@@ -71,11 +41,17 @@ def project_file_reads(messages: Sequence[Message]) -> list[Message]:
         call_id = message.tool_call_id
         if message.role != "tool" or not isinstance(call_id, str) or call_id not in visible_calls:
             continue
-        payload = _read_payload(message)
+        payload = file_read_result_payload(message)
         if payload is None:
             continue
 
         forced = visible_calls[call_id] or payload.get("force_refresh") is True
+        if payload.get("context_truncated") is True:
+            if not forced and max_content_chars is not None:
+                shortened = preview_file_read_result(payload, max_content_chars)
+                if shortened is not None:
+                    projected[-1] = replace(message, content=shortened)
+            continue
         comparable = {key: value for key, value in payload.items() if key != "force_refresh"}
         warning = comparable.get("guardrail")
         if (
@@ -88,10 +64,16 @@ def project_file_reads(messages: Sequence[Message]) -> list[Message]:
             key = json.dumps(comparable, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         except (ValueError, RecursionError):
             continue
-        source = sources.setdefault(key, call_id)
-        if source == call_id or forced:
+        source = sources.get(key)
+        if source is not None and not forced:
+            payload.pop("content")
+            payload.update(unchanged=True, source_tool_call_id=source)
+            projected[-1] = replace(message, content=json.dumps(payload, ensure_ascii=False))
             continue
-        payload.pop("content")
-        payload.update(unchanged=True, source_tool_call_id=source)
-        projected[-1] = replace(message, content=json.dumps(payload, ensure_ascii=False))
+        if not forced and max_content_chars is not None:
+            shortened = preview_file_read_result(payload, max_content_chars)
+            if shortened is not None:
+                projected[-1] = replace(message, content=shortened)
+                continue
+        sources.setdefault(key, call_id)
     return projected

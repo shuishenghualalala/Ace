@@ -2,11 +2,12 @@
 
 import os
 import threading
-from pathlib import Path
 
 import pytest
 
 from crew.agent import instructions, prompt_builder
+from crew.agent.compact.tokens import estimate_text_tokens
+from crew.agent.prompt_budget import source_token_budgets
 from crew.agent.prompt_builder import _clear_file_cache, _load_profile, build_prompt_parts
 from crew.core.runctx import current_owner_account_id
 from crew.state.home import get_owner_runtime_home
@@ -21,24 +22,24 @@ def _clean_cache():
     instructions._read_source.cache_clear()
 
 
-def _patch_counting_read_text(monkeypatch) -> tuple[dict[str, int], list[int]]:
-    """统计 Path.read_text 真实读盘次数，并记录读盘发生的线程。"""
-    real = Path.read_text
+def _patch_counting_profile_reads(monkeypatch) -> tuple[dict[str, int], list[int]]:
+    """记录 profile 的有界文件读取及调用线程。"""
+    real = prompt_builder.read_bounded_markdown
     counter = {"n": 0}
     idents: list[int] = []
 
-    def counting(self, *args, **kwargs):
+    def counting(path, *args, **kwargs):
         counter["n"] += 1
         idents.append(threading.get_ident())
-        return real(self, *args, **kwargs)
+        return real(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", counting)
+    monkeypatch.setattr(prompt_builder, "read_bounded_markdown", counting)
     return counter, idents
 
 
 def test_profile_read_is_cached_by_mtime(tmp_path, monkeypatch):
     """mtime 未变不重复读盘；mtime 变化后重新读盘。"""
-    counter, _ = _patch_counting_read_text(monkeypatch)
+    counter, _ = _patch_counting_profile_reads(monkeypatch)
     profile = tmp_path / "profile.md"
     profile.write_text("v1", encoding="utf-8")
 
@@ -169,7 +170,7 @@ def test_project_instruction_read_failure_leaves_workspace_prompt_usable(tmp_pat
 
 async def test_build_prompt_parts_reads_off_main_thread(tmp_path, monkeypatch):
     """build_prompt_parts 的读盘在工作线程执行，不在调用方（事件循环）线程。"""
-    counter, idents = _patch_counting_read_text(monkeypatch)
+    counter, idents = _patch_counting_profile_reads(monkeypatch)
     main_ident = threading.get_ident()
     profile = tmp_path / "profile.md"
     profile.write_text("画像", encoding="utf-8")
@@ -179,3 +180,57 @@ async def test_build_prompt_parts_reads_off_main_thread(tmp_path, monkeypatch):
     assert counter["n"] >= 1
     assert len(idents) == counter["n"]
     assert all(t != main_ident for t in idents)
+
+
+async def test_model_window_bounds_independent_sources_and_keeps_rule_provenance(tmp_path, monkeypatch):
+    checkout = tmp_path / "workspace"
+    checkout.mkdir()
+    (checkout / "AGENTS.md").write_text("项目首部\n" + "中🚀" * 40_000 + "\n项目末部", encoding="utf-8")
+    isolated_home = tmp_path / "prompt-fixture-home"
+    isolated_home.mkdir()
+    monkeypatch.setenv("CREW_HOME", str(isolated_home))
+    # Build every file under pytest's temporary fixture, independently of the shell profile.
+    monkeypatch.setattr(instructions, "get_owner_runtime_home", lambda **_: isolated_home)
+    import crew.state.home as state_home
+    monkeypatch.setattr(state_home, "get_owner_runtime_home", lambda **_: isolated_home)
+    (isolated_home / "AGENTS.md").write_text("用户首部\n" + "规则" * 40_000 + "\n用户末部", encoding="utf-8")
+    paths = isolated_home / "memories"
+    paths.mkdir()
+    for name in ("MEMORY", "USER"):
+        (paths / f"{name}.md").write_text(f"{name}-start\n" + "事实" * 50_000 + f"\n{name}-end", encoding="utf-8")
+    monkeypatch.setattr(prompt_builder, "build_skills_index_prompt", lambda **_: "")
+    kwargs = dict(
+        cwd=str(checkout), workspace_instructions="设置首部\n" + "配置" * 40_000 + "\n设置末部",
+        memory_text="召回首部\n" + "历史" * 40_000 + "\n召回末部",
+        available_tool_names=frozenset({"file_read"}),
+    )
+    small = (await build_prompt_parts(**kwargs, context_window=4_096))["user_reminder"]
+    large = (await build_prompt_parts(**kwargs, context_window=64_000))["user_reminder"]
+    headings = [
+        "## 用户级指令（AGENTS.md）", "# 项目提示词", "## 项目规则（AGENTS.md）",
+        "# 持久记忆", "# 用户画像", "# 会话记忆",
+    ]
+    for first, next_heading in zip(headings, headings[1:] + ["当前时间："]):
+        assert small.index(first) < small.index(next_heading)
+    for marker in ("用户首部", "设置首部", "项目首部", "MEMORY-start", "USER-start", "召回首部"):
+        assert marker in small
+    for marker in ("用户末部", "设置末部", "项目末部", "MEMORY-end", "USER-end", "召回末部"):
+        assert marker not in small and marker not in large
+    assert small.count("已截断") == len(headings)
+    assert "\ufffd" not in small
+    display = small[small.index(headings[0]):small.index("当前时间：")].strip()
+    assert estimate_text_tokens(display) <= 4_096 // 8
+    assert abs(sum(source_token_budgets(None).values()) - 8_192) < 40
+    assert len(large) > len(small) * 3
+
+
+async def test_workspace_facts_and_truncation_do_not_advertise_hidden_tools(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("规则" * 20_000, encoding="utf-8")
+    parts = await build_prompt_parts(
+        cwd=str(tmp_path), context_window=8_192, available_tool_names=frozenset({"grep"}),
+    )
+    reminder = parts["user_reminder"]
+    assert "grep" in reminder and "file_read" not in reminder and "terminal" not in reminder
+    assert "用户拒绝任一安全审批" in reminder and "runtime_protocol_mismatch" in reminder
+    assert "其余规则" in reminder and "记忆工具" not in parts["system_static"]
+    assert "子智能体委派纪律" not in parts["system_static"]

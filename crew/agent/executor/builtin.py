@@ -18,11 +18,13 @@ import inspect
 import random
 import time
 from dataclasses import replace
+from functools import partial
 from typing import Any, AsyncIterator
 
+from crew.agent.compact.budget import RequestBudget, RequestBudgetExceeded, assess_request_budget
+from crew.agent.compact.tokens import estimate_prompt_tokens, estimate_tokens
 from crew.agent.executor.base import AgentExecutor, ExecutionContext, FinalRequestView
 from crew.agent.executor.file_read_projection import project_file_reads
-from crew.agent.compact.tokens import estimate_tokens
 from crew.agent.loop import (
     CONTINUATION_PROMPT,
     EMPTY_RETRY_NUDGE,
@@ -55,6 +57,7 @@ from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger
 from crew.tools.policy import ToolDisclosureMode
 from crew.tools.tool_search import (
+    ToolSearchAssembly,
     ToolSearchConfig,
     assemble_tool_schemas,
     available_deferred_tools_message,
@@ -197,6 +200,27 @@ def _accepts_prefix_kwargs(fn: Any) -> bool:
     except (TypeError, ValueError):
         return True
     return "system_prompt" in params and "tools" in params
+
+
+def _request_budget(view: FinalRequestView, provider: LLMProvider) -> RequestBudget:
+    window = getattr(provider, "context_window", None)
+    default_output = getattr(provider, "max_tokens", None) or getattr(provider, "default_max_output_tokens", None)
+    accepts_max_tokens = True
+    if view.max_output_tokens is not None or (window and default_output):
+        try:
+            parameters = inspect.signature(provider.stream_chat).parameters
+            accepts_max_tokens = "max_tokens" in parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+        except (TypeError, ValueError):
+            pass
+    return assess_request_budget(
+        view.estimated_prompt_tokens(provider),
+        context_window=window,
+        requested_output_tokens=view.max_output_tokens,
+        provider_default_output_tokens=default_output,
+        accepts_output_override=accepts_max_tokens,
+    )
 
 
 def _without_image_inputs(messages: list[Message]) -> list[Message]:
@@ -354,6 +378,15 @@ class BuiltinExecutor(AgentExecutor):
         # 用于检测 plan 模式是否刚退出，以便注入一次性 exit reminder。
         self._plan_was_active = False
 
+    def _assemble_tool_search(
+        self, schemas: list[dict[str, Any]], disclosure: ToolDisclosureMode,
+    ) -> ToolSearchAssembly:
+        config = ToolSearchConfig(enabled="off") if disclosure is ToolDisclosureMode.DIRECT else None
+        window = getattr(self.provider, "context_window", None)
+        return assemble_tool_schemas(
+            schemas, config=config, context_window=window if type(window) is int and window > 0 else None,
+        )
+
     def build_request_view(
         self,
         system_prompt: str,
@@ -365,6 +398,7 @@ class BuiltinExecutor(AgentExecutor):
         tool_search_assembly: Any = None,
         discovered_tool_names: Any = None,
         consume_transient: bool = True,
+        retained_todo_reminder: str | None = None,
         vision_downgraded: bool = False,
         max_output_tokens: int | None = None,
     ) -> FinalRequestView:
@@ -377,12 +411,7 @@ class BuiltinExecutor(AgentExecutor):
         system_msg = Message.system(system_prompt)
         assembly = tool_search_assembly
         if assembly is None:
-            ts_config = (
-                ToolSearchConfig(enabled="off")
-                if tool_disclosure_mode is ToolDisclosureMode.DIRECT
-                else None
-            )
-            assembly = assemble_tool_schemas(tool_schemas, config=ts_config)
+            assembly = self._assemble_tool_search(tool_schemas, tool_disclosure_mode)
         deferred_tools_message = available_deferred_tools_message(assembly)
         if discovered_tool_names is None:
             discovered_tool_names = extract_discovered_tool_names(
@@ -395,7 +424,7 @@ class BuiltinExecutor(AgentExecutor):
         if deferred_tools_message:
             api_messages.append(Message.user(deferred_tools_message, is_meta=True))
         api_messages.extend(messages)
-        todo_reminder = self._todo_reminder(session_id, consume=consume_transient)
+        todo_reminder = retained_todo_reminder or self._todo_reminder(session_id, consume=consume_transient)
         if todo_reminder:
             api_messages.append(Message.system_reminder(todo_reminder))
         if vision_downgraded:
@@ -536,12 +565,7 @@ class BuiltinExecutor(AgentExecutor):
         original_tools = ctx.tool_schemas or []
         # 披露模式不改变授权范围。DIRECT 直接发送全部已授权 schema；
         # PROGRESSIVE 才按全局 ToolSearch 配置装配。
-        ts_config = (
-            ToolSearchConfig(enabled="off")
-            if ctx.tool_disclosure_mode is ToolDisclosureMode.DIRECT
-            else None
-        )
-        tool_search_assembly = assemble_tool_schemas(original_tools, config=ts_config)
+        tool_search_assembly = self._assemble_tool_search(original_tools, ctx.tool_disclosure_mode)
         discovered_tool_names = extract_discovered_tool_names(
             ctx.messages,
             original_tool_schemas=tool_search_assembly.original_tool_schemas,
@@ -667,6 +691,8 @@ class BuiltinExecutor(AgentExecutor):
         streamed_text = ""  # 流式中断续写累计文本
         overflow_mode = False  # 命中上下文溢出且兜底压缩使投影前进后，后续轮持续走 force_compact
         overflow_pending = False  # 命中溢出待压缩：下一轮开头先做剪枝+摘要，再决定是否重试
+        preflight_pending: RequestBudgetExceeded | None = None
+        retry_todo_reminder: str | None = None
         overflow_retries = 0  # 本轮已消耗的 overflow compact-retry 次数（上限 compactor.max_overflow_retries）
         vision_downgraded = False  # 上游实际拒绝图片后，本轮余下请求只发送文本视图
 
@@ -679,7 +705,8 @@ class BuiltinExecutor(AgentExecutor):
         #   - ctx.messages：本轮全量 append-only 日志，供 _persist_turn 回灌 canonical 历史，永不被压缩。
         #   - view_messages：发给 LLM 的视图，每轮 compact_view 可把旧段摘要掉。与 ctx.messages 共享
         #     最近消息的 Message 对象引用（in-place 编辑如 steer 自动传播）；旧段被摘要后用新对象替换。
-        view_messages: list[Message] = list(ctx.messages)
+        pinned = ctx.messages[:1] if ctx.messages and ctx.messages[0].source_kind == "turn_prompt_context" else []
+        view_messages: list[Message] = ctx.messages[len(pinned):]
 
         grace = False  # 预算耗尽后允许的最后一轮宽限（用于收尾文本）
         iteration_number = 0
@@ -728,43 +755,57 @@ class BuiltinExecutor(AgentExecutor):
             #   （压缩后视图 token 数变小）才重试，否则不再重试，直接报错。
             provisional_view = self.build_request_view(
                 ctx.system_prompt,
-                view_messages,
+                [*pinned, *view_messages],
                 original_tools,
                 ctx.session_id,
                 ctx.tool_disclosure_mode,
                 tool_search_assembly=tool_search_assembly,
                 discovered_tool_names=runner.discovered_tool_names,
                 consume_transient=False,
+                retained_todo_reminder=retry_todo_reminder,
                 vision_downgraded=vision_downgraded,
                 max_output_tokens=max_output_tokens_override,
             )
             prompt_overhead_tokens = max(
                 0,
-                provisional_view.estimated_prompt_tokens() - _cached_view_tokens(view_messages),
+                provisional_view.estimated_prompt_tokens(self.provider) - _cached_view_tokens(view_messages),
             )
-            if (overflow_mode or overflow_pending) and self.compactor is not None:
+            local_overflow = preflight_pending
+            preflight_pending = None
+            if (overflow_mode or overflow_pending or local_overflow is not None) and self.compactor is not None:
                 overflow_pending = False
-                overflow_before = _cached_view_tokens(view_messages)
+                view_before = view_messages
+                overflow_before = (
+                    estimate_prompt_tokens(view_before) if local_overflow is not None else _cached_view_tokens(view_before)
+                )
                 overflow_count_before = len(view_messages)
                 yield ResponseChunk.compaction_event(rid, True, next_seq())
                 compact_interrupted = False
                 try:
                     from crew.core.runctx import current_owner_account_id
 
-                    force_compact = self.compactor.force_compact
-                    kwargs: dict[str, Any] = {}
-                    try:
-                        params = inspect.signature(force_compact).parameters
-                        accepts_owner = "owner_account_id" in params or any(
-                            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                    if local_overflow is not None:
+                        compact = partial(
+                            self.compactor.compact_for_request, view_before, ctx.session_id,
+                            required_savings=local_overflow.budget.excess_tokens,
+                            request_id=rid,
                         )
-                    except (TypeError, ValueError):
-                        accepts_owner = True
-                    if accepts_owner:
-                        kwargs["owner_account_id"] = current_owner_account_id.get()
-                    if _accepts_prefix_kwargs(force_compact):
-                        kwargs["system_prompt"] = ctx.system_prompt
-                        kwargs["tools"] = original_tools
+                    else:
+                        force_compact = self.compactor.force_compact
+                        kwargs: dict[str, Any] = {}
+                        try:
+                            params = inspect.signature(force_compact).parameters
+                            accepts_owner = "owner_account_id" in params or any(
+                                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                            )
+                        except (TypeError, ValueError):
+                            accepts_owner = True
+                        if accepts_owner:
+                            kwargs["owner_account_id"] = current_owner_account_id.get()
+                        if _accepts_prefix_kwargs(force_compact):
+                            kwargs["system_prompt"] = ctx.system_prompt
+                            kwargs["tools"] = original_tools
+                        compact = partial(force_compact, ctx.messages[len(pinned):], ctx.session_id, **kwargs)
                     # compact 段中断检查（前）：已在压缩前被中断则不启动本次压缩。
                     wait_interrupted = getattr(control, "wait_interrupted", None)
                     if control is not None and control.interrupted:
@@ -773,15 +814,17 @@ class BuiltinExecutor(AgentExecutor):
                         # 摘要调用与 interrupt 事件竞争：interrupt 先到即取消在途
                         # 摘要（await 点可被取消，不侵入 compactor 内部流水线），
                         # 放弃本次压缩走回合收尾。
-                        compact_task = asyncio.create_task(
-                            force_compact(ctx.messages, ctx.session_id, **kwargs)
-                        )
+                        compact_task = asyncio.create_task(compact())
                         interrupt_task = asyncio.create_task(wait_interrupted())
                         try:
                             done, _pending = await asyncio.wait(
                                 {compact_task, interrupt_task},
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
+                        except asyncio.CancelledError:
+                            compact_task.cancel()
+                            await asyncio.gather(compact_task, return_exceptions=True)
+                            raise
                         finally:
                             interrupt_task.cancel()
                         if compact_task in done:
@@ -795,12 +838,10 @@ class BuiltinExecutor(AgentExecutor):
                             await asyncio.gather(compact_task, return_exceptions=True)
                             compact_interrupted = True
                     else:
-                        view_messages = await force_compact(
-                            ctx.messages, ctx.session_id, **kwargs
-                        )
+                        view_messages = await compact()
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("force_compact 失败，按原视图发送：%s", exc)
-                    view_messages = list(ctx.messages)
+                    log.warning("兜底上下文压缩失败：%s", exc)
+                    view_messages = view_before if local_overflow is not None else ctx.messages[len(pinned):]
                 finally:
                     yield ResponseChunk.compaction_event(rid, False, next_seq())
                 if compact_interrupted:
@@ -810,7 +851,9 @@ class BuiltinExecutor(AgentExecutor):
                     async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
                         yield _fc
                     return
-                overflow_after = estimate_tokens(view_messages)
+                overflow_after = (
+                    estimate_prompt_tokens(view_messages) if local_overflow is not None else estimate_tokens(view_messages)
+                )
                 overflow_count_after = len(view_messages)
                 if overflow_after >= overflow_before and overflow_count_after >= overflow_count_before:
                     # 投影未前进：再发一次同样的请求必然再溢出，不再重试。
@@ -821,9 +864,13 @@ class BuiltinExecutor(AgentExecutor):
                         overflow_after,
                         ctx.session_id,
                     )
-                    yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
+                    if local_overflow is not None:
+                        yield _llm_error_chunk(rid, local_overflow, next_seq())
+                    else:
+                        yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
                     return
-                overflow_mode = True
+                if local_overflow is None:
+                    overflow_mode = True
                 log.info(
                     "overflow 兜底压缩后投影前进（%d → %d tokens），重试本轮 session=%s",
                     overflow_before,
@@ -858,7 +905,9 @@ class BuiltinExecutor(AgentExecutor):
                 finally:
                     if show_compaction:
                         yield ResponseChunk.compaction_event(rid, False, next_seq())
-            view = view_messages
+            view = [*pinned, *view_messages]
+            todo_reminder = retry_todo_reminder or self._todo_reminder(ctx.session_id, consume=True)
+            retry_todo_reminder = None
             request_view = self.build_request_view(
                 ctx.system_prompt,
                 view,
@@ -867,7 +916,8 @@ class BuiltinExecutor(AgentExecutor):
                 ctx.tool_disclosure_mode,
                 tool_search_assembly=tool_search_assembly,
                 discovered_tool_names=runner.discovered_tool_names,
-                consume_transient=True,
+                consume_transient=False,
+                retained_todo_reminder=todo_reminder,
                 vision_downgraded=vision_downgraded,
                 max_output_tokens=max_output_tokens_override,
             )
@@ -941,6 +991,19 @@ class BuiltinExecutor(AgentExecutor):
                     str(result.get("provider_error") or "当前模型不支持所需能力"),
                     next_seq(),
                 )
+                return
+            preflight_failure = result.get("preflight_budget_error")
+            if isinstance(preflight_failure, RequestBudgetExceeded):
+                if (
+                    callable(getattr(self.compactor, "compact_for_request", None))
+                    and overflow_retries < getattr(self.compactor, "max_overflow_retries", 1)
+                ):
+                    overflow_retries += 1
+                    preflight_pending = preflight_failure
+                    retry_todo_reminder = todo_reminder
+                    budget.refund()
+                    continue
+                yield _llm_error_chunk(rid, preflight_failure, next_seq())
                 return
             if result.get("overflow"):
                 max_overflow_retries = (
@@ -1351,9 +1414,11 @@ class BuiltinExecutor(AgentExecutor):
                     provider=provider,
                 )
                 effective_request = middleware_view.to_payload()
-                sent_view_holder = [middleware_view]
+                sent_view = middleware_view
+                sent_budget: RequestBudget | None = None
 
                 def _stream(req, active_provider=provider):
+                    nonlocal sent_view, sent_budget
                     final_view = FinalRequestView.from_payload(
                         req if isinstance(req, dict) else {},
                         middleware_view,
@@ -1362,27 +1427,27 @@ class BuiltinExecutor(AgentExecutor):
                         base_url=_prov_base_url,
                         provider_index=prov_idx,
                     )
-                    messages_arg = project_file_reads(final_view.messages)
-                    sent_view_holder[0] = final_view.with_messages(messages_arg)
+                    raw_messages = final_view.messages
+                    messages_arg = project_file_reads(raw_messages)
+                    final_view = final_view.with_messages(messages_arg)
+                    budget_check = _request_budget(final_view, active_provider)
+                    if budget_check.over_budget and budget_check.context_window is not None:
+                        preview_chars = max(256, min(2000, budget_check.context_window // 8))
+                        shortened = project_file_reads(raw_messages, max_content_chars=preview_chars)
+                        if shortened != messages_arg:
+                            messages_arg = shortened
+                            final_view = final_view.with_messages(messages_arg)
+                            budget_check = _request_budget(final_view, active_provider)
+                    if budget_check.over_budget:
+                        raise RequestBudgetExceeded(budget_check)
+                    sent_view = replace(final_view, max_output_tokens=budget_check.max_output_tokens)
+                    sent_budget = budget_check
                     tools_arg = list(final_view.tools) if final_view.tools is not None else None
-                    max_tokens_arg = final_view.max_output_tokens
-                    if max_tokens_arg is None:
+                    if sent_view.max_output_tokens is None:
                         return active_provider.stream_chat(messages_arg, tools=tools_arg)
-                    try:
-                        stream_params = inspect.signature(active_provider.stream_chat).parameters
-                        accepts_max_tokens = "max_tokens" in stream_params or any(
-                            param.kind == inspect.Parameter.VAR_KEYWORD
-                            for param in stream_params.values()
-                        )
-                    except (TypeError, ValueError):
-                        accepts_max_tokens = True
-                    if accepts_max_tokens:
-                        return active_provider.stream_chat(
-                            messages_arg,
-                            tools=tools_arg,
-                            max_tokens=max_tokens_arg,
-                        )
-                    return active_provider.stream_chat(messages_arg, tools=tools_arg)
+                    return active_provider.stream_chat(
+                        messages_arg, tools=tools_arg, max_tokens=sent_view.max_output_tokens,
+                    )
 
                 stream = await self.plugins.run_llm_execution_middleware(
                     effective_request,
@@ -1492,15 +1557,16 @@ class BuiltinExecutor(AgentExecutor):
                         if chunk.usage:
                             result["usage"] = chunk.usage
                 elapsed = time.perf_counter() - t0
-                sent_view = sent_view_holder[0]
                 sent_messages = list(sent_view.messages)
                 sent_tools = list(sent_view.tools) if sent_view.tools is not None else None
-                request_view_tokens = sent_view.estimated_prompt_tokens()
+                request_view_tokens = (
+                    sent_budget.prompt_tokens if sent_budget is not None else sent_view.estimated_prompt_tokens(provider)
+                )
                 message_chars = sum(len(message.text_content) for message in sent_messages)
                 log.info(
                     "[PERF] llm prov=%d  middleware=%.3fs  first_event=%.3fs  "
                     "first_reasoning=%.3fs  first_text=%.3fs  ttft=%.3fs  total=%.3fs  "
-                    "messages=%d  chars=%d  tools=%d  tokens_approx=%d  request_id=%s session=%s "
+                    "messages=%d  chars=%d  tools=%d  input_tokens_approx=%d  tokens_approx=%d  request_id=%s session=%s "
                     "provider=%s model=%s",
                     prov_idx,
                     middleware_ready if middleware_ready is not None else -1.0,
@@ -1512,6 +1578,7 @@ class BuiltinExecutor(AgentExecutor):
                     len(sent_messages),
                     message_chars,
                     len(sent_tools or []),
+                    request_view_tokens,
                     len(accumulated) // 4,
                     rid,
                     session_id,
@@ -1530,6 +1597,11 @@ class BuiltinExecutor(AgentExecutor):
                     usage = {}
                     result["usage"] = usage
                 usage["request_view_tokens"] = request_view_tokens
+                if sent_budget is not None and sent_budget.context_window is not None:
+                    usage["request_context_window"] = sent_budget.context_window
+                    usage["request_output_reserve"] = sent_budget.output_reserve
+                    if sent_budget.max_output_tokens is not None:
+                        usage["request_max_output_tokens"] = sent_budget.max_output_tokens
                 if not isinstance(usage.get("prompt_tokens"), (int, float)):
                     usage["prompt_tokens"] = request_view_tokens
                     usage["prompt_tokens_source"] = "request_view"
@@ -1605,6 +1677,25 @@ class BuiltinExecutor(AgentExecutor):
                         result["error"] = True
                         return
                     result["stream_interrupt"] = True
+                    return
+                if isinstance(exc, RequestBudgetExceeded):
+                    current_window = exc.budget.context_window or 0
+                    log.info(
+                        "[PERF] llm_preflight_exceeded request_id=%s session=%s provider=%s model=%s "
+                        "input_tokens_approx=%d output_reserve=%d context_window=%d",
+                        rid, session_id, _prov_name, _prov_model,
+                        exc.budget.prompt_tokens, exc.budget.output_reserve, current_window,
+                    )
+                    larger = next((
+                        index for index in range(prov_idx + 1, len(providers))
+                        if isinstance(window := getattr(providers[index], "context_window", None), int)
+                        and window > current_window
+                    ), None)
+                    if larger is not None:
+                        prov_idx = larger
+                        attempt = 0
+                        continue
+                    result["preflight_budget_error"] = exc
                     return
                 # 上下文溢出：静默交主循环压缩后重试本轮（不向用户吐 error 帧）
                 if is_context_overflow(exc) and self.compactor is not None:
