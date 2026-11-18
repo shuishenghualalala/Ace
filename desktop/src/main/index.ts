@@ -68,6 +68,7 @@ import type {
   BackendTransportState,
 } from './backend-health-monitor';
 import { GatewayRestartController } from './gateway-restart-controller';
+import { GatewayStartupLog } from './gateway-startup-log';
 import { GatewayProcessRetirement, GatewayStopTimeoutError } from './gateway-process-retirement';
 import { DesktopShutdown, waitForShutdownTask, type ShutdownReason } from './desktop-shutdown';
 import { DesktopChatOutbox, desktopChatOutboxScope } from './chat-outbox';
@@ -1667,10 +1668,8 @@ function startManagedGateway(port: number): void {
     windowsHide: true,
   });
   const child = managedGateway;
-  attachGatewayLog(child);
+  attachGatewayLog(child, '[gateway]');
   writeGatewayLogLine(`[spawn] managed gateway pid=${child.pid} port=${port} python=${python}`);
-  child.stdout.on('data', (chunk) => console.log('[gateway]', String(chunk).trim()));
-  child.stderr.on('data', (chunk) => console.warn('[gateway]', String(chunk).trim()));
   child.on('exit', (code, signal) => {
     console.warn('[gateway] exited', { code, signal });
     handleManagedGatewayEnd(child, 'managed', { code, signal });
@@ -1751,10 +1750,8 @@ function startWindowsPackagedGateway(port: number): void {
     console.log(`[gateway] Spawn took ${Date.now() - spawnStart}ms, PID: ${child.pid}`);
 
     // 记录 stdout/stderr 用于诊断启动问题
-    attachGatewayLog(child);
+    attachGatewayLog(child, '[gateway-win]');
     writeGatewayLogLine(`[spawn] packaged win gateway pid=${child.pid} port=${port} python=${launch.command}`);
-    child.stdout.on('data', (chunk) => console.log('[gateway-win]', String(chunk).trim()));
-    child.stderr.on('data', (chunk) => console.warn('[gateway-win]', String(chunk).trim()));
 
     child.on('exit', (code, signal) => {
       console.warn('[gateway] Windows packaged gateway exited', { code, signal });
@@ -1812,10 +1809,8 @@ function startMacOSPackagedGateway(port: number): void {
     });
     const child = managedGateway;
 
-    attachGatewayLog(child);
+    attachGatewayLog(child, '[gateway-mac]');
     writeGatewayLogLine(`[spawn] packaged mac gateway pid=${child.pid} port=${port} python=${launch.command}`);
-    child.stdout.on('data', (chunk) => console.log('[gateway-mac]', String(chunk).trim()));
-    child.stderr.on('data', (chunk) => console.warn('[gateway-mac]', String(chunk).trim()));
 
     child.on('exit', (code, signal) => {
       console.warn('[gateway] macOS packaged gateway exited', { code, signal });
@@ -1863,10 +1858,8 @@ function startLinuxPackagedGateway(port: number): void {
     });
     const child = managedGateway;
 
-    attachGatewayLog(child);
+    attachGatewayLog(child, '[gateway-linux]');
     writeGatewayLogLine(`[spawn] packaged linux gateway pid=${child.pid} port=${port} python=${launch.command}`);
-    child.stdout.on('data', (chunk) => console.log('[gateway-linux]', String(chunk).trim()));
-    child.stderr.on('data', (chunk) => console.warn('[gateway-linux]', String(chunk).trim()));
 
     child.on('exit', (code, signal) => {
       console.warn('[gateway] Linux packaged gateway exited', { code, signal });
@@ -1881,62 +1874,19 @@ function startLinuxPackagedGateway(port: number): void {
   }
 }
 
-// ── 托管 Gateway 启动日志捕获 ──────────────────────────────────────────────
-// 打包用户看不到主进程控制台；把 gateway stdout/stderr 落盘到
-// userData/logs/gateway-startup.log，供「查看日志」诊断冷启动卡顿（AV 扫 cacert、
-// 崩溃 traceback、端口冲突等）。
-// append + 大小轮转（.1/.2，单份 2MB）：崩溃循环不被下一次 spawn 截断抹掉自己的历史。
-// spawn 与首次输出之间有窗口，先把 spawn 动作本身写进日志，避免开头长时间空白；
-// 显式 utf8，避免 Windows GBK 控制台输出落到文件成乱码。
-let gatewayLogStream: fs.WriteStream | null = null;
-const GATEWAY_LOG_MAX_BYTES = 2 * 1024 * 1024;
+let gatewayLog: GatewayStartupLog | null = null;
 
 function gatewayLogPath(): string {
   return path.join(app.getPath('userData'), 'logs', 'gateway-startup.log');
 }
 
 function writeGatewayLogLine(line: string): void {
-  try {
-    gatewayLogStream?.write(`[${new Date().toISOString()}] ${line}\n`, 'utf8');
-  } catch {
-    /* 日志失败不阻断主流程 */
-  }
+  gatewayLog?.line(line);
 }
 
-function rotateGatewayLogIfNeeded(file: string): void {
-  try {
-    if (fs.statSync(file).size < GATEWAY_LOG_MAX_BYTES) return;
-  } catch {
-    return; // 尚无文件
-  }
-  try { fs.rmSync(`${file}.2`, { force: true }); } catch { /* best-effort */ }
-  try { fs.renameSync(`${file}.1`, `${file}.2`); } catch { /* 尚无 .1 */ }
-  try { fs.renameSync(file, `${file}.1`); } catch { /* best-effort */ }
-}
-
-function attachGatewayLog(child: ChildProcessWithoutNullStreams): void {
-  try {
-    const file = gatewayLogPath();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    rotateGatewayLogIfNeeded(file);
-    gatewayLogStream?.end();
-    gatewayLogStream = fs.createWriteStream(file, { flags: 'a', encoding: 'utf8' });
-    gatewayLogStream.write(`\n===== gateway spawn @ ${new Date().toISOString()} =====\n`, 'utf8');
-    const write = (prefix: string, chunk: Buffer | string): void => {
-      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-      gatewayLogStream?.write(
-        `[${new Date().toISOString()}] ${prefix}${text.endsWith('\n') ? text : `${text}\n`}`,
-        'utf8',
-      );
-    };
-    child.stdout.on('data', (c) => write('[out] ', c));
-    child.stderr.on('data', (c) => write('[err] ', c));
-    child.on('exit', (code, signal) => {
-      writeGatewayLogLine(`[exit] code=${code} signal=${signal}`);
-    });
-  } catch (err) {
-    console.error('[gateway] failed to attach startup log:', err);
-  }
+function attachGatewayLog(child: ChildProcessWithoutNullStreams, consoleLabel: string): void {
+  gatewayLog ??= new GatewayStartupLog(gatewayLogPath());
+  gatewayLog.attach(child, consoleLabel);
 }
 
 /** 统一 backend:status 负载：connected + 实际 baseUrl + 启动日志路径（供 renderer「查看日志」）。
@@ -4329,6 +4279,10 @@ async function prepareAppShutdown(reason: ShutdownReason): Promise<void> {
     })(),
   };
   const results = await Promise.allSettled(Object.values(tasks));
+  if (gatewayLog) {
+    await waitForShutdownTask(gatewayLog.flushAfterChildren(), 'Gateway log', 1500)
+      .catch(error => console.warn('[shutdown] Gateway log drain incomplete:', error));
+  }
   const failed: string[] = [];
   for (const [index, task] of Object.keys(tasks).entries()) {
     const result = results[index];
