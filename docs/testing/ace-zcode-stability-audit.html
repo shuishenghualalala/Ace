@@ -523,6 +523,11 @@
 <p class="evidence">Ace <code>crew/app.py</code>、<code>crew/providers/openai_provider.py</code>。ZCode <code>packages/services/src/node.ts:909</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-execution.ts</code>。</p>
 <p>ZCode 的桌面宿主构建将运行服务内联到 ESM 产物，主进程仍独立启动宿主。Ace 以相同 Windows 包做了纯 Python SDK 布局实验，使用 <code>ZIP_STORED</code> 存放 SDK 的 2,089 个原始文件。版本仍为 3.55.0，实际导入的 537 个 SDK 模块均由标准 <code>zipimporter</code> 装载，无散文件回退。包含先导的十次启动均通过公开流式聊天及正常退出。四对温热样本中，原版和 ZIP 的双端口就绪中位数为 10.128、10.328 秒，启动到 WebSocket 首正文为 10.976、11.062 秒。同对中位数分别慢 302、205 毫秒，当前发行保留散文件布局。</p>
 <p class="evidence">Ace <code>deb-package/pack_exe.ps1</code>。ZCode <code>packages/desktop/tsup.config.ts:346</code>、<code>packages/desktop/src/main/desktopHostProcess.ts:251</code>。</p>
+<h3>默认关闭的技能进化导入实验</h3>
+<p>正式 Windows 包两次导入剖析中，默认关闭的技能进化仍在 Gateway 导入时加载管理器、生成器、优化器、轨迹、日志与数据模型。六个模块自身的导入合计分别为 67.6 和 65.3 毫秒。ZCode 的 <code>packages/services/src/skills/skillsService.ts:1036</code> 将技能发现放在首次读取，<code>packages/services/src/node.ts:1973</code> 在使用可选宿主能力时才导入实现。Ace 原型将进化管理器移入启用分支，现有公共类按访问加载。</p>
+<p>五个独立进程验证默认路径、启用路径和公共类导入。原型的默认 Gateway 导入、启动、首条正文、回合保存及关闭都未加载这六个模块。启用后首轮以同样的管理器和队列写入真实轨迹，公开的 11 个名称仍指向同一实现。配置与导入回归 72 项通过。正式 Windows 包副本也通过公开配置读回、回环流式聊天和目标轨迹落盘验证。</p>
+<p>在 <code>024e03da</code> 官方运行时使用两份独立覆盖、全新临时配置和同一本地 SSE 模型，交错进行四对计时。基线与原型的双端口就绪中位数为 9.769 和 9.825 秒，启动到 WebSocket 首正文为 10.528 和 10.610 秒。发送到首正文分别为 568 和 680 毫秒。每对原型都慢 73–138 毫秒，Gateway 时间戳显示差异集中在首次请求进入模型前，四对中的账号运行环境准备慢 92–131 毫秒。</p>
+<p>另做两对带阶段时间戳的诊断。原型的首轮发送到首正文慢 55 和 61 毫秒，发送到本地模型收包慢 48 和 64 毫秒。同一 WebSocket 的第二轮差异缩到 3–6 毫秒。实验未建立模块移动与首次路径准备之间的因果关系。所有计时样本均完成正常回复、历史持久化和端口回收。依据当前结果，发行保留原装配，五秒验收目标继续以实际启动和发送检查为准。</p>
 <h3>Windows 安装包 Gateway 导入与 Work 准备成本</h3>
 <p>对 <code>024e03da</code> 解包运行时用两个独立测试配置执行 <code>python -X importtime</code>。仅导入 <code>crew.gateway.server</code> 的墙钟为 5.274 和 5.290 秒，两次记录 980 个模块。累计导入成本包括 <code>crew.app</code> 2.302–2.387 秒、FastAPI 0.959–1.004 秒和上下文压缩子包 1.121–1.126 秒。这些分支计时包含共享依赖，例如压缩后的文件重载先引入了文件工具，而普通 Agent 与注册器之后也使用该模块。测量未运行核心就绪阶段，累计导入值不能作为移除可选功能后可节省的时间。</p>
 <p>较早的正式包构建剖面中，Work 从同一数据库打开八个业务 Store，另外打开连接写 schema 基线及复制旧数据，整个功能构建 336 毫秒，其中 Store 及准备 230 毫秒。两次辅助准备分别耗时 22、24 毫秒，其中各自打开连接约 21、18 毫秒。ZCode 将会话任务存储准备集中到独立入口，各仓库再复用已完成状态。Ace 的普通对话首轮会使用 Work 关联和偏好；当前证据只支持按开连接的量级评估准备复用。</p>
