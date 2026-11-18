@@ -1,12 +1,4 @@
-/**
- * 更新包完整性校验（纯客户端，非防篡改）。
- *
- * 不需要服务端改动，只抓最常见的"下载坏了"——截断 / 后缀错配。
- * - 完整性：落盘字节数与下载记录的 size 一致。
- * - 格式 magic bytes：exe 必须是 PE（`MZ`）；deb 必须是 ar 归档（`!<arch>\n`）。
- *
- * 不做防篡改哈希（需服务端签名/哈希，本次范围外）。
- */
+/** Checks package size and format before the independent signature verification. */
 import * as fs from 'fs';
 import * as path from 'path';
 import { createPublicKey, verify } from 'crypto';
@@ -16,12 +8,15 @@ const EXE_MAGIC = Buffer.from('MZ', 'ascii');
 /** Debian .deb 实际是 ar 归档，magic 为 `!<arch>\n`（8 字节）。 */
 const DEB_MAGIC = Buffer.from('!<arch>\n', 'ascii');
 
-export type PackageKind = 'exe' | 'deb' | 'unknown';
+const UDIF_TRAILER_BYTES = 512;
+
+export type PackageKind = 'exe' | 'deb' | 'dmg' | 'unknown';
 
 export function packageKindFromPath(filePath: string): PackageKind {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.exe') return 'exe';
   if (ext === '.deb') return 'deb';
+  if (ext === '.dmg') return 'dmg';
   return 'unknown';
 }
 
@@ -54,27 +49,35 @@ export function verifyPackageIntegrity(filePath: string, expectedSize: number): 
 
   const kind = packageKindFromPath(filePath);
   if (kind === 'unknown') {
-    return { ok: false, message: '不支持的安装包格式（仅支持 exe / deb）' };
+    return { ok: false, message: '不支持的安装包格式（仅支持 exe / deb / dmg）' };
   }
 
-  let header: Buffer;
   try {
     const fd = fs.openSync(filePath, 'r');
-    header = Buffer.alloc(8);
-    fs.readSync(fd, header, 0, 8, 0);
-    fs.closeSync(fd);
+    try {
+      if (kind === 'dmg') {
+        // The UDZO images emitted by hdiutil have a version-4 UDIF trailer.
+        const trailer = Buffer.alloc(12);
+        const position = stat.size - UDIF_TRAILER_BYTES;
+        if (position > 0 && fs.readSync(fd, trailer, 0, trailer.length, position) === trailer.length
+          && trailer.toString('ascii', 0, 4) === 'koly'
+          && trailer.readUInt32BE(4) === 4 && trailer.readUInt32BE(8) === UDIF_TRAILER_BYTES) {
+          return { ok: true };
+        }
+        return { ok: false, message: '安装包缺少有效的 UDIF 磁盘映像尾部' };
+      }
+      const expected = kind === 'exe' ? EXE_MAGIC : DEB_MAGIC;
+      const header = Buffer.alloc(expected.length);
+      if (fs.readSync(fd, header, 0, header.length, 0) === header.length && header.equals(expected)) {
+        return { ok: true };
+      }
+      return { ok: false, message: kind === 'exe' ? '安装包缺少 Windows MZ 头' : '安装包缺少 deb !<arch> 头' };
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch (err) {
-    return { ok: false, message: `读取安装包头部失败：${(err as Error).message}` };
+    return { ok: false, message: `读取安装包失败：${(err as Error).message}` };
   }
-
-  const expected = kind === 'exe' ? EXE_MAGIC : DEB_MAGIC;
-  if (header.slice(0, expected.length).equals(expected)) {
-    return { ok: true };
-  }
-  return {
-    ok: false,
-    message: kind === 'exe' ? '安装包不是有效的 Windows 程序（缺少 MZ 头）' : '安装包不是有效的 deb 归档（缺少 !<arch> 头）',
-  };
 }
 
 /** Verify a detached base64 Ed25519 signature against the exact package bytes. */

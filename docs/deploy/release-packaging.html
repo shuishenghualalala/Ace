@@ -120,5 +120,6 @@ git push origin v1.1.0</pre>
 
   <div class="nav">相关文件：deb-package/pack_mac.sh · deb-package/pack_deb.ps1 · deb-package/pack_exe.ps1 · deb-package/runtime-requirements.txt · Dockerfile.pack · .github/workflows/release-desktop.yml</div>
 </div>
+<p>macOS 更新器在 DMG 文件末尾的 512 字节检查 UDIF 标记、格式版本和尾部长度。<code>pack_mac.sh</code> 生成的 UDZO 映像经过尺寸和格式检查后，再按既有签名策略校验并交给系统打开。</p>
 </body>
 </html>

@@ -73,6 +73,23 @@ describe('verifyPackageIntegrity', () => {
     },
   );
 
+  it('recognizes the release DMG trailer and rejects truncated or mislabeled images', () => {
+    const data = Buffer.alloc(1024);
+    const footer = data.subarray(512);
+    footer.write('koly');
+    footer.writeUInt32BE(4, 4);
+    footer.writeUInt32BE(512, 8);
+    const file = writeTemp('disk.dmg', data);
+    expect(verifyPackageIntegrity(file, data.length)).toEqual({ ok: true });
+    fs.writeFileSync(file, data.subarray(0, data.length - 1));
+    expect(verifyPackageIntegrity(file, 0).ok).toBe(false);
+    fs.writeFileSync(file, Buffer.concat([footer, Buffer.alloc(512)]));
+    expect(verifyPackageIntegrity(file, 0).ok).toBe(false);
+    footer.writeUInt32BE(128, 8);
+    fs.writeFileSync(file, data);
+    expect(verifyPackageIntegrity(file, 0).ok).toBe(false);
+  });
+
   it('size 不符（下载不完整）不通过', () => {
     const p = writeTemp('truncated.exe', Buffer.concat([Buffer.from('MZ'), Buffer.from('x')]));
     const r = verifyPackageIntegrity(p, 1024); // 期望 1024，实际仅 3
