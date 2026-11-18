@@ -1,4 +1,4 @@
-import { queryPlanAction, submitLegacyPlanAction, submitPlanAction, supportsPlanReceipts } from './features/plan-actions';
+import { queryPlanAction, submitPlanDecision, type PlanActionNotice } from './features/plan-actions';
 import { interactiveOwnerKey } from './features/interactive-owner';
 import type { PlanReviewStatus } from './chat-render';
 /**
@@ -372,7 +372,7 @@ function bindGlobalEvents(): () => void {
       if (interactiveOwnerKey() !== owner) return;
       const beforeRequest = bookFor(plan.sessionId).activeRequestId;
       const input = { ...plan, mode: state.mode || 'agent', workspaceId: state.currentWorkspaceId };
-      const onResult: Parameters<typeof submitPlanAction>[1] = (notice) => {
+      const onResult = (notice: PlanActionNotice) => {
         if (interactiveOwnerKey() !== owner) return;
         const current = bookFor(plan.sessionId);
         const snapshot = notice.planState;
@@ -414,13 +414,9 @@ function bindGlobalEvents(): () => void {
           refreshInspector();
         }
       };
-      if (supportsPlanReceipts(input.expectedVersion)) {
-        submitPlanAction(input, onResult);
-      } else {
-        void submitLegacyPlanAction(input,
-          () => dispatchWs(plan.sessionId, '请根据以下反馈修改计划：\n' + (plan.feedback ?? ''), [], { planActive: true }),
-          onResult);
-      }
+      submitPlanDecision(input, (requestId) => dispatchWs(
+        plan.sessionId, '请根据以下反馈修改计划：\n' + (plan.feedback ?? ''), [], { planActive: true, requestId },
+      ), onResult);
     },
   });
 

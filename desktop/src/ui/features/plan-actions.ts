@@ -32,26 +32,29 @@ interface PendingPlanAction {
   command: PlanCommand;
   status: PlanActionStatus;
   notify(notice: PlanActionNotice): void;
+  storeId: string;
   transport?: { scope: string; storeId: string };
   timer?: number;
 }
 
 const pending = new Map<string, PendingPlanAction>();
 const legacyChecks = new Map<string, () => Promise<void>>();
-let receiptsAvailable = false;
+let receiptStoreId: string | undefined;
 
 export function receivePlanCapability(chunk: ChatChunk): void {
   if (chunk.kind === 'send_receipt_capability') {
-    receiptsAvailable = chunk.body.version === 1 && chunk.body.plan_receipts === 1;
+    const id = chunk.body.store_id;
+    receiptStoreId = chunk.body.version === 1 && chunk.body.plan_receipts === 1
+      && typeof id === 'string' && /^[a-f0-9]{32}$/.test(id) ? id : undefined;
   }
 }
 
 export function disconnectPlanReceipts(): void {
-  receiptsAvailable = false;
+  receiptStoreId = undefined;
 }
 
 export function supportsPlanReceipts(version: string | undefined): boolean {
-  return receiptsAvailable && Boolean(version);
+  return Boolean(receiptStoreId && version);
 }
 
 function key(sessionId: string): string {
@@ -73,6 +76,7 @@ function stillCurrent(entry: PendingPlanAction): boolean {
 }
 
 function matchingTransport(entry: PendingPlanAction): boolean {
+  if (entry.storeId !== receiptStoreId) return false;
   if (!entry.transport) return true;
   const current = chatOutbox.transportIdentity();
   return current?.scope === entry.transport.scope && current.storeId === entry.transport.storeId;
@@ -92,7 +96,7 @@ function transmit(entry: PendingPlanAction, frame: PlanCommand): void {
 function query(entry: PendingPlanAction): void {
   if (!stillCurrent(entry)) return;
   clearTimer(entry);
-  if (!receiptsAvailable || !matchingTransport(entry)) {
+  if (!matchingTransport(entry)) {
     publish(entry, { status: 'uncertain' });
     return;
   }
@@ -115,7 +119,7 @@ export function submitPlanAction(input: PlanActionInput, notify: (notice: PlanAc
     return;
   }
   const transport = chatOutbox.transportIdentity();
-  if (!supportsPlanReceipts(input.expectedVersion) || (desktopOutboxBridge() && !transport)) {
+  if (!receiptStoreId || !input.expectedVersion || (desktopOutboxBridge() && !transport)) {
     notify({ status: 'unavailable' });
     return;
   }
@@ -131,6 +135,7 @@ export function submitPlanAction(input: PlanActionInput, notify: (notice: PlanAc
   };
   if (previous) clearTimer(previous);
   const entry: PendingPlanAction = {
+    storeId: reuse ? previous.storeId : receiptStoreId,
     owner: interactiveOwnerKey(), input: structuredClone(input), command, status: 'confirming', notify,
     ...(reuse && previous.transport ? { transport: previous.transport } : transport ? { transport } : {}),
   };
@@ -190,12 +195,25 @@ export function receivePlanReceipt(chunk: ChatChunk): boolean {
   return true;
 }
 
+export function submitPlanDecision(
+  input: PlanActionInput,
+  sendFeedback: (requestId: string) => Promise<boolean>,
+  notify: (notice: PlanActionNotice) => void,
+): void {
+  if (input.expectedVersion) submitPlanAction(input, notify);
+  else void submitLegacyPlanAction(input, sendFeedback, notify);
+}
+
 /** Confirm older servers through their existing plan state, without resending an ambiguous action. */
 export async function submitLegacyPlanAction(
   input: PlanActionInput,
   sendFeedback: (requestId: string) => Promise<boolean>,
   notify: (notice: PlanActionNotice) => void,
 ): Promise<void> {
+  if (input.expectedVersion) {
+    notify({ status: 'unavailable' });
+    return;
+  }
   const identity = key(input.sessionId);
   const existing = legacyChecks.get(identity);
   if (existing) {
@@ -206,20 +224,27 @@ export async function submitLegacyPlanAction(
   const socket = state.socket;
   const current = () => interactiveOwnerKey() === owner && state.socket === socket;
   const requestId = 'plan_' + crypto.randomUUID().replaceAll('-', '');
+  const executionExpected = input.action === 'plan_approve' || (input.action === 'plan_reject' && Boolean(input.feedback));
+  const executionObserved = async () => {
+    const status = await backendApi.sessionStatus(input.sessionId).catch(() => undefined);
+    if (status?.active_request_id === requestId) return true;
+    const page = await backendApi.historyWindow(input.sessionId, { limit: 40 }).catch(() => undefined);
+    return page?.items.some((row) => row.role === 'user' && row.request_id === requestId) ?? false;
+  };
   const stateMatches = (snapshot: SessionPlanState) => {
     if (input.plan !== undefined && snapshot.plan !== input.plan) return false;
     if (input.action === 'plan_approve') {
-      return snapshot.phase === 'approved' || snapshot.status === 'approved' || snapshot.status === 'readonly';
+      return snapshot.phase === 'approved' || snapshot.status === 'approved' || (!snapshot.phase && snapshot.status === 'readonly');
     }
-    if (input.action === 'plan_reject_and_exit') return !snapshot.active && !snapshot.awaiting_approval;
+    if (input.action === 'plan_reject_and_exit') return snapshot.phase === 'rejected' || snapshot.status === 'rejected';
     if (input.action === 'plan_reject') return snapshot.phase === 'revising' || snapshot.status === 'revising';
     return true;
   };
-  async function readUntil(matches: (snapshot: SessionPlanState) => boolean): Promise<SessionPlanState | undefined> {
+  async function readUntil(matches: (snapshot: SessionPlanState) => boolean | Promise<boolean>): Promise<SessionPlanState | undefined> {
     for (let attempt = 0; attempt < 10 && current(); attempt += 1) {
       const snapshot = await backendApi.sessionPlan(input.sessionId).catch(() => undefined);
       if (!current()) return;
-      if (snapshot && matches(snapshot)) return snapshot;
+      if (snapshot?.session_id === input.sessionId && await matches(snapshot)) return snapshot;
       await new Promise((resolve) => window.setTimeout(resolve, 150));
     }
     return undefined;
@@ -227,7 +252,7 @@ export async function submitLegacyPlanAction(
   const check = async () => {
     if (!current()) return;
     notify({ status: 'confirming' });
-    const snapshot = await readUntil(stateMatches);
+    const snapshot = await readUntil((current) => stateMatches(current) && (!executionExpected || executionObserved()));
     if (!current()) return;
     if (!snapshot) {
       notify({ status: 'uncertain' });
@@ -236,12 +261,19 @@ export async function submitLegacyPlanAction(
     legacyChecks.delete(identity);
     notify({
       status: 'confirmed', planState: snapshot,
-      ...(input.action === 'plan_approve' ? { executionRequestId: requestId } : {}),
     });
   };
   legacyChecks.set(identity, check);
   notify({ status: 'confirming' });
   try {
+    const before = await backendApi.sessionPlan(input.sessionId).catch(() => undefined);
+    if (!current()) return;
+    if (!before || before.session_id !== input.sessionId || before.version || !before.active) {
+      legacyChecks.delete(identity);
+      notify(before && before.session_id === input.sessionId
+        ? { status: 'expired', planState: before } : { status: 'unavailable' });
+      return;
+    }
     let sent = false;
     if (input.action === 'plan_approve') {
       sent = await socket?.planApprove(input.sessionId, input.mode, input.workspaceId, requestId, input.plan) ?? false;

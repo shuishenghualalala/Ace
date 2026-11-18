@@ -130,25 +130,63 @@ describe('versioned Plan decisions', () => {
     expect(send.mock.calls.filter(([frame]) => frame.action === input.action)).toHaveLength(1);
   });
 
-  it('uses existing legacy approval but reports REST-confirmed state separately', async () => {
-    receivePlanCapability(capability(false));
-    vi.spyOn(backendApi, 'sessionPlan').mockResolvedValue(snapshot);
+  it('never sends a versioned draft through a legacy action when negotiation is delayed', async () => {
+    disconnectPlanReceipts();
     const notify = vi.fn();
-    await submitLegacyPlanAction(input, vi.fn(async () => true), notify);
-    expect(state.socket?.planApprove).toHaveBeenCalledWith(input.sessionId, input.mode, input.workspaceId, expect.any(String), input.plan);
-    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'confirmed', planState: snapshot }));
+    submitPlanAction(input, notify);
+    await submitLegacyPlanAction(input, vi.fn(), notify);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'unavailable' });
+    expect(state.socket?.planApprove).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
+    receivePlanCapability(capability());
+    submitPlanAction(input, notify);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ expected_version: input.expectedVersion }));
   });
 
-  it('preserves a failed legacy decision for status-only checking', async () => {
-    vi.mocked(state.socket!.planApprove).mockResolvedValue(false);
+  const legacy = { ...input, expectedVersion: undefined };
+  const review = { ...snapshot, version: undefined, active: true, phase: 'review', status: 'pending' };
+  it('requires the authoritative legacy plan state and the submitted execution request', async () => {
+    receivePlanCapability(capability(false));
+    vi.spyOn(backendApi, 'sessionPlan').mockResolvedValueOnce(review).mockResolvedValue({ ...snapshot, version: undefined });
+    vi.spyOn(backendApi, 'sessionStatus').mockImplementation(async () => ({
+      session_id: input.sessionId, live: 'running', queue_depth: 0, last_status: '', last_error: '',
+      active_request_id: vi.mocked(state.socket!.planApprove).mock.calls[0]?.[3],
+    }));
     const notify = vi.fn();
-    await submitLegacyPlanAction(input, vi.fn(async () => true), notify);
-    expect(notify).toHaveBeenLastCalledWith({ status: 'unavailable' });
+    await submitLegacyPlanAction(legacy, vi.fn(), notify);
+    expect(state.socket?.planApprove).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'confirmed' }));
+    expect(notify.mock.lastCall?.[0]).not.toHaveProperty('executionRequestId');
+  });
+
+  it('refreshes an unversioned card when the current server returns a version', async () => {
+    disconnectPlanReceipts();
     vi.spyOn(backendApi, 'sessionPlan').mockResolvedValue(snapshot);
+    const notify = vi.fn();
+    await submitLegacyPlanAction(legacy, vi.fn(), notify);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'expired', planState: snapshot });
+    expect(state.socket?.planApprove).not.toHaveBeenCalled();
+  });
+
+  it('keeps failed feedback unconfirmed even after the legacy state becomes revising', async () => {
+    receivePlanCapability(capability(false));
+    const revised = { ...review, phase: 'revising', status: 'revising' };
+    vi.spyOn(backendApi, 'sessionPlan').mockResolvedValueOnce(review).mockResolvedValue(revised);
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+      session_id: input.sessionId, live: 'idle', queue_depth: 0, last_status: '', last_error: '',
+    });
+    const history = vi.spyOn(backendApi, 'historyWindow').mockResolvedValue({ items: [], has_more: false, next_before: null });
+    const notify = vi.fn();
+    const feedback = vi.fn(async (_requestId: string) => false);
+    await submitLegacyPlanAction({ ...legacy, action: 'plan_reject', feedback: 'actual feedback' }, feedback, notify);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'unavailable' });
+    queryPlanAction(input.sessionId);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'uncertain' });
+    history.mockResolvedValue({ items: [{ role: 'user', content: 'actual feedback', request_id: feedback.mock.calls[0][0] }], has_more: false, next_before: null });
     queryPlanAction(input.sessionId);
     await vi.advanceTimersByTimeAsync(1);
-    expect(state.socket?.planApprove).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'confirmed' }));
+    expect(feedback).toHaveBeenCalledTimes(1);
   });
 });

@@ -1026,7 +1026,7 @@ export class BackendChatSocket {
     }
     if (this.ws?.readyState === WebSocket.CONNECTING || this.ws?.readyState === WebSocket.OPEN) return;
     logStream('ws-renderer', 'connect-direct-ws', { wsBase: wsBase() });
-    const wsUrl = `${wsBase()}/ws`;
+    const wsUrl = `${wsBase()}/ws?send_receipts=1`;
     this.ws = new WebSocket(wsUrl);
     this.ws.onopen = () => {
       this.reconnectAttempts = 0;

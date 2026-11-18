@@ -182,6 +182,7 @@ const ttftRenderLoggedRequests = new Set<string>();
 const ttftRequestStartedAt = new Map<string, number>();
 
 interface DispatchOptions {
+  requestId?: string;
   canStart?: () => boolean;
   subScenario?: string;
   planActive?: boolean;
@@ -1917,7 +1918,7 @@ async function dispatchQuery(
   if (!canDispatch() || getSessionStreamRecovery(sessionId) || dispatchOptions.canStart?.() === false) {
     return false;
   }
-  const requestId = dispatchOptions.queuedItem?.requestId ?? newTurnRequestId();
+  const requestId = dispatchOptions.queuedItem?.requestId ?? dispatchOptions.requestId ?? newTurnRequestId();
   const wikiKbId = dispatchOptions.queuedItem?.wikiKbId ?? wikiSendExtrasResolver?.(sessionId)?.wikiKbId;
   const payload: SendPayload & { request_id: string } = {
     query,
