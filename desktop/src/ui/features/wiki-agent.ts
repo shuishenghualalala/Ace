@@ -36,11 +36,9 @@ import {
   getBookFileChanges,
   newMessageId,
   notify,
-  setBookTodos,
   setQueueHint,
   setSessionStatus,
   state,
-  type TodoItem,
   type SessionRow,
 } from '../state';
 import { sessionStore } from '../stores/stores';
@@ -361,9 +359,8 @@ async function activateEmbeddedSession(
   wikiAgentSessions.set(sessionId, item);
   ensureWikiSessionRow(sessionId);
   subscribeSessions([sessionId]);
-  await loadBackendHistory(sessionId);
+  await loadBackendHistory(sessionId, { retryTodos: true });
   await loadEmbeddedWikiTasks(sessionId);
-  await loadEmbeddedTodos(sessionId);
   ensureWikiSessionRow(sessionId);
   scheduleEmbeddedRender();
   // 会话级模型绑定写入共享缓存（按 sessionId 隔离），chip/上下文环经控制器自动刷新。
@@ -400,24 +397,6 @@ async function loadEmbeddedWikiTasks(sessionId: string): Promise<void> {
       });
   } catch {
     // 兼容旧后端或离线状态；在线任务仍会通过 task WS 事件更新。
-  }
-}
-
-async function loadEmbeddedTodos(sessionId: string): Promise<void> {
-  try {
-    const { todos } = await backendApi.sessionTodos(sessionId);
-    setBookTodos(
-      sessionId,
-      (todos ?? []).map((todo) => ({
-        id: todo.id,
-        content: todo.content,
-        status: (['pending', 'in_progress', 'completed', 'cancelled'].includes(todo.status)
-          ? todo.status
-          : 'pending') as TodoItem['status'],
-      })),
-    );
-  } catch {
-    // 兼容旧后端或离线状态；运行中的 todo_updated 仍会更新会话 book。
   }
 }
 

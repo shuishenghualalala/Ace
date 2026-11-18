@@ -4,11 +4,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BackendHistoryItem, BackendHistoryWindow } from '../../src/ui/api/feature-session';
 import { backendApi } from '../../src/ui/backend-client';
-import { bindBackendAuth, bootstrapBackend, loadBackendHistory, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
+import { bindBackendAuth, bootstrapBackend, loadBackendHistory, loadOlderHistoryPage, openSession, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
 import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
 import { firstChangedMessageIndex } from '../../src/ui/conversation-message-changes';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
-import { appendMessage, consumePending, renderChat, respondToFollowup, stopGeneration } from '../../src/ui/features/chat-controller';
+import { appendMessage, applyChunk, consumePending, renderChat, respondToFollowup, stopGeneration } from '../../src/ui/features/chat-controller';
 import { disposeConversationRenderer, getConversationScrollAnchor } from '../../src/ui/features/conversation-renderer';
 import { getGatewayCursors, resetGatewaySequence } from '../../src/ui/features/gateway-sequence';
 import { cancelSessionStreamRecovery, getSessionStreamRecovery } from '../../src/ui/features/session-stream-recovery';
@@ -869,6 +869,93 @@ describe('older history page viewport', () => {
     expect(anchor.isStickyBottom()).toBe(true);
     // The renderer will pin to bottom on its usual next frame.
     expect(container.scrollTop).toBe(700);
+  });
+});
+
+describe('session todo hydration', () => {
+  const sid = 'sid-1';
+  const previous = [{ id: 'old', content: 'Earlier task', status: 'pending' as const }];
+  const latest = [{ id: 'new', content: 'Current task', status: 'in_progress' as const }];
+
+  beforeEach(() => {
+    authStore.set({ isLoggedIn: true });
+    vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult([
+      { role: 'assistant', content: 'Restored reply', history_id: 'reply' },
+    ]));
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+      session_id: sid, live: 'idle', queue_depth: 0, last_status: 'completed', last_error: '',
+    });
+    vi.spyOn(backendApi, 'sessionPlan').mockRejectedValue(new Error('unavailable'));
+    vi.spyOn(backendApi, 'getSessionModel').mockRejectedValue(new Error('unavailable'));
+    vi.spyOn(backendApi, 'getSessionAgentConfig').mockRejectedValue(new Error('unavailable'));
+    vi.spyOn(backendApi, 'sessionContext').mockRejectedValue(new Error('unavailable'));
+    vi.spyOn(backendApi, 'sessionTodos').mockResolvedValue({ todos: latest });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    authStore.set({ isLoggedIn: false });
+  });
+
+  it('retains the direct history snapshot after resetting the idle book', async () => {
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    expect(backendApi.sessionTodos).toHaveBeenCalledExactlyOnceWith(sid);
+    expect(sessionStore.get().books[sid].todos).toEqual(latest);
+    expect(messageStore.get().messages[sid].at(-1)?.todoSnapshot).toEqual(latest);
+  });
+
+  it.each([{ name: 'items', todos: latest }, { name: 'empty', todos: [] }])(
+    'cold open applies the authoritative $name list from a single read',
+    async ({ todos }) => {
+      patchBook(sid, { todos: previous });
+      vi.mocked(backendApi.sessionTodos).mockResolvedValue({ todos });
+      await openSession(sid);
+      expect(backendApi.sessionTodos).toHaveBeenCalledExactlyOnceWith(sid);
+      expect(sessionStore.get().books[sid].todos).toEqual(todos);
+    },
+  );
+
+  it.each([true, false])('retries an unavailable first read, recovery succeeds=%s', async (recovers) => {
+    patchBook(sid, { todos: previous });
+    const read = vi.mocked(backendApi.sessionTodos).mockRejectedValueOnce(new Error('offline'));
+    if (!recovers) read.mockRejectedValueOnce(new Error('still offline'));
+    await openSession(sid);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(sessionStore.get().books[sid].todos).toEqual(recovers ? latest : previous);
+  });
+
+  it('refreshes todos exactly once on a cached reopen without fetching history', async () => {
+    appendMessage(sid, 'assistant', 'Cached reply');
+    patchBook(sid, { todos: previous });
+    await openSession(sid);
+    expect(backendApi.historyWindow).not.toHaveBeenCalled();
+    expect(backendApi.sessionTodos).toHaveBeenCalledExactlyOnceWith(sid);
+    expect(sessionStore.get().books[sid].todos).toEqual(latest);
+  });
+
+  it.each(['navigate', 'reload', 'live'] as const)('rejects a cached open response after %s', async (action) => {
+    appendMessage(sid, 'assistant', 'Cached reply');
+    patchBook(sid, { todos: previous });
+    const started = Promise.withResolvers<void>();
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.sessionTodos>>>();
+    vi.mocked(backendApi.sessionTodos).mockImplementationOnce(() => {
+      started.resolve();
+      return pending.promise;
+    });
+    const opening = openSession(sid);
+    await started.promise;
+    if (action === 'navigate') {
+      setActiveSessionId('sid-2');
+      setActiveSessionId(sid);
+    } else if (action === 'reload') {
+      await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    } else {
+      applyChunk({ kind: 'todo_updated', session_id: sid, sequence: 1, is_final: false, body: { todos: latest } });
+      expect(sessionStore.get().books[sid].todos).toEqual(latest);
+    }
+    pending.resolve({ todos: [] });
+    await opening;
+    expect(sessionStore.get().books[sid].todos).toEqual(action === 'navigate' ? previous : latest);
   });
 });
 

@@ -51,7 +51,7 @@ import { patchBook, setBookTodos, setBusy, type Bookkeeping } from '../../src/ui
 
 const { mockOpenSession, mockLoadBackendHistory, mockShowConfirmDialog } = vi.hoisted(() => ({
   mockOpenSession: vi.fn(),
-  mockLoadBackendHistory: vi.fn(async () => undefined),
+  mockLoadBackendHistory: vi.fn<typeof import('../../src/ui/features/session-controller').loadBackendHistory>().mockResolvedValue(true),
   mockShowConfirmDialog: vi.fn(async () => true),
 }));
 
@@ -189,7 +189,7 @@ function socket(): MockSocket {
 async function enterWiki(): Promise<string> {
   uiStore.set({ activeTab: 'wiki' });
   await refreshWikiData();
-  await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+  await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true }));
   return WIKI_SID;
 }
 
@@ -468,7 +468,7 @@ describe('wiki-page 入口挂点', () => {
 
     await vi.waitFor(() => {
       expect(document.querySelector('[data-wiki-agent-panel]')).not.toBeNull();
-      expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID);
+      expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true });
     });
     const panel = document.querySelector<HTMLElement>('[data-wiki-agent-panel]')!;
     const messages = panel.querySelector<HTMLElement>('[data-wiki-agent-messages]')!;
@@ -523,7 +523,9 @@ describe('wiki-page 入口挂点', () => {
 
     await enterWiki();
 
+    await vi.waitFor(() => expect(api.getSessionModel).toHaveBeenCalledWith(WIKI_SID));
     expect(api.tasks).toHaveBeenCalledWith(WIKI_SID);
+    expect(api.sessionTodos).not.toHaveBeenCalled();
     const restored = (messageStore.get().messages[WIKI_SID] ?? [])
       .find((message) => message.id === 'wiki-ingest-wiki-task-restored');
     expect(restored?.streaming).toBe(true);
@@ -533,7 +535,7 @@ describe('wiki-page 入口挂点', () => {
   it('面板内消息复制按钮可用（不依赖 #chat-messages 的全局委托）', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true }));
 
     const writeText = vi.fn(async () => undefined);
     Object.defineProperty(navigator, 'clipboard', {
@@ -551,7 +553,7 @@ describe('wiki-page 入口挂点', () => {
   it('历史对话浮层支持删除非当前会话', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true }));
 
     api.wikiAgentSessions.mockResolvedValue({
       ok: true,
@@ -578,7 +580,7 @@ describe('wiki-page 入口挂点', () => {
   it('删除 KB 后清理内嵌会话缓存，同名 KB 会重新向后端取会话', async () => {
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true }));
 
     const freshSid = 'wiki-fresh-session';
     forgetWikiAgentKb('default');
@@ -591,7 +593,7 @@ describe('wiki-page 入口挂点', () => {
 
     await vi.waitFor(() => {
       expect(api.wikiAgentSession).toHaveBeenLastCalledWith('default');
-      expect(mockLoadBackendHistory).toHaveBeenCalledWith(freshSid);
+      expect(mockLoadBackendHistory).toHaveBeenCalledWith(freshSid, { retryTodos: true });
     });
   });
 
@@ -612,7 +614,7 @@ describe('wiki-page 入口挂点', () => {
 
     uiStore.set({ activeTab: 'wiki' });
     await refreshWikiData();
-    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true }));
     appendMessage(WIKI_SID, 'assistant', '只属于默认知识库的旧消息');
     await vi.waitFor(() => {
       expect(document.querySelector('[data-wiki-agent-messages]')?.textContent)
@@ -625,7 +627,7 @@ describe('wiki-page 入口挂点', () => {
 
     await vi.waitFor(() => {
       expect(document.querySelector('[data-wiki-agent-panel]')?.getAttribute('data-kb-id')).toBe('other');
-      expect(mockLoadBackendHistory).toHaveBeenCalledWith(otherSessionId);
+      expect(mockLoadBackendHistory).toHaveBeenCalledWith(otherSessionId, { retryTodos: true });
       expect(document.querySelector('.wiki-agent-pane__title')?.textContent).toContain('新知识库');
     });
     expect(document.querySelector('[data-wiki-agent-messages]')?.textContent)
@@ -703,7 +705,7 @@ describe('wiki-page 入口挂点', () => {
     await refreshWikiData();
     await vi.waitFor(() => {
       expect(document.querySelector('[data-wiki-agent-panel]')).not.toBeNull();
-      expect(api.sessionTodos).toHaveBeenCalledWith(WIKI_SID);
+      expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true });
     });
 
     setBookTodos(WIKI_SID, [
@@ -803,7 +805,7 @@ describe('wiki-page 入口挂点', () => {
 
     await vi.waitFor(() => {
       expect(api.wikiAgentSession).toHaveBeenLastCalledWith('default', { forceNew: true });
-      expect(mockLoadBackendHistory).toHaveBeenCalledWith(newSessionId);
+      expect(mockLoadBackendHistory).toHaveBeenCalledWith(newSessionId, { retryTodos: true });
       expect(newConversation.disabled).toBe(false);
       expect(sessionStore.get().sessions.some((session) => session.id === WIKI_SID)).toBe(true);
       expect(sessionStore.get().sessions.some((session) => session.id === newSessionId)).toBe(true);
@@ -817,12 +819,12 @@ describe('wiki-page 入口挂点', () => {
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-history]')).not.toBeNull());
 
     const oldSessionId = `wiki-old-${wikiSidSeq}`;
-    api.sessionTodos.mockImplementation(async (sessionId: string) => ({
-      ok: true,
-      todos: sessionId === oldSessionId
-        ? [{ id: 'old-todo', content: '旧会话待办', status: 'in_progress' }]
-        : [],
-    }));
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true }));
+    mockLoadBackendHistory.mockImplementationOnce(async (sessionId) => {
+      expect(sessionId).toBe(oldSessionId);
+      setBookTodos(sessionId, [{ id: 'old-todo', content: '旧会话待办', status: 'in_progress' }]);
+      return true;
+    });
     api.wikiAgentSessions.mockResolvedValueOnce({
       ok: true,
       kb_id: 'default',
@@ -840,8 +842,8 @@ describe('wiki-page 入口挂点', () => {
     document.querySelector<HTMLElement>(`[data-wiki-agent-history-session="${oldSessionId}"]`)!.click();
 
     await vi.waitFor(() => {
-      expect(mockLoadBackendHistory).toHaveBeenCalledWith(oldSessionId);
-      expect(api.sessionTodos).toHaveBeenCalledWith(oldSessionId);
+      expect(mockLoadBackendHistory).toHaveBeenCalledWith(oldSessionId, { retryTodos: true });
+      expect(api.sessionTodos).not.toHaveBeenCalled();
       expect(api.getSessionModel).toHaveBeenCalledWith(oldSessionId);
       expect(document.querySelector('[data-wiki-agent-panel] .chat-todo-slot')?.textContent).toContain('旧会话待办');
     });
@@ -959,7 +961,7 @@ describe('wiki-page 入口挂点', () => {
     const contribution = createWikiPageContribution();
     uiStore.set({ activeTab: 'wiki' });
     contribution.activate({ signal: new AbortController().signal });
-    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID));
+    await vi.waitFor(() => expect(mockLoadBackendHistory).toHaveBeenCalledWith(WIKI_SID, { retryTodos: true }));
     const selector = '[data-wiki-agent-panel] [data-composer-input]';
     const input = document.querySelector<HTMLTextAreaElement>(selector)!;
     input.value = '切页时正在发送';

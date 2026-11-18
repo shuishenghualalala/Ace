@@ -126,7 +126,9 @@ export async function openSession(
   ensureSessionMessages(sessionId);
   setActiveSessionId(sessionId);
   const navigation = getSessionNavigationVersion();
-  const isCurrent = () => isRendererLoggedIn() && generation === openSessionGeneration
+  const owner = interactiveOwnerKey();
+  const isCurrent = () => isRendererLoggedIn() && interactiveOwnerKey() === owner
+    && generation === openSessionGeneration
     && navigation === getSessionNavigationVersion() && state.activeSessionId === sessionId;
   subscribeSessions([sessionId]);
   const row = state.sessions.find((s) => s.id === sessionId) ?? findChannelSession(sessionId);
@@ -157,8 +159,9 @@ export async function openSession(
     if (state.activeSessionId !== sessionId) releaseInitialSkeleton();
     return;
   }
-  if (getMessages(sessionId).length === 0) {
-    await loadBackendHistory(sessionId, { canApply: isCurrent });
+  const loadHistory = getMessages(sessionId).length === 0;
+  if (loadHistory) {
+    await loadBackendHistory(sessionId, { canApply: isCurrent, retryTodos: true });
   } else {
     // 内存里已有消息（含修复前落库的幽灵路径）：仍做一次磁盘对账，清掉对话「已编辑」卡里的临时文件。
     void hydrateMissingTurnFileCounts(sessionId).then((changed) => {
@@ -176,7 +179,7 @@ export async function openSession(
   renderChat();
   if (!restoredViewport) jumpChatToBottom();
   void refreshCronJobs();
-  await loadSessionTodos(sessionId);
+  if (!loadHistory) await loadSessionTodos(sessionId, isCurrent);
   if (!isCurrent()) return;
   renderChat();
   void loadInspectorContext(sessionId);
@@ -193,21 +196,33 @@ export async function openSession(
   }
 }
 
-async function loadSessionTodos(sessionId: string): Promise<void> {
+function currentSessionTodos(sessionId: string): TodoItem[] | undefined {
+  return sessionStore.get().books[sessionId]?.todos;
+}
+
+async function readSessionTodos(sessionId: string): Promise<TodoItem[] | null> {
   try {
     const { todos } = await backendApi.sessionTodos(sessionId);
-    setBookTodos(
-      sessionId,
-      (todos ?? []).map((t) => ({
-        id: t.id,
-        content: t.content,
-        status: (['pending', 'in_progress', 'completed', 'cancelled'].includes(t.status)
-          ? (t.status as TodoItem['status'])
-          : 'pending'),
-      })),
-    );
+    if (!Array.isArray(todos)) return null;
+    return todos.map((todo) => ({
+      id: typeof todo.id === 'string' ? todo.id : '?',
+      content: typeof todo.content === 'string' ? todo.content : '',
+      status: todo.status === 'in_progress' || todo.status === 'completed' || todo.status === 'cancelled'
+        ? todo.status
+        : 'pending',
+    }));
   } catch {
-    /* 后端无此端点或离线：忽略，todo 走 todo_updated 帧实时同步 */
+    return null;
+  }
+}
+
+async function loadSessionTodos(sessionId: string, canApply: () => boolean): Promise<void> {
+  const historyVersion = historyLoadSeq.get(sessionId);
+  const previous = currentSessionTodos(sessionId);
+  const todos = await readSessionTodos(sessionId);
+  if (todos !== null && canApply() && historyVersion === historyLoadSeq.get(sessionId)
+    && currentSessionTodos(sessionId) === previous) {
+    setBookTodos(sessionId, todos);
   }
 }
 
@@ -273,18 +288,28 @@ export async function loadBackendHistory(
     terminalStatus?: BackendSessionStatus;
     pendingFollowup?: PendingFollowup;
     snapshot?: BackendHistoryWindow;
+    retryTodos?: boolean;
   } = {},
 ): Promise<boolean> {
-  if (!isRendererLoggedIn() || (getSessionStreamRecovery(sessionId) && !options.terminalStatus)) return false;
+  if (!isRendererLoggedIn()) return false;
+  const owner = interactiveOwnerKey();
+  const canApplyForOwner = () => isRendererLoggedIn() && interactiveOwnerKey() === owner
+    && (options.canApply?.() ?? true);
+  if (getSessionStreamRecovery(sessionId) && !options.terminalStatus) {
+    if (options.retryTodos) await loadSessionTodos(sessionId, canApplyForOwner);
+    return false;
+  }
   const loadSeq = (historyLoadSeq.get(sessionId) ?? 0) + 1;
   historyLoadSeq.set(sessionId, loadSeq);
   const isLatestLoad = () => historyLoadSeq.get(sessionId) === loadSeq;
-  const owner = authStore.get().userInfo?.staffCode;
-  const canApply = () => isLatestLoad() && isRendererLoggedIn()
-    && authStore.get().userInfo?.staffCode === owner && state.historyLoading.has(sessionId)
-    && (options.canApply?.() ?? true);
+  const ownsLoad = () => isLatestLoad() && canApplyForOwner();
+  const canApply = () => ownsLoad() && state.historyLoading.has(sessionId);
   const previousPaging = options.snapshot ? undefined : state.historyPaging[sessionId];
   setHistoryLoading(sessionId, true);
+  const originalTodos = currentSessionTodos(sessionId);
+  const todoRead = readSessionTodos(sessionId);
+  let todosAfterHistory = originalTodos;
+  let todosHandled = false;
   try {
     const [window, st, planState, todoState] = await Promise.all([
       options.snapshot ?? backendApi.historyWindow(sessionId, {
@@ -294,7 +319,7 @@ export async function loadBackendHistory(
       }),
       options.terminalStatus ?? backendApi.sessionStatus(sessionId).catch(() => null),
       backendApi.sessionPlan(sessionId).catch(() => null),
-      backendApi.sessionTodos(sessionId).catch(() => ({ todos: [] })),
+      todoRead,
     ]);
     if (!canApply()) return false;
     const localMsgs = state.messages[sessionId] ?? [];
@@ -342,15 +367,9 @@ export async function loadBackendHistory(
     // （后端历史把 exit_plan_mode 作为 tool_call 落在该轮），满足「在哪轮写就留在哪轮」；
     // todoSnapshot 挂到最后一条 assistant（最新进度）。两者可能不是同一条消息，分开挂载。
     const wantPlan = Boolean(planState?.has_plan && planState.plan);
-    const rawTodos = Array.isArray(todoState?.todos) ? todoState.todos : [];
-    const todos: TodoItem[] = rawTodos.map((t) => ({
-      id: typeof t.id === 'string' ? t.id : '?',
-      content: typeof t.content === 'string' ? t.content : '',
-      status:
-        t.status === 'in_progress' || t.status === 'completed' || t.status === 'cancelled'
-          ? t.status
-          : 'pending',
-    }));
+    const currentTodos = currentSessionTodos(sessionId);
+    const hasNewerTodos = currentTodos !== originalTodos;
+    const todos = hasNewerTodos ? null : todoState;
     if (wantPlan) {
       let planIdx = -1;
       for (let i = merged.length - 1; i >= 0; i--) {
@@ -387,7 +406,7 @@ export async function loadBackendHistory(
         });
       }
     }
-    if (todos.length > 0) {
+    if (todos?.length) {
       let todoIdx = -1;
       for (let i = merged.length - 1; i >= 0; i--) {
         if (merged[i].role === 'assistant') {
@@ -411,7 +430,6 @@ export async function loadBackendHistory(
         }
       }
     }
-    if (todos.length > 0) setBookTodos(sessionId, todos);
     if (state.activeSessionId === sessionId) {
       preserveConversationHistoryViewport(resolveChatRenderTargetId(isStudioView()), sessionId);
     }
@@ -429,12 +447,18 @@ export async function loadBackendHistory(
       merged.map((m) => m.id),
       { unfolded: state.userUnfoldedTurns, folded: state.userFoldedTurns },
     );
-    if (st?.live !== 'running' && st?.live !== 'queued') {
-      resetBook(sessionId);
-      if (options.pendingFollowup) patchBook(sessionId, { pendingFollowup: options.pendingFollowup });
-    } else {
-      patchBook(sessionId, { hadTeamInternal: merged.some((message) => message.role === 'team_internal') });
-    }
+    batchStoreUpdates(() => {
+      if (st?.live !== 'running' && st?.live !== 'queued') {
+        resetBook(sessionId);
+        if (options.pendingFollowup) patchBook(sessionId, { pendingFollowup: options.pendingFollowup });
+      } else {
+        patchBook(sessionId, { hadTeamInternal: merged.some((message) => message.role === 'team_internal') });
+      }
+      const restoredTodos = todos ?? currentTodos;
+      if (restoredTodos !== undefined) setBookTodos(sessionId, restoredTodos);
+      todosAfterHistory = currentSessionTodos(sessionId);
+      todosHandled = hasNewerTodos || todos !== null;
+    });
     // Plan 状态恢复：从后端 plan_state 重建 planActive / pendingPlan。
     if (planState?.has_plan) {
       const status: PlanReviewStatus = planState.status
@@ -495,6 +519,15 @@ export async function loadBackendHistory(
     // history 写回完成：flush 期间排队的迟到分片（P2-2），再清 loading 标记。
     // 仅最新请求收尾：旧请求不得清 loading（新请求仍在排队窗口内）也不得 flush。
     if (isLatestLoad() && state.historyLoading.has(sessionId)) finishHistoryLoading(sessionId);
+    const canRestoreTodos = () => ownsLoad() && currentSessionTodos(sessionId) === todosAfterHistory;
+    if (options.retryTodos && !todosHandled && canRestoreTodos()) {
+      // A failed history window may still have a valid sibling todo response.
+      const todos = await todoRead;
+      if (canRestoreTodos()) {
+        if (todos === null) await loadSessionTodos(sessionId, canRestoreTodos);
+        else setBookTodos(sessionId, todos);
+      }
+    }
   }
 }
 
