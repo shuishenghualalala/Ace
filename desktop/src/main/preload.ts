@@ -4,6 +4,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AuthStateSnapshot,
+  DefaultConversationPermission,
+  SecurityPermissionPreferences,
   UpdateStateSnapshot,
   VersionUpdateDownloadProgressPayload,
   VersionUpdatePackageResult,
@@ -113,10 +115,6 @@ const api = {
   getSystemLocale: () => ipcRenderer.invoke('app:get-system-locale') as Promise<string>,
   rendererInitialStateReady: (): Promise<{ ok: true }> =>
     ipcRenderer.invoke('app:renderer-initial-state-ready'),
-  getStrictSecurityEnabled: () => ipcRenderer.invoke('security:get-strict-security'),
-  setStrictSecurityEnabled: (enabled: boolean) =>
-    ipcRenderer.invoke('security:set-strict-security', enabled),
-
   heartbeat: (version?: string) => ipcRenderer.invoke('auth:heartbeat', version),
   authGetState: () =>
     ipcRenderer.invoke('auth:get-state') as Promise<{ ok: boolean; state: AuthStateSnapshot; error?: string }>,
@@ -176,6 +174,12 @@ const api = {
   },
   securityPending: (args: { workspaceId: string; sessionId: string; taskId?: string }) =>
     ipcRenderer.invoke('security:pending', args),
+  securityGetFullAccessChoice: (): Promise<SecurityPermissionPreferences> =>
+    ipcRenderer.invoke('security:get-full-access-choice'),
+  securitySetFullAccessChoice: (enabled: boolean): Promise<SecurityPermissionPreferences> =>
+    ipcRenderer.invoke('security:set-full-access-choice', enabled),
+  securitySetDefaultConversationPermission: (mode: DefaultConversationPermission): Promise<SecurityPermissionPreferences> =>
+    ipcRenderer.invoke('security:set-default-conversation-permission', mode),
   securitySetMode: (args: {
     workspaceId: string;
     sessionId: string;

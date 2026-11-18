@@ -25,7 +25,7 @@ import {
 } from './external-agents-feature';
 import { externalAgentInitial, externalAgentTone } from './external-agent-avatar';
 import { applySessionModelBinding, mergeSessionModelsFromBackend, modelIdForNewCrewSession, modelLabelForId, syncSessionModelUi } from './session-model';
-import { assignSecurityMode } from './security-approval';
+import { clearDraftSecurityMode } from './security-approval';
 import {
   patchMountedSessionHistoryStatus,
   renderSessionHistory,
@@ -732,7 +732,10 @@ export function setComposerTargetWorkspace(workspaceId: string): void {
     ensureComposerDraftSession();
   }
 
-  if (draftSession) draftSession.workspaceId = workspaceId;
+  if (draftSession && draftSession.workspaceId !== workspaceId) {
+    clearDraftSecurityMode(draftSession.id);
+    draftSession.workspaceId = workspaceId;
+  }
 
   setCurrentWorkspaceId(workspaceId);
 }
@@ -767,9 +770,9 @@ export function composerWorkspaceId(): string {
 }
 
 export function workspaceForSessionDispatch(sessionId: string): string {
+  if (draftSession?.id === sessionId) return draftSession.workspaceId;
   const row = state.sessions.find((s) => s.id === sessionId);
   if (row) return row.workspaceId || 'default';
-  if (isDraftSession(sessionId)) return composerWorkspaceId();
   return 'default';
 }
 
@@ -871,6 +874,7 @@ export function discardDraft(): void {
 
   draftSession = null;
 
+  clearDraftSecurityMode(id);
   removeSessionState(id);
 
   if (state.activeSessionId === id) setActiveSessionId(null);
@@ -958,8 +962,6 @@ export function createSessionInWorkspace(workspaceId: string, openSession: OpenS
   discardDraft();
 
   const id = newSessionId();
-
-  void assignSecurityMode(id, workspaceId);
 
   draftSession = { id, workspaceId, ...(seedModel ? { modelProfileId: seedModel } : {}) };
 

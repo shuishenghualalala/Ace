@@ -39,14 +39,18 @@ const capabilities = {
   managed_network: true,
   detail: '安全运行组件已就绪',
 };
+const setupRequiredCapabilities = {
+  ...capabilities,
+  filesystem_sandbox: false,
+  managed_network: false,
+  status: 'setup_required' as const,
+  setup_required: true,
+};
 
 function makeHandlers(overrides: Partial<SecurityCenterActions> = {}): SecurityCenterActions {
   return {
     onRefresh: vi.fn(),
-    onStrictSecurityChange: vi.fn(),
-    onModeChange: vi.fn(),
     onInstall: vi.fn(),
-    onUninstall: vi.fn(),
     onRuleToggle: vi.fn(),
     onRuleDelete: vi.fn(),
     onAuditExport: vi.fn(),
@@ -70,15 +74,14 @@ describe('Security Center view', () => {
     expect(view.element.querySelector('.page-header')).toBeNull();
   });
 
-  it('explains mode consequences and renders exact rule scope as text', () => {
-    const onModeChange = vi.fn();
-    const view = createSecurityCenterView(makeHandlers({ onModeChange }));
+  it('renders exact rule scope and moves deletion into the rule menu', () => {
+    const onRuleDelete = vi.fn();
+    const view = createSecurityCenterView(makeHandlers({ onRuleDelete }));
+    document.body.append(view.element);
     view.update({
       loading: false,
       error: '',
       workspaceId: 'workspace-a',
-      strictSecurityEnabled: true,
-      mode: 'request_approval',
       capabilities,
       rules: [{
         rule_id: 'rule-1',
@@ -92,8 +95,6 @@ describe('Security Center view', () => {
       audits: [],
     });
 
-    expect(view.element.textContent).toContain('沙箱内命令和工作区写入直接执行；扩权与高风险操作需确认');
-    expect(view.element.textContent).toContain('使用当前宿主用户权限，不启用沙箱');
     expect(view.element.textContent).toContain('D:/work/<img src=x onerror=alert(1)>');
     expect(view.element.querySelector('.security-center__rule-detail')?.textContent)
       .toContain('操作：读取文件');
@@ -101,124 +102,148 @@ describe('Security Center view', () => {
     expect(view.element.querySelector<HTMLElement>('.security-center__load-state')?.hidden)
       .toBe(true);
     expect(view.element.textContent).not.toContain('安全状态已更新');
+    expect(view.element.querySelector('[data-security-mode]')).toBeNull();
+    expect(view.element.querySelector('[data-security-action="refresh"]')).toBeNull();
+    expect(view.element.querySelector<HTMLDetailsElement>('[data-security-disclosure="rules"]')?.open).toBe(false);
 
-    view.element.querySelector<HTMLButtonElement>('[data-security-mode="auto_review"]')?.click();
-    expect(onModeChange).toHaveBeenCalledWith('auto_review');
+    view.element.querySelector<HTMLDetailsElement>('[data-security-disclosure="rules"]')!.open = true;
+    const more = view.element.querySelector<HTMLButtonElement>('[data-security-action="rule-menu"]')!;
+    expect(document.querySelector('[data-menu-item="delete-rule"]')).toBeNull();
+    more.click();
+    const remove = document.querySelector<HTMLButtonElement>('[data-menu-item="delete-rule"]')!;
+    expect(remove.textContent).toBe('永久删除授权规则');
+    remove.click();
+    expect(onRuleDelete).toHaveBeenCalledWith(expect.objectContaining({ rule_id: 'rule-1' }));
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    view.dispose();
   });
 
-  it('shows built-in Seatbelt status without Windows setup actions on macOS', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
+  it('explains how to save a rule when the current workspace has none', () => {
+    const view = createSecurityCenterView(makeHandlers());
+    view.update({ loading: false, error: '', workspaceId: 'workspace-a', capabilities, rules: [], audits: [] });
+
+    const rules = view.element.querySelector('[data-security-disclosure="rules"]');
+    expect(rules?.querySelector('summary')?.textContent).toBe('已保存的授权规则');
+    expect(rules?.textContent).toContain('此工作空间还没有已保存的规则');
+    expect(rules?.textContent).toContain('选择「始终允许此操作」并确认');
+    expect(rules?.textContent).toContain('仅在当前账号和工作空间内生效');
+  });
+
+  it('offers a retry in the protection card only when the state is unavailable', () => {
+    const onRefresh = vi.fn();
+    const view = createSecurityCenterView(makeHandlers({ onRefresh }));
+    const snapshot = {
+      loading: false, error: '', workspaceId: 'workspace-a', capabilities: null, rules: [], audits: [],
+    };
+    view.update({ ...snapshot, loading: true });
+    expect(view.element.querySelector('[data-security-action="refresh"]')).toBeNull();
+    view.update(snapshot);
+    const retry = view.element.querySelector<HTMLButtonElement>('.security-center__protection [data-security-action="refresh"]');
+    expect(retry?.textContent).toBe('重新检测');
+    retry?.click();
+    expect(onRefresh).toHaveBeenCalledOnce();
+    view.update({ ...snapshot, capabilities });
+    expect(view.element.querySelector('[data-security-action="refresh"]')).toBeNull();
+    view.update({ ...snapshot, capabilities, error: '授权规则加载失败' });
+    expect(view.element.querySelector('[data-security-action="refresh"]')?.textContent).toBe('重试加载');
+  });
+
+  it.each([
+    ['windows_sandbox_busy', 'Windows 沙箱正忙'],
+    ['windows_acl_recovery_failed', 'Windows 沙箱恢复未完成'],
+  ])('offers recheck without elevation when %s', (reason, label) => {
+    const view = createSecurityCenterView(makeHandlers());
+    view.update({
+      loading: false, error: '', workspaceId: 'workspace-a', rules: [], audits: [],
+      capabilities: { ...setupRequiredCapabilities, reason, status: 'unavailable' },
     });
+    expect(view.element.textContent).toContain(label);
+    expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
+    expect(view.element.querySelector('[data-security-action="refresh"]')?.textContent).toBe('重新检测');
+  });
+
+  it.each([['darwin', 'macOS'], ['linux', 'Linux']])('reports automatic %s protection without an install action', (platform, label) => {
+    const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false,
       error: '',
       workspaceId: 'workspace-a',
-      strictSecurityEnabled: true,
-      mode: 'request_approval',
-      capabilities: { ...capabilities, platform: 'darwin' },
+      capabilities: { ...capabilities, platform },
       rules: [],
       audits: [],
     });
 
     expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]'))
       .toBeNull();
-    expect(view.element.textContent).toContain('系统内置原生防护');
+    expect(view.element.textContent).toContain(`${label} 防护已可用于 Ace 的受管命令`);
   });
 
-  it('keeps only the applicable Windows setup action enabled', () => {
-    const view = createSecurityCenterView({
-      onRefresh: vi.fn(),
-      onStrictSecurityChange: vi.fn(),
-      onModeChange: vi.fn(),
-      onInstall: vi.fn(),
-      onUninstall: vi.fn(),
-      onRuleToggle: vi.fn(),
-      onRuleDelete: vi.fn(),
-      onAuditExport: vi.fn(),
-      onAuditPurge: vi.fn(),
-    });
+  it('shows one Windows setup action only after an explicit setup result', () => {
+    const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false,
       error: '',
       workspaceId: 'workspace-a',
-      strictSecurityEnabled: true,
-      mode: 'request_approval',
-      capabilities: { ...capabilities, platform: 'windows', filesystem_sandbox: false },
+      capabilities: setupRequiredCapabilities,
       rules: [],
       audits: [],
     });
 
     expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
       .toBe(false);
-    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
-      .toBe(true);
+    expect(view.element.querySelector('[data-security-action="install"]')?.textContent).toBe('设置 Windows 防护');
+    expect(view.element.querySelector('[data-security-action="uninstall"]')).toBeNull();
     expect(view.element.textContent).not.toContain('当前设备尚未提供原生防护');
 
     view.update({
       loading: false,
       error: '',
       workspaceId: 'workspace-a',
-      strictSecurityEnabled: true,
-      mode: 'request_approval',
-      capabilities,
+      capabilities: { ...capabilities, status: 'ready' },
       rules: [],
       audits: [],
     });
 
-    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
-      .toBe(true);
-    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
-      .toBe(false);
+    expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
+    expect(view.element.querySelector('[data-security-action="uninstall"]')).toBeNull();
+    expect(view.element.textContent).toContain('本机防护已就绪');
   });
 
-  it('locks both Windows setup actions while one operation is in progress', () => {
+  it.each([
+    null,
+    { ...capabilities, helper_present: false, status: 'unavailable' as const },
+    { ...setupRequiredCapabilities, runtime_stale: true },
+    { ...capabilities, workspace_network_access: true, direct_network: false },
+    { ...setupRequiredCapabilities, platform: 'linux' },
+  ])('does not offer elevated setup for an inconclusive or non-actionable detection: %j', (reported) => {
     const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false,
-      setupAction: 'install',
       error: '',
       workspaceId: 'workspace-a',
-      strictSecurityEnabled: true,
-      mode: 'request_approval',
-      capabilities: { ...capabilities, filesystem_sandbox: false, managed_network: false },
+      capabilities: reported,
+      rules: [],
+      audits: [],
+    });
+
+    expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
+  });
+
+  it('locks the Windows setup action while the operation is in progress', () => {
+    const view = createSecurityCenterView(makeHandlers());
+    view.update({
+      loading: false,
+      settingUp: true,
+      error: '',
+      workspaceId: 'workspace-a',
+      capabilities: setupRequiredCapabilities,
       rules: [],
       audits: [],
     });
 
     expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
       .toBe(true);
-    expect(view.element.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
-      .toBe(true);
-    expect(view.element.textContent).toContain('正在安装…');
-  });
-
-  it('shows the strict security toggle so compatibility remains an explicit opt-out', () => {
-    const onStrictSecurityChange = vi.fn();
-    const view = createSecurityCenterView(makeHandlers({ onStrictSecurityChange }));
-    view.update({
-      loading: false,
-      error: '',
-      workspaceId: 'workspace-a',
-      strictSecurityEnabled: true,
-      mode: 'request_approval',
-      capabilities,
-      rules: [],
-      audits: [],
-    });
-
-    // 严格安全默认开启；兼容模式必须由用户显式切换。
-    const toggle = view.element.querySelector('[data-security-strict-toggle]');
-    expect(toggle).not.toBeNull();
-    expect((toggle as HTMLInputElement).checked).toBe(true);
+    expect(view.element.textContent).toContain('正在设置…');
   });
 
   it('filters and sorts audit rows, then opens a redacted detail dialog', () => {
@@ -228,8 +253,6 @@ describe('Security Center view', () => {
       loading: false,
       error: '',
       workspaceId: 'workspace-a',
-      strictSecurityEnabled: true,
-      mode: 'request_approval',
       capabilities,
       rules: [],
       audits: [{
@@ -287,20 +310,58 @@ describe('Security Center view', () => {
     expect(dialog?.textContent).toContain('事件审批模式替我审批');
     expect(dialog?.textContent).toContain('当前审批模式请求批准');
     expect(dialog?.textContent).toContain('git status --token sk-...3456');
+    expect(dialog?.querySelectorAll('button[aria-label="关闭"]')).toHaveLength(1);
+    expect(dialog?.querySelector('.mw-dialog__footer')).toBeNull();
+    view.dispose();
+  });
+
+  it('hides single-page navigation and names the account-wide audit actions in their menu', () => {
+    const onAuditExport = vi.fn();
+    const onAuditPurge = vi.fn();
+    const view = createSecurityCenterView(makeHandlers({ onAuditExport, onAuditPurge }));
+    document.body.append(view.element);
+    view.update({ loading: false, error: '', workspaceId: 'workspace-a', capabilities, rules: [], audits: [], auditTotal: 20 });
+    expect(view.element.querySelector('[data-pager-id="security-audit"]')).toBeNull();
+    view.element.querySelector<HTMLDetailsElement>('[data-security-disclosure="audit"]')!.open = true;
+    const more = view.element.querySelector<HTMLButtonElement>('[data-security-action="audit-menu"]')!;
+    more.click();
+    const exportItem = document.querySelector<HTMLButtonElement>('[data-menu-item="export"]')!;
+    expect(exportItem.textContent).toBe('导出账号全部审计记录');
+    exportItem.click();
+    expect(onAuditExport).toHaveBeenCalledOnce();
+    more.click();
+    expect(document.querySelector('[data-menu-item="purge"]')?.textContent).toBe('清理账号内 30 天前的审计记录');
+    view.dispose();
+    expect(document.querySelector('[data-menu-item="purge"]')).toBeNull();
+    expect(onAuditPurge).not.toHaveBeenCalled();
+  });
+
+  it('keeps an in-progress audit filter while the protection card refreshes', () => {
+    const view = createSecurityCenterView(makeHandlers());
+    const snapshot = {
+      loading: false, error: '', workspaceId: 'workspace-a', capabilities, rules: [], audits: [],
+    };
+    view.update(snapshot);
+    const input = view.element.querySelector<HTMLInputElement>('[data-security-audit-session]')!;
+    input.value = 'session-in-progress';
+    view.update({ ...snapshot, loading: true });
+    expect(view.element.querySelector('[data-security-audit-session]')).toBe(input);
+    expect(input.value).toBe('session-in-progress');
   });
 });
 
 describe('Security Center integration', () => {
-  it('uses the in-app confirmation and locks setup actions during installation', async () => {
+  it('starts Windows setup from one explicit action and locks it during installation', async () => {
     let finishSetup: ((value: { ok: boolean; exitCode: number }) => void) | undefined;
     const securitySetup = vi.fn(() => new Promise<{ ok: boolean; exitCode: number }>((resolve) => {
       finishSetup = resolve;
     }));
-    const incompleteCapabilities = { ...capabilities, filesystem_sandbox: false, managed_network: false };
+    const securityCapabilities = vi.fn()
+      .mockResolvedValueOnce({ ok: true, body: setupRequiredCapabilities })
+      .mockResolvedValueOnce({ ok: true, body: capabilities });
     Object.assign(window, {
       Crew: {
-        getStrictSecurityEnabled: vi.fn(async () => ({ strictSecurityEnabled: true })),
-        securityCapabilities: vi.fn(async () => ({ ok: true, body: incompleteCapabilities })),
+        securityCapabilities,
         securityRules: vi.fn(async () => ({ ok: true, body: { rules: [] } })),
         securityAudit: vi.fn(async () => ({ ok: true, body: { total: 0, events: [] } })),
         securitySetup,
@@ -309,24 +370,47 @@ describe('Security Center integration', () => {
 
     renderSecurityPage();
     await initSecurityPage();
+    expect(securitySetup).not.toHaveBeenCalled();
     document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.click();
 
-    await vi.waitFor(() => expect(showConfirmDialogMock).toHaveBeenCalledWith(expect.objectContaining({
-      title: '安装安全防护',
-      confirmText: '安装并继续',
-    })));
+    await vi.waitFor(() => expect(securitySetup).toHaveBeenCalledWith({ action: 'repair' }));
+    expect(showConfirmDialogMock).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
-      .toBe(true);
-    expect(document.querySelector<HTMLButtonElement>('[data-security-action="uninstall"]')?.disabled)
       .toBe(true);
     finishSetup?.({ ok: true, exitCode: 0 });
     await vi.waitFor(() => expect(securitySetup).toHaveBeenCalledWith({ action: 'repair' }));
+    await vi.waitFor(() => expect(document.querySelector('[data-security-action="install"]')).toBeNull());
+    expect(document.body.textContent).toContain('本机防护已就绪');
+  });
+
+  it('does not modify UAC or launch setup when Windows reports UAC off', async () => {
+    const securityUacStatus = vi.fn(async () => ({ enabled: false }));
+    const securityEnableUac = vi.fn();
+    const securitySetup = vi.fn();
+    Object.assign(window, {
+      Crew: {
+        securityCapabilities: vi.fn(async () => ({ ok: true, body: setupRequiredCapabilities })),
+        securityRules: vi.fn(async () => ({ ok: true, body: { rules: [] } })),
+        securityAudit: vi.fn(async () => ({ ok: true, body: { total: 0, events: [] } })),
+        securityUacStatus,
+        securityEnableUac,
+        securitySetup,
+      },
+    });
+
+    await initSecurityPage();
+    const currentInstall = () => document.querySelector<HTMLButtonElement>('[data-security-action="install"]');
+    currentInstall()?.click();
+    await vi.waitFor(() => expect(securityUacStatus).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(currentInstall()?.disabled).toBe(false));
+    expect(securityEnableUac).not.toHaveBeenCalled();
+    expect(securitySetup).not.toHaveBeenCalled();
+    expect(showConfirmDialogMock).not.toHaveBeenCalled();
   });
 
   it('keeps one shell and loads capabilities, rules and audit through the existing bridge', async () => {
     Object.assign(window, {
       Crew: {
-        getStrictSecurityEnabled: vi.fn(async () => ({ strictSecurityEnabled: true })),
         securityCapabilities: vi.fn(async () => ({ ok: true, body: capabilities })),
         securityRules: vi.fn(async () => ({
           ok: true,
@@ -360,7 +444,7 @@ describe('Security Center integration', () => {
     await initSecurityPage();
 
     expect(document.querySelector('[data-security-center]')).toBe(shell);
-    expect(document.body.textContent).toContain('安全运行组件已就绪');
+    expect(document.body.textContent).toContain('本机防护已就绪');
     expect(document.body.textContent).toContain('git status');
     expect(document.body.textContent).toContain('exec');
   });
@@ -375,7 +459,6 @@ describe('Security Center integration', () => {
       });
     Object.assign(window, {
       Crew: {
-        getStrictSecurityEnabled: vi.fn(async () => ({ strictSecurityEnabled: true })),
         securityCapabilities: vi.fn(async () => ({ ok: true, body: capabilities })),
         securityRules: vi.fn(async () => ({ ok: true, body: { rules: [] } })),
         securityAudit,
@@ -384,11 +467,13 @@ describe('Security Center integration', () => {
 
     renderSecurityPage();
     await initSecurityPage();
+    document.querySelector<HTMLDetailsElement>('[data-security-disclosure="audit"]')!.open = true;
     document.querySelector<HTMLButtonElement>('[data-security-audit-page="next"]')?.click();
-    await vi.waitFor(() => expect(securityAudit).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(securityAudit).toHaveBeenCalledTimes(3));
 
+    expect(securityAudit.mock.calls[1]?.[0]).toEqual(expect.objectContaining({ offset: 20 }));
     expect(securityAudit.mock.calls[2]?.[0]).toEqual(expect.objectContaining({ offset: 0 }));
     expect(document.body.textContent).toContain('最后一页记录');
+    expect(document.querySelector<HTMLDetailsElement>('[data-security-disclosure="audit"]')?.open).toBe(true);
   });
 });

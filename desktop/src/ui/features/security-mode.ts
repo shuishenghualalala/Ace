@@ -1,16 +1,30 @@
 import type { BackendConfig } from '../backend-client';
 import { state } from '../state';
 
+export type ConversationSecurityMode = 'request_approval' | 'auto_review' | 'full_access';
+
+export function defaultConversationSecurityMode(config: BackendConfig | null | undefined = state.config): ConversationSecurityMode {
+  const mode = config?.security?.default_mode;
+  return mode === 'request_approval' || mode === 'full_access' ? mode : 'auto_review';
+}
+
 export interface SecurityCapabilities {
   platform?: string;
   helper_present?: boolean;
   filesystem_sandbox?: boolean;
   managed_network?: boolean;
+  workspace_network_access?: boolean;
+  direct_network?: boolean;
   local_binding_control?: boolean;
   detail?: string;
+  runtime_stale?: boolean;
+  status?: 'ready' | 'recovering' | 'setup_required' | 'unavailable';
+  reason?: string;
+  backend?: string;
+  setup_required?: boolean;
 }
 
-/** 安全模块总开关：后端 /api/config 返回 security.enabled，Ace 默认关闭。 */
+/** 读取后端 /api/config 返回的内建沙箱启用状态。 */
 export function securityModuleEnabled(config: BackendConfig | null | undefined = state.config): boolean {
   return config?.security?.enabled === true;
 }
@@ -47,8 +61,22 @@ export function detectedRuntimePlatform(capabilityPlatform?: string): string | u
     : undefined;
 }
 
+/** An elevated setup action needs an explicit, current signal from the Gateway probe. */
+export function windowsSetupRequired(capability: SecurityCapabilities | null): boolean {
+  return isWindowsPlatform(detectedRuntimePlatform(capability?.platform))
+    && (capability?.status === undefined || capability.status === 'setup_required')
+    && capability?.reason !== 'windows_acl_recovery'
+    && capability?.reason !== 'windows_acl_recovery_failed'
+    && capability?.reason !== 'windows_sandbox_busy'
+    && capability?.setup_required === true
+    && capability.helper_present === true
+    && capability.runtime_stale !== true;
+}
+
 export function formatCapabilitySummary(capability: SecurityCapabilities): string {
   if (!capability.helper_present) return `未启用原生沙箱 · ${capability.detail ?? '运行组件缺失'}`;
-  const enabled = capability.filesystem_sandbox && capability.managed_network;
+  const enabled = capability.filesystem_sandbox && (capability.workspace_network_access
+    ? capability.direct_network
+    : capability.managed_network);
   return `${enabled ? '原生沙箱已启用' : '沙箱配置不完整'} · ${capability.detail ?? '等待能力检测'}`;
 }

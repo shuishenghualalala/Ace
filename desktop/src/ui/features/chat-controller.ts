@@ -76,18 +76,27 @@ import {
   setBackendIdleHandler,
 } from './session-busy';
 import { clearScenarioChip, takeArmedSubScenario } from './scenario-arm';
-import { requireRendererLogin } from './auth-gate';
+import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import {
   formatFollowupAnswerMessage,
   isRuntimeStaffingFollowup,
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
-import { backendApi, type ChatChunk, type WikiIngestProgress } from '../backend-client';
+import { backendApi, type Attachment, type ChatChunk, type WikiIngestProgress } from '../backend-client';
 import { isObservationDevLaunch } from '../../shared/observability';
 import { makeSessionTitle } from './history-mapping';
 import { applyFoldState, createChatRenderCoalescer, createStreamingPatchCoalescer } from '../render-utils';
 import { getToolFold, setToolFold } from './fold-state';
 import { renderSecurityBanner } from './security-banner';
+import {
+  assignSecurityMode,
+  draftSecurityMode,
+  finishFirstTurnSecurityMode,
+  needsFirstTurnSecurityMode,
+  revokeDraftFullAccess,
+  type ConversationSecurityMode,
+} from './security-approval';
+import { loadFullAccessChoice } from './security-permission-settings';
 import { renderModelFallbackBanner } from './model-fallback-banner';
 import {
   chunkRequestId,
@@ -1052,7 +1061,7 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
     return;
   }
   if (chunk.kind === 'audit_updated') {
-    void import('./security-center').then(({ activateSecurityPage }) => activateSecurityPage());
+    void import('./security-center').then(({ refreshSecurityAudit }) => refreshSecurityAudit());
     return;
   }
   // 通知中心推送：owner 级广播帧，与具体会话无关；只负责唤醒角标与轻提示，
@@ -1544,11 +1553,19 @@ export function editQueueItem(sessionId: string, index: number): void {
 }
 
 const nativeVisualCapabilitySessions = new Set<string>();
+const pendingFirstDispatches = new Set<string>();
+
+interface DraftDispatch {
+  workspaceId: string;
+  mode: ConversationSecurityMode;
+  isCurrent(): boolean;
+  settingFullAccess: boolean;
+}
 
 export async function dispatchWs(
   sessionId: string,
   query: string,
-  attachments = takeAttachmentsForSend(),
+  attachments: Attachment[] | (() => Attachment[]) = takeAttachmentsForSend,
   subScenarioOrOptions: string | DispatchOptions = '',
   planActiveOverride?: boolean,
 ): Promise<boolean> {
@@ -1558,15 +1575,61 @@ export async function dispatchWs(
         ...(planActiveOverride !== undefined ? { planActive: planActiveOverride } : {}),
       }
     : subScenarioOrOptions;
-  const subScenario = dispatchOptions.subScenario ?? '';
   if (!requireRendererLogin()) return false;
-  if (isDraftSession(sessionId)) {
-    await persistDraftSessionModel(sessionId);
+  if (pendingFirstDispatches.has(sessionId)) return false;
+
+  const workspaceId = workspaceForSessionDispatch(sessionId);
+  if (!needsFirstTurnSecurityMode(sessionId, workspaceId)) {
+    return dispatchQuery(sessionId, query, attachments, dispatchOptions);
   }
+  const owner = state.userInfo;
+  const isCurrentDraft = () => isRendererLoggedIn() && state.userInfo === owner
+    && state.activeSessionId === sessionId
+    && needsFirstTurnSecurityMode(sessionId, workspaceId)
+    && workspaceForSessionDispatch(sessionId) === workspaceId;
+  if (!isCurrentDraft()) return false;
+  pendingFirstDispatches.add(sessionId);
+  let sent = false;
+  let draft: DraftDispatch | undefined;
+  try {
+    try {
+      await loadFullAccessChoice();
+    } catch {
+      notify('未能读取权限设置，消息未发送。请重试。');
+      return false;
+    }
+    if (!isCurrentDraft()) return false;
+    const mode = draftSecurityMode(sessionId, workspaceId);
+    draft = {
+      workspaceId,
+      mode,
+      isCurrent: () => isCurrentDraft() && draftSecurityMode(sessionId, workspaceId) === mode,
+      settingFullAccess: false,
+    };
+    await persistDraftSessionModel(sessionId);
+    sent = await dispatchQuery(sessionId, query, attachments, dispatchOptions, draft);
+    if (sent) finishFirstTurnSecurityMode(sessionId);
+    return sent;
+  } finally {
+    if (!sent && draft?.settingFullAccess && state.userInfo === owner && isRendererLoggedIn()) {
+      await revokeDraftFullAccess(sessionId, workspaceId);
+    }
+    pendingFirstDispatches.delete(sessionId);
+  }
+}
+
+async function dispatchQuery(
+  sessionId: string,
+  query: string,
+  attachmentSource: Attachment[] | (() => Attachment[]),
+  dispatchOptions: DispatchOptions,
+  draft?: DraftDispatch,
+): Promise<boolean> {
+  const workspaceId = draft?.workspaceId ?? workspaceForSessionDispatch(sessionId);
   const capabilityKey = JSON.stringify([state.userInfo, sessionId]);
   if (!nativeVisualCapabilitySessions.has(capabilityKey) && state.backendConnected) {
     try {
-      await ensureNativeVisualCapability(sessionId, workspaceForSessionDispatch(sessionId),
+      await ensureNativeVisualCapability(sessionId, workspaceId,
         state.sessions.find((item) => item.id === sessionId)?.title || '新会话');
       nativeVisualCapabilitySessions.add(capabilityKey);
     } catch {
@@ -1577,30 +1640,21 @@ export async function dispatchWs(
   // 新一轮发送：解除对该会话的「迟到分片屏蔽」
   removeSuppressedSession(sessionId);
   const ui = uiStore.get();
+  const socket = state.socket;
   const backendCanSend = ui.backendCanSend
     || (ui.backendConnected && ui.backendTransportState === 'unknown');
-  if (!state.socket || !backendCanSend) {
+  if (!socket || !backendCanSend) {
     appendMessage(sessionId, 'error', '服务未连接，请稍后重试。');
     setBusyWithUi(sessionId, false);
     renderChat();
     notify('服务未连接');
     return false;
   }
-  // 乐观 UI：先把用户消息渲染出来，再 await WS send。
-  // 修订式引导在点击瞬间已经追加了 user 气泡；这里复用该气泡，避免当前 turn 收束后重复出现同一句。
-  const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
-  const hasOptimisticUserMessage = optimisticUserMessageId
-    ? getMessages(sessionId).some((m) => m.id === optimisticUserMessageId)
-    : false;
-  if (!hasOptimisticUserMessage) {
-    appendMessage(sessionId, 'user', query, {
-      attachments,
-      ...(optimisticUserMessageId ? { id: optimisticUserMessageId } : {}),
-    });
+  if (draft) {
+    if (!draft.isCurrent()) return false;
+    draft.settingFullAccess = draft.mode === 'full_access' && state.config?.security?.enabled !== false;
+    if (!await assignSecurityMode(sessionId, workspaceId, draft.mode) || !draft.isCurrent()) return false;
   }
-  renderChat();
-  // 用户提交新消息：强制跳到底部（重置 stickyBottom）。对齐 hermes 的 runStart → jumpToBottom。
-  jumpChatToBottom();
   const planActiveForSend = dispatchOptions.planActive ?? state.composerMode === 'plan';
   const workDisabledPreferenceIds = dispatchOptions.workDisabledPreferenceIds
     ?? (productModeStore.get().productMode === 'work' ? takeDisabledWorkPreferenceIds() : []);
@@ -1615,6 +1669,20 @@ export async function dispatchWs(
   if (externalTeamId) {
     await primeTeamCollaborationIdentity(sessionId);
     renderChat();
+  }
+  if (state.socket !== socket || (draft && !draft.isCurrent())) return false;
+  const attachments = typeof attachmentSource === 'function' ? attachmentSource() : attachmentSource;
+  const subScenario = dispatchOptions.subScenario ?? '';
+  // 修订式引导已经追加了用户消息，发送时复用该气泡。
+  const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
+  const hasOptimisticUserMessage = optimisticUserMessageId
+    ? getMessages(sessionId).some((m) => m.id === optimisticUserMessageId)
+    : false;
+  if (!hasOptimisticUserMessage) {
+    appendMessage(sessionId, 'user', query, {
+      attachments,
+      ...(optimisticUserMessageId ? { id: optimisticUserMessageId } : {}),
+    });
   }
   const requestId = newTurnRequestId();
   openTurnForRequest(sessionId, requestId);
@@ -1639,12 +1707,12 @@ export async function dispatchWs(
   });
   // 专用 Wiki Agent 经注册口提供本会话的 wiki_kb_id。
   const wikiExtras = wikiSendExtrasResolver?.(sessionId) ?? null;
-  const ok = await state.socket.send({
+  const ok = await socket.send({
     query,
     session_id: sessionId,
     request_id: requestId,
     mode,
-    workspace_id: workspaceForSessionDispatch(sessionId),
+    workspace_id: workspaceId,
     attachments,
     ...(planActiveForSend ? { plan_active: true } : {}),
     ...(dispatchOptions.clientIntent ? { client_intent: dispatchOptions.clientIntent } : {}),
@@ -1691,17 +1759,18 @@ export async function sendNativeVisualMessage(sessionId: string, text: string): 
   return dispatchWs(sessionId, text, [], { subScenario: '', workDisabledPreferenceIds: [] });
 }
 
-export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<void> {
-  if (!requireRendererLogin()) return;
+export async function sendMessage(text: string, userMentions: UserAgentMention[] = []): Promise<boolean> {
+  if (!requireRendererLogin()) return false;
   const plainContent = text.trim();
   const attachments = state.attachments;
   const activeHasAnnotations = state.activeSessionId
     && (hasSiteAnnotationDraft(state.activeSessionId) || hasBlueprintAnnotationDraft(state.activeSessionId));
-  if (!plainContent && attachments.length === 0 && !activeHasAnnotations) return;
+  if (!plainContent && attachments.length === 0 && !activeHasAnnotations) return false;
 
   // 无活跃会话（欢迎页）时新建草稿：用 composerWorkspaceId()（即右下角选择器所显示的空间），
   // 而不是裸读 state.currentWorkspaceId——避免二者不一致时消息落到选择器之外的空间。
   const sessionId = state.activeSessionId ?? createSessionInWorkspace(composerWorkspaceId(), openSessionFn);
+  if (!sessionId) return false;
   const activeTeamId = state.activeExternalTeamIdBySession[sessionId] || '';
   const wikiGrant = activeTeamId ? getTeamWikiReadGrant(sessionId, activeTeamId) : null;
   const externalWikiReadKbId = wikiGrant?.kbId || '';
@@ -1745,22 +1814,21 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
     if (isStudioView()) openStudioChatPanel();
     renderChat();
     setTabFn('chat');
-    return;
+    return true;
   }
 
   if (queueEditDraft?.sessionId === sessionId) {
     queueEditDraft = null;
   }
 
-  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend(), {
+  const sent = await dispatchWs(sessionId, content, takeAttachmentsForSend, {
     subScenario: takeArmedSubScenario(),
     ...(externalWikiReadKbId ? { externalWikiReadKbId } : {}),
     ...(userMentions.length > 0 ? { userMentions } : {}),
   });
-  if (sent) {
-    clearSiteAnnotationDraft(sessionId);
-    clearBlueprintAnnotationDraft(sessionId);
-  }
+  if (!sent) return false;
+  clearSiteAnnotationDraft(sessionId);
+  clearBlueprintAnnotationDraft(sessionId);
   clearScenarioChip();
   if (isDraftSession(sessionId)) {
     commitDraftSession(sessionId, makeSessionTitle(previewText), previewText.slice(0, 48), openSessionFn);
@@ -1772,6 +1840,7 @@ export async function sendMessage(text: string, userMentions: UserAgentMention[]
   if (isStudioView()) openStudioChatPanel();
   setTabFn('chat');
   renderChat();
+  return true;
 }
 
 /** 把指定会话当前正在 streaming 的 assistant 消息冻结并结算回合耗时。

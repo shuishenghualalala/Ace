@@ -168,6 +168,8 @@ def test_load_config_defaults_security_to_disabled(tmp_path: Path):
     loaded = load_config(config_path=str(config_path))
 
     assert loaded.security_enabled is False
+    assert loaded.security_sandbox_enabled is True
+    assert loaded.security_workspace_network_access is False
 
 
 def test_load_config_reads_enabled_security(tmp_path: Path):
@@ -177,6 +179,43 @@ def test_load_config_reads_enabled_security(tmp_path: Path):
     loaded = load_config(config_path=str(config_path))
 
     assert loaded.security_enabled is True
+    assert loaded.security_sandbox_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("security", "strict_enabled", "sandbox_enabled"),
+    [
+        ({"enabled": False}, False, False),
+        ({"enabled": False, "sandbox_enabled": True}, False, True),
+        ({"enabled": True, "sandbox_enabled": False}, True, False),
+        ({"sandbox_enabled": False}, False, False),
+    ],
+)
+def test_load_config_resolves_sandbox_with_legacy_fallback(
+    tmp_path: Path, security: dict, strict_enabled: bool, sandbox_enabled: bool,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"security": security}), encoding="utf-8")
+
+    loaded = load_config(config_path=config_path)
+
+    assert loaded.security_enabled is strict_enabled
+    assert loaded.security_sandbox_enabled is sandbox_enabled
+
+
+@pytest.mark.parametrize("network_access", [True, False, "true", 1, None])
+def test_load_config_requires_explicit_boolean_to_enable_workspace_network(
+    tmp_path: Path, network_access,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"security": {"sandbox_workspace_write": {"network_access": network_access}}}),
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path=config_path)
+
+    assert loaded.security_workspace_network_access is (network_access is True)
 
 
 def test_add_model_rejects_empty_id(cfg: Config):

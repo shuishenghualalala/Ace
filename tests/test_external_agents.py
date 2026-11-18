@@ -75,7 +75,7 @@ from crew.core.envelope import ResponseChunk
 from crew.core.types import Message, ToolCall
 from crew.gateway.helpers import role_markdown, suggest_role_description, with_session_agent_labels
 from crew.security.context import SecurityContext
-from crew.security.launch import ProcessLaunch, current_process_launch
+from crew.security.launch import ProcessLaunch, current_process_launch, use_process_launch
 from crew.security.models import PermissionProfile, PermissionProfileKind
 from crew.security.service import ExecAuthorization
 from crew.state.config import Config
@@ -95,6 +95,13 @@ def _host_process_launch_for_external_adapter_tests():
         yield
     finally:
         current_process_launch.reset(token)
+
+
+@pytest.fixture
+def managed_builtin_launch(_host_process_launch_for_external_adapter_tests):
+    """Keep the Ace shell sandbox active while external runtimes use host transport."""
+    with use_process_launch(ProcessLaunch(PermissionProfile(PermissionProfileKind.MANAGED))):
+        yield
 
 
 _FIXTURE_EXECUTABLE_SHEBANG = "#!/usr/bin/env python3"
@@ -241,7 +248,10 @@ async def test_managed_codex_and_claude_use_captured_one_shot_instead_of_host_st
 
     monkeypatch.setattr(cli_adapter, "run_external_cli", captured)
     token = current_process_launch.set(
-        ProcessLaunch(PermissionProfile(PermissionProfileKind.MANAGED))
+        ProcessLaunch(
+            PermissionProfile(PermissionProfileKind.MANAGED),
+            external_security_enabled=True,
+        )
     )
     request = RuntimeExecutionRequest(
         executable_path=str(tmp_path / provider),
@@ -397,6 +407,7 @@ async def test_managed_external_launch_approves_exact_provider_network_overlay(t
     token = current_process_launch.set(
         ProcessLaunch(
             PermissionProfile(PermissionProfileKind.MANAGED),
+            external_security_enabled=True,
             security_context=context,
             approval_service=service,
         )
@@ -464,6 +475,7 @@ async def test_managed_external_cli_passes_provider_env_but_not_runtime_control_
     token = current_process_launch.set(
         ProcessLaunch(
             PermissionProfile(PermissionProfileKind.MANAGED),
+            external_security_enabled=True,
             security_context=context,
             approval_service=ApprovalService(),
         )
@@ -485,6 +497,7 @@ async def test_managed_external_cli_passes_provider_env_but_not_runtime_control_
     argv, kwargs, effective_launch = calls[0]
     assert argv[0] == str(executable.resolve())
     assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert kwargs["external"] is True
     assert kwargs["env_overrides"]["OPENAI_API_KEY"] == "provider-key"
     assert "HOME" not in kwargs["env_overrides"]
     assert "PATH" not in kwargs["env_overrides"]
@@ -494,6 +507,7 @@ async def test_managed_external_cli_passes_provider_env_but_not_runtime_control_
     assert effective_launch.additional_permissions.network
 
 
+@pytest.mark.usefixtures("managed_builtin_launch")
 @pytest.mark.asyncio
 async def test_external_cli_process_receives_sanitized_runtime_env(monkeypatch, tmp_path):
     script = _fake_executable(
@@ -531,6 +545,9 @@ async def test_external_cli_process_receives_sanitized_runtime_env(monkeypatch, 
             custom_env={
                 "RUNTIME_FLAG": "enabled",
                 "CAPTURE_FILE": str(capture_file),
+                "JWT": "must-be-filtered",
+                "CREW_ENV_FILE": "/unapproved/.env",
+                "CREW_INTERNAL_SECRET": "must-be-filtered",
             },
         )
     )
@@ -982,6 +999,7 @@ def _fake_acp_permission_runtime(tmp_path):
     return script
 
 
+@pytest.mark.usefixtures("managed_builtin_launch")
 @pytest.mark.asyncio
 async def test_acp_permission_handler_returns_runtime_allow_once(tmp_path):
     script = _fake_acp_permission_runtime(tmp_path)
@@ -1387,6 +1405,7 @@ def _fake_hermes(tmp_path):
     return script
 
 
+@pytest.mark.usefixtures("managed_builtin_launch")
 @pytest.mark.parametrize(
     ("fake_factory", "env_var", "scan_fn", "provider", "expected_version", "expected_protocol"),
     [
@@ -4583,6 +4602,7 @@ def _fake_claude_stream_runtime(tmp_path):
     return script
 
 
+@pytest.mark.usefixtures("managed_builtin_launch")
 @pytest.mark.asyncio
 async def test_claude_stream_json_emits_session_text_tools_usage_and_permission(tmp_path):
     script = _fake_claude_stream_runtime(tmp_path)
@@ -4846,6 +4866,7 @@ def _fake_codex_app_server(tmp_path):
     return script
 
 
+@pytest.mark.usefixtures("managed_builtin_launch")
 @pytest.mark.asyncio
 async def test_codex_app_server_gates_turn_events_and_emits_tools_usage_approval(tmp_path):
     script = _fake_codex_app_server(tmp_path)

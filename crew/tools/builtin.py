@@ -506,6 +506,7 @@ async def handle_terminal(
     approval_decision = ""
     terminal_metadata: dict[str, Any] = {
         "execution_boundary": "host",
+        "network_mode": "host",
         "effective_home": str(Path.home().expanduser().resolve(strict=False)),
         "applied_permissions": {
             "filesystem": [],
@@ -527,6 +528,7 @@ async def handle_terminal(
         from crew.security.models import (
             EMPTY_ADDITIONAL_PERMISSIONS,
             ConversationPermissionMode,
+            NetworkPolicy,
             SandboxPermissions,
             serialize_additional_permissions,
         )
@@ -534,6 +536,7 @@ async def handle_terminal(
 
         security_context = build_security_context(workspace_store)
         mode = security_service.mode_for(security_context)
+        direct_network = getattr(security_service, "workspace_network_access", False) is True
         explicit_sandbox_permissions = args.get("sandbox_permissions")
         requested_permissions = (
             EMPTY_ADDITIONAL_PERMISSIONS
@@ -575,6 +578,17 @@ async def handle_terminal(
                 and has_permission_entries
             ):
                 raise ToolError("require_escalated 不能与 additional_permissions 同时使用")
+        if direct_network and (requested_permissions.network or requested_permissions.allow_local_binding):
+            requested_permissions = replace(
+                requested_permissions,
+                network=(),
+                allow_local_binding=False,
+                sandbox_permissions=(
+                    requested_permissions.sandbox_permissions
+                    if requested_permissions.filesystem
+                    else SandboxPermissions.USE_DEFAULT
+                ),
+            )
         permission_reason = args.get("justification", args.get("permission_reason", ""))
         if not isinstance(permission_reason, str) or len(permission_reason) > 1000:
             raise ToolError("justification 必须是长度不超过 1000 的字符串")
@@ -597,7 +611,11 @@ async def handle_terminal(
             is not SandboxPermissions.REQUIRE_ESCALATED
         ):
             raise ToolError("prefix_rule 只能与 require_escalated 一起使用")
-        final_argv = shell_argv(command)
+        managed_shell = (
+            mode is not ConversationPermissionMode.FULL_ACCESS
+            and requested_permissions.sandbox_permissions is not SandboxPermissions.REQUIRE_ESCALATED
+        )
+        final_argv = shell_argv(command, cwd=Path(cwd) if managed_shell else None)
         shell_kind = current_shell_kind()
         classification = None
         if mode is not ConversationPermissionMode.FULL_ACCESS:
@@ -723,14 +741,24 @@ async def handle_terminal(
             security_service.mode_for(security_context),
             db_path=security_service.db_path,
             audit=security_service.audit,
+            approval_service=security_service,
             additional_permissions=granted_permissions,
             trusted_readable_roots=(
                 inherited_launch.trusted_readable_roots if inherited_launch is not None else ()
             ),
         )
         applied_permissions = launch.additional_permissions
+        if not launch.managed:
+            network_mode = "host"
+        elif launch.profile.network is NetworkPolicy.UNRESTRICTED:
+            network_mode = "direct"
+        elif launch.profile.network_entries or applied_permissions.network:
+            network_mode = "proxy"
+        else:
+            network_mode = "restricted"
         terminal_metadata = {
             "execution_boundary": "sandbox" if launch.managed else "host",
+            "network_mode": network_mode,
             "effective_home": str(Path.home().expanduser().resolve(strict=False)),
             "applied_permissions": serialize_additional_permissions(applied_permissions),
         }
@@ -807,6 +835,7 @@ async def handle_terminal(
                 command,
                 launch=launch,
                 cwd=cwd,
+                command_argv=final_argv,
                 session_key=current_session_id.get(),
                 owner_account_id=owner,
                 watch_patterns=[str(p) for p in watch_patterns],
@@ -845,6 +874,7 @@ async def handle_terminal(
         command,
         launch=launch,
         cwd=cwd,
+        command_argv=final_argv,
         session_key=current_session_id.get(),
         owner_account_id=owner,
         notify_on_complete=False,
@@ -932,7 +962,7 @@ async def handle_terminal(
             "sandbox_unavailable": "当前平台的安全沙箱不可用，命令未执行",
             "sandbox_denied": "安全沙箱拒绝执行该命令",
             "policy_denied": "安全策略拒绝执行该命令",
-            "network_unavailable": "安全运行时无法建立获批的网络边界",
+            "network_unavailable": "安全运行时无法应用当前网络策略",
             "timeout": "安全运行时执行超时",
             "output_truncated": "安全运行时输出超过限制",
         }

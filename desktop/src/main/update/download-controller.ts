@@ -106,7 +106,7 @@ function safeUnlink(p: string): void {
 async function downloadAndVerifySignature(packageUrl: string, packagePath: string): Promise<void> {
   const publicKey = configuredUpdatePublicKey();
   if (!publicKey) {
-    throw new Error('严格安全约束已阻止更新：未配置 ACE_UPDATE_PUBLIC_KEY');
+    throw new Error('无法验证更新包签名：未配置更新签名公钥');
   }
   const signaturePath = `${packagePath}.sig`;
   const temporaryPath = `${signaturePath}.part`;
@@ -213,7 +213,7 @@ async function runDownload(inf: Inflight): Promise<void> {
           console.log('[Download] redirect to:', inf.url);
           // 严格安全：手动 follow 重定向时，禁止落到非 HTTPS（替代 fetch 自动 follow 后的 isSecureRemoteUrl 校验）
           if (!isSecureRemoteUrl(inf.url, strictSecurityEnabled())) {
-            reject(new Error('严格安全约束已阻止更新包重定向到非 HTTPS 地址'));
+            reject(new Error('更新包下载被阻止：重定向地址未使用 HTTPS'));
             return;
           }
           req.destroy();
@@ -402,17 +402,17 @@ export function startDownload(args: StartArgs): { success: boolean; message?: st
     try {
       parsedUrl = new URL(url);
     } catch {
-      const message = '严格安全约束要求更新包使用有效的 HTTPS 地址';
+      const message = '更新包需要有效的 HTTPS 下载地址。';
       send({ phase: 'error', message });
       return { success: false, message };
     }
     if (parsedUrl.protocol !== 'https:') {
-      const message = '严格安全约束要求更新包使用 HTTPS；可在安全中心关闭后启用兼容模式';
+      const message = '更新包需要通过 HTTPS 下载，请使用 HTTPS 下载地址。';
       send({ phase: 'error', message });
       return { success: false, message };
     }
     if (!configuredUpdatePublicKey()) {
-      const message = '严格安全约束已阻止更新：未配置 ACE_UPDATE_PUBLIC_KEY';
+      const message = '无法验证更新包签名：未配置更新签名公钥';
       send({ phase: 'error', message });
       return { success: false, message };
     }

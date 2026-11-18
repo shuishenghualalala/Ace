@@ -1,25 +1,6 @@
 import { BrowserWindow, dialog } from 'electron';
 import * as path from 'path';
 
-/** Collect the host user's decision before weakening the global compatibility policy. */
-export async function confirmStrictSecurityDisable(parent: BrowserWindow | null): Promise<boolean> {
-  if (!parent || parent.isDestroyed()) return false;
-  const result = await dialog.showMessageBox(parent, {
-    type: 'warning',
-    title: '关闭严格安全约束',
-    message: '要启用兼容模式吗？',
-    detail: [
-      '兼容模式会放宽旧服务的明文传输、更新/安装完整性校验和默认审批。',
-      '受管会话仍会在原生隔离环境中执行，隔离环境不可用时不会回退到宿主执行。',
-    ].join('\n\n'),
-    buttons: ['保持严格模式', '启用兼容模式'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-  });
-  return result.response === 1;
-}
-
 /** Ask for one host-mutating action without delegating authority to the renderer. */
 export async function confirmCuaDriverInstall(parent: BrowserWindow | null): Promise<boolean> {
   if (!parent || parent.isDestroyed()) return false;
@@ -70,4 +51,19 @@ export async function confirmCuaDriverInstall(parent: BrowserWindow | null): Pro
     });
     void window.loadFile(path.join(__dirname, '../assets/host-authority-dialog.html'));
   });
+}
+
+export async function confirmDefaultFullAccess(parent: BrowserWindow | null): Promise<boolean> {
+  if (!parent || parent.isDestroyed()) return false;
+  const { response } = await dialog.showMessageBox(parent, {
+    type: 'warning',
+    title: '新对话默认权限',
+    message: '将完全访问设为默认？',
+    detail: '之后新建的对话会使用当前系统用户权限运行命令，可读写工作区外的文件并联网。',
+    buttons: ['取消', '设为默认'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  return response === 1;
 }

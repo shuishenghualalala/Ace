@@ -663,7 +663,7 @@ async def stream_codex_events(
     from crew.security.launch import current_process_launch
 
     launch = current_process_launch.get()
-    if launch is not None and launch.managed:
+    if launch is not None and launch.external_managed:
         from crew.agent.external.cli_adapter import ExternalCliConfig, run_external_cli
 
         output = await run_external_cli(

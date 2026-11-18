@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from crew.agent.capabilities import capability_profile_ids
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.features.session_context import SessionSource, build_session_key
+from crew.security.models import default_conversation_permission_mode
 from crew.state.config import _lookup_api_key, is_owner_overridable_model_profile
 from crew.team.formation import (
     build_team_draft as build_team_draft,
@@ -222,6 +223,7 @@ def config_body(
         capability_snapshot() if callable(capability_snapshot) else {},
         crew.config,
     )
+    sandbox_enabled = bool(getattr(crew.config, "security_sandbox_enabled", False))
     return {
         "model": active.model,
         "has_key": active.has_key,
@@ -240,11 +242,10 @@ def config_body(
         },
         "feature_capabilities": feature_capabilities,
         "security": {
-            "enabled": bool(getattr(crew.config, "security_enabled", False)),
-            "default_mode": (
-                "request_approval"
-                if getattr(crew.config, "security_enabled", False)
-                else "full_access"
+            "enabled": sandbox_enabled,
+            "default_mode": default_conversation_permission_mode(sandbox_enabled).value,
+            "workspace_network_access": bool(
+                getattr(crew.config, "security_workspace_network_access", False)
             ),
         },
     }

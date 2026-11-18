@@ -15,6 +15,7 @@ use windows_sys::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
     CRYPT_INTEGER_BLOB,
 };
+use windows_sys::Win32::Security::EqualSid;
 
 const IDENTITY_VERSION: u16 = 3;
 const IDENTITY_FILE: &str = "windows-sandbox-identity.json";
@@ -26,6 +27,14 @@ struct StoredIdentity {
     protected_password: Vec<u8>,
     online_username: String,
     online_protected_password: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    direct: Option<StoredAccount>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredAccount {
+    username: String,
+    protected_password: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -35,21 +44,26 @@ pub struct SandboxCredentials {
 }
 
 /// Installer-only elevated setup. Runtime never invokes this automatically.
-pub fn setup(state_dir: &Path) -> Result<(), String> {
+pub fn setup(state_dir: &Path, expected_owner_sid: Option<&str>) -> Result<(), String> {
     if !state_dir.is_absolute() {
         return Err("security state directory must be absolute".to_string());
     }
+    if let Some(expected_owner_sid) = expected_owner_sid {
+        verify_setup_owner(expected_owner_sid)?;
+    }
+    let _lock = super::acl::acquire_mutex()?;
     super::state::prepare_directory(state_dir)?;
     protect_legacy_identity(state_dir)?;
     super::acl::protect_legacy_state(state_dir)?;
     recover_identity_backup(state_dir)?;
-    if super::state::read_optional_file(&identity_path(state_dir))?.is_some() {
+    let path = identity_path(state_dir);
+    if let Some(bytes) = super::state::read_optional_file(&path)? {
         let offline = load(state_dir)?;
         let online = load_online(state_dir)?;
         super::token::sid_string_for_account(&offline.username)?;
         super::token::sid_string_for_account(&online.username)?;
         super::wfp::install(&offline.username, &online.username)?;
-        return Ok(());
+        return provision_direct_identity(&path, parse_identity(&bytes)?);
     }
     let suffix: String = thread_rng()
         .sample_iter(&Alphanumeric)
@@ -80,23 +94,91 @@ pub fn setup(state_dir: &Path) -> Result<(), String> {
             protected_password: protect(password.as_bytes())?,
             online_username: online_username.clone(),
             online_protected_password: protect(online_password.as_bytes())?,
+            direct: None,
         };
-        let bytes = serde_json::to_vec_pretty(&stored)
-            .map_err(|error| format!("cannot serialize sandbox identity: {error}"))?;
-        write_protected_identity(&identity_path(state_dir), &bytes)?;
-        Ok(())
+        write_identity(&path, &stored)?;
+        Ok(stored)
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(identity_path(state_dir));
-        delete_local_user(&username);
-        delete_local_user(&online_username);
-    } else if let Err(error) = super::wfp::install(&username, &online_username) {
-        let _ = fs::remove_file(identity_path(state_dir));
-        delete_local_user(&username);
-        delete_local_user(&online_username);
+    let stored = result.and_then(|stored| {
+        super::wfp::install(&username, &online_username)?;
+        Ok(stored)
+    });
+    match stored {
+        Ok(stored) => provision_direct_identity(&path, stored),
+        Err(error) => {
+            let _ = fs::remove_file(path);
+            delete_local_user(&username);
+            delete_local_user(&online_username);
+            Err(error)
+        }
+    }
+}
+
+/// Installer preflight for an existing installation under the normal user.
+pub fn check_setup(state_dir: &Path) -> Result<(), String> {
+    if !state_dir.is_absolute() {
+        return Err("security state directory must be absolute".to_string());
+    }
+    let offline = load(state_dir)?;
+    let online = load_online(state_dir)?;
+    load_direct(state_dir)?;
+    super::wfp::verify_installed(&offline.username, false)?;
+    super::wfp::verify_installed(&online.username, true)
+}
+
+fn verify_setup_owner(expected_sid: &str) -> Result<(), String> {
+    let expected = super::token::LocalSid::from_string(expected_sid)
+        .map_err(|_| "invalid --expected-owner-sid value".to_string())?;
+    let mut current = super::state::current_user_sid()?;
+    if unsafe { EqualSid(current.as_mut_ptr().cast(), expected.as_ptr()) } == 0 {
+        return Err("windows_setup_owner_mismatch: elevate using the Windows account that started Ace setup".to_string());
+    }
+    Ok(())
+}
+
+fn provision_direct_identity(path: &Path, mut stored: StoredIdentity) -> Result<(), String> {
+    if let Some(account) = stored.direct.as_ref() {
+        if direct_password(account).is_ok() {
+            return Ok(());
+        }
+        if !valid_direct_account(&account.username) {
+            return Err("Windows sandbox direct network identity is invalid".to_string());
+        }
+    }
+    let suffix: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(10)
+        .map(char::from)
+        .collect();
+    let username = format!("AceSbDir_{suffix}");
+    let password: String = thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect();
+    let protected_password = protect(password.as_bytes())?;
+    create_local_user(&username, &password)?;
+    let previous = stored.direct.replace(StoredAccount {
+        username: username.clone(),
+        protected_password,
+    });
+    if let Err(error) = write_identity(path, &stored) {
+        // Publishing can succeed before removal of the old backup is attempted.
+        // Avoid deleting the account if the new record already points to it.
+        let published = super::state::read_file(path)
+            .and_then(|bytes| parse_identity(&bytes))
+            .ok()
+            .and_then(|stored| stored.direct)
+            .is_some_and(|account| account.username == username);
+        if !published {
+            delete_local_user(&username);
+        }
         return Err(error);
     }
-    result
+    if let Some(account) = previous {
+        delete_local_user(&account.username);
+    }
+    Ok(())
 }
 
 pub fn load(state_dir: &Path) -> Result<SandboxCredentials, String> {
@@ -107,12 +189,34 @@ pub fn load_online(state_dir: &Path) -> Result<SandboxCredentials, String> {
     load_named(state_dir, true)
 }
 
+pub fn load_direct(state_dir: &Path) -> Result<SandboxCredentials, String> {
+    let stored = read_identity(state_dir)?;
+    let account = stored.direct.ok_or_else(|| {
+        "Windows direct network requires sandbox setup or repair from Ace Security Center"
+            .to_string()
+    })?;
+    let password = direct_password(&account)?;
+    Ok(SandboxCredentials {
+        username: account.username,
+        password,
+    })
+}
+
+fn direct_password(account: &StoredAccount) -> Result<String, String> {
+    if !valid_direct_account(&account.username) {
+        return Err("Windows sandbox direct network identity is invalid".to_string());
+    }
+    super::token::sid_string_for_account(&account.username)?;
+    decode_password(&account.protected_password)
+}
+
 /// Elevated uninstall removes only stable Ace WFP objects and current Ace
 /// sandbox accounts recorded in the identity file.
 pub fn uninstall(state_dir: &Path) -> Result<(), String> {
     if !state_dir.is_absolute() {
         return Err("security state directory must be absolute".to_string());
     }
+    let _lock = super::acl::acquire_mutex()?;
     if state_dir.exists() {
         super::state::prepare_directory(state_dir)?;
         protect_legacy_identity(state_dir)?;
@@ -139,23 +243,13 @@ pub fn uninstall(state_dir: &Path) -> Result<(), String> {
 }
 
 fn load_named(state_dir: &Path, online: bool) -> Result<SandboxCredentials, String> {
-    let bytes = super::state::read_file(&identity_path(state_dir))
-        .map_err(|error| format!("Windows sandbox identity is not installed: {error}"))?;
-    let stored: StoredIdentity = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Windows sandbox identity is invalid: {error}"))?;
-    if stored.version != IDENTITY_VERSION
-        || !valid_offline_account(&stored.username)
-        || !valid_online_account(&stored.online_username)
-    {
-        return Err("Windows sandbox identity version mismatch".to_string());
-    }
+    let stored = read_identity(state_dir)?;
     let protected_password = if online {
         &stored.online_protected_password
     } else {
         &stored.protected_password
     };
-    let password = String::from_utf8(unprotect(protected_password)?)
-        .map_err(|_| "Windows sandbox password is not valid UTF-8".to_string())?;
+    let password = decode_password(protected_password)?;
     Ok(SandboxCredentials {
         username: if online {
             stored.online_username
@@ -166,6 +260,29 @@ fn load_named(state_dir: &Path, online: bool) -> Result<SandboxCredentials, Stri
     })
 }
 
+fn read_identity(state_dir: &Path) -> Result<StoredIdentity, String> {
+    let bytes = super::state::read_file(&identity_path(state_dir))
+        .map_err(|error| format!("Windows sandbox identity is not installed: {error}"))?;
+    parse_identity(&bytes)
+}
+
+fn parse_identity(bytes: &[u8]) -> Result<StoredIdentity, String> {
+    let stored: StoredIdentity = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Windows sandbox identity is invalid: {error}"))?;
+    if stored.version != IDENTITY_VERSION
+        || !valid_offline_account(&stored.username)
+        || !valid_online_account(&stored.online_username)
+    {
+        return Err("Windows sandbox identity version mismatch".to_string());
+    }
+    Ok(stored)
+}
+
+fn decode_password(protected_password: &[u8]) -> Result<String, String> {
+    String::from_utf8(unprotect(protected_password)?)
+        .map_err(|_| "Windows sandbox password is not valid UTF-8".to_string())
+}
+
 /// Current account names only.
 fn valid_offline_account(value: &str) -> bool {
     value.starts_with("AceSbOff_") && value.len() <= 64
@@ -173,6 +290,12 @@ fn valid_offline_account(value: &str) -> bool {
 
 fn valid_online_account(value: &str) -> bool {
     value.starts_with("AceSbNet_") && value.len() <= 64
+}
+
+fn valid_direct_account(value: &str) -> bool {
+    value.strip_prefix("AceSbDir_").is_some_and(|suffix| {
+        suffix.len() == 10 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
 }
 
 /// Guards ``delete_local_user`` so only Ace sandbox accounts are ever removed,
@@ -188,6 +311,12 @@ fn stored_usernames_from_value(value: &serde_json::Value) -> Result<Vec<String>,
     }
     if let Some(s) = value.get("online_username").and_then(|v| v.as_str()) {
         names.push(s.to_string());
+    }
+    if let Some(account) = value["direct"]["username"]
+        .as_str()
+        .filter(|name| valid_direct_account(name))
+    {
+        names.push(account.to_string());
     }
     Ok(names)
 }
@@ -300,8 +429,10 @@ fn crypt(bytes: &[u8], protect: bool) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 
-fn write_protected_identity(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    super::state::write_file(path, bytes)
+fn write_identity(path: &Path, stored: &StoredIdentity) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(stored)
+        .map_err(|error| format!("cannot serialize sandbox identity: {error}"))?;
+    super::state::write_file(path, &bytes)
 }
 
 fn protect_legacy_identity(state_dir: &Path) -> Result<(), String> {
@@ -335,4 +466,63 @@ pub fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_check_leaves_missing_state_untouched() {
+        let parent = tempfile::tempdir().unwrap();
+        let state = parent.path().join("not-installed");
+        assert!(check_setup(&state).is_err());
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn mismatched_setup_owner_does_not_create_security_state() {
+        let parent = tempfile::tempdir().unwrap();
+        let state = parent.path().join("untouched");
+        let error = setup(&state, Some("S-1-1-0")).unwrap_err();
+        assert!(error.starts_with("windows_setup_owner_mismatch:"));
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn malformed_setup_owner_does_not_create_security_state() {
+        let parent = tempfile::tempdir().unwrap();
+        let state = parent.path().join("untouched");
+        let error = setup(&state, Some("invalid")).unwrap_err();
+        assert!(error.contains("invalid --expected-owner-sid value"));
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn legacy_v3_file_keeps_restricted_identities_and_has_no_direct_identity() {
+        let existing = serde_json::json!({
+            "version": 3,
+            "username": "AceSbOff_0123456789",
+            "protected_password": [],
+            "online_username": "AceSbNet_0123456789",
+            "online_protected_password": [],
+        });
+        let stored = parse_identity(&serde_json::to_vec(&existing).unwrap()).unwrap();
+        assert_eq!(stored.username, "AceSbOff_0123456789");
+        assert_eq!(stored.online_username, "AceSbNet_0123456789");
+        assert!(stored.direct.is_none());
+        assert_eq!(stored_usernames_from_value(&existing).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn uninstall_enumerates_only_valid_new_direct_identity_names() {
+        let value = |name: &str| serde_json::json!({ "direct": { "username": name } });
+        assert_eq!(
+            stored_usernames_from_value(&value("AceSbDir_0123456789")).unwrap(),
+            ["AceSbDir_0123456789"],
+        );
+        assert!(stored_usernames_from_value(&value("Administrator"))
+            .unwrap()
+            .is_empty());
+    }
 }

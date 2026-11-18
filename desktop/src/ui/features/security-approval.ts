@@ -7,10 +7,15 @@
  */
 
 import { $, notify, state } from '../state';
+import { sessionStore } from '../stores/session-store';
 import { appendMessage, renderChat } from './chat-controller';
+import { findChannelSession } from './channel-sessions';
 import { queryPrimaryComposer } from './composer-scope';
+import { defaultConversationSecurityMode, securityModuleEnabled, type ConversationSecurityMode } from './security-mode';
+import { FULL_ACCESS_CHOICE_CHANGED, fullAccessChoiceEnabled, preferredNewConversationMode } from './security-permission-settings';
+import { composerWorkspaceId, ensureComposerDraftSession, isDraftSession } from './workspaces';
 
-export type ConversationSecurityMode = 'request_approval' | 'auto_review' | 'full_access';
+export type { ConversationSecurityMode } from './security-mode';
 export type SecurityApprovalChoice = 'once' | 'session' | 'always' | 'reject';
 
 export const SECURITY_APPROVAL_CHOICES: readonly SecurityApprovalChoice[] = [
@@ -29,6 +34,9 @@ export const SECURITY_MODE_OPTIONS: { value: ConversationSecurityMode; label: st
 
 export const FULL_ACCESS_CONFIRMATION =
   '完全访问会让当前对话直接使用你的宿主系统用户权限，不再启用原生文件或网络沙箱，也不逐项审批；永久安全红线、拒绝规则、审计与进程回收仍保留。确定启用吗？';
+
+export const DRAFT_FULL_ACCESS_CONFIRMATION =
+  '这条新对话将使用你的系统用户权限运行，关闭原生文件和网络沙箱及逐项审批。此选择只适用于这条对话。';
 
 export function modeLabel(mode: ConversationSecurityMode): string {
   if (mode === 'full_access') return '完全访问权限';
@@ -145,29 +153,31 @@ export function formatApprovalSummary(request: Record<string, unknown>): string 
 }
 
 const sessionModes = new Map<string, ConversationSecurityMode>();
-// 按项目记忆的新对话预设（决策 #96）。full_access 永不作为预设持久化——
-// 新对话必须再次确认（决策 #95），避免一次确认后静默继承最高权限。
-const nextConversationModes = new Map<string, ConversationSecurityMode>();
+const browserDraftsAwaitingFirstTurn = new Map<string, { workspaceId: string; ownerKey: string }>();
+let draftPermission: {
+  sessionId: string;
+  workspaceId: string;
+  ownerKey: string;
+  mode: ConversationSecurityMode;
+} | null = null;
+
+if (typeof window !== 'undefined') {
+  window.addEventListener(FULL_ACCESS_CHOICE_CHANGED, () => {
+    if (!fullAccessChoiceEnabled() && draftPermission?.mode === 'full_access') draftPermission = null;
+  });
+}
+
+sessionStore.subscribe(({ activeSessionId }) => {
+  if (draftPermission && activeSessionId !== draftPermission.sessionId) draftPermission = null;
+});
 
 function acknowledgedMode(
   result: { body?: unknown } | undefined,
-  fallback: ConversationSecurityMode,
-): ConversationSecurityMode {
+): ConversationSecurityMode | null {
   const value = String((result?.body as { mode?: unknown } | undefined)?.mode ?? '');
   return value === 'request_approval' || value === 'auto_review' || value === 'full_access'
     ? value
-    : fallback;
-}
-
-function configuredDefaultMode(): ConversationSecurityMode {
-  const configured = state.config?.security?.default_mode;
-  return configured === 'request_approval' || configured === 'auto_review' || configured === 'full_access'
-    ? configured
-    : 'request_approval';
-}
-
-function presetForWorkspace(workspaceId: string): ConversationSecurityMode {
-  return nextConversationModes.get(workspaceId) ?? configuredDefaultMode();
+    : null;
 }
 
 function announceModeChange(): void {
@@ -177,33 +187,97 @@ function announceModeChange(): void {
 }
 
 function workspaceIdForSession(sid: string | null | undefined): string {
-  if (sid) {
-    return state.sessions.find((item) => item.id === sid)?.workspaceId ?? 'default';
-  }
-  return state.currentWorkspaceId ?? 'default';
+  if (!sid || isDraftSession(sid)) return composerWorkspaceId();
+  return (state.sessions.find((item) => item.id === sid) ?? findChannelSession(sid))?.workspaceId
+    ?? 'default';
 }
 
-/** 当前生效模式：有活跃会话看会话绑定，否则看该项目的新对话预设。chip label 据此渲染。 */
+/** 已保存的对话显示已确认的模式，草稿显示单独选择或新对话默认值。 */
 export function currentSecurityMode(): ConversationSecurityMode {
   const sid = state.activeSessionId;
-  if (sid) return securityModeForSession(sid);
-  return presetForWorkspace(workspaceIdForSession(sid));
+  const workspaceId = workspaceIdForSession(sid);
+  if (sid && !needsFirstTurnSecurityMode(sid, workspaceId)) {
+    return securityModeForSession(sid);
+  }
+  return draftSecurityMode(sid, workspaceId);
+}
+
+export function canSelectFullAccess(sessionId = state.activeSessionId): boolean {
+  if (!fullAccessChoiceEnabled()) return false;
+  if (!sessionId || isDraftSession(sessionId)) return true;
+  const row = state.sessions.find((item) => item.id === sessionId) ?? findChannelSession(sessionId);
+  return Boolean(row?.workspaceId);
+}
+
+function securityOwnerKey(): string {
+  const user = state.userInfo;
+  return JSON.stringify([user?.uid, user?.pid, user?.staffCode, user?.staffUid]);
+}
+
+export function draftSecurityMode(
+  sessionId: string | null,
+  workspaceId: string,
+): ConversationSecurityMode {
+  const backendDefault = defaultConversationSecurityMode();
+  if (state.config?.security?.enabled === false) return backendDefault;
+  const selected = sessionId ? explicitDraftMode(sessionId, workspaceId) : undefined;
+  if (selected) return selected;
+  const preferred = preferredNewConversationMode();
+  if (preferred === 'full_access') return fullAccessChoiceEnabled() ? preferred : 'auto_review';
+  return preferred ?? (backendDefault === 'full_access' ? 'auto_review' : backendDefault);
+}
+
+function explicitDraftMode(sessionId: string, workspaceId: string): ConversationSecurityMode | undefined {
+  if (draftPermission?.sessionId !== sessionId || draftPermission.workspaceId !== workspaceId
+    || draftPermission.ownerKey !== securityOwnerKey()) return undefined;
+  if (draftPermission.mode === 'full_access' && !fullAccessChoiceEnabled()) return undefined;
+  return draftPermission.mode;
+}
+
+/** Browser can save the conversation before it has sent a model turn. */
+export function rememberBrowserDraftSecurityScope(sessionId: string, workspaceId: string): void {
+  if (isDraftSession(sessionId)) {
+    browserDraftsAwaitingFirstTurn.set(sessionId, { workspaceId, ownerKey: securityOwnerKey() });
+  }
+}
+
+export function needsFirstTurnSecurityMode(sessionId: string, workspaceId: string): boolean {
+  if (isDraftSession(sessionId)) return true;
+  const browserDraft = browserDraftsAwaitingFirstTurn.get(sessionId);
+  return browserDraft?.workspaceId === workspaceId && browserDraft.ownerKey === securityOwnerKey();
+}
+
+export function clearDraftSecurityMode(sessionId: string): void {
+  if (draftPermission?.sessionId === sessionId) draftPermission = null;
+}
+
+export function finishFirstTurnSecurityMode(sessionId: string): void {
+  browserDraftsAwaitingFirstTurn.delete(sessionId);
+  clearDraftSecurityMode(sessionId);
 }
 
 /**
- * 选择安全模式：若有活跃会话则即时切到该会话（toolbar chip 是「对话框内」选择器，
- * 与 codex 一致）。request_approval/auto_review 会记为该项目新对话预设并静默沿用；
- * full_access 只作用于当前会话，不写入预设——下次新对话仍需再次确认（决策 #95）。
- * full_access 的二次确认由调用方传入的 confirmFullAccess 负责。
+ * 已保存的会话即时切换。草稿的权限在首条消息发送前提交给 Gateway。
+ * 完全访问只绑定一次确认所指向的会话和工作空间。
  */
 export async function selectNextConversationMode(
   mode: ConversationSecurityMode,
-  confirmFullAccess: () => boolean | Promise<boolean>,
+  confirmFullAccess: (isNewConversation: boolean) => boolean | Promise<boolean>,
 ): Promise<boolean> {
-  if (mode === 'full_access' && !await confirmFullAccess()) return false;
   const sid = state.activeSessionId;
   const workspaceId = workspaceIdForSession(sid);
-  if (sid) {
+  const draft = !sid || needsFirstTurnSecurityMode(sid, workspaceId);
+  const ownerKey = securityOwnerKey();
+  if (mode === 'full_access') {
+    if (!canSelectFullAccess(sid) || !await confirmFullAccess(draft)) return false;
+    if (state.activeSessionId !== sid || workspaceIdForSession(sid) !== workspaceId
+      || securityOwnerKey() !== ownerKey || !canSelectFullAccess(sid)) return false;
+  }
+  if (draft) {
+    const draftId = sid ?? ensureComposerDraftSession();
+    if (!draftId || workspaceIdForSession(draftId) !== workspaceId) return false;
+    draftPermission = { sessionId: draftId, workspaceId, ownerKey, mode };
+  } else {
     const setMode = typeof window !== 'undefined' ? window.Crew?.securitySetMode : undefined;
     if (!setMode) {
       notify('安全模式切换失败：Desktop 安全桥不可用');
@@ -216,7 +290,7 @@ export async function selectNextConversationMode(
         notify(`安全模式切换失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}`);
         return false;
       }
-      effectiveMode = acknowledgedMode(result, mode);
+      effectiveMode = acknowledgedMode(result) ?? mode;
     } catch (err) {
       notify(`安全模式切换失败：${String((err as Error)?.message ?? err)}`);
       return false;
@@ -224,48 +298,52 @@ export async function selectNextConversationMode(
     // Gateway ACK 后才更新 renderer 状态，避免 UI 显示 full_access 但后端仍在 managed（或相反）。
     sessionModes.set(sid, effectiveMode);
   }
-  if (mode !== 'full_access') {
-    nextConversationModes.set(workspaceId, mode);
-  }
   announceModeChange();
   return true;
 }
 
-/** 新会话创建时（workspaces.ts）调用：把该项目的预设落到该会话绑定。
- *
- * 等 Gateway ACK 后才更新 renderer 本地状态，与 selectNextConversationMode 一致：
- * 否则前端可能显示 full_access 但后端仍在 managed（或相反），新会话首个动作就按错误
- * 模式授权。ACK 失败时不落 preset，保持安全默认 request_approval。
- */
+/** 首条消息前向 Gateway 提交新会话的权限，并等候确认。 */
 export async function assignSecurityMode(
   sessionId: string,
   workspaceId = 'default',
-): Promise<ConversationSecurityMode> {
-  const preset = presetForWorkspace(workspaceId);
-  if (typeof window !== 'undefined') {
-    const setMode = window.Crew?.securitySetMode;
-    if (setMode) {
-      try {
-        const result = await setMode({ workspaceId, sessionId, mode: preset });
-        if (!result?.ok) {
-          notify(`安全模式初始化失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}，已回退到逐次审批`);
-          return 'request_approval';
-        }
-        const effective = acknowledgedMode(result, preset);
-        sessionModes.set(sessionId, effective);
-        return effective;
-      } catch (err) {
-        notify(`安全模式初始化失败：${String((err as Error)?.message ?? err)}，已回退到逐次审批`);
-        return 'request_approval';
-      }
-    }
+  mode = draftSecurityMode(sessionId, workspaceId),
+): Promise<ConversationSecurityMode | null> {
+  const setMode = typeof window !== 'undefined' ? window.Crew?.securitySetMode : undefined;
+  if (!securityModuleEnabled() && state.config?.security?.enabled === false) {
+    const effective = defaultConversationSecurityMode();
+    if (effective !== mode) return null;
+    sessionModes.set(sessionId, effective);
+    return effective;
   }
-  sessionModes.set(sessionId, preset);
-  return preset;
+  if (!setMode && !securityModuleEnabled() && mode !== 'full_access') {
+    sessionModes.set(sessionId, mode);
+    return mode;
+  }
+  try {
+    if (!setMode) throw new Error('Desktop 安全桥不可用');
+    const result = await setMode({ workspaceId, sessionId, mode });
+    if (!result?.ok || acknowledgedMode(result) !== mode) {
+      throw new Error(String((result?.body as { detail?: string })?.detail ?? '网关未确认所选权限'));
+    }
+    sessionModes.set(sessionId, mode);
+    return mode;
+  } catch (error) {
+    notify(`消息未发送，未能确认新对话权限：${String((error as Error)?.message ?? error)}`);
+    return null;
+  }
+}
+
+export async function revokeDraftFullAccess(sessionId: string, workspaceId: string): Promise<void> {
+  sessionModes.delete(sessionId);
+  try {
+    await window.Crew?.securitySetMode?.({ workspaceId, sessionId, mode: 'request_approval' });
+  } catch {
+    // This draft cannot dispatch before the next successful permission acknowledgement.
+  }
 }
 
 export function securityModeForSession(sessionId: string): ConversationSecurityMode {
-  return sessionModes.get(sessionId) ?? configuredDefaultMode();
+  return sessionModes.get(sessionId) ?? defaultConversationSecurityMode();
 }
 
 function decisionLabel(decision: SecurityApprovalChoice): string {

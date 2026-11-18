@@ -22,6 +22,7 @@ from crew.security.models import (
     PermissionProfileKind,
 )
 from crew.security.runtime_client import NativeRuntimeClient
+from crew.security.workspace import prepare_new_workspace
 
 
 async def run_matrix(runtime: Path, platform_name: str) -> None:
@@ -32,6 +33,7 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
         workspace = root / "workspace"
         outside = root / "outside"
         workspace.mkdir()
+        prepare_new_workspace(workspace)
         outside.mkdir()
         metadata_root = workspace / ".git"
         metadata_root.mkdir()
@@ -46,6 +48,11 @@ async def run_matrix(runtime: Path, platform_name: str) -> None:
                 FilesystemEntry(
                     root=workspace,
                     access=FilesystemAccess.READ_WRITE,
+                ),
+                *(
+                    (FilesystemEntry(root=outside, access=FilesystemAccess.READ),)
+                    if platform_name == "windows"
+                    else ()
                 ),
                 *(
                     FilesystemEntry(

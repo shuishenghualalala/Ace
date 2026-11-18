@@ -879,8 +879,15 @@ def task_workspace_path(
     root = base / safe_path_segment(workspace_id, "default")
     _validate_task_workspace_path(root, owner_account_id=owner, workspace_id=workspace_id)
     if create:
-        base.mkdir(parents=True, exist_ok=True)
-        root.mkdir(parents=True, exist_ok=True)
+        try:
+            root.mkdir(parents=True)
+        except FileExistsError:
+            if not root.is_dir():
+                raise
+        else:
+            from crew.security.workspace import prepare_new_workspace
+
+            prepare_new_workspace(root)
     return root
 
 

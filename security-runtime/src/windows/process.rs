@@ -43,6 +43,7 @@ struct RunnerRequest {
     command: Vec<String>,
     cwd: PathBuf,
     capability_sids: Vec<String>,
+    scratch_dir: PathBuf,
     max_output_bytes: usize,
     network_enabled: bool,
     allow_local_binding: bool,
@@ -83,6 +84,7 @@ pub fn run_via_account(
     credentials: &SandboxCredentials,
     request: &WindowsRunRequest,
     capability_sids: &[String],
+    scratch_dir: &Path,
     capabilities: RuntimeCapabilities,
     control_rx: Option<Receiver<RuntimeControl>>,
     sender: &SyncSender<RuntimeMessage>,
@@ -91,9 +93,10 @@ pub fn run_via_account(
         command: request.command.clone(),
         cwd: request.cwd.clone(),
         capability_sids: capability_sids.to_vec(),
+        scratch_dir: scratch_dir.to_path_buf(),
         max_output_bytes: request.max_output_bytes,
         network_enabled: request.network_enabled,
-        allow_local_binding: request.allow_local_binding,
+        allow_local_binding: request.allow_local_binding && !request.network_access,
         stdin_b64: request
             .stdin
             .as_ref()
@@ -125,12 +128,17 @@ pub fn run_via_account(
     startup.hStdOutput = child_stdout.child;
     startup.hStdError = child_stderr.child;
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let application = wide(&executable);
     let mut command_line = wide(format!("{} --windows-runner", quote_arg(&executable)));
     let username = wide(&credentials.username);
     let domain = wide(".");
     let password = wide(&credentials.password);
-    let cwd = wide(executable.parent().unwrap_or(Path::new(r"C:\")));
-    let mut environment = environment_block(restricted_environment(false, BTreeMap::new()));
+    // The runner lives in the host installation or checkout, which the sandbox
+    // account may traverse to launch the explicitly granted binary but cannot
+    // use as an unrestricted working directory. The task cwd is sent below.
+    let cwd = wide(system_root());
+    let mut environment =
+        environment_block(restricted_environment(false, BTreeMap::new(), scratch_dir));
     let flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
     // Audit W2: CreateProcessWithLogonW cannot accept PROC_THREAD_ATTRIBUTE_HANDLE_LIST
     // (only CreateProcessAsUserW supports the extended STARTUPINFOEXW attribute list).
@@ -147,7 +155,7 @@ pub fn run_via_account(
             domain.as_ptr(),
             password.as_ptr(),
             LOGON_WITH_PROFILE,
-            std::ptr::null(),
+            application.as_ptr(),
             command_line.as_mut_ptr(),
             flags,
             environment.as_mut_ptr().cast(),
@@ -156,14 +164,13 @@ pub fn run_via_account(
             &mut process_info,
         )
     };
+    if ok == 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(format!("CreateProcessWithLogonW failed: {error}"));
+    }
     child_stdin.close_child();
     let child_stdout = child_stdout.into_parent_file_after_child_close();
     let mut child_stderr = child_stderr.into_parent_file_after_child_close();
-    if ok == 0 {
-        return Err(format!("CreateProcessWithLogonW failed: {}", unsafe {
-            GetLastError()
-        }));
-    }
     let job = KillOnCloseJob::new()?;
     if let Err(error) = job.assign(process_info.hProcess) {
         unsafe {
@@ -174,13 +181,12 @@ pub fn run_via_account(
         return Err(error);
     }
     if unsafe { ResumeThread(process_info.hThread) } == u32::MAX {
+        let error = std::io::Error::last_os_error();
         unsafe {
             CloseHandle(process_info.hThread);
             CloseHandle(process_info.hProcess);
         }
-        return Err(format!("ResumeThread failed: {}", unsafe {
-            GetLastError()
-        }));
+        return Err(format!("ResumeThread failed: {error}"));
     }
     unsafe { CloseHandle(process_info.hThread) };
     let request_bytes = serde_json::to_vec(&runner_request)
@@ -351,8 +357,11 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
                 .to_string(),
         );
     }
-    let mut child_environment =
-        restricted_environment(request.network_enabled, request.env_overrides);
+    let mut child_environment = restricted_environment(
+        request.network_enabled,
+        request.env_overrides,
+        &request.scratch_dir,
+    );
     if let Some(home) = &staged_home {
         child_environment.insert("HOME".to_string(), home.0.to_string_lossy().to_string());
         child_environment.insert(
@@ -401,26 +410,25 @@ fn run_restricted<W: Write, R: BufRead + Send + 'static>(
             &mut process_info,
         )
     };
+    if ok == 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { CloseHandle(token) };
+        return Err(format!("CreateProcessAsUserW failed: {error}"));
+    }
     unsafe { CloseHandle(token) };
     let mut stdin = child_stdin.into_parent_file_after_child_close();
     let stdout = child_stdout.into_parent_file_after_child_close();
     let stderr = child_stderr.into_parent_file_after_child_close();
-    if ok == 0 {
-        return Err(format!("CreateProcessAsUserW failed: {}", unsafe {
-            GetLastError()
-        }));
-    }
     // The runner itself is already in the outer kill-on-close Job; children
     // inherit that Job. Suspension closes the assignment/start race.
     if unsafe { ResumeThread(process_info.hThread) } == u32::MAX {
+        let error = std::io::Error::last_os_error();
         unsafe {
             TerminateProcess(process_info.hProcess, 1);
             CloseHandle(process_info.hThread);
             CloseHandle(process_info.hProcess);
         }
-        return Err(format!("ResumeThread failed: {}", unsafe {
-            GetLastError()
-        }));
+        return Err(format!("ResumeThread failed: {error}"));
     }
     unsafe { CloseHandle(process_info.hThread) };
     let mut writer = RunnerWriter::new(output);
@@ -834,9 +842,14 @@ impl Drop for ProcThreadAttributes {
     }
 }
 
+fn system_root() -> std::ffi::OsString {
+    std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into())
+}
+
 fn restricted_environment(
     network_enabled: bool,
-    env_overrides: BTreeMap<String, String>,
+    mut env_overrides: BTreeMap<String, String>,
+    scratch_dir: &Path,
 ) -> BTreeMap<String, String> {
     let mut result = BTreeMap::new();
     for name in ["SystemRoot", "WINDIR", "ComSpec"] {
@@ -844,15 +857,22 @@ fn restricted_environment(
             result.insert(name.to_string(), value);
         }
     }
-    let system_root = result
-        .get("SystemRoot")
-        .cloned()
-        .unwrap_or_else(|| r"C:\Windows".to_string());
+    let system_root = system_root();
+    let system_root = system_root.to_string_lossy();
     result.insert(
         "PATH".to_string(),
         format!(r"{system_root}\System32;{system_root}"),
     );
+    env_overrides.retain(|name, _| {
+        !matches!(
+            name.to_ascii_uppercase().as_str(),
+            "TEMP" | "TMP" | "TMPDIR"
+        )
+    });
     result.extend(env_overrides);
+    for name in ["TEMP", "TMP", "TMPDIR"] {
+        result.insert(name.to_string(), scratch_dir.to_string_lossy().into_owned());
+    }
     if network_enabled {
         result.extend(crate::network::managed_proxy_environment(
             "http://127.0.0.1:43119",
@@ -927,4 +947,30 @@ fn read_capped(reader: &mut impl Read, limit: usize) -> (Vec<u8>, bool) {
         truncated |= retain < count;
     }
     (result, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_temp_paths_cannot_be_overridden() {
+        let scratch = Path::new(r"C:\Users\sandbox\ace-sandbox-example");
+        let overrides = BTreeMap::from([
+            ("Temp".to_string(), r"C:\host".to_string()),
+            ("tMp".to_string(), r"C:\host".to_string()),
+            ("tmpdir".to_string(), r"C:\host".to_string()),
+            ("CUSTOM".to_string(), "visible".to_string()),
+        ]);
+
+        let environment = restricted_environment(false, overrides, scratch);
+
+        for name in ["TEMP", "TMP", "TMPDIR"] {
+            assert_eq!(environment[name], scratch.to_str().unwrap());
+        }
+        for name in ["Temp", "tMp", "tmpdir"] {
+            assert!(!environment.contains_key(name));
+        }
+        assert_eq!(environment["CUSTOM"], "visible");
+    }
 }

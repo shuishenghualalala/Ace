@@ -14,12 +14,13 @@ pub const MAX_HOME_FILES: usize = 64;
 pub const MAX_RESPONSE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
-pub const READY_CAPABILITIES: [&str; 5] = [
+pub const READY_CAPABILITIES: &[&str] = &[
     "stdin_once",
     "stream_output",
     "stdin_bidirectional",
     "readonly_roots",
     "full_disk_read",
+    "direct_network",
 ];
 
 /// Stable error codes for the managed-network layer (spec §13).
@@ -93,6 +94,8 @@ pub enum RuntimeRequest {
         #[serde(default)]
         network_enabled: bool,
         #[serde(default)]
+        network_access: bool,
+        #[serde(default)]
         network_rules: Vec<NetworkRule>,
         #[serde(default)]
         allow_local_binding: bool,
@@ -121,6 +124,8 @@ pub enum RuntimeRequest {
         #[serde(default)]
         network_enabled: bool,
         #[serde(default)]
+        network_access: bool,
+        #[serde(default)]
         network_rules: Vec<NetworkRule>,
         #[serde(default)]
         allow_local_binding: bool,
@@ -148,7 +153,7 @@ pub struct ReadyFrame {
     #[serde(rename = "type")]
     pub frame_type: &'static str,
     pub version: u16,
-    pub capabilities: [&'static str; 5],
+    pub capabilities: &'static [&'static str],
 }
 
 #[derive(Debug, Serialize)]
@@ -229,14 +234,14 @@ pub struct RuntimeCapabilities {
     pub filesystem_sandbox: bool,
     pub process_tree_cleanup: bool,
     pub managed_network: bool,
+    pub direct_network: bool,
     pub full_disk_read: bool,
     pub system_bwrap: bool,
     pub bundled_bwrap: bool,
     pub wsl_version: Option<u8>,
     // Spec §13 capability matrix: fine-grained fields so the host can disable only the
-    // profile that depends on a missing capability (e.g. WFP absent ⇒ managed-network
-    // unavailable, while the offline filesystem sandbox stays usable) instead of
-    // all-or-nothing trial-and-error.
+    // profiles that need a capability (e.g. Windows WFP protects both offline
+    // and proxy-only requests).
     pub local_binding_control: bool,
     pub explicit_handle_inheritance: bool,
     pub windows_restricted_token: bool,
@@ -401,6 +406,7 @@ mod tests {
             filesystem_sandbox: true,
             process_tree_cleanup: true,
             managed_network: false,
+            direct_network: false,
             full_disk_read: false,
             system_bwrap: false,
             bundled_bwrap: false,

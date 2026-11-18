@@ -29,7 +29,7 @@ def test_sandbox_accounts_cannot_read_the_machine_dpapi_identity_file():
     assert "read_write = FILE_GENERIC_READ | FILE_GENERIC_WRITE" not in identity
     assert "super::state::prepare_directory(state_dir)" in identity
     assert "super::state::read_file(&identity_path(state_dir))" in identity
-    assert "super::state::write_file(path, bytes)" in identity
+    assert "super::state::write_file(path, &bytes)" in identity
     atomic_write = state[state.index("pub(crate) fn write_file") : state.index(
         "pub(crate) fn read_file"
     )]
@@ -42,9 +42,10 @@ def test_windows_setup_reprotects_the_legacy_identity_before_reading_it():
     identity = _read("identity.rs")
     setup = identity[identity.index("pub fn setup") : identity.index("pub fn load")]
 
+    assert "let path = identity_path(state_dir);" in setup
     assert "protect_legacy_identity(state_dir)?" in setup
     assert setup.index("protect_legacy_identity(state_dir)?") < setup.index(
-        "read_optional_file(&identity_path(state_dir))"
+        "read_optional_file(&path)"
     )
 
 

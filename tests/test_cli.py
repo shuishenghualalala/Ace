@@ -292,6 +292,33 @@ def test_security_check_terminal(capsys, cli_home):
     assert data is not None and data["verdict"] == "blocked"
 
 
+@pytest.mark.parametrize("available", [True, False])
+def test_security_auto_review_uses_live_runtime_probe(capsys, cli_home, monkeypatch, available):
+    async def probe(*, network_access):
+        assert network_access is False
+        return (object() if available else None), available, False, "test"
+
+    monkeypatch.setattr("crew.gateway.routers.security._live_filesystem_runtime", probe)
+
+    code, out = run_cli(
+        capsys,
+        "security",
+        "mode",
+        "set",
+        "--session-id",
+        "sec-sess",
+        "--mode",
+        "auto_review",
+        "--json",
+    )
+
+    if available:
+        assert code == 0
+        assert json_out(out)["mode"] == "auto_review"
+    else:
+        assert code == 1
+
+
 def test_security_check_file_and_network(capsys, cli_home):
     code, out = run_cli(
         capsys,
@@ -317,7 +344,8 @@ def test_security_check_file_and_network(capsys, cli_home):
     )
     assert code == 0
     data = json_out(out)
-    assert data is not None and data["allowed"] is True
+    assert data is not None and data["allowed"] is False
+    assert data["request"]["action"]["host"] == "example.com"
 
 
 def test_security_fake_file_and_network_actions(capsys, cli_home):
@@ -372,7 +400,17 @@ def test_security_sandbox_run(capsys, cli_home):
 
     if not Path(packaged_runtime_argv()[0]).is_file():
         pytest.skip("native security runtime 未随包安装")
-    code, out = run_cli(capsys, "security", "sandbox-run", "--argv", "/bin/echo", "sandbox-ok", "--json")
+    if os.name == "nt":
+        if not os.environ.get("ACE_SECURITY_STATE_DIR"):
+            pytest.skip("Windows native sandbox state is not configured for the CLI")
+        argv = ("cmd.exe", "/d", "/c", "echo sandbox-ok")
+    else:
+        argv = ("/bin/echo", "sandbox-ok")
+    workspace = cli_home.parent / "workspace"
+    workspace.mkdir()
+    code, out = run_cli(
+        capsys, "security", "sandbox-run", "--cwd", str(workspace), "--argv", *argv, "--json"
+    )
     assert code == 0
     data = json_out(out)
     assert data is not None and data["exit_code"] == 0

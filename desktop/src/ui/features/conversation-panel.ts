@@ -46,7 +46,7 @@ import {
 
 /** Composer 动作组：submit/stop/edit/queue（app.ts 主对话原接线逻辑的参数化形态）。 */
 export interface ConversationPanelActions {
-  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
+  submit(text: string, userMentions?: UserAgentMention[]): boolean | void | Promise<boolean | void>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -112,7 +112,7 @@ export function createMainComposerActions(
           state.userUnfoldedTurns.delete(message.id);
         }
       }
-      await sendMessage(text, userMentions);
+      return sendMessage(text, userMentions);
     },
     stop: () => stopGeneration(),
     cancelEdit,

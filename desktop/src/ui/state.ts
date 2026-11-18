@@ -70,7 +70,6 @@ export type TabKey =
   | 'wiki'
   | 'sites'
   | 'cron'
-  | 'security'
   | 'audit'
   | 'tracing'
   | 'system';

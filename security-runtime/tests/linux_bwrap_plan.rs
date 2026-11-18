@@ -17,6 +17,7 @@ mod linux {
         pub denied_roots: Vec<PathBuf>,
         pub full_disk_read: bool,
         pub network_enabled: bool,
+        pub network_access: bool,
         pub network_rules: Vec<()>,
         pub allow_local_binding: bool,
         pub proxy_socket_dir: Option<PathBuf>,

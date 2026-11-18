@@ -444,6 +444,27 @@ Type: filesandordirs; Name: "{app}\crew-gateway\runtimes"
 [Run]
 Filename: "{app}\crew-desktop\crew-desktop.exe"; Description: "{cm:LaunchProgram,Crew}"; Flags: nowait postinstall
 
+[Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  DesktopPath, DesktopDir: String;
+  ResultCode: Integer;
+begin
+  if (CurStep <> ssPostInstall) or WizardSilent then
+    Exit;
+  DesktopDir := ExpandConstant('{app}\crew-desktop');
+  DesktopPath := DesktopDir + '\crew-desktop.exe';
+  WizardForm.StatusLabel.Caption := '正在检查本机防护...';
+  if not ExecAsOriginalUser(DesktopPath, '--crew-provision-windows-sandbox',
+      DesktopDir, SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    LogFmt('Unable to start Windows sandbox initialization: %d', [ResultCode])
+  else if ResultCode = 0 then
+    Exit
+  else
+    LogFmt('Windows sandbox initialization exited with code %d', [ResultCode]);
+  MsgBox('Ace 已安装。Windows 防护尚未就绪，可打开安全中心查看状态。', mbInformation, MB_OK);
+end;
+
 "@
 
 [System.IO.File]::WriteAllText($issPath, $issContent, [System.Text.Encoding]::UTF8)

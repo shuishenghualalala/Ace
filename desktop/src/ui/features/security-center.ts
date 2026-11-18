@@ -1,8 +1,7 @@
 /**
  * Security Center composition root.
  *
- * The renderer view owns presentation only. Existing preload security APIs and
- * security-approval mode semantics remain the sole execution path.
+ * The renderer view owns presentation only; requests use the preload security APIs.
  */
 
 import { $, notify, state } from '../state';
@@ -12,27 +11,35 @@ import {
   type SecurityCenterSnapshot,
   type SecurityCenterView,
 } from './security-center-view';
-import {
-  FULL_ACCESS_CONFIRMATION,
-  currentSecurityMode,
-  selectNextConversationMode,
-  type ConversationSecurityMode,
-} from './security-approval';
 import type { SecurityCapabilities } from './security-mode';
 import type { SecurityRuleView } from './security-rules';
-import { enableUacAndPromptRestart, prepareWindowsSecuritySetup } from './security-setup-flow';
 import {
   EMPTY_SECURITY_AUDIT_QUERY,
   type SecurityAuditQuery,
   type SecurityAuditView,
 } from './security-audit';
 import type { PageContribution, PageLifecycleContext } from './page-registry';
-import { securityModuleEnabled } from './security-mode';
+import { securityModuleEnabled, windowsSetupRequired } from './security-mode';
 
 type GatewayResult = { ok?: boolean; body?: unknown };
+type SecurityResource = 'capabilities' | 'rules' | 'audit';
+type AuditRequest = { page: number; pageSize: number; query: SecurityAuditQuery };
+
+const CAPABILITY_CHECK_TIMEOUT_MS = 16_000;
+const RECOVERY_RECHECK_INTERVAL_MS = 2_000;
+const RECOVERY_WAIT_MS = 125_000;
+
+class CapabilityCheckTimeout extends Error {}
 
 let securityCenterView: SecurityCenterView | null = null;
 let snapshot: SecurityCenterSnapshot = emptySnapshot();
+let auditRequest: AuditRequest = initialAuditRequest();
+const requestRevisions = { capabilities: 0, rules: 0, audit: 0 };
+let loadErrors: Partial<Record<SecurityResource, string>> = {};
+const pendingRules = new Set<string>();
+let purgingAudit = false;
+let capabilityCheck: AbortController | undefined;
+let recoveryRecheck: ReturnType<typeof setTimeout> | undefined;
 
 // ── 页面生命周期状态 ──
 let securityLifecycleSignal: AbortSignal | null = null;
@@ -42,25 +49,38 @@ function securityLifecycleAvailable(): boolean {
   return !securityLifecycleSignal || !securityLifecycleSignal.aborted;
 }
 
+function activePageGuard(): () => boolean {
+  const epoch = securityLifecycleEpoch;
+  return () => epoch === securityLifecycleEpoch && securityLifecycleAvailable();
+}
+
+function latestRequestGuard(resource: SecurityResource): () => boolean {
+  const stillActive = activePageGuard();
+  const revision = ++requestRevisions[resource];
+  return () => stillActive() && revision === requestRevisions[resource];
+}
+
 function workspaceId(): string {
   return state.currentWorkspaceId ?? 'default';
 }
 
+function initialAuditRequest(): AuditRequest {
+  return { page: 1, pageSize: 20, query: { ...EMPTY_SECURITY_AUDIT_QUERY } };
+}
+
 function emptySnapshot(): SecurityCenterSnapshot {
+  const { page, pageSize, query } = initialAuditRequest();
   return {
     loading: false,
-    setupAction: null,
     error: '',
     workspaceId: workspaceId(),
-    strictSecurityEnabled: true,
-    mode: currentSecurityMode(),
     capabilities: null,
     rules: [],
     audits: [],
-    auditPage: 1,
-    auditPageSize: 20,
+    auditPage: page,
+    auditPageSize: pageSize,
     auditTotal: 0,
-    auditQuery: { ...EMPTY_SECURITY_AUDIT_QUERY },
+    auditQuery: query,
   };
 }
 
@@ -70,283 +90,300 @@ function ensureSecurityCenter(): SecurityCenterView | null {
   if (!securityCenterView) {
     securityCenterView = createSecurityCenterView({
       onRefresh: () => void refresh(),
-      onStrictSecurityChange: (enabled) => void changeStrictSecurity(enabled),
-      onModeChange: (mode) => void changeMode(mode),
-      onInstall: () => void setupProtection('repair'),
-      onUninstall: () => void setupProtection('uninstall'),
+      onInstall: () => void setupProtection(),
       onRuleToggle: (rule) => void toggleRule(rule),
       onRuleDelete: (rule) => void deleteRule(rule),
       onAuditExport: () => void exportAudit(),
       onAuditPurge: () => void purgeAudit(),
-      onAuditPageChange: (page) => void loadAuditPage(page, snapshot.auditPageSize ?? 20),
-      onAuditPageSizeChange: (size) => void loadAuditPage(1, size),
-      onAuditQueryChange: (query) => void loadAuditPage(1, snapshot.auditPageSize ?? 20, query),
-    });
+      onAuditPageChange: (page) => void loadAuditPage({ ...auditRequest, page }, true),
+      onAuditPageSizeChange: (pageSize) => void loadAuditPage({ ...auditRequest, page: 1, pageSize }, true),
+      onAuditQueryChange: (patch) => void loadAuditPage({
+        ...auditRequest,
+        page: 1,
+        query: { ...auditRequest.query, ...patch },
+      }, true),
+    }, { embedded: root.closest('#settings-pane-security') !== null });
   }
   if (!root.contains(securityCenterView.element)) root.replaceChildren(securityCenterView.element);
   return securityCenterView;
 }
 
 function render(): void {
-  snapshot = {
-    ...snapshot,
-    workspaceId: workspaceId(),
-    mode: currentSecurityMode(),
-  };
+  const currentWorkspace = workspaceId();
+  if (snapshot.workspaceId !== currentWorkspace) {
+    snapshot = { ...snapshot, workspaceId: currentWorkspace, rules: [] };
+    delete loadErrors.rules;
+  }
+  snapshot.error = Object.values(loadErrors).join('；');
   ensureSecurityCenter()?.update(snapshot);
 }
 
 function bodyOf<T>(result: GatewayResult | undefined, label: string): T {
-  if (!result?.ok) throw new Error(`${label}不可用`);
+  if (!result?.ok) throw new Error(label);
   return (result.body ?? {}) as T;
 }
 
 /** Loads each security surface independently so one failed endpoint does not hide the others. */
 async function refresh(): Promise<void> {
   if (!securityLifecycleAvailable()) return;
-  snapshot = { ...snapshot, loading: true, error: '', workspaceId: workspaceId() };
-  render();
-  const auditQuery = snapshot.auditQuery ?? EMPTY_SECURITY_AUDIT_QUERY;
-  const auditPageSize = snapshot.auditPageSize ?? 20;
-  let fallbackAuditPage = 0;
-  const epoch = securityLifecycleEpoch;
-  const signal = securityLifecycleSignal;
-  const results = await Promise.allSettled([
-    window.Crew?.getStrictSecurityEnabled?.(),
-    window.Crew?.securityCapabilities?.(),
-    window.Crew?.securityRules?.({ workspaceId: workspaceId() }),
-    window.Crew?.securityAudit?.({
-      limit: auditPageSize,
-      offset: ((snapshot.auditPage ?? 1) - 1) * auditPageSize,
-      actionType: auditQuery.actionType,
-      decision: auditQuery.decision,
-      sessionId: auditQuery.sessionId,
-      sort: auditQuery.sort,
-    }),
-  ]);
-  if (signal !== securityLifecycleSignal || epoch !== securityLifecycleEpoch || !securityLifecycleAvailable()) return;
-  const errors: string[] = [];
-
-  const preferenceResult = results[0];
-  if (preferenceResult.status === 'fulfilled') {
-    const value = preferenceResult.value as { strictSecurityEnabled?: unknown } | undefined;
-    snapshot.strictSecurityEnabled = value?.strictSecurityEnabled === true;
-  } else {
-    errors.push(`全局安全策略：${String(preferenceResult.reason)}`);
-  }
-
-  const capabilityResult = results[1];
-  if (capabilityResult.status === 'fulfilled') {
-    try {
-      snapshot.capabilities = bodyOf<SecurityCapabilities>(
-        capabilityResult.value as GatewayResult | undefined,
-        '防护能力',
-      );
-    } catch (error) {
-      errors.push(String((error as Error).message || error));
-    }
-  } else {
-    errors.push(`防护能力：${String(capabilityResult.reason)}`);
-  }
-
-  const rulesResult = results[2];
-  if (rulesResult.status === 'fulfilled') {
-    try {
-      const body = bodyOf<{ rules?: SecurityRuleView[] }>(
-        rulesResult.value as GatewayResult | undefined,
-        '授权规则',
-      );
-      snapshot.rules = body.rules ?? [];
-    } catch (error) {
-      errors.push(String((error as Error).message || error));
-    }
-  } else {
-    errors.push(`授权规则：${String(rulesResult.reason)}`);
-  }
-
-  const auditResult = results[3];
-  if (auditResult.status === 'fulfilled') {
-    try {
-      const body = bodyOf<{ events?: SecurityAuditView[]; total?: number }>(
-        auditResult.value as GatewayResult | undefined,
-        '安全审计',
-      );
-      snapshot.audits = body.events ?? [];
-      snapshot.auditTotal = body.total ?? snapshot.audits.length;
-      const lastPage = Math.max(1, Math.ceil(snapshot.auditTotal / auditPageSize));
-      if ((snapshot.auditPage ?? 1) > lastPage) fallbackAuditPage = lastPage;
-    } catch (error) {
-      errors.push(String((error as Error).message || error));
-    }
-  } else {
-    errors.push(`安全审计：${String(auditResult.reason)}`);
-  }
-
-  snapshot = { ...snapshot, loading: false, error: errors.join('；') };
-  render();
-  if (fallbackAuditPage) await loadAuditPage(fallbackAuditPage, auditPageSize, auditQuery);
+  await Promise.all([refreshCapabilities(), refreshRules(), loadAuditPage(auditRequest)]);
 }
 
-async function changeStrictSecurity(enabled: boolean): Promise<void> {
-  const result = await window.Crew?.setStrictSecurityEnabled?.(enabled);
-  snapshot = {
-    ...snapshot,
-    strictSecurityEnabled: result?.strictSecurityEnabled === true,
-  };
-  render();
-  notify('安全策略已保存，网关正在重启以应用新设置。');
+function cancelCapabilityCheck(): void {
+  capabilityCheck?.abort();
+  clearTimeout(recoveryRecheck);
+  recoveryRecheck = undefined;
 }
 
-async function changeMode(mode: ConversationSecurityMode): Promise<void> {
-  const accepted = await selectNextConversationMode(
-    mode,
-    () => showConfirmDialog({
-      title: '启用完全访问？',
-      message: FULL_ACCESS_CONFIRMATION,
-      confirmText: '仅对此对话启用',
-    }),
-  );
-  if (!accepted) return;
-  snapshot = { ...snapshot, mode: currentSecurityMode() };
+async function readCapabilities(signal: AbortSignal, timeoutMs: number): Promise<GatewayResult | undefined> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: () => void = () => {};
+  const stop = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    timeout = setTimeout(() => reject(new CapabilityCheckTimeout()), timeoutMs);
+  });
+  try {
+    return await Promise.race([stop, window.Crew?.securityCapabilities?.()]);
+  } finally {
+    clearTimeout(timeout);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+async function refreshCapabilities(recoveryDeadline?: number): Promise<void> {
+  const isCurrent = latestRequestGuard('capabilities');
+  cancelCapabilityCheck();
+  const check = new AbortController();
+  capabilityCheck = check;
+  const lifecycle = securityLifecycleSignal;
+  const cancelOnLeave = () => check.abort();
+  lifecycle?.addEventListener('abort', cancelOnLeave, { once: true });
+  if (recoveryDeadline === undefined) {
+    snapshot.loading = true;
+    delete loadErrors.capabilities;
+    render();
+  }
+  try {
+    const remaining = recoveryDeadline === undefined ? CAPABILITY_CHECK_TIMEOUT_MS : recoveryDeadline - Date.now();
+    if (remaining <= 0) throw new CapabilityCheckTimeout();
+    const result = await readCapabilities(check.signal, Math.min(CAPABILITY_CHECK_TIMEOUT_MS, remaining));
+    if (!isCurrent()) return;
+    snapshot.capabilities = bodyOf<SecurityCapabilities>(result, '无法读取防护状态');
+    if (snapshot.capabilities.status === 'recovering' && lifecycle) {
+      const deadline = recoveryDeadline ?? Date.now() + RECOVERY_WAIT_MS;
+      recoveryRecheck = setTimeout(() => {
+        if (isCurrent()) void refreshCapabilities(deadline);
+      }, Math.min(RECOVERY_RECHECK_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+    }
+  } catch (error) {
+    if (!isCurrent()) return;
+    snapshot.capabilities = null;
+    if (error instanceof CapabilityCheckTimeout) {
+      loadErrors.capabilities = recoveryDeadline === undefined
+        ? '本机防护检测超时'
+        : 'Windows 沙箱恢复耗时较长，请稍后重新检测';
+    } else {
+      loadErrors.capabilities = '无法读取防护状态';
+    }
+  } finally {
+    lifecycle?.removeEventListener('abort', cancelOnLeave);
+    if (capabilityCheck === check) capabilityCheck = undefined;
+    if (isCurrent()) {
+      snapshot.loading = false;
+      render();
+    }
+  }
+}
+
+async function refreshRules(): Promise<void> {
+  const targetWorkspace = workspaceId();
+  const isCurrent = latestRequestGuard('rules');
+  try {
+    const result = await window.Crew?.securityRules?.({ workspaceId: targetWorkspace });
+    if (!isCurrent() || workspaceId() !== targetWorkspace) return;
+    const body = bodyOf<{ rules?: SecurityRuleView[] }>(result, '无法读取授权规则');
+    snapshot.rules = body.rules ?? [];
+    delete loadErrors.rules;
+  } catch {
+    if (!isCurrent() || workspaceId() !== targetWorkspace) return;
+    loadErrors.rules = '无法读取授权规则';
+  }
   render();
 }
 
-async function setupProtection(action: 'repair' | 'uninstall'): Promise<void> {
-  if (snapshot.setupAction || snapshot.loading) return;
-  snapshot = {
-    ...snapshot,
-    setupAction: action === 'repair' ? 'install' : 'uninstall',
-  };
+async function setupProtection(): Promise<void> {
+  if (snapshot.settingUp || snapshot.loading || !windowsSetupRequired(snapshot.capabilities)) return;
+  const stillActive = activePageGuard();
+  snapshot = { ...snapshot, settingUp: true };
   render();
   try {
-    if (action === 'repair') {
-      const uacPreparation = await prepareWindowsSecuritySetup();
-      if (uacPreparation !== 'ready') return;
+    const uac = await window.Crew?.securityUacStatus?.();
+    if (!stillActive()) return;
+    if (uac?.restartRequired) {
+      notify('请重启电脑，使 Windows 的用户账户控制设置生效。');
+      return;
     }
-    const accepted = await showConfirmDialog({
-      title: action === 'repair' ? '安装安全防护' : '卸载安全防护',
-      message: action === 'repair'
-        ? '将请求一次系统管理员权限，创建受限执行环境并配置网络防护规则。安装完成后，受管命令将在安全边界内执行。是否继续？'
-        : '将移除应用创建的安全执行环境和网络防护规则。项目文件不会被删除，但受管命令将暂时无法使用。是否继续？',
-      confirmText: action === 'repair' ? '安装并继续' : '卸载并继续',
-    });
-    if (!accepted) return;
-    const result = await window.Crew?.securitySetup?.({ action });
+    if (uac?.enabled === false) {
+      notify('请先在 Windows 中开启用户账户控制（UAC），然后再试。');
+      return;
+    }
+    const result = await window.Crew?.securitySetup?.({ action: 'repair' });
+    if (!stillActive()) return;
     if (result?.code === 'uac_restart_required') {
-      await prepareWindowsSecuritySetup();
+      notify('请重启电脑，使 Windows 的用户账户控制设置生效。');
       return;
     }
     if (result?.code === 'uac_disabled') {
-      await enableUacAndPromptRestart();
+      notify('请先在 Windows 中开启用户账户控制（UAC），然后再试。');
       return;
     }
     if (!result?.ok) {
       const detail = result?.detail ? `：${result.detail}` : '';
-      notify(action === 'repair'
-        ? `安全设置未完成${detail}；托管执行仍保持不可用。`
-        : `安全组件卸载未完成${detail}，请使用安装包修复后重试。`);
+      notify(`Windows 防护设置未完成${detail}`);
     }
-    await refresh();
+    await refreshCapabilities();
   } catch (error) {
-    notify(`安全设置未完成：${String(error)}`);
+    if (stillActive()) notify(`Windows 防护设置未完成：${String(error)}`);
   } finally {
-    snapshot = { ...snapshot, setupAction: null };
-    render();
+    if (stillActive()) {
+      snapshot = { ...snapshot, settingUp: false };
+      render();
+    }
   }
 }
 
 async function toggleRule(rule: SecurityRuleView): Promise<void> {
-  await window.Crew?.securitySetRule?.({
-    workspaceId: workspaceId(),
-    ruleId: String(rule.rule_id ?? ''),
-    enabled: rule.enabled === false,
-  });
-  await refresh();
+  const enabled = rule.enabled === false;
+  await mutateRule(rule, enabled ? '启用' : '禁用', (target) => (
+    window.Crew?.securitySetRule?.({ ...target, enabled })
+  ));
 }
 
 async function deleteRule(rule: SecurityRuleView): Promise<void> {
   if (!window.confirm('永久删除这条授权规则？此操作不可撤销。')) return;
-  await window.Crew?.securityDeleteRule?.({
-    workspaceId: workspaceId(),
-    ruleId: String(rule.rule_id ?? ''),
-  });
-  await refresh();
+  await mutateRule(rule, '删除', (target) => window.Crew?.securityDeleteRule?.(target));
+}
+
+async function mutateRule(
+  rule: SecurityRuleView,
+  action: string,
+  mutate: (target: { workspaceId: string; ruleId: string }) => Promise<GatewayResult> | undefined,
+): Promise<void> {
+  if (!securityLifecycleAvailable() || snapshot.workspaceId !== workspaceId() || !rule.rule_id) return;
+  const target = { workspaceId: snapshot.workspaceId, ruleId: rule.rule_id };
+  const key = JSON.stringify([target.workspaceId, target.ruleId]);
+  if (pendingRules.has(key)) return;
+  pendingRules.add(key);
+  const stillActive = activePageGuard();
+  const matchesWorkspace = () => stillActive() && target.workspaceId === workspaceId();
+  try {
+    const result = await mutate(target);
+    if (!matchesWorkspace()) return;
+    const body = bodyOf<{ changed?: boolean }>(result, `授权规则${action}失败`);
+    if (body.changed !== true) {
+      notify(`授权规则${action}未生效，请检查规则状态。`);
+      await refreshRules();
+      return;
+    }
+    notify(`授权规则已${action}`);
+    void loadAuditPage(auditRequest);
+    await refreshRules();
+  } catch {
+    if (matchesWorkspace()) notify(`授权规则${action}失败`);
+  } finally {
+    if (stillActive()) pendingRules.delete(key);
+  }
 }
 
 async function exportAudit(): Promise<void> {
-  const result = await window.Crew?.securityAuditExport?.() as GatewayResult | undefined;
-  if (!result?.ok) {
-    notify('安全审计导出失败');
-    return;
+  const stillActive = activePageGuard();
+  try {
+    const result = await window.Crew?.securityAuditExport?.();
+    if (!stillActive()) return;
+    const { jsonl } = bodyOf<{ jsonl?: string }>(result, '安全审计导出失败');
+    if (typeof jsonl !== 'string') throw new Error('安全审计导出失败');
+    const url = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'crew-security-audit.jsonl';
+    try {
+      link.click();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  } catch {
+    if (stillActive()) notify('安全审计导出失败');
   }
-  const jsonl = String((result.body as { jsonl?: string } | undefined)?.jsonl ?? '');
-  const url = URL.createObjectURL(new Blob([jsonl], { type: 'application/x-ndjson' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = 'crew-security-audit.jsonl';
-  link.click();
-  URL.revokeObjectURL(url);
 }
 
-async function loadAuditPage(
-  page: number,
-  pageSize: number,
-  query: SecurityAuditQuery = snapshot.auditQuery ?? EMPTY_SECURITY_AUDIT_QUERY,
-): Promise<void> {
+async function loadAuditPage(request: AuditRequest, reportFailure = false): Promise<void> {
   if (!securityLifecycleAvailable()) return;
-  const epoch = securityLifecycleEpoch;
-  const signal = securityLifecycleSignal;
-  const safeSize = Math.max(1, Math.min(100, pageSize));
-  const safePage = Math.max(1, page);
-  const result = await window.Crew?.securityAudit?.({
-    limit: safeSize,
-    offset: (safePage - 1) * safeSize,
-    actionType: query.actionType,
-    decision: query.decision,
-    sessionId: query.sessionId,
-    sort: query.sort,
-  }) as GatewayResult | undefined;
-  if (signal !== securityLifecycleSignal || epoch !== securityLifecycleEpoch || !securityLifecycleAvailable()) return;
-  if (!result?.ok) {
-    notify('安全审计加载失败');
-    return;
+  const isCurrent = latestRequestGuard('audit');
+  const { query } = request;
+  const pageSize = Math.max(1, Math.min(100, Math.trunc(request.pageSize)));
+  let page = Math.max(1, Math.trunc(request.page));
+  auditRequest = { page, pageSize, query };
+  try {
+    for (;;) {
+      const result = await window.Crew?.securityAudit?.({
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+        ...query,
+      });
+      if (!isCurrent()) return;
+      const body = bodyOf<{ events?: SecurityAuditView[]; total?: number }>(result, '安全审计加载失败');
+      const events = body.events ?? [];
+      const total = body.total ?? events.length;
+      const lastPage = Math.max(1, Math.ceil(total / pageSize));
+      if (page > lastPage) {
+        page = lastPage;
+        continue;
+      }
+      auditRequest = { page, pageSize, query };
+      snapshot = { ...snapshot, audits: events, auditPage: page, auditPageSize: pageSize, auditTotal: total, auditQuery: query };
+      delete loadErrors.audit;
+      break;
+    }
+  } catch {
+    if (!isCurrent()) return;
+    loadErrors.audit = '安全审计加载失败';
+    if (reportFailure) notify(loadErrors.audit);
   }
-  const body = result.body as {
-    events?: SecurityAuditView[];
-    total?: number;
-  } | undefined;
-  const events = body?.events ?? [];
-  const total = body?.total ?? events.length;
-  const lastPage = Math.max(1, Math.ceil(total / safeSize));
-  if (safePage > lastPage) {
-    await loadAuditPage(lastPage, safeSize, query);
-    return;
-  }
-  snapshot = {
-    ...snapshot,
-    audits: events,
-    auditPage: safePage,
-    auditPageSize: safeSize,
-    auditTotal: total,
-    auditQuery: { ...query },
-  };
   render();
 }
 
 async function purgeAudit(): Promise<void> {
-  if (!window.confirm('删除超过 30 天的安全审计记录？')) return;
-  await window.Crew?.securityAuditPurge?.({ workspaceId: workspaceId() });
-  snapshot.auditPage = 1;
-  await refresh();
+  if (purgingAudit || !securityLifecycleAvailable()) return;
+  purgingAudit = true;
+  const stillActive = activePageGuard();
+  const targetWorkspace = workspaceId();
+  try {
+    const accepted = await showConfirmDialog({
+      title: '清理旧审计记录？',
+      message: '将删除当前账户在所有工作空间中超过 30 天的安全审计记录。使用中的筛选条件不影响清理范围。',
+      confirmText: '删除旧记录',
+    });
+    if (!accepted || !stillActive()) return;
+    const result = await window.Crew?.securityAuditPurge?.({ workspaceId: targetWorkspace });
+    if (!stillActive()) return;
+    const { deleted } = bodyOf<{ deleted: number }>(result, '安全审计清理失败');
+    if (!Number.isInteger(deleted) || deleted < 0) throw new Error('安全审计清理失败');
+    notify(deleted === 0 ? '没有超过 30 天的审计记录' : `已清理 ${deleted} 条审计记录`);
+    void loadAuditPage(auditRequest);
+  } catch {
+    if (stillActive()) notify('安全审计清理失败');
+  } finally {
+    if (stillActive()) purgingAudit = false;
+  }
 }
 
 export function renderSecurityPage(): void {
   render();
 }
 
-export function activateSecurityPage(): void {
-  render();
-  void refresh();
+export function refreshSecurityAudit(): void {
+  if (securityLifecycleSignal && securityLifecycleAvailable()) void loadAuditPage(auditRequest);
 }
 
 export async function initSecurityPage(): Promise<void> {
@@ -355,8 +392,20 @@ export async function initSecurityPage(): Promise<void> {
 }
 
 export function __resetSecurityCenterForTest(): void {
+  resetPage();
+}
+
+function resetPage(): void {
+  securityLifecycleEpoch += 1;
+  cancelCapabilityCheck();
+  securityLifecycleSignal = null;
+  securityCenterView?.dispose();
   securityCenterView = null;
   snapshot = emptySnapshot();
+  auditRequest = initialAuditRequest();
+  loadErrors = {};
+  pendingRules.clear();
+  purgingAudit = false;
 }
 
 export function createSecurityPageContribution(): PageContribution {
@@ -369,12 +418,6 @@ export function createSecurityPageContribution(): PageContribution {
       render();
       void refresh();
     },
-    deactivate: async () => {
-      securityLifecycleEpoch += 1;
-      securityLifecycleSignal = null;
-      securityCenterView?.element.remove();
-      securityCenterView = null;
-      snapshot = emptySnapshot();
-    },
+    deactivate: resetPage,
   };
 }

@@ -8,8 +8,10 @@ pub mod token;
 pub mod wfp;
 
 use std::collections::BTreeMap;
-use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{env, fs};
+
+use rand::RngCore;
 use std::sync::mpsc::{Receiver, SyncSender};
 
 use crate::protocol::{RuntimeCapabilities, RuntimeControl, RuntimeMessage};
@@ -23,6 +25,7 @@ pub struct WindowsRunRequest {
     pub denied_roots: Vec<PathBuf>,
     pub full_disk_read: bool,
     pub network_enabled: bool,
+    pub network_access: bool,
     pub network_rules: Vec<crate::protocol::NetworkRule>,
     pub allow_local_binding: bool,
     pub max_output_bytes: usize,
@@ -52,7 +55,7 @@ pub fn run_interactive(
 }
 
 fn run_with_control(
-    request: WindowsRunRequest,
+    mut request: WindowsRunRequest,
     control_rx: Option<Receiver<RuntimeControl>>,
     sender: &SyncSender<RuntimeMessage>,
 ) -> Result<(), WindowsRuntimeError> {
@@ -61,10 +64,9 @@ fn run_with_control(
     if !readiness.filesystem_sandbox {
         return Err(error("sandbox_unavailable", readiness.detail));
     }
-    if request.network_enabled {
-        wfp::verify_installed().map_err(|message| error("network_unavailable", message))?;
-    }
-    let credentials = if request.network_enabled {
+    let credentials = if request.network_access {
+        identity::load_direct(&state_dir)
+    } else if request.network_enabled {
         identity::load_online(&state_dir)
     } else {
         identity::load(&state_dir)
@@ -82,8 +84,15 @@ fn run_with_control(
     // True parallelism (WIN-NET-001) stays deferred — it needs per-run dynamic
     // ports + runtime WFP filters; serialization keeps the single-port design
     // safe until then.
+    let scratch =
+        ScratchDirectory::create().map_err(|message| error("sandbox_unavailable", message))?;
+    request.writable_roots.push(scratch.path().to_path_buf());
     let lease = acl::AclLease::prepare(&state_dir, &credentials.username, &request)
         .map_err(|message| error("sandbox_denied", message))?;
+    if !request.network_access {
+        wfp::verify_installed(&credentials.username, request.network_enabled)
+            .map_err(|message| error("network_unavailable", message))?;
+    }
     let policy =
         crate::network::NetworkPolicy::new(request.network_rules.clone()).map_err(network_error)?;
     let proxy = if request.network_enabled {
@@ -99,6 +108,7 @@ fn run_with_control(
         filesystem_sandbox: true,
         process_tree_cleanup: true,
         managed_network: request.network_enabled,
+        direct_network: request.network_access,
         full_disk_read: request.full_disk_read,
         system_bwrap: false,
         bundled_bwrap: false,
@@ -108,12 +118,13 @@ fn run_with_control(
         windows_restricted_token: true,
         windows_acl: true,
         windows_job: true,
-        windows_wfp: request.network_enabled,
+        windows_wfp: !request.network_access,
     };
     let outcome = process::run_via_account(
         &credentials,
         &request,
         lease.capability_sids(),
+        scratch.path(),
         capabilities,
         control_rx,
         sender,
@@ -132,6 +143,31 @@ fn run_with_control(
     drop(lease);
     outcome?;
     Ok(())
+}
+
+struct ScratchDirectory(PathBuf);
+
+impl ScratchDirectory {
+    fn create() -> Result<Self, String> {
+        let mut random = [0_u8; 16];
+        rand::thread_rng().fill_bytes(&mut random);
+        let name: String = random.iter().map(|value| format!("{value:02x}")).collect();
+        let directory = env::temp_dir().join(format!("ace-sandbox-{name}"));
+        fs::create_dir(&directory)
+            .map_err(|error| format!("cannot create Windows sandbox scratch directory: {error}"))?;
+        Ok(Self(directory))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDirectory {
+    fn drop(&mut self) {
+        // The managed child is gone and the ACL lease has been released.
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn managed_proxy_port() -> u16 {

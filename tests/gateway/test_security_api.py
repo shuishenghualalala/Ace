@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -53,7 +54,7 @@ def _remote_cookies(user_id: str) -> dict[str, str]:
 
 
 @pytest.fixture
-def api(tmp_path, monkeypatch):
+def api(tmp_path, monkeypatch, request):
     crew_home = tmp_path / ".crew"
     key_dir = crew_home / ".gateway-instance"
     key_dir.mkdir(parents=True, mode=0o700)
@@ -65,7 +66,7 @@ def api(tmp_path, monkeypatch):
         config=Config(
             db_path=str(tmp_path / "crew.db"),
             plugins_enabled=[],
-            security_enabled=True,
+            security_enabled=getattr(request, "param", True),
         ),
         enable_team=False,
     )
@@ -127,23 +128,54 @@ async def test_gateway_security_headers_cover_authentication_failures(api):
 async def test_conversation_mode_is_set_by_authenticated_desktop_runtime(
     api, monkeypatch,
 ):
-    async def available_runtime():
+    probed = False
+
+    async def available_runtime(*, network_access):
+        nonlocal probed
+        probed = True
+        assert network_access is False
         return object(), True, False, "test"
 
     monkeypatch.setattr("crew.gateway.routers.security._live_filesystem_runtime", available_runtime)
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        explicit = await _put_json(
+            client,
+            "/api/security/mode",
+            {"workspace_id": "default", "session_id": "s1", "mode": "request_approval"},
+        )
         response = await _put_json(
             client,
             "/api/security/mode",
             {"workspace_id": "default", "session_id": "s1", "mode": "auto_review"},
         )
+    assert explicit.status_code == 200
+    assert explicit.json() == {"mode": "request_approval"}
+    assert response.status_code == 200
+    assert response.json() == {"mode": "auto_review"}
+    assert probed
+
+
+@pytest.mark.asyncio
+async def test_default_conversation_mode_acknowledges_without_native_probe(api, monkeypatch):
+    async def unexpected_probe(**_kwargs):
+        pytest.fail("acknowledging the default should not start a native probe")
+
+    monkeypatch.setattr("crew.gateway.routers.security._live_filesystem_runtime", unexpected_probe)
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await _put_json(
+            client,
+            "/api/security/mode",
+            {"workspace_id": "default", "session_id": "new", "mode": "auto_review"},
+        )
+
     assert response.status_code == 200
     assert response.json() == {"mode": "auto_review"}
 
 
 @pytest.mark.asyncio
-async def test_disabled_security_forces_full_access(tmp_path, monkeypatch):
+async def test_disabled_sandbox_forces_full_access_in_strict_mode(tmp_path, monkeypatch):
     crew_home = tmp_path / ".crew"
     key_dir = crew_home / ".gateway-instance"
     key_dir.mkdir(parents=True, mode=0o700)
@@ -155,7 +187,8 @@ async def test_disabled_security_forces_full_access(tmp_path, monkeypatch):
         config=Config(
             db_path=str(tmp_path / "disabled-security.db"),
             plugins_enabled=[],
-            security_enabled=False,
+            security_enabled=True,
+            security_sandbox_enabled=False,
         ),
         enable_team=False,
     )
@@ -166,10 +199,16 @@ async def test_disabled_security_forces_full_access(tmp_path, monkeypatch):
             response = await _put_json(
                 client,
                 "/api/security/mode",
-                {"workspace_id": "default", "session_id": "s1", "mode": "request_approval"},
+                {"workspace_id": "default", "session_id": "s1", "mode": "auto_review"},
             )
+            config_response = await client.get("/api/config")
         assert response.status_code == 200
         assert response.json() == {"mode": "full_access"}
+        assert config_response.json()["security"] == {
+            "enabled": False,
+            "default_mode": "full_access",
+            "workspace_network_access": False,
+        }
     finally:
         crew.security_rules.close()
         crew.security_audit.close()
@@ -177,8 +216,10 @@ async def test_disabled_security_forces_full_access(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_strict_auto_review_requires_live_native_runtime(api, monkeypatch):
-    async def unavailable_runtime():
+@pytest.mark.parametrize("api", [True, False], indirect=True)
+async def test_sandbox_auto_review_requires_live_native_runtime(api, monkeypatch):
+    async def unavailable_runtime(*, network_access):
+        assert network_access is False
         return None, False, False, "darwin"
 
     monkeypatch.setattr(
@@ -187,14 +228,26 @@ async def test_strict_auto_review_requires_live_native_runtime(api, monkeypatch)
     )
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        explicit = await _put_json(
+            client,
+            "/api/security/mode",
+            {"workspace_id": "default", "session_id": "s1", "mode": "request_approval"},
+        )
+        assert explicit.status_code == 200
         response = await _put_json(
             client,
             "/api/security/mode",
             {"workspace_id": "default", "session_id": "s1", "mode": "auto_review"},
         )
+        config_response = await client.get("/api/config")
 
     assert response.status_code == 409
     assert "live probe" in response.json()["detail"]
+    assert config_response.json()["security"] == {
+        "enabled": True,
+        "default_mode": "auto_review",
+        "workspace_network_access": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -423,7 +476,7 @@ async def test_audit_page_returns_owner_scoped_total(api, monkeypatch):
             "workspace_id": "default",
             "workspace_name": "默认工作空间",
             "workspace_root": "",
-            "current_approval_mode": "request_approval",
+            "current_approval_mode": "auto_review",
         }],
         "total": 42,
     }
@@ -495,7 +548,7 @@ async def test_audit_page_recovers_old_action_detail_from_owner_session_history(
     assert event["action_summary"] == f"读取文件：{target.resolve()}"
     assert event["action_detail"] == f"文件：{target.resolve()}\n操作：读取文件"
     assert "other" not in event["action_detail"]
-    assert event["current_approval_mode"] == "request_approval"
+    assert event["current_approval_mode"] == "auto_review"
 
 
 @pytest.mark.asyncio
@@ -528,14 +581,20 @@ async def test_capabilities_do_not_trust_static_windows_identity(api, tmp_path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("direct_configured", "direct_ready"), [(False, False), (True, False), (True, True)],
+)
 async def test_capabilities_require_separate_live_filesystem_and_network_probes(
     api,
     tmp_path,
     monkeypatch,
+    direct_configured,
+    direct_ready,
 ):
+    api.state.crew.security_service.workspace_network_access = direct_configured
     helper = tmp_path / "ace-security-runtime.exe"
     helper.write_bytes(b"fake helper")
-    calls: list[bool] = []
+    calls: list[tuple[bool, bool]] = []
 
     class FakeRuntimeClient:
         def __init__(self, helper_argv):
@@ -543,9 +602,12 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
 
         async def execute(self, **kwargs):
             network_enabled = kwargs["network_enabled"]
-            calls.append(network_enabled)
+            network_access = kwargs["network_access"]
+            calls.append((network_enabled, network_access))
             assert kwargs["readonly_roots"] == (Path(kwargs["cwd"]) / ".git",)
-            assert kwargs["readable_roots"] == (readable_root,)
+            assert kwargs["readable_roots"] == (Path(kwargs["cwd"]).parent / "readable",)
+            if network_access and not direct_ready:
+                return SimpleNamespace(exit_code=71)
             Path(kwargs["cwd"]).joinpath("probe-marker").write_text("ok", encoding="ascii")
             return SimpleNamespace(
                 exit_code=0,
@@ -561,6 +623,7 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
                     windows_acl=True,
                     windows_job=True,
                     windows_wfp=network_enabled,
+                    direct_network=network_access,
                 ),
             )
 
@@ -570,12 +633,6 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         lambda: (str(helper),),
     )
     monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
-    readable_root = tmp_path / "readable"
-    readable_root.mkdir()
-    monkeypatch.setattr(
-        "crew.security.launch._windows_full_disk_read_roots",
-        lambda: (readable_root,),
-    )
     monkeypatch.setattr("crew.gateway.routers.security.NativeRuntimeClient", FakeRuntimeClient)
 
     path = "/api/security/capabilities"
@@ -584,9 +641,95 @@ async def test_capabilities_require_separate_live_filesystem_and_network_probes(
         response = await client.get(path, headers=_headers("GET", path))
 
     assert response.status_code == 200
-    assert response.json()["filesystem_sandbox"] is True
-    assert response.json()["managed_network"] is True
-    assert calls == [False, True]
+    body = response.json()
+    assert body["filesystem_sandbox"] is True
+    assert body["managed_network"] is True
+    assert body["workspace_network_access"] is direct_configured
+    assert body["direct_network"] is direct_ready
+    assert body["status"] == ("unavailable" if direct_configured and not direct_ready else "ready")
+    assert body["setup_required"] is False
+    if direct_configured and not direct_ready:
+        assert "修复防护" in body["detail"]
+    assert calls == [(False, False), (True, False)] + ([(False, True)] if direct_configured else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repairable", [False, True])
+async def test_windows_setup_action_requires_a_repairable_probe_error(monkeypatch, repairable):
+    from crew.gateway.routers import security as security_router
+    from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
+
+    async def failed_probe(*, on_error):
+        detail = (
+            "FwpmFilterGetByKey0; run Windows sandbox setup or repair failed: 0x00000005"
+            if repairable
+            else "native runtime timed out"
+        )
+        on_error(NativeRuntimeError(RuntimeErrorCode.NETWORK_UNAVAILABLE, detail))
+        return None, True, False, "windows"
+
+    monkeypatch.setattr(security_router, "_live_filesystem_runtime", failed_probe)
+    capabilities = await security_router.probe_security_capabilities(workspace_network_access=False)
+    assert capabilities["setup_required"] is repairable
+    assert capabilities["status"] == ("setup_required" if repairable else "unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [None, "windows_sandbox_busy", "windows_acl_recovery_failed"])
+async def test_windows_capabilities_recover_acl_once_before_running_canary(api, tmp_path, monkeypatch, reason):
+    from crew.gateway.routers import security as security_router
+
+    helper = tmp_path / "ace-security-runtime.exe"
+    helper.touch()
+    journal = tmp_path / "windows-acl-state.json"
+    journal.touch()
+    recovery_started = asyncio.Event()
+    finish_recovery = asyncio.Event()
+    recovery_calls = []
+    probe_calls = []
+
+    async def recover(helper_argv, state_dir):
+        recovery_calls.append((helper_argv, state_dir))
+        recovery_started.set()
+        await finish_recovery.wait()
+        if reason is None:
+            journal.unlink()
+        return reason
+
+    async def probe(*, workspace_network_access):
+        probe_calls.append(workspace_network_access)
+        return {"status": "ready", "runtime_stale": False}
+
+    monkeypatch.setenv("ACE_SECURITY_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(security_router.platform, "system", lambda: "Windows")
+    monkeypatch.setattr("crew.security.launch.packaged_runtime_argv", lambda: (str(helper),))
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
+    monkeypatch.setattr(security_router, "_recover_windows_acl", recover)
+    monkeypatch.setattr(security_router, "probe_security_capabilities", probe)
+    path = "/api/security/capabilities"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get(path, headers=_IDENTITY_A)).status_code == 403
+        assert recovery_calls == []
+        first = await client.get(path, headers=_headers("GET", path))
+        await recovery_started.wait()
+        second = await client.get(path, headers=_headers("GET", path))
+        assert first.json()["status"] == second.json()["status"] == "recovering"
+        assert second.json()["setup_required"] is False
+        assert recovery_calls == [((str(helper),), tmp_path)]
+        assert probe_calls == []
+        finish_recovery.set()
+        await asyncio.sleep(0)
+        final = (await client.get(path, headers=_headers("GET", path))).json()
+
+    if reason is None:
+        assert final["status"] == "ready"
+        assert len(probe_calls) == 1
+    else:
+        assert final["status"] == "unavailable"
+        assert final["reason"] == reason
+        assert final["setup_required"] is False
+        assert probe_calls == []
 
 
 @pytest.mark.asyncio

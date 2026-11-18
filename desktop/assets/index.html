@@ -132,9 +132,6 @@
         <div id="cron-page-root" class="cron-page-root"></div>
       </section>
 
-      <section id="security-tab" class="tab-pane">
-        <div id="security-page-root" class="security-page-root"></div>
-      </section>
 
       <section id="tracing-tab" class="tab-pane">
         <div id="tracing-page-root" class="tracing-page-root"></div>
@@ -520,19 +517,6 @@
                 <label class="set-v2-switch"><input type="checkbox" id="set-auto-start"><span class="set-v2-switch__track"></span></label>
               </div>
             </div>
-            <!--
-              ponytail: 严格安全服务尚未就绪，当前默认兼容模式并隐藏此开关。
-              上游 HTTPS 与安装校验服务就绪后再恢复。
-            -->
-            <div class="set-v2-row" hidden>
-              <div class="set-v2-row__copy">
-                <div class="set-v2-row__label">严格安全约束</div>
-                <div class="set-v2-row__desc">开启后要求安全传输与安装完整性校验；受管隔离始终保持启用。</div>
-              </div>
-              <div class="set-v2-row__control">
-                <label class="set-v2-switch"><input type="checkbox" id="set-strict-security"><span class="set-v2-switch__track"></span></label>
-              </div>
-            </div>
             <div class="set-v2-row">
               <div class="set-v2-row__copy">
                 <div class="set-v2-row__label">关闭窗口</div>
@@ -561,6 +545,11 @@
         <div class="set-v2-pane" id="settings-pane-model" hidden></div>
         <div class="set-v2-pane" id="settings-pane-channel" hidden></div>
         <div class="set-v2-pane" id="settings-pane-mcp" hidden></div>
+        <div class="set-v2-pane set-v2-pane--security" id="settings-pane-security" hidden>
+          <h3 class="set-v2-pane__title">安全</h3>
+          <div id="settings-security-permissions-root"></div>
+          <div id="security-page-root" class="security-page-root"></div>
+        </div>
         <div class="set-v2-pane" id="settings-pane-work" hidden></div>
 
         <div class="set-v2-pane" id="settings-pane-sys-logs" hidden></div>

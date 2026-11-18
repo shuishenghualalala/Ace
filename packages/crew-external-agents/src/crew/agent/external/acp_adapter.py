@@ -867,7 +867,7 @@ async def stream_acp_events(prompt: str, config: AcpAdapterConfig) -> AsyncItera
             ExecutionRequest(
                 command=(executable, *config.launch_args, *config.custom_args),
                 cwd=cwd_path,
-                permission_profile=launch.profile,
+                permission_profile=launch.external_profile,
                 additional_permissions=additional_permissions,
                 trusted_readable_roots=launch.trusted_readable_roots,
                 home_files=projected_home_files,

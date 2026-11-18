@@ -27,7 +27,7 @@ import type { PanelAttachments } from './attachments';
 const MAX_INPUT_HEIGHT = 180;
 
 export interface ComposerViewOptions {
-  submit(text: string, userMentions?: UserAgentMention[]): void | Promise<void>;
+  submit(text: string, userMentions?: UserAgentMention[]): boolean | void | Promise<boolean | void>;
   stop(): void;
   cancelEdit(): void;
   editQueueItem(sessionId: string, index: number): void;
@@ -351,13 +351,15 @@ export function createComposerView(
     submitError = '';
     refresh();
     try {
-      await options.submit(
+      const submitted = await options.submit(
         serializeMentionInput(input.value),
         getUserAgentMentions(input.value),
       );
-      input.value = '';
-      resetTextareaHeight(input);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (submitted !== false) {
+        input.value = '';
+        resetTextareaHeight(input);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
     } catch (error) {
       submitError = `发送失败：${(error as Error).message}`;
     } finally {

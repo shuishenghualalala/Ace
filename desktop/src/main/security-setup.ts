@@ -15,6 +15,17 @@ const UAC_REGISTRY_KEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Po
 const POWERSHELL_UAC_REGISTRY_PATH = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System';
 let uacRestartRequired = false;
 
+export function securityRuntimePlatformKey(platform: string, arch: string): string | undefined {
+  const platformName = platform.trim().toLowerCase();
+  const archName = arch.trim().toLowerCase();
+  const targetPlatform = ({ windows: 'win32', macos: 'darwin', linux2: 'linux' } as Record<string, string>)[platformName] ?? platformName;
+  const targetArch = ({ amd64: 'x64', x86_64: 'x64', aarch64: 'arm64' } as Record<string, string>)[archName] ?? archName;
+  if (['win32', 'linux', 'darwin'].includes(targetPlatform) && ['x64', 'arm64'].includes(targetArch)) {
+    return `${targetPlatform}-${targetArch}`;
+  }
+  return undefined;
+}
+
 function quotePowerShell(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
@@ -45,10 +56,15 @@ export function buildElevatedSecuritySetup(
   }
   if (!path.win32.isAbsolute(stateDir)) throw new Error('security state directory must be absolute');
   const runtimeArg = action === 'uninstall' ? '--windows-uninstall' : '--windows-setup';
+  const originalUser = action === 'uninstall'
+    ? ''
+    : '$ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value;';
+  const ownerArg = action === 'uninstall' ? '' : ", '--expected-owner-sid', $ownerSid";
   const script = [
+    originalUser,
     `$process = Start-Process -FilePath ${quotePowerShell(runtimePath)}`,
-    `-ArgumentList @(${quotePowerShell(runtimeArg)}, ${quotePowerShell(`"${stateDir}"`)})`,
-    '-Verb RunAs -Wait -PassThru;',
+    `-ArgumentList @(${quotePowerShell(runtimeArg)}, ${quotePowerShell(`"${stateDir}"`)}${ownerArg})`,
+    '-Verb RunAs -Wait -PassThru -ErrorAction Stop;',
     'exit $process.ExitCode',
   ].join(' ');
   return {
@@ -100,7 +116,7 @@ export function getWindowsUacStatus(): { enabled: boolean | null; restartRequire
     : { enabled };
 }
 
-async function runElevatedCommand(
+async function runSetupCommand(
   command: { executable: string; argv: string[] },
   spawnProcess: typeof spawn,
 ): Promise<SecuritySetupResult> {
@@ -123,12 +139,12 @@ async function runElevatedCommand(
       exitCode: null,
       detail: `无法启动安全防护安装程序：${error.message}`,
     }));
-    child.once('exit', (code) => {
+    child.once('close', (code) => {
       const detail = output.join('').trim();
       finish({
         ok: code === 0,
         exitCode: code,
-        ...(detail ? { detail } : {}),
+        ...(detail ? { detail } : code === 0 ? {} : { detail: `安装程序退出码 ${code ?? '未知'}` }),
       });
     });
   });
@@ -143,7 +159,7 @@ export async function runElevatedUacEnable(
   if (readWindowsUacEnabled() === true) {
     return { ok: true, exitCode: 0, restartRequired: false };
   }
-  const result = await runElevatedCommand(buildElevatedUacEnable(), spawnProcess);
+  const result = await runSetupCommand(buildElevatedUacEnable(), spawnProcess);
   if (!result.ok) return result;
   uacRestartRequired = true;
   return { ...result, restartRequired: true };
@@ -174,8 +190,22 @@ export async function runElevatedSecuritySetup(
       };
     }
   }
-  // Create under the interactive user's profile before elevation so inherited ACLs remain
-  // readable by that user even when UAC uses an over-the-shoulder administrator credential.
+  // Native setup verifies that UAC kept the original user's Windows identity.
   fs.mkdirSync(stateDir, { recursive: true });
-  return runElevatedCommand(buildElevatedSecuritySetup(runtimePath, stateDir, action), spawnProcess);
+  return runSetupCommand(buildElevatedSecuritySetup(runtimePath, stateDir, action), spawnProcess);
+}
+
+export async function provisionInstalledWindowsSandbox(
+  runtimePath: string,
+  stateDir: string,
+  spawnProcess: typeof spawn = spawn,
+): Promise<SecuritySetupResult> {
+  const verify = () => runSetupCommand({
+    executable: runtimePath,
+    argv: ['--windows-check-setup', stateDir],
+  }, spawnProcess);
+  const before = await verify();
+  if (before.ok || before.exitCode !== 1) return before;
+  const setup = await runElevatedSecuritySetup(runtimePath, stateDir, 'install', spawnProcess);
+  return setup.ok ? verify() : setup;
 }

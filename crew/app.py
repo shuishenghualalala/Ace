@@ -532,7 +532,8 @@ class CrewApp:
             self.security_rules,
             self.security_audit,
             db_path=config.db_path,
-            security_enabled=config.security_enabled,
+            security_enabled=config.security_sandbox_enabled,
+            workspace_network_access=config.security_workspace_network_access,
         )
         # 通知中心：core 契约的默认实现（SQLite + 可选 WS 推送，push_fn 由 gateway 延迟注入）
         from crew.notifications import NotificationCenterService, NotificationStore

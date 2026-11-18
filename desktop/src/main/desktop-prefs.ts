@@ -4,7 +4,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
-import type { UserInfoSnapshot } from '../shared/types';
+import type { DefaultConversationPermission, SecurityPermissionPreferences, UserInfoSnapshot } from '../shared/types';
 
 export type CloseBehavior = 'tray' | 'quit' | 'ask';
 
@@ -12,6 +12,8 @@ export interface DesktopPrefs {
   closeBehavior?: CloseBehavior;
   themeMode?: 'system' | 'light' | 'dark';
   strictSecurityEnabled?: boolean;
+  fullAccessChoiceEnabled?: boolean;
+  defaultConversationPermission?: DefaultConversationPermission;
   encryptedJwt?: string;
   userInfo?: UserInfoSnapshot;
   [key: string]: unknown;
@@ -86,4 +88,41 @@ export function saveStrictSecurityPreference(enabled: boolean): { strictSecurity
   const parsed = readDesktopPrefsFile();
   writeDesktopPrefsFile({ ...parsed, strictSecurityEnabled: enabled });
   return { strictSecurityEnabled: enabled };
+}
+
+export function isFullAccessChoiceEnabled(): boolean {
+  return readDesktopPrefsFile().fullAccessChoiceEnabled !== false;
+}
+
+export function saveFullAccessChoicePreference(enabled: boolean): SecurityPermissionPreferences {
+  const preferences = readDesktopPrefsFile();
+  const resetDefault = !enabled && preferences.defaultConversationPermission === 'full_access';
+  const updated: DesktopPrefs = {
+    ...preferences,
+    fullAccessChoiceEnabled: enabled,
+    ...(resetDefault ? { defaultConversationPermission: 'auto_review' } : {}),
+  };
+  writeDesktopPrefsFile(updated);
+  return securityPermissionPreferences(updated);
+}
+
+function securityPermissionPreferences(preferences: DesktopPrefs): SecurityPermissionPreferences {
+  const enabled = preferences.fullAccessChoiceEnabled !== false;
+  const mode = preferences.defaultConversationPermission;
+  if (mode === 'full_access') return { enabled, defaultMode: enabled ? mode : 'auto_review' };
+  return { enabled, ...(mode === 'request_approval' || mode === 'auto_review' ? { defaultMode: mode } : {}) };
+}
+
+export function readSecurityPermissionPreferences(): SecurityPermissionPreferences {
+  return securityPermissionPreferences(readDesktopPrefsFile());
+}
+
+export function saveDefaultConversationPermissionPreference(defaultMode: DefaultConversationPermission): SecurityPermissionPreferences {
+  const preferences = readDesktopPrefsFile();
+  if (defaultMode === 'full_access' && preferences.fullAccessChoiceEnabled === false) {
+    throw new Error('完全访问选项已关闭');
+  }
+  const updated = { ...preferences, defaultConversationPermission: defaultMode };
+  writeDesktopPrefsFile(updated);
+  return securityPermissionPreferences(updated);
 }

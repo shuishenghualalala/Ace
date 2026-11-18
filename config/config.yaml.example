@@ -96,9 +96,14 @@ gateway:
   admin_accounts: []
   max_active_runs: 4
   max_queue_depth_per_session: 20
-# 安全模块总开关。false 表示默认使用当前宿主用户的完全访问权限，不启用沙箱和审批。
 security:
+  # Gateway、渠道和其他宿主的严格安全策略。
   enabled: false
+  # 内建工具默认使用原生沙箱，新会话采用「替我审批」。旧配置缺少此项时沿用显式 enabled 值。
+  sandbox_enabled: true
+  sandbox_workspace_write:
+    # false 时默认断网，可逐项申请目的地。true 允许受管进程直连，文件沙箱仍然生效。
+    network_access: false
 # 默认使用邮箱区分本机租户（不验证邮箱所有权）。local 为免登录，remote 为验证码登录。
 auth:
   mode: email  # local | email | remote

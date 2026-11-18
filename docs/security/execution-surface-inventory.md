@@ -20,7 +20,8 @@
 | 源文件 | 处理类型 | 当前用途与最终处理 |
 |---|---|---|
 | `crew/tools/builtin.py` | indirect | terminal 前后台入口；P6 统一经 broker，managed 失败不得回退宿主。 |
-| `crew/security/runtime_client.py` | runtime-boundary | 唯一允许的 managed helper host spawn；固定 helper argv、随机启动 token、版本/nonce 校验，用户 command 只进入 stdin 协议。 |
+| `crew/security/runtime_client.py` | runtime-boundary | 受管命令通过固定 helper argv、随机启动 token、版本/nonce 校验进入沙箱，用户 command 只进入 stdin 协议。 |
+| `crew/gateway/routers/security.py` | host-fixed | Desktop proof 保护的能力检查可启动 Windows ACL 恢复。仅运行已验证的原生组件、固定恢复参数和宿主状态目录，不接收请求中的命令或路径。 |
 | `crew/security/launch.py` | indirect | 会话级统一 captured execution；managed 只启动固定 native helper，disabled 才使用当前 OS 用户权限。宿主 spawn 经 `process_lifecycle.spawn_tracked`（exit 事件 future 与管道排干分离），本文件不再直接持有进程创建调用。 |
 | `crew/security/process_lifecycle.py` | runtime-boundary | 唯一 ProcessOwner（signal / wait_for_exit / terminate_for_host_exit）：宿主 spawn 唯一入口 `spawn_tracked`；平台收容集中选择（Linux 探测 `systemd-run --user --scope --collect`、失败回退进程组；macOS 进程组 + 一次性降级警告；Windows `CREATE_NEW_PROCESS_GROUP` + 固定 `taskkill /T /F` argv）；PID 复用围栏现读现比。`taskkill`/`systemctl`/`ps`/`/proc` 仅服务于已登记进程树的终止、存活探测与围栏。 |
 | `crew/tools/process_registry.py` | broker | terminal 后台执行已按 `ProcessLaunch` 分流：disabled 才使用本地 shell；managed 只启动固定 Python bridge，再由 `NativeRuntimeClient` 执行协议内 command，runtime unavailable 不回退宿主。`taskkill/tasklist` 仅用于已登记进程的宿主生命周期清理/探测。 |

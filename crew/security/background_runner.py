@@ -29,6 +29,7 @@ async def _run(payload: dict) -> int:
             denied_roots=tuple(Path(value) for value in payload.get("denied_roots", [])),
             full_disk_read=bool(payload.get("full_disk_read", False)),
             network_enabled=bool(payload.get("network_rules")),
+            network_access=payload.get("network_access") is True,
             network_rules=tuple(payload.get("network_rules", [])),
             allow_local_binding=bool(payload.get("allow_local_binding", False)),
             timeout=float(payload.get("timeout", 86400)),

@@ -8,7 +8,6 @@ from crew.cli.app import CliContext, CliError, CliResult
 from crew.security.approvals import ApprovalDecision, ApprovalError
 from crew.security.context import SecurityContextError, build_gateway_security_context
 from crew.security.models import ConversationPermissionMode, serialize_additional_permissions
-from crew.security.settings import strict_security_enabled
 
 
 def register(subparsers, handlers: dict[str, Any]) -> None:
@@ -169,10 +168,12 @@ async def _security_mode_set(args: Any, ctx: CliContext) -> CliResult:
     app = ctx.app
     sec_ctx = _security_context(app, ctx, args.session_id, args.task_id)
     requested = ConversationPermissionMode(args.mode)
-    if requested == ConversationPermissionMode.AUTO_REVIEW and strict_security_enabled():
+    if requested is ConversationPermissionMode.AUTO_REVIEW and app.security_service.security_enabled:
         from crew.gateway.routers.security import _live_filesystem_runtime
 
-        runtime, _present, _stale, _system = _live_filesystem_runtime()
+        runtime, _present, _stale, _system = await _live_filesystem_runtime(
+            network_access=app.security_service.workspace_network_access,
+        )
         if runtime is None:
             raise CliError("auto_review 需要已通过 live probe 的原生文件沙箱", exit_code=409)
     changed = app.security_service.set_mode(sec_ctx, requested)
@@ -297,41 +298,22 @@ def _security_audit_purge(args: Any, ctx: CliContext) -> CliResult:
 
 
 async def _security_capabilities(args: Any, ctx: CliContext) -> CliResult:
-    import platform
+    from crew.gateway.routers.security import probe_security_capabilities
 
-    from crew.gateway.routers.security import _live_filesystem_runtime, _probe_runtime
-    from crew.security.launch import packaged_runtime_argv
-
-    filesystem_probe, helper_present, stale, system = await _live_filesystem_runtime()
-    helper_argv = packaged_runtime_argv()
-    detail = "native security runtime 未随包安装"
-    filesystem = filesystem_probe is not None
-    network = False
-    if helper_present and stale:
-        detail = "native security runtime 与当前源码不一致"
-    elif filesystem_probe is not None:
-        if filesystem:
-            network_probe = await _probe_runtime(helper_argv, system=system, network_enabled=True)
-            network = network_probe is not None and network_probe.managed_network
-            detail = (
-                "文件沙箱与联网管控 live probe 已通过"
-                if network
-                else (
-                    "文件沙箱 live probe 已通过；联网管控探针失败"
-                    if filesystem
-                    else "原生防护 live probe 失败或只读基线未生效"
-                )
-            )
-        elif helper_present:
-            detail = "当前设备不支持可用的原生安全运行组件"
+    security = ctx.app.security_service
+    capabilities = await probe_security_capabilities(
+        workspace_network_access=security.security_enabled and security.workspace_network_access,
+    )
     return CliResult(
         data={
-            "platform": platform.system().lower(),
-            "helper_present": helper_present,
-            "stale": stale,
-            "filesystem": filesystem,
-            "network": network,
-            "detail": detail,
+            "platform": capabilities["platform"],
+            "helper_present": capabilities["helper_present"],
+            "stale": capabilities["runtime_stale"],
+            "filesystem": capabilities["filesystem_sandbox"],
+            "network": capabilities["managed_network"],
+            "workspace_network_access": capabilities["workspace_network_access"],
+            "direct_network": capabilities["direct_network"],
+            "detail": capabilities["detail"],
         }
     )
 

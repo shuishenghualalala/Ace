@@ -3,6 +3,7 @@ import { createIcon, MONOCHROME_ICON_CLASS, type IconId } from '../components/ic
 const SETTINGS_NAVIGATION: ReadonlyArray<{ id: string; label: string; icon: IconId }> = [
   { id: 'account', label: '账户', icon: 'icon-agent' },
   { id: 'general', label: '通用', icon: 'icon-settings' },
+  { id: 'security', label: '安全', icon: 'icon-security' },
   { id: 'model', label: '模型', icon: 'process-thinking' },
   { id: 'channel', label: '渠道', icon: 'process-web' },
   { id: 'mcp', label: 'MCP', icon: 'process-terminal' },

@@ -39,10 +39,8 @@ from crew.features.context import ContextContribution
 from crew.security.launch import (
     ProcessLaunch,
     audit_execution_result,
-    serialize_profile,
     shell_argv,
 )
-from crew.security.models import serialize_additional_permissions
 from crew.security.process_lifecycle import (
     ProcessOwner,
     register_live,
@@ -409,13 +407,15 @@ class ProcessRegistry:
         *,
         launch: ProcessLaunch,
         cwd: str | None = None,
+        command_argv: tuple[str, ...] | None = None,
         **session_options: Any,
     ) -> ProcessSession:
         """Start through the host-owned security decision; managed never uses a user argv."""
         from crew.security.actions import normalize_exec_action
 
         resolved_cwd = Path(cwd or os.getcwd()).resolve(strict=True)
-        command_argv = shell_argv(command)
+        if command_argv is None:
+            command_argv = shell_argv(command, cwd=resolved_cwd if launch.managed else None)
         action = normalize_exec_action(command_argv, resolved_cwd)
         if not launch.managed:
             return self.spawn_local(
@@ -430,27 +430,16 @@ class ProcessRegistry:
             owner_account_id,
             managed=True,
         )
-        from crew.security.broker import compile_runtime_filesystem_roots
-
-        profile = serialize_profile(launch.profile)
-        additional = serialize_additional_permissions(launch.additional_permissions)
+        from crew.security.broker import (
+            compile_runtime_filesystem_roots,
+            compile_runtime_network_options,
+        )
         writable, readable, readonly, denied = compile_runtime_filesystem_roots(
             launch.profile,
             launch.additional_permissions,
             launch.trusted_readable_roots,
         )
-        network_rules = []
-        for entry in [*profile["network_entries"], *additional["network"]]:
-            network_rules.append(
-                {
-                    "host": entry["host"],
-                    "port": entry["port"],
-                    "protocol": entry["protocol"],
-                    "allow": entry["access"] == "allow",
-                    "allow_private": entry["allow_private"],
-                    "escalatable": entry["escalatable"],
-                }
-            )
+        network = compile_runtime_network_options(launch.profile, launch.additional_permissions)
         payload = {
             "version": 1,
             "helper_argv": list(launch.helper_argv),
@@ -460,11 +449,8 @@ class ProcessRegistry:
             "readable_roots": [str(root) for root in readable],
             "readonly_roots": [str(root) for root in readonly],
             "denied_roots": [str(root) for root in denied],
-            "full_disk_read": bool(profile["full_disk_read"]),
-            "network_rules": network_rules,
-            "allow_local_binding": (
-                profile["allow_local_binding"] or additional["allow_local_binding"]
-            ),
+            "full_disk_read": launch.profile.full_disk_read,
+            **network,
             "env_overrides": child_env,
         }
         return self._spawn_managed_bridge(
@@ -522,7 +508,12 @@ class ProcessRegistry:
         flags = _WINDOWS_PROCESS_FLAGS if _IS_WINDOWS else 0
         scope_unit = ""
         bridge_argv = [sys.executable, "-I", "-c", _BACKGROUND_BRIDGE_LAUNCHER]
-        bridge_env = build_spawn_env({"PYTHONUNBUFFERED": "1"})
+        bridge_overrides = {"PYTHONUNBUFFERED": "1"}
+        # The fixed bridge starts the authenticated helper. Its state path
+        # belongs to that host process and is excluded from the sandbox child.
+        if state_dir := os.environ.get("ACE_SECURITY_STATE_DIR"):
+            bridge_overrides["ACE_SECURITY_STATE_DIR"] = state_dir
+        bridge_env = build_spawn_env(bridge_overrides)
         if not _IS_WINDOWS:
             bridge_argv, scope_unit = wrap_argv_for_containment(bridge_argv, env=bridge_env)
         try:
