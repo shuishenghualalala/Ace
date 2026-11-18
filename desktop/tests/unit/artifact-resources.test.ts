@@ -1,5 +1,6 @@
-import { link, mkdir, mkdtemp, realpath, rename, rm, stat, symlink, truncate, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, realpath, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import os from 'node:os';
+import { linkFixtureFile } from './helpers/linked-file';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readArtifactResource, type ArtifactResourceRoot } from '../../src/main/browser/artifact-resources';
@@ -34,11 +35,14 @@ describe('local HTML preview resources', () => {
   });
 
   it('rejects symlink and hardlink escapes', async () => {
-    const outside = path.join(temporary, 'outside.css');
+    const sibling = path.join(temporary, 'sibling');
+    await mkdir(sibling);
+    const outside = path.join(sibling, 'outside.css');
     await writeFile(outside, 'private');
-    await symlink(outside, path.join(root.directory, 'linked.css'));
+    const linked = await linkFixtureFile(outside, path.join(root.directory, 'linked.css'));
+    const resourcePath = '/' + path.relative(root.directory, linked).split(path.sep).join('/');
     await link(outside, path.join(root.directory, 'hardlinked.css'));
-    expect(await readArtifactResource(root, '/linked.css')).toBeNull();
+    expect(await readArtifactResource(root, resourcePath)).toBeNull();
     expect(await readArtifactResource(root, '/hardlinked.css')).toBeNull();
   });
 

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { access, mkdtemp, mkdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
+import { linkFixtureFile } from './helpers/linked-file';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -1919,11 +1920,12 @@ describe('BrowserHost', () => {
     await setMode(host, created.data.targetId, 'human');
 
     const workspace = path.join(tempRoot, 'workspace');
-    const outside = path.join(tempRoot, 'outside.html');
-    const linked = path.join(workspace, 'index.html');
+    const sibling = path.join(tempRoot, 'sibling');
+    const outside = path.join(sibling, 'outside.html');
+    await mkdir(sibling);
     await mkdir(workspace, { recursive: true });
     await writeFile(outside, '<!doctype html><title>Outside</title>', 'utf8');
-    await symlink(outside, linked, process.platform === 'win32' ? 'file' : undefined);
+    const linked = await linkFixtureFile(outside, path.join(workspace, 'index.html'));
 
     await expect(host.handleRpc({
       runtime_key: RUNTIME_KEY,
