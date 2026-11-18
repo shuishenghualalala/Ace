@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -137,13 +138,14 @@ def test_windows_case_folding_for_keys_and_ownership(monkeypatch: pytest.MonkeyP
 
 def test_spawn_local_child_env_excludes_host_secrets(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """端到端：spawn_local 派生环境不含 KEY/TOKEN/SECRET/PASSWORD 变量。"""
     import sys
 
     from crew.tools.process_registry import ProcessRegistry
 
-    ambient = _host_env()
+    ambient = _host_env() | {"HOME": str(tmp_path), "CREW_HOME": str(tmp_path / ".crew")}
     if os.name == "nt":
         ambient.update({name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT") if name in os.environ})
     monkeypatch.setattr(child_env.os, "environ", ambient)
