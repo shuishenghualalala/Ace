@@ -1,14 +1,22 @@
 """会话存储 + 记忆。"""
 
+import multiprocessing
+import os
 import sqlite3
 import threading
 import time
+from contextlib import closing
+from functools import partial
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, current_owner_account_id
 from crew.core.types import Message, ToolCall
 from crew.memory.simple import SQLiteMemory
-from crew.state.session_store import SQLiteSessionStore
+from crew.state.schema_version import current_version
+from crew.state.session_store import SESSIONS_SCHEMA_FEATURE, SESSIONS_SCHEMA_VERSION, SQLiteSessionStore
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 
@@ -171,27 +179,114 @@ def test_explicit_title_not_overwritten_by_resave(tmp_path):
     assert s1["title"] == "自定义标题"
 
 
-def test_migration_from_legacy_schema(tmp_path):
-    """旧库（仅 session_id/messages/updated_at）应能被无损迁移并正常工作。"""
-    db = tmp_path / "legacy.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute(
-        "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, messages TEXT NOT NULL, updated_at REAL NOT NULL)"
-    )
-    conn.execute(
-        "INSERT INTO sessions VALUES (?, ?, ?)",
-        ("old", '[{"role": "user", "content": "旧消息"}]', 1.0),
-    )
-    conn.commit()
-    conn.close()
+@pytest.fixture
+def legacy_db(tmp_path):
+    db = tmp_path / "旧版会话.db"
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute(
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, messages TEXT NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?)",
+            ("old", '[{"role": "user", "content": "旧消息"}]', 1.0),
+        )
+    return db
 
-    store = SQLiteSessionStore(str(db))  # 触发迁移
-    # 迁移产生的历史行经 owner 回填归属本机 local；访问需显式带 owner。
-    loaded = store.load("old", owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
-    assert len(loaded) == 1 and loaded[0].content == "旧消息"
-    # 迁移后新会话功能正常
-    store.save("new", [Message.user("新问题")], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
-    assert {s["session_id"] for s in store.list_sessions(owner_account_id=LOCAL_OWNER_ACCOUNT_ID)} == {"old", "new"}
+
+def _interrupt_migration(db, phase, committed):
+    class InterruptedCommit(sqlite3.Connection):
+        def commit(self):
+            marked = self.execute(
+                "SELECT 1 FROM store_meta WHERE key = ?", (SQLiteSessionStore.BACKFILL_DONE_KEY,)
+            ).fetchone()
+            if bool(marked) == (phase == "backfill"):
+                if committed:
+                    super().commit()
+                os._exit(73)
+            super().commit()
+
+    with patch.object(sqlite3, "connect", partial(sqlite3.connect, factory=InterruptedCommit)):
+        store = SQLiteSessionStore(str(db))
+        store.wait_for_legacy_backfill()
+
+
+def _assert_migration_reopens(db):
+    with closing(sqlite3.connect(db)) as conn:
+        previous_stamp = None
+        if current_version(conn, SESSIONS_SCHEMA_FEATURE):
+            previous_stamp = conn.execute("SELECT * FROM sessions_schema_version").fetchone()
+    for _ in range(2):
+        with closing(SQLiteSessionStore(str(db))) as store:
+            assert store.wait_for_legacy_backfill()
+            assert [m.content for m in store.load("old", owner_account_id=LOCAL_OWNER_ACCOUNT_ID)] == ["旧消息"]
+            assert not store.load("old", owner_account_id="another-owner")
+        with closing(sqlite3.connect(db)) as conn:
+            assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            assert current_version(conn, SESSIONS_SCHEMA_FEATURE) == SESSIONS_SCHEMA_VERSION
+            assert conn.execute("SELECT owner_account_id, session_id, seq FROM session_events").fetchall() == [
+                (LOCAL_OWNER_ACCOUNT_ID, "old", 1)
+            ]
+            assert conn.execute("SELECT owner_account_id, session_id, leaf_seq FROM sessions").fetchall() == [
+                (LOCAL_OWNER_ACCOUNT_ID, "old", 1)
+            ]
+            stamp = conn.execute("SELECT * FROM sessions_schema_version").fetchone()
+            if previous_stamp is not None:
+                assert stamp == previous_stamp
+            previous_stamp = stamp
+
+
+@pytest.mark.parametrize("phase", ["schema", "backfill"])
+@pytest.mark.parametrize("committed", [False, True], ids=["before-commit", "after-commit"])
+def test_legacy_migration_process_exit(legacy_db, phase, committed):
+    child = multiprocessing.get_context("spawn").Process(
+        target=_interrupt_migration, args=(legacy_db, phase, committed)
+    )
+    child.start()
+    try:
+        child.join(30)
+        assert child.exitcode == 73
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join()
+        child.close()
+
+    with closing(sqlite3.connect(legacy_db)) as conn:
+        version = current_version(conn, SESSIONS_SCHEMA_FEATURE)
+        if phase == "schema" and not committed:
+            assert version == 0
+            assert [c[1] for c in conn.execute("PRAGMA table_info(sessions)")] == ["session_id", "messages", "updated_at"]
+        else:
+            assert version == SESSIONS_SCHEMA_VERSION
+            backfilled = int(phase == "backfill" and committed)
+            assert conn.execute("SELECT COUNT(*) FROM session_events").fetchone() == (backfilled,)
+            assert conn.execute(
+                "SELECT COUNT(*) FROM store_meta WHERE key = ?", (SQLiteSessionStore.BACKFILL_DONE_KEY,)
+            ).fetchone() == (backfilled,)
+    _assert_migration_reopens(legacy_db)
+
+
+def test_legacy_migration_disk_full(legacy_db):
+    with closing(connect_sqlite(legacy_db)) as conn:
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        conn.execute(f"PRAGMA max_page_count={page_count + 4}")
+        with patch("crew.state.session_store.connect_sqlite", return_value=conn), pytest.raises(
+            sqlite3.OperationalError
+        ) as error:
+            SQLiteSessionStore(str(legacy_db))
+        assert error.value.sqlite_errorcode == sqlite3.SQLITE_FULL
+        assert current_version(conn, SESSIONS_SCHEMA_FEATURE) == 0
+        assert [c[1] for c in conn.execute("PRAGMA table_info(sessions)")] == ["session_id", "messages", "updated_at"]
+    _assert_migration_reopens(legacy_db)
+
+
+def test_migration_from_legacy_schema(legacy_db):
+    """旧库（仅 session_id/messages/updated_at）应能被无损迁移并正常工作。"""
+    with closing(SQLiteSessionStore(str(legacy_db))) as store:
+        loaded = store.load("old", owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
+        assert len(loaded) == 1 and loaded[0].content == "旧消息"
+        store.save("new", [Message.user("新问题")], owner_account_id=LOCAL_OWNER_ACCOUNT_ID)
+        assert {s["session_id"] for s in store.list_sessions(owner_account_id=LOCAL_OWNER_ACCOUNT_ID)} == {"old", "new"}
 
 
 def test_set_status_and_not_overwritten_by_save(tmp_path):
