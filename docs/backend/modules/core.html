@@ -89,6 +89,8 @@
 
 禁止：crew.core -&gt; crew.team / crew.wiki / crew.gateway / crew.agent.external</code></pre>
 
+  <p><code>FollowupWaiter</code> 将已校验的结构化回答投影为一条用户历史。选择题以展示标签输出，自由文本保持原文。多题按回答分段，单题自由文本及多题各段的题名只输出一次。Gateway 在确认回执中附上该正文和历史标识，桌面在旧回执缺少正文时沿用同样的标题和题名规则。模型收到的工具结果保留实际选项值及文本。</p>
+
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li><code>ResponseChunk.kind</code> 仍包含业务枚举，阶段 2 后续迁为命名空间 <code>feature_event</code>。</li>

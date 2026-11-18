@@ -379,10 +379,9 @@ class FollowupWaiter:
             if not labels:
                 continue
             text = ", ".join(labels)
-            if q.get("inputMode") == "text" and q.get("question"):
-                text = f"{q.get('question')}：{text}"
-            if multi and q.get("question"):
-                text = f"{q.get('question')}：{text}"
+            question = q.get("question")
+            if question and (multi or q.get("inputMode") == "text"):
+                text = f"{question}：{text}"
             parts.append(text)
         prefix = "已补充" if any(q.get("inputMode") == "text" for q in question_map.values()) else "已选择"
         return f"{prefix}：{'；'.join(parts)}" if parts else ""

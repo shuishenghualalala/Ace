@@ -506,9 +506,14 @@ export function formatFollowupAnswerMessage(
     const item = questionById.get(answer.question_id);
     const labelByValue = new Map(item?.options.map((option) => [option.value, option.label]) ?? []);
     const values = answer.answers.map((value) => labelByValue.get(value) ?? value).filter(Boolean);
-    return values.length ? [values.join(', ')] : [];
+    if (!values.length) return [];
+    const text = values.join(', ');
+    return [item?.question && (answers.length > 1 || item.inputMode === 'text')
+      ? `${item.question}：${text}`
+      : text];
   });
-  return parts.length ? `已选择：${parts.join('；')}` : null;
+  const prefix = question.questions.some((item) => item.inputMode === 'text') ? '已补充' : '已选择';
+  return parts.length ? `${prefix}：${parts.join('；')}` : null;
 }
 
 /** 渲染追问卡片为 DOM 节点（供 chat-controller keyed-diff 使用）。 */

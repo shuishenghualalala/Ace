@@ -347,7 +347,23 @@ def _receive(socket, kind):
     pytest.fail(f"Did not receive {kind}")
 
 
-def test_ws_receipt_replay_and_response_precede_resumed_stream(tmp_path):
+@pytest.mark.parametrize(("questions", "answers", "answer_text"), [
+    pytest.param(_QUESTIONS, _ANSWERS, "已选择：Option B", id="single-choice"),
+    pytest.param(
+        validate_questions([
+            {
+                "id": "q1", "question": "Supported platforms", "multiSelect": True,
+                "options": [{"label": "Windows", "value": "win"}, {"label": "Linux", "value": "linux"}],
+            },
+            {"id": "q2", "question": "Deployment note", "inputMode": "text"},
+        ]),
+        [{"question_id": "q1", "answers": ["linux", "win"]},
+         {"question_id": "q2", "answers": ["保留现有会话"]}],
+        "已补充：Supported platforms：Linux, Windows；Deployment note：保留现有会话",
+        id="multiple-choice-and-text",
+    ),
+])
+def test_ws_receipt_replay_and_response_precede_resumed_stream(tmp_path, questions, answers, answer_text):
     with closing(SQLiteSessionStore(str(tmp_path / "followup.db"))) as store:
         store.ensure_session("s", owner_account_id="local")
         client, connections = _client(store)
@@ -356,7 +372,7 @@ def test_ws_receipt_replay_and_response_precede_resumed_stream(tmp_path):
         consumed = []
 
         async def create():
-            qid = waiter.create("s", _QUESTIONS, owner_account_id="local", request_id="r")
+            qid = waiter.create("s", questions, owner_account_id="local", request_id="r")
 
             async def resume():
                 consumed.append(await waiter.wait("s", qid, owner_account_id="local"))
@@ -371,7 +387,7 @@ def test_ws_receipt_replay_and_response_precede_resumed_stream(tmp_path):
             qid = client.portal.call(create)
             command = {
                 "action": "followup_answer", "session_id": "s", "request_id": "r",
-                "question_id": qid, "submission_id": "submit", "answers": _ANSWERS,
+                "question_id": qid, "submission_id": "submit", "answers": answers,
             }
             with client.websocket_connect("/ws") as socket:
                 socket.send_json(command)
@@ -379,10 +395,10 @@ def test_ws_receipt_replay_and_response_precede_resumed_stream(tmp_path):
                 receipt = socket.receive_json()
                 resumed = socket.receive_json()
                 assert resolution["kind"] == "followup_question"
-                assert resolution["body"]["answer_text"] == "已选择：Option B"
+                assert resolution["body"]["answer_text"] == answer_text
                 assert receipt["kind"] == "interaction_receipt" and receipt["body"]["status"] == "applied"
                 assert receipt["body"]["answer_history_id"] == f"followup:{qid}"
-                assert resumed["kind"] == "delta" and consumed == [_ANSWERS]
+                assert resumed["kind"] == "delta" and consumed == [answers]
                 socket.send_json(command)
                 assert socket.receive_json() == receipt
                 socket.send_json({**command, "answers": [{"question_id": "q1", "answers": ["altered"]}]})
@@ -399,6 +415,10 @@ def test_ws_receipt_replay_and_response_precede_resumed_stream(tmp_path):
         with restarted.websocket_connect("/ws") as socket:
             socket.send_json({**command, "action": "followup_receipt_query"})
             assert socket.receive_json() == receipt
+
+        history = read_session_history_window(store, "s", "local", 20)
+        recorded = [item for item in history["items"] if item.get("history_id") == f"followup:{qid}"]
+        assert [(item["role"], item["content"]) for item in recorded] == [("user", answer_text)]
 
 
 @pytest.mark.parametrize("modern", [False, True])

@@ -161,6 +161,28 @@ describe('follow-up permission presentation', () => {
       { question_id: 'perm', answers: ['allow_once'] },
     ])).toBe('已选择：允许一次');
   });
+
+  it('labels mixed choice and free-text answers once in the legacy message', () => {
+    const question: PendingFollowup = {
+      questionId: 'mixed',
+      title: 'Deployment',
+      recordHistory: true,
+      questions: [
+        {
+          id: 'platforms', question: 'Supported platforms', multiSelect: true, allowFreeText: false,
+          options: [{ label: 'Linux', value: 'linux' }, { label: 'Windows', value: 'win' }],
+        },
+        {
+          id: 'note', question: 'Deployment note', inputMode: 'text',
+          multiSelect: false, allowFreeText: true, options: [],
+        },
+      ],
+    };
+    expect(formatFollowupAnswerMessage(question, [
+      { question_id: 'platforms', answers: ['linux', 'win'] },
+      { question_id: 'note', answers: ['保留现有会话'] },
+    ])).toBe('已补充：Supported platforms：Linux, Windows；Deployment note：保留现有会话');
+  });
 });
 
 describe('runtime staffing follow-up presentation', () => {
