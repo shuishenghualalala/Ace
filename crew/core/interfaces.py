@@ -500,6 +500,9 @@ class WorkspaceStore(ABC):
         description: str = "",
         instructions: str = "",
         root_path: str = "",
+        *,
+        owner_account_id: str,
+        reuse_root: bool = False,
     ) -> dict[str, Any]: ...
 
     @abstractmethod

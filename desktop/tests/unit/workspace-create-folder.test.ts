@@ -50,6 +50,7 @@ describe('createWorkspaceFromFolderPicker', () => {
       description: '',
       instructions: '',
       root_path: 'D:/Projects/MyApp',
+      reuse_root: true,
     });
     expect(workspaceStore.get().currentWorkspaceId).toBe('ws_new');
     expect(workspaceStore.get().expandedWorkspaces.ws_new).not.toBe(false);
@@ -66,6 +67,23 @@ describe('createWorkspaceFromFolderPicker', () => {
 
     expect(backendApi.createWorkspace).not.toHaveBeenCalled();
     expect(workspaceStore.get().currentWorkspaceId).toBe('ws-old');
+  });
+
+  it('delegates folder identity once for 500 different spellings and preserves a hidden match', async () => {
+    const roots = Array.from({ length: 500 }, (_, i) => ({
+      id: String(i), name: 'folder', description: '', instructions: '', root_path: '/Projects/' + i,
+    }));
+    workspaceStore.set({ workspaces: roots });
+    const info = vi.fn();
+    window.Crew = {
+      selectFolder: vi.fn(async () => ['/projects/499']), workspaceDirectoryInfo: info,
+    } as unknown as typeof window.Crew;
+    vi.mocked(backendApi.createWorkspace).mockResolvedValue({ ...roots[499]!, hidden: true });
+    expect(await createWorkspaceFromFolderPicker(vi.fn())).toBe('499');
+    expect(backendApi.createWorkspace).toHaveBeenCalledTimes(1);
+    expect(backendApi.workspaces).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledTimes(0);
+    expect(workspaceStore.get().currentWorkspaceId).not.toBe('499');
   });
 
   it('用户取消选择时不创建', async () => {

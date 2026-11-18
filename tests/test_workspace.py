@@ -45,6 +45,58 @@ def test_workspace_store_root_path(tmp_path):
     assert got["root_path"] == str(project.resolve())
 
 
+def test_picker_root_is_atomic_and_owner_scoped(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    db = str(tmp_path / "workspaces.db")
+    stores = [SQLiteWorkspaceStore(db) for _ in range(4)]
+    project = tmp_path / "project"
+    project.mkdir()
+    try:
+        def select(i):
+            return stores[i % 4].create("picked", root_path=str(project), owner_account_id="a", reuse_root=True)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            rows = list(pool.map(select, range(20)))
+        bound = rows[0]["id"]
+        assert {row["id"] for row in rows} == {bound}
+        store = stores[0]
+        store.update(bound, "a", hidden=True, name="original")
+        assert select(1)["hidden"]
+        other = store.create("other", owner_account_id="a")
+        conflict = store.update(other["id"], "a", root_path=str(project), name="ignored", reuse_root=True)
+        assert conflict["id"] == bound and conflict["name"] == "original"
+        assert store.get(other["id"], "a")["root_path"] == ""
+        with pytest.raises(KeyError):
+            store.update("missing", "a", root_path=str(project), reuse_root=True)
+        assert store.create("separate", root_path=str(project), owner_account_id="b", reuse_root=True)["id"] != bound
+        assert store.create("shared", root_path=str(project), owner_account_id="a")["id"] != bound
+        with pytest.raises(ValueError):
+            store.update(bound, "a", root_path=str(tmp_path / "missing"), reuse_root=True)
+    finally:
+        for store in stores:
+            store.close()
+
+
+def test_picker_respects_actual_volume_case_and_path_spelling(tmp_path):
+    with_case = tmp_path / "Project"
+    other_case = tmp_path / "project"
+    with_case.mkdir()
+    same = other_case.exists()
+    if not same:
+        other_case.mkdir()
+    store = SQLiteWorkspaceStore(str(tmp_path / "workspaces.db"))
+    try:
+        def pick(path):
+            return store.create("pick", root_path=str(path), owner_account_id="a", reuse_root=True)["id"]
+        assert (pick(with_case) == pick(other_case)) == same
+        if Path("/").anchor == "/":
+            trailing = tmp_path / "Project "
+            trailing.mkdir()
+            assert pick(trailing) != pick(with_case)
+    finally:
+        store.close()
+
+
 def test_default_workspace_protected(tmp_path):
     store = SQLiteWorkspaceStore(str(tmp_path / "w.db"))
     with pytest.raises(ValueError):

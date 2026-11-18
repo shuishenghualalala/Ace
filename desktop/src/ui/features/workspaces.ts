@@ -1017,40 +1017,14 @@ function displayProjectPrompt(instructions: string | undefined, rootPath?: strin
 
 /** 从本地路径取文件夹名，作为默认工作空间名称。 */
 function folderBaseName(folderPath: string): string {
-  const normalized = folderPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const path = window.Crew?.runtimePlatform === 'win32' ? folderPath.replace(/\\/g, '/') : folderPath;
+  const normalized = path.replace(/\/+$/, '');
   const base = normalized.split('/').filter(Boolean).pop();
   return base?.trim() || '新工作空间';
 }
 
-function normalizeFolderPathForCompare(folderPath: string): string {
-  return folderPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-}
-
-async function findWorkspaceByRoot(
-  rootPath: string,
-  excludedId?: string,
-): Promise<Workspace | undefined> {
-  const candidates = state.workspaces.filter((workspace) =>
-    workspace.id !== excludedId && Boolean(workspace.root_path?.trim()));
-  const normalized = normalizeFolderPathForCompare(rootPath);
-  const direct = candidates.find((workspace) =>
-    normalizeFolderPathForCompare(workspace.root_path!) === normalized);
-  if (direct) return direct;
-
-  const directoryInfo = window.Crew?.workspaceDirectoryInfo;
-  if (!directoryInfo) return undefined;
-  const canonical = await Promise.all(candidates.map(async (workspace) => {
-    try {
-      return {
-        workspace,
-        path: (await directoryInfo(workspace.id)).canonicalPath,
-      };
-    } catch {
-      return { workspace, path: null };
-    }
-  }));
-  return canonical.find((item) =>
-    item.path && normalizeFolderPathForCompare(item.path) === normalized)?.workspace;
+function findWorkspaceByRoot(rootPath: string, excludedId?: string): Workspace | undefined {
+  return state.workspaces.find((workspace) => workspace.id !== excludedId && workspace.root_path === rootPath);
 }
 
 async function findWorkspaceByRootAfterReload(
@@ -1084,10 +1058,10 @@ export async function createWorkspaceFromFolderPicker(
   }
   const paths = await selectFolder();
   if (!paths?.length) return;
-  const rootPath = paths[0]!.trim();
+  const rootPath = paths[0]!;
   if (!rootPath) return;
 
-  const existing = await findWorkspaceByRoot(rootPath);
+  const existing = findWorkspaceByRoot(rootPath);
   if (existing) {
     focusVisibleWorkspace(existing, openSession);
     notify(`该目录已是工作空间「${existing.name}」`);
@@ -1100,13 +1074,11 @@ export async function createWorkspaceFromFolderPicker(
       description: '',
       instructions: '',
       root_path: rootPath,
+      reuse_root: true,
     });
     await loadWorkspaces();
-    setCurrentWorkspaceId(created.id);
-    setExpandedWorkspace(created.id, true);
-    renderWorkspaceHistory(openSession);
-    window.dispatchEvent(new CustomEvent('workspace:context-changed'));
-    notify(`已添加工作空间「${created.name}」`);
+    focusVisibleWorkspace(created, openSession);
+    notify(created.hidden ? `该目录已是隐藏工作空间「${created.name}」` : `已选择工作空间「${created.name}」`);
     return created.id;
   } catch (err) {
     const concurrent = await findWorkspaceByRootAfterReload(rootPath);
@@ -1235,17 +1207,21 @@ export async function relinkWorkspaceFromFolderPicker(
     return;
   }
   const paths = await selectFolder();
-  const rootPath = paths?.[0]?.trim();
+  const rootPath = paths?.[0];
   if (!rootPath) return;
 
-  const existing = await findWorkspaceByRoot(rootPath, workspaceId);
+  const existing = findWorkspaceByRoot(rootPath, workspaceId);
   if (existing) {
     notify(`该目录已属于工作空间「${existing.name}」`);
     return existing.id;
   }
 
   try {
-    await backendApi.updateWorkspace(workspaceId, { root_path: rootPath });
+    const bound = await backendApi.updateWorkspace(workspaceId, { root_path: rootPath, reuse_root: true });
+    if (bound.id !== workspaceId) {
+      notify(`该目录已属于工作空间「${bound.name}」`);
+      return bound.id;
+    }
     await loadWorkspaces();
     renderWorkspaceHistory(openSession);
     window.dispatchEvent(new CustomEvent('workspace:context-changed'));

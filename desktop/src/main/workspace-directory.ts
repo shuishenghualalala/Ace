@@ -30,7 +30,7 @@ export async function resolveWorkspaceDirectoryInfo(
     && item['id'] === workspaceId);
   if (!workspace) throw new Error('Workspace 不存在');
   const rootPath = typeof workspace['root_path'] === 'string'
-    ? workspace['root_path'].trim()
+    ? workspace['root_path']
     : '';
   if (!rootPath) return { exists: false, canonicalPath: null };
   try {

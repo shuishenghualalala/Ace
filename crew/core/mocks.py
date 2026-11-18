@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import os
 import uuid
 
 from crew.core.interfaces import LLMProvider, MemoryProvider, SessionStore, WorkspaceStore
@@ -278,6 +279,19 @@ class InMemoryWorkspaceStore(WorkspaceStore):
     def _ensure_default(self, owner_account_id: str) -> None:
         self._data.setdefault(self._key("default", owner_account_id), self._builtin("default"))
 
+    def _bound_root(self, owner: str, root: str, excluded_id: str = "") -> dict | None:
+        if not root or not os.path.isdir(root):
+            raise ValueError("root_path 不是有效目录")
+        for (account, wid), ws in self._data.items():
+            stored = ws.get("root_path")
+            if stored and account == owner and wid != excluded_id:
+                try:
+                    if os.path.samefile(stored, root):
+                        return dict(ws)
+                except OSError:
+                    continue
+        return None
+
     def create(
         self,
         name: str,
@@ -285,7 +299,10 @@ class InMemoryWorkspaceStore(WorkspaceStore):
         description: str = "",
         instructions: str = "",
         root_path: str = "",
+        reuse_root: bool = False,
     ) -> dict:
+        if reuse_root and (existing := self._bound_root(owner_account_id, root_path)):
+            return existing
         self._ensure_default(owner_account_id)
         wid = f"ws_{uuid.uuid4().hex[:8]}"
         ws = {
@@ -310,7 +327,12 @@ class InMemoryWorkspaceStore(WorkspaceStore):
 
     def update(self, workspace_id: str, owner_account_id: str, **fields) -> dict:
         key = self._key(workspace_id, owner_account_id)
-        self._data[key].update({k: v for k, v in fields.items() if v is not None})
+        original = self._data[key]
+        if fields.pop("reuse_root", False) is True:
+            existing = self._bound_root(owner_account_id, fields.get("root_path", ""), workspace_id)
+            if existing:
+                return existing
+        original.update({k: v for k, v in fields.items() if v is not None})
         return dict(self._data[key])
 
     def delete(self, workspace_id: str, owner_account_id: str) -> None:

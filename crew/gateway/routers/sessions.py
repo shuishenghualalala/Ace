@@ -472,7 +472,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
     @router.post("/api/workspaces")
     def create_workspace(request: Request, payload: dict) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
-        raw_root = str(payload.get("root_path") or "").strip()
+        raw_root = str(payload.get("root_path") or "")
         if raw_root:
             from crew.state.workspace_store import _normalize_root_path
 
@@ -481,13 +481,17 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     {"ok": False, "error": "root_path 不是有效目录"},
                     status_code=400,
                 )
-        ws = crew.workspace_store.create(
-            name=payload.get("name", "新工作空间"),
-            description=payload.get("description", ""),
-            instructions=payload.get("instructions", ""),
-            root_path=str(payload.get("root_path") or ""),
-            owner_account_id=owner,
-        )
+        try:
+            ws = crew.workspace_store.create(
+                name=payload.get("name", "新工作空间"),
+                description=payload.get("description", ""),
+                instructions=payload.get("instructions", ""),
+                root_path=raw_root,
+                owner_account_id=owner,
+                **({"reuse_root": True} if payload.get("reuse_root") is True else {}),
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return JSONResponse(ws)
 
     @router.put("/api/workspace/{workspace_id}")
@@ -495,6 +499,8 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = account_from_request(request).owner_account_id
         try:
             return JSONResponse(crew.workspace_store.update(workspace_id, owner_account_id=owner, **payload))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         except KeyError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
 

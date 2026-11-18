@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -28,12 +29,12 @@ BUILTIN_WORKSPACES: dict[str, tuple[str, int]] = {
 
 def _normalize_root_path(path: str) -> str:
     """规范化本地根目录为绝对路径；无效输入返回空串。"""
-    raw = (path or "").strip()
-    if not raw:
+    raw = path or ""
+    if not raw.strip():
         return ""
     try:
         resolved = Path(raw).expanduser().resolve()
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         return ""
     return str(resolved) if resolved.is_dir() else ""
 
@@ -70,6 +71,7 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         self._migrate_owner_primary_key(conn)
         self._migrate_root_path_column(conn)
         self._migrate_hidden_column(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_workspaces_owner_root ON workspaces(owner_account_id, root_path)")
         # 历史 owner='' 行归属本机 local（owner 统一后不存在无主工作空间）。
         backfill_empty_owner_rows(conn, ["workspaces"])
 
@@ -141,6 +143,58 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             )
         self._writer.execute(_write)
 
+    @staticmethod
+    def _same_directory(stored: str, selected: os.stat_result) -> bool:
+        try:
+            return os.path.samestat(os.stat(stored), selected)
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _exact_binding(conn, owner: str, root: str, excluded_id: str) -> str | None:
+        row = conn.execute(
+            "SELECT id FROM workspaces WHERE owner_account_id=? AND root_path=? AND id<>? ORDER BY created_at, id LIMIT 1",
+            (owner, root, excluded_id),
+        ).fetchone()
+        return row[0] if row else None
+
+    def _inspect_roots(self, owner: str, root: str, excluded_id: str = "") -> tuple[os.stat_result, dict[str, bool]]:
+        if not root:
+            raise ValueError("root_path 不是有效目录")
+        try:
+            selected = os.stat(root)
+        except OSError as exc:
+            raise ValueError("root_path 不是有效目录") from exc
+        with self._lock:
+            if self._exact_binding(self._conn, owner, root, excluded_id):
+                return selected, {}
+            rows = self._conn.execute(
+                "SELECT DISTINCT root_path FROM workspaces WHERE owner_account_id=? AND root_path<>'' AND id<>?",
+                (owner, excluded_id),
+            ).fetchall()
+        paths = {row[0] for row in rows}
+        # A directory may have moved behind an old symlink. Probe the filesystem outside the write transaction.
+        checks = {path: self._same_directory(path, selected) for path in paths}
+        return selected, checks
+
+    def _bound_root(self, conn, owner: str, root: str, inspected: tuple[os.stat_result, dict[str, bool]],
+                    excluded_id: str = "") -> str | None:
+        match = self._exact_binding(conn, owner, root, excluded_id)
+        if match:
+            return match
+        selected, checks = inspected
+        rows = conn.execute(
+            "SELECT id, root_path FROM workspaces WHERE owner_account_id=? AND root_path<>'' AND id<>? ORDER BY created_at, id",
+            (owner, excluded_id),
+        )
+        for workspace_id, stored in rows:
+            # A concurrent writer can bind a directory after inspection and before BEGIN IMMEDIATE.
+            if stored not in checks:
+                checks[stored] = self._same_directory(stored, selected)
+            if checks[stored]:
+                return workspace_id
+        return None
+
     def create(
         self,
         name: str,
@@ -149,8 +203,10 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         root_path: str = "",
         *,
         owner_account_id: str,
+        reuse_root: bool = False,
     ) -> dict:
         normalized_root = _normalize_root_path(root_path)
+        inspected = self._inspect_roots(owner_account_id, normalized_root) if reuse_root else None
         ws = Workspace(
             name=name,
             description=description,
@@ -159,6 +215,10 @@ class SQLiteWorkspaceStore(WorkspaceStore):
             hidden=False,
         )
         def _write(conn):
+            if inspected is not None:
+                bound = self._bound_root(conn, owner_account_id, normalized_root, inspected)
+                if bound:
+                    return bound
             conn.execute(
                 "INSERT INTO workspaces "
                 "(owner_account_id, id, name, description, instructions, created_at, updated_at, root_path, hidden) "
@@ -175,8 +235,10 @@ class SQLiteWorkspaceStore(WorkspaceStore):
                     1 if ws.hidden else 0,
                 ),
             )
-        self._writer.execute(_write)
-        return ws.to_dict()
+            return ws.id
+
+        bound = self._writer.execute(_write)
+        return ws.to_dict() if bound == ws.id else self.get(bound, owner_account_id)
 
     def get(self, workspace_id: str, owner_account_id: str) -> dict:
         if workspace_id in BUILTIN_WORKSPACES:
@@ -208,16 +270,27 @@ class SQLiteWorkspaceStore(WorkspaceStore):
         }
         if "root_path" in allowed:
             allowed["root_path"] = _normalize_root_path(str(allowed["root_path"]))
+        reuse_root = fields.get("reuse_root") is True
+        inspected = self._inspect_roots(owner_account_id, allowed.get("root_path", ""), workspace_id) if reuse_root else None
         if "hidden" in allowed:
             allowed["hidden"] = 1 if bool(allowed["hidden"]) else 0
         if allowed:
             sets = ", ".join(f"{k} = ?" for k in allowed)
             def _write(conn):
+                if inspected is not None:
+                    if not conn.execute("SELECT 1 FROM workspaces WHERE owner_account_id=? AND id=?",
+                                        (owner_account_id, workspace_id)).fetchone():
+                        raise KeyError(f"工作空间不存在: {workspace_id}")
+                    bound = self._bound_root(conn, owner_account_id, allowed["root_path"], inspected, workspace_id)
+                    if bound:
+                        return bound
                 conn.execute(
                     f"UPDATE workspaces SET {sets}, updated_at = ? WHERE owner_account_id = ? AND id = ?",
                     (*allowed.values(), time.time(), owner_account_id, workspace_id),
                 )
-            self._writer.execute(_write)
+                return workspace_id
+
+            workspace_id = self._writer.execute(_write)
         return self.get(workspace_id, owner_account_id=owner_account_id)
 
     def delete(self, workspace_id: str, owner_account_id: str, *, writer=None) -> None:

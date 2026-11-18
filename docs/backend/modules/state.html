@@ -151,6 +151,9 @@ runtime.health_port                     # 独立线程 health 服务端口，默
   <p><code>TraceStore</code> 使用独立 SQLite 文件、owner scope、外键和 WAL（不支持 WAL 的文件系统回退 DELETE）。无受信业务归属的启动/第三方日志写入独立 <code>system</code> scope，不伪装成 <code>local</code>；系统追踪日志由诊断管理员专用查询合并展示，trace/span/payload 仍严格按 owner 隔离。<code>ObservationRecorder</code> 在业务线程完成脱敏后进入有界队列，由单一 writer 以批量事务写入；队列满、SQLite 忙或关闭超时只标记降级，不阻塞业务收尾。trace 计数和字节账本有固定上限，关闭不会在满队列上无限等待，stop 哨兵也会完成队列计数。</p>
   <p>payload schema 保存 <code>capture_layer</code>、policy/version、截断原因及引用水位。分页查询使用 keyset cursor；导出通过独立临时文件分页生成，并在 manifest 中记录 snapshot 水位、数量与 partial 原因。</p>
 
+  <h2>工作空间目录复用</h2>
+  <p>桌面文件夹选择器在创建或重新关联时传递 <code>reuse_root</code>。Gateway 将路径解析为实际目录，存储层在同一个 SQLite 写事务内查找当前账号的绑定并执行写入。已有绑定返回原工作空间，保留名称、隐藏状态和指令。精确路径使用账号与根路径索引。路径不同的候选在写事务前按文件系统身份核对，覆盖大小写、Unicode 和旧目录改作链接的情况。事务内只补查并发新增的候选。普通 API 创建仍可显式建立共享目录的多个工作空间。</p>
+
   <div class="nav">返回：<a href="index.html">Ace 后端模块索引</a> · <a href="../../index.html">文档总览</a> · <a href="../../testing/observability-tracing.html">可观测测试记录</a></div>
 </div>
 </body>

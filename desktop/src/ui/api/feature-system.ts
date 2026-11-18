@@ -509,9 +509,9 @@ export const systemApi = {
 
   // workspaces
   workspaces: () => getJSON<Workspace[]>('/api/workspaces'),
-  createWorkspace: (fields: Partial<Workspace>) =>
+  createWorkspace: (fields: Partial<Workspace> & { reuse_root?: boolean }) =>
     getJSON<Workspace>('/api/workspaces', { method: 'POST', ...jsonBody(fields) }),
-  updateWorkspace: (id: string, fields: Partial<Workspace>) =>
+  updateWorkspace: (id: string, fields: Partial<Workspace> & { reuse_root?: boolean }) =>
     getJSON<Workspace>(`/api/workspace/${encodeURIComponent(id)}`, { method: 'PUT', ...jsonBody(fields) }),
   deleteWorkspace: (id: string) =>
     getJSON<{ ok: boolean }>(`/api/workspace/${encodeURIComponent(id)}`, { method: 'DELETE' }),
