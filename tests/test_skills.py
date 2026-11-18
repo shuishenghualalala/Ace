@@ -2086,6 +2086,38 @@ def test_watcher_event_invalidates_index(skills_dir):
         index_mod.skill_index().stop_watcher()
 
 
+@pytest.mark.asyncio
+async def test_last_app_releases_skill_watcher_and_next_lookup_rescans(skills_dir, tmp_path):
+    pytest.importorskip("watchdog")
+    from crew.agent.skills import get_skills, skill_index
+    from crew.app import build_app
+    from crew.state.config import Config
+
+    def create_app(name):
+        config = Config(db_path=str(tmp_path / f"{name}.db"), crew_home=str(tmp_path / name))
+        return build_app(config=config, enable_team=False)
+
+    first = create_app("first")
+    second = create_app("second")
+    index = skill_index()
+    try:
+        entry = get_skills()["/greet"]
+        watcher = index._watcher
+        assert watcher is not None and watcher.running
+        await first.shutdown()
+        assert watcher.running
+        await second.shutdown()
+        assert not watcher.running
+
+        skill_md = Path(entry["skill_md_path"])
+        skill_md.write_text("---\nname: greet\nfeatured: true\ndescription: reopened\n---\nhello", encoding="utf-8")
+        assert get_skills()["/greet"]["description"] == "reopened"
+    finally:
+        await first.shutdown()
+        await second.shutdown()
+        index.stop_watcher()
+
+
 def test_skill_body_cache_follows_mtime(skills_dir, monkeypatch):
     """body 缓存按 (path, mtime_ns) 失效：文件变更后读到新正文。"""
     import crew.agent.skills as skills_mod

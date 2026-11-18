@@ -137,6 +137,9 @@ class SkillIndex:
             watcher = self._watcher
             self._watcher = None
             self._watcher_failed = False
+            if watcher is not None:
+                # Changes made while observation is stopped require a fresh scan.
+                self.invalidate()
         if watcher is not None:
             watcher.stop()
 
@@ -202,8 +205,9 @@ class SkillIndex:
 
     async def aget(self) -> dict[str, dict]:
         """async 版 get：watcher 通道 revision 命中纯内存返回；其余进线程池。"""
-        if self._watcher is not None:
-            self._watcher.sync()
+        watcher = self._watcher
+        if watcher is not None:
+            watcher.sync()
             with _SCAN_LOCK:
                 key = self._catalog.revision
                 skills, stored_key = self._catalog.stored()

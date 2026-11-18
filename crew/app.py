@@ -37,7 +37,7 @@ from crew.agent.external.store import ExternalAgentStore
 from crew.agent.feature import build_agent_factory_feature
 from crew.agent.runtime import SingleAgent
 from crew.agent.prompt_builder import append_subagent_handoff_guidance
-from crew.agent.skills import configure_skill_filter
+from crew.agent.skills import configure_skill_filter, skill_index
 from crew.agent.subagent.context import ParentDeliveryState
 from crew.agent.subagent.policy import (
     SUBAGENT_BLOCKED_TOOLSET_PREFIXES,
@@ -441,7 +441,7 @@ class AgentManager:
         await self.wait_closed()
 
 
-# 存活的 CrewApp 实例注册表：测试中存在不走 ASGI lifespan 的用法（直接
+# 最后一个 CrewApp 关闭时释放进程共享的技能目录监听。测试中也存在不走 ASGI lifespan 的用法（直接
 # ASGITransport 调 app），shutdown 不会被触发；tests/conftest.py 的兜底 fixture
 # 在每个用例后统一关闭，避免 SQLite/WAL 句柄跨用例累积耗尽 fd。
 # 正常 shutdown() 会把自己从表中移除，生产单实例场景开销可忽略。
@@ -2698,9 +2698,11 @@ class CrewApp:
                 return
             self._shutdown_started = True
             await self._shutdown_resources(provider_timeout=timeout)
+            with suppress(ValueError):
+                _LIVE_APPS.remove(self)
+            if not _LIVE_APPS:
+                await asyncio.to_thread(skill_index().stop_watcher)
             self._shutdown_complete = True
-        with suppress(ValueError):
-            _LIVE_APPS.remove(self)
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
         """Execute the ordered App shutdown sequence."""

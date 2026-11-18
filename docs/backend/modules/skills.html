@@ -39,6 +39,7 @@
 
   <h2>2. 目录分层</h2>
   <h3>2.1 扫描层（scan_skills，决定可调用）</h3>
+  <p>一个进程内多个 <code>CrewApp</code> 共用技能索引。最后一个实例关闭时停止并等待文件监听线程退出，同时清空旧索引。下次查询重新扫描目录，停用期间编辑的技能描述也会更新。</p>
   <p>模块已拆分为 <code>crew/agent/skills/</code> 子包：<code>core.py</code>（路径/containment/frontmatter 原语）、<code>scanner.py</code>（一层 + package 感知枚举，只产 metadata）、<code>catalog.py</code>（metadata 缓存 + revision 单调递增计数器）、<code>watcher.py</code>（watchdog 监听）、<code>index.py</code>（SkillIndex 单例 + body 缓存 + async 访问器）、<code>manage.py</code>（安装/卸载/repair/审计）；<code>__init__.py</code> 重导出全部公共 API，<code>from crew.agent.skills import X</code> 不变。</p>
   <p>缓存失效双通道：<b>watcher 通道</b>——watchdog 监听各 skill roots（root 不存在时监听最近现存祖先），SKILL.md / PACKAGE.md 及目录增删改触发 <code>revision += 1</code> 并清缓存，毫秒级感知；<b>stat 回退</b>——watchdog 不可用（导入/启动失败、root 不可监听）时回退 <code>_scan_mtime_key()</code> + <code>_MTIME_KEY_TTL_S = 2.0</code> 短 TTL，行为与拆分前一致。进程内安装/卸载经 <code>_invalidate_cache()</code> 立即失效，两种通道一致生效。稳态下 <code>get_skills()</code> 只做内存 revision 比较，零磁盘 stat；扫描也不再读 SKILL.md 正文（原先把 body 全量读进缓存）。</p>
   <p>metadata / body 分离：扫描结果 info dict 不含 <code>content</code> 字段；正文按需经 <code>get_skill_body(info)</code> 加载，按 <code>(path, mtime_ns)</code> 缓存，重扫时整体失效。<code>build_skill_message</code> 与 <code>skill_view</code> 均已改走 body 缓存。</p>
@@ -145,6 +146,7 @@ get_crew_home()/skills/&lt;name&gt;  --symlink-->  ~/.agents/skills/&lt;name&gt;
 对话中 /&lt;name&gt;  ──►  resolve_skill  ──►  build_skill_activation</code></pre>
 
   <h2>8. 测试</h2>
+  <p><code>tests/test_skills.py</code> 使用真实目录监听覆盖双实例关闭与重新读取。Windows 打包资源验收覆盖发送、停止、渲染进程恢复、Gateway 重启及两次正常退出。修复前退出时有四条目录读取线程仍停在 <code>ReadDirectoryChangesExW</code>，25 秒等待超时。修复后的独立包态验证中，首次退出耗时 1.78 秒，重启并读取历史后退出耗时 2.35 秒，两次均释放 Gateway 和健康检查端口。</p>
   <p><code>tests/test_local_skills.py</code>（8 例）：扫描发现、软链安装、scan 加载、source 判定（user 不误判 builtin）、卸载删链不删源、安全边界（软链到白名单外被拒）、已安装不重复、slug 不存在。</p>
   <p><code>tests/gateway/test_global_skills_api.py</code>：store 路由响应含 <code>local</code> 字段。</p>
   <p><code>desktop/tests/unit/skills-global-scope.test.ts</code>：本地徽章、软链文案、<code>~/.agents/skills</code> 文案断言。</p>
