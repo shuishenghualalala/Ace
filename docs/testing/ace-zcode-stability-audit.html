@@ -571,6 +571,37 @@
 <p>对 <code>024e03da</code> 解包运行时用两个独立测试配置执行 <code>python -X importtime</code>。仅导入 <code>crew.gateway.server</code> 的墙钟为 5.274 和 5.290 秒，两次记录 980 个模块。累计导入成本包括 <code>crew.app</code> 2.302–2.387 秒、FastAPI 0.959–1.004 秒和上下文压缩子包 1.121–1.126 秒。这些分支计时包含共享依赖，例如压缩后的文件重载先引入了文件工具，而普通 Agent 与注册器之后也使用该模块。测量未运行核心就绪阶段，累计导入值不能作为移除可选功能后可节省的时间。</p>
 <p>较早的正式包构建剖面中，Work 从同一数据库打开八个业务 Store，另外打开连接写 schema 基线及复制旧数据，整个功能构建 336 毫秒，其中 Store 及准备 230 毫秒。两次辅助准备分别耗时 22、24 毫秒，其中各自打开连接约 21、18 毫秒。ZCode 将会话任务存储准备集中到独立入口，各仓库再复用已完成状态。Ace 的普通对话首轮会使用 Work 关联和偏好；当前证据只支持按开连接的量级评估准备复用。</p>
 <p class="evidence">Ace <code>crew/gateway/server.py</code>、<code>crew/app.py</code>、<code>packages/crew-work/src/crew/work/feature.py</code>。ZCode <code>packages/services/src/project-storage/startup.ts:31</code>。</p>
+<h3>Windows 正式包实际可发送时间复测</h3>
+<p>复用 <code>024e03da</code> 官方发行副本，新建两个独立用户目录。测量从新进程和新用户目录开始，沿用系统文件缓存。两轮均经真实输入框发送本地 SSE 对话，核对答复和唯一用户消息落盘。</p>
+<table>
+<thead><tr><th>测量阶段</th><th>样本一（秒）</th><th>样本二（秒）</th></tr></thead>
+<tbody>
+<tr><td>Electron 输入框出现</td><td>1.612</td><td>1.501</td></tr>
+<tr><td>Gateway 子进程启动</td><td>0.940</td><td>0.903</td></tr>
+<tr><td>桌面观察到核心就绪</td><td>11.192</td><td>9.820</td></tr>
+<tr><td>WebSocket 已连接</td><td>11.599</td><td>10.242</td></tr>
+<tr><td>可以发送，实际提交输入</td><td>11.605</td><td>10.247</td></tr>
+<tr><td>窗口出现首条答复</td><td>12.602</td><td>11.185</td></tr>
+</tbody>
+</table>
+<p>包内 Python 单独启动两次，从进程启动到双端口验证就绪为 9.432 和 9.809 秒，到实际 WebSocket 握手为 9.523 和 9.925 秒。阶段记录中 Gateway 模块导入占 3.965 和 4.319 秒，<code>build_app</code> 占 3.666 和 3.660 秒，FastAPI 路由注册占 0.102 和 0.098 秒，<code>CrewApp.startup_core</code> 占 0.121 和 0.158 秒。进程正常退出，端口均可重新绑定。</p>
+<p>单独再跑一轮正式 Gateway，用函数边界记录拆分 3.818 秒的 <code>build_app</code>。OpenAI Provider 构造占 1.449 秒，Work 功能 410 毫秒，Sites 330 毫秒，插件目录发现和加载 250 毫秒，<code>CrewApp</code> 构造 233 毫秒，External Agent 195 毫秒，Wiki 177 毫秒。会话 SQLite、加载配置和用户目录初始化分别为 48、47、30 毫秒。本轮双端口 10.089 秒就绪，10.357 秒经真实 WebSocket 收到能力回执，正常关闭并释放端口。</p>
+<p>ZCode 先准备 shell 环境，在独立宿主中沿 workspace 复用 runtime，客户端等真实握手再提交。Ace 已在创建窗口前启动受管 Gateway，桌面输入框出现与真实发送条件分别验证。两个样本的实际发送仍高于 5 秒。</p>
+<p class="evidence">Ace <code>desktop/src/main/index.ts:2019</code>、<code>:4215</code>，<code>crew/gateway/app.py:605</code>。ZCode <code>packages/desktop/src/main/index.ts:598</code>、<code>:644</code>，<code>packages/desktop/src/main/desktopHostProcess.ts:251</code>，<code>packages/services/src/zcode-agent/zcodeAgentProcessManager.ts:845</code>。</p>
+<h3>Windows 源码相邻字节码的对照</h3>
+<p>先用包内解释器测侧置缓存，三对标准时间戳缓存的导入各慢 0.275、0.381 和 0.108 秒。随后把缓存放在源码旁，排除侧置目录的查找影响。在两份私有发行副本覆盖同一 <code>5da56a2b</code> 源码，保留原时间和大小，编译了 Gateway 及正常装配所需的 1,435 个模块，共 22,524,961 字节。候选每轮实际执行 1,384 份相邻 <code>.pyc</code>。四对交错的双端口就绪中位数从 9.827 秒升至 11.445 秒，四对均有增加，范围为 0.992 至 4.503 秒。进程启动到 WebSocket 首正文的中位数从 10.875 秒升至 12.116 秒，发送到首正文为 590 和 555 毫秒。</p>
+<p>八轮均通过双端口实例核验、真实流式聊天、历史落盘和退出端口复用。安装器样本另外核对了 902 个曾参与哈希缓存实验的源码文件，613 个偶数秒时间保持原值，289 个奇数秒各减少一秒，符合 Inno Setup 6.7.1 默认两秒向下取整。此轮 Gateway 运行测量使用解包副本。根据启动到首正文的对照，发行继续沿用已有源码布局。</p>
+<h3>Gateway 模块导入前预取 OpenAI SDK 的对照</h3>
+<p>在已明确配置 OpenAI 回环模型的正式包副本中，临时入口在建立桌面父进程租约后立即启动 SDK 导入，并在原 Provider 构造之前等待导入结果。读配置、客户端构造和核心就绪仍走原路径。四轮依次执行基线、预取、预取、基线，使用独立用户目录，全部完成真实 WebSocket 首聊、唯一历史落盘、退出和端口释放。</p>
+<table>
+<thead><tr><th>测量阶段</th><th>第一对，基线 → 预取</th><th>第二对，基线 → 预取</th></tr></thead>
+<tbody>
+<tr><td>双端口就绪</td><td>9.834 → 9.324 秒</td><td>9.739 → 9.507 秒</td></tr>
+<tr><td>进程启动到首正文</td><td>10.626 → 10.093 秒</td><td>10.594 → 10.288 秒</td></tr>
+<tr><td>实际发送到首正文</td><td>594 → 672 毫秒</td><td>605 → 698 毫秒</td></tr>
+</tbody>
+</table>
+<p>两轮预取在原构造处都已结束。首次 <code>build_app</code> 分别缩短 1.286 和 1.168 秒，同时 Gateway 模块导入拉长 0.756 和 0.900 秒。启动到首正文净缩短 0.533 和 0.306 秒，实际发送后的首正文两轮各多等待约 0.08 和 0.09 秒。试验中的模型类别由夹具提前确定，生产配置还涉及用户模板、凭据和环境变量时序。发行继续使用原装配。本节各组的新用户目录样本仍高于五秒验收目标。</p>
 <h3>观测如何归因</h3>
 <p>沿用 <a href="../frontend/stream-performance-diagnostics.html">首 token 诊断</a> 和 <a href="observability-tracing.html">已有 tracing</a>。以 <code>request_id</code> 串起 Desktop 接收、网关受理、provider 首事件、首正文、持久化和首绘，以 <code>gateway_instance_id</code>、进程代次、退出原因串起启动与回收。恢复路径记录模式、游标距离、缺口、队列字节与同步耗时。按平台、通道、事件类别等有限维度报 P50/P95/P99，实例和请求 ID 留在结构化事件。采样只记行为类别、计时和大小。审计基线的 <code>first-visible-text</code> 出现在回合门控前，<code>first-dom-patch</code> 也可能早于正文挂载。<a href="#first-text-timing">F8</a> 已分别记录收到正文、接纳正文、确认挂载和下一绘制时机。用故障测试验证每个阶段都能找到，便于判断慢在模型、路由、重放、磁盘或绘制。</p>
 </section>
