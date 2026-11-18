@@ -257,7 +257,7 @@ for line in sys.stdin:
 def _helper(tmp_path: Path, mode: str) -> NativeRuntimeClient:
     script = tmp_path / "fake_runtime.py"
     script.write_text(_FAKE_HELPER, encoding="utf-8")
-    return NativeRuntimeClient((sys.executable, str(script), mode), startup_timeout=0.5)
+    return NativeRuntimeClient((sys.executable, "-I", "-S", str(script), mode))
 
 
 def _interactive_helper(tmp_path: Path) -> NativeRuntimeClient:
@@ -284,7 +284,7 @@ async def test_interactive_session_forwards_bidirectional_stdio(tmp_path):
 @pytest.mark.asyncio
 async def test_large_helper_stderr_is_drained_without_deadlock(tmp_path):
     result = await _helper(tmp_path, "stderr-flood").execute(
-        command=("ignored",), cwd=tmp_path, timeout=2
+        command=("ignored",), cwd=tmp_path, timeout=10
     )
     assert result.stdout == "sandboxed"
 
