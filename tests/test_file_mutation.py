@@ -129,6 +129,59 @@ def test_plan_edits_exact_wins_over_fuzzy():
     assert plan.after == "x\nsay ‘hi’\n"
 
 
+@pytest.mark.parametrize(("original", "old", "expected"), [
+    ("oﬃce=Ａ  ", "ffi", "oXce=Ａ  "),
+    ("cafe\u0301 Ａ", "é", "cafX Ａ"),
+    ("coﬀee ‘ready’", "'ready'", "coﬀee X"),
+    ("Ａ  \nＢ  ", "\nB", "Ａ  X  "),
+    ("‘x’  \nＡ", "'x'\n", "XＡ"),
+])
+def test_fuzzy_match_replaces_only_its_original_span(original, old, expected):
+    plan = plan_edits(original, [EditOp(old, "X")])
+    match, = plan.matches
+    assert match.mode == "fuzzy" and plan.after == expected
+    assert original[:match.start] + "X" + original[match.start + match.length:] == expected
+
+
+@pytest.mark.parametrize(("original", "edits", "code"), [
+    ("ﬃ", [EditOp("fi", "x")], "patch_no_match"),
+    ("cafe\u0301", [EditOp("café", "x"), EditOp("e", "y")], "patch_overlap"),
+    ("‘x’ “x”", [EditOp("x", "y"), EditOp('"x"', "z")], "patch_ambiguous"),
+])
+def test_invalid_fuzzy_or_overlapping_batch_is_rejected(original, edits, code):
+    with pytest.raises(EditMatchError) as error:
+        plan_edits(original, edits)
+    assert error.value.code == code
+
+
+async def test_registry_fuzzy_batch_preserves_sibling_values_and_cas(registry, tmp_path):
+    target = tmp_path / "目录.json"
+    original = '{"label":"“draft”","sku":"Ａ０１","tier":"①","other":"draft"}  \r\n'
+    target.write_bytes(b"\xef\xbb\xbf" + original.encode("utf-8"))
+    path = {"path": str(target)}
+    session = current_session_id.set("fuzzy-batch")
+    try:
+        read = await registry.execute(ToolCall("read", "file_read", path))
+        version = json.loads(read.content)["file_version"]
+        # The exact 'other' edit remains exact even when the same batch needs
+        # normalization to locate a different field.
+        edits = {"edits": [
+            {"old": '"draft"', "new": '"ready"'},
+            {"old": 'label":""draft""', "new": 'label":"final"'},
+        ]}
+        patch = await registry.execute(ToolCall("patch", "patch", {**path, **edits, "expected_version": version}))
+        assert not patch.is_error, patch.content
+        assert {match["mode"] for match in json.loads(patch.content)["matches"]} == {"exact", "fuzzy"}
+        expected = '{"label":"final","sku":"Ａ０１","tier":"①","other":"ready"}  \r\n'
+        written = b"\xef\xbb\xbf" + expected.encode("utf-8")
+        assert target.read_bytes() == written
+        stale = await registry.execute(ToolCall("stale", "patch", {**path, **edits, "expected_version": version}))
+        assert stale.is_error and stale.code == "stale_file"
+        assert target.read_bytes() == written
+    finally:
+        current_session_id.reset(session)
+
+
 def test_plan_edits_not_found_mentions_fuzzy_attempt():
     with pytest.raises(EditMatchError, match="模糊"):
         plan_edits("completely different\n", [EditOp(old="not there", new="x")])

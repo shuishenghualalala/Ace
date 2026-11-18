@@ -61,6 +61,7 @@
     </tbody>
   </table>
   <p><code>file_read</code> 返回 <code>file_version</code>、<code>read_complete</code> 和可用的 <code>next_offset</code>。<code>patch</code> 和 <code>file_write</code> 可传 <code>expected_version</code>，省略时使用会话已观察的版本。读完同一版本所有未裁剪的分页后可以覆盖整份文件。<code>stale_file</code> 表示文件已变更或移除，Agent 应重新读取并重新计算修改。只读、无法替换和匹配歧义也带有独立错误码。</p>
+  <p>每个 <code>patch</code> 编辑项先在同一份原文快照中精确定位。要求唯一命中且已完整读取时，可通过 Unicode 归一化、引号与行尾空白查找候选。写入前把候选两端映射回原文并复核片段，返回的偏移与长度以 LF 归一化后的原文计。批量编辑按原文范围检查重叠后一次写入。同一行的全角字符、其他字段和片段外空白保持原样。命中落在单个兼容字符展开结果的内部时，工具返回 <code>patch_no_match</code>，可扩大原文片段后重试。</p>
   <p>搜索结果用 <code>scan_complete</code> 标记扫描是否完成，用 <code>truncated</code> 标记分页或预览截断。未完成时保留已匹配的结果，通过 <code>partial_reasons</code> 和 <code>search_notice</code> 报告原因，例如超时、目录读取失败或文件超限。Python 路径提供已扫描和跳过计数。结果提供 <code>next_offset</code> 时，使用相同搜索条件在文件集合未变的情况下续查。扫描未完成时缩小路径或过滤条件重新搜索。</p>
   <p>托管安全模式用 Python 搜索并保留验证式文件读取和链接剪枝。停止时会在下一次检查退出，当前的系统调用或正则匹配需要先返回。使用原生 ripgrep 时，超时、缓冲超限和取消均会终止本次拥有的子进程。</p>
 

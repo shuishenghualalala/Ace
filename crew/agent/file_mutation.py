@@ -1,6 +1,6 @@
 """文件变更服务：编辑/写入类工具的内核载体。
 
-匹配阶梯（LF 归一化域精确 → 模糊兜底，模糊只定位上报、写回保留原文未触碰行）
+匹配阶梯（LF 归一化域精确 → 模糊兜底，模糊命中映射回原文区间）
 → per-path FIFO 串行 → 版本 CAS → 原子写，全部收敛在这一层；工具 handler 只
 负责参数解析、授权与结果呈现。写入安全语义（快照 + 冲突检测 + 原子写 +
 BOM/CRLF 保真）由 crew.tools.file_utils 提供，这里只组合不另起炉灶。
@@ -19,6 +19,7 @@ import stat
 import threading
 import unicodedata
 import weakref
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence, TypeVar
@@ -143,83 +144,43 @@ def _normalize_for_fuzzy(text: str) -> str:
     return "\n".join(lines).translate(_FUZZY_TRANSLATION)
 
 
-def _split_lines_lf(text: str) -> list[str]:
-    """只按 \n 切行并保留行尾（str.splitlines 会按 \v 等额外分隔符切，不用）。"""
-    if not text:
-        return []
-    parts = text.split("\n")
-    lines = [part + "\n" for part in parts[:-1]]
-    if parts[-1]:
-        lines.append(parts[-1])
-    return lines
+class _FuzzyText:
+    """Index normalized lines while retaining their coordinates in the source."""
 
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.text = _normalize_for_fuzzy(source)
+        self.source_lines = self._line_starts(source)
+        self.normalized_lines = self._line_starts(self.text)
 
-def _line_spans(text: str) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    offset = 0
-    for line in _split_lines_lf(text):
-        spans.append((offset, offset + len(line)))
-        offset += len(line)
-    return spans
+    @staticmethod
+    def _line_starts(text: str) -> list[int]:
+        return [0, *(index + 1 for index, char in enumerate(text) if char == "\n")]
 
+    def source_offset(self, offset: int, *, start: bool) -> int:
+        line = bisect_right(self.normalized_lines, offset) - 1
+        begin = self.source_lines[line]
+        end = self.source_lines[line + 1] - 1 if line + 1 < len(self.source_lines) else len(self.source)
+        # A match beginning with a newline starts after any stripped spaces.
+        if start and self.text.startswith("\n", offset):
+            return end
+        column = offset - self.normalized_lines[line]
+        raw = self.source[begin:end]
+        normalized = unicodedata.normalize("NFKC", raw)
+        if raw == normalized:
+            return begin + column
 
-def _line_range_for(spans: Sequence[tuple[int, int]], start: int, end: int) -> tuple[int, int]:
-    start_line = -1
-    for index, (line_start, line_end) in enumerate(spans):
-        if line_start <= start < line_end:
-            start_line = index
-            break
-    if start_line == -1:
-        raise EditMatchError("匹配区域越出文件末尾")
-    end_line = start_line
-    while end_line < len(spans) and spans[end_line][1] < end:
-        end_line += 1
-    if end_line >= len(spans):
-        raise EditMatchError("匹配区域越出文件末尾")
-    return start_line, end_line + 1
-
-
-def _fuzzy_score(base: str, domain: str, start: int, length: int, old_lf: str) -> float:
-    """模糊命中得分：模型给出的 old 与文件原文对应行段的相似度（0..1，写入仍定位原文）。"""
-    spans = _line_spans(domain)
-    start_line, end_line = _line_range_for(spans, start, start + length)
-    base_lines = _split_lines_lf(base)
-    span_text = "".join(base_lines[start_line:end_line])
-    return difflib.SequenceMatcher(None, old_lf, span_text).ratio()
-
-
-def _apply_preserving_lines(
-    original: str,
-    base: str,
-    replacements: Sequence[tuple[int, int, str]],
-) -> str:
-    """在模糊域上替换后，把未触碰的行按原文逐字节贴回（保留原行尾/空白/引号）。"""
-    original_lines = _split_lines_lf(original)
-    base_spans = _line_spans(base)
-    if len(original_lines) != len(base_spans):
-        raise EditMatchError("模糊匹配域与原文行数不一致，未修改文件")
-
-    groups: list[dict[str, Any]] = []
-    for start, length, new_text in sorted(replacements, key=lambda r: r[0]):
-        start_line, end_line = _line_range_for(base_spans, start, start + length)
-        if groups and start_line < groups[-1]["end"]:
-            groups[-1]["end"] = max(groups[-1]["end"], end_line)
-            groups[-1]["repls"].append((start, length, new_text))
-        else:
-            groups.append({"start": start_line, "end": end_line, "repls": [(start, length, new_text)]})
-
-    chunks: list[str] = []
-    cursor = 0
-    for group in groups:
-        chunks.extend(original_lines[cursor : group["start"]])
-        group_start = base_spans[group["start"]][0]
-        group_end = base_spans[group["end"] - 1][1]
-        chunk = base[group_start:group_end]
-        relative = [(s - group_start, length, t) for s, length, t in group["repls"]]
-        chunks.append(_apply_replacements(chunk, relative))
-        cursor = group["end"]
-    chunks.extend(original_lines[cursor:])
-    return "".join(chunks)
+        # Decomposition lengths are additive even for ligatures and combining
+        # marks. Only accept a cut that also reproduces the actual NFKC prefix.
+        prefix = normalized[:column]
+        remaining = len(unicodedata.normalize("NFKD", prefix))
+        index = 0
+        while remaining > 0 and index < len(raw):
+            remaining -= len(unicodedata.normalize("NFKD", raw[index]))
+            index += 1
+        if remaining or unicodedata.normalize("NFKC", raw[:index]) != prefix:
+            raise EditMatchError("模糊匹配边界不能定位到原文，请扩大匹配范围，未修改文件")
+        return begin + index
 
 
 def _find_all(haystack: str, needle: str) -> list[int]:
@@ -278,43 +239,31 @@ def _ambiguous_message(
 def plan_edits(original: str, ops: Sequence[EditOp], *, allow_fuzzy: bool = True) -> EditPlan:
     """匹配阶梯：先在 LF 归一化域精确匹配；精确失败且要求唯一的编辑模糊兜底。
 
-    模糊域只做定位与上报，写回时未触碰的行保持原文逐字节不变。匹配是纯计算：
+    每项先在原文中定位。模糊域只提供候选位置，写入前验证原文区间。匹配是纯计算：
     任何一步失败抛 EditMatchError，调用方保证此时文件未被触碰，从而实现
     「先全部匹配、后统一写入」的事务语义。
     """
     base = _normalize_lf(original)
-    for op in ops:
+    fuzzy: _FuzzyText | None = None
+    matches: list[EditMatch] = []
+    replacements: list[tuple[int, int, str]] = []
+    for index, op in enumerate(ops):
         if not op.old:
             raise EditMatchError("old 不能为空", code="invalid_arguments")
         if op.count < 0:
             raise EditMatchError("count 不能为负", code="invalid_arguments")
 
-    # 探测：任一编辑在模糊域命中，则整批切换到模糊域统一替换（单域偏移才稳定）。
-    fuzzy_base: str | None = None
-    fuzzy_needed = False
-    for op in ops if allow_fuzzy else ():
-        if _find_all(base, _normalize_lf(op.old)) or op.count != 1:
-            continue
-        if fuzzy_base is None:
-            fuzzy_base = _normalize_for_fuzzy(base)
-        if _find_all(fuzzy_base, _normalize_for_fuzzy(_normalize_lf(op.old))):
-            fuzzy_needed = True
-    domain = fuzzy_base if (fuzzy_needed and fuzzy_base is not None) else base
-
-    matches: list[EditMatch] = []
-    replacements: list[tuple[int, int, str]] = []
-    for index, op in enumerate(ops):
-        old_lf = _normalize_lf(op.old)
-        exact_in_base = bool(_find_all(base, old_lf))
-        needle = old_lf
-        starts = _find_all(domain, needle)
+        old = _normalize_lf(op.old)
+        needle = old
+        domain = base
+        starts = _find_all(base, needle)
         mode = "exact"
-        if not starts and fuzzy_needed:
-            needle = _normalize_for_fuzzy(old_lf)
+        if not starts and allow_fuzzy and op.count == 1:
+            if fuzzy is None:
+                fuzzy = _FuzzyText(base)
+            needle = _normalize_for_fuzzy(old)
+            domain = fuzzy.text
             starts = _find_all(domain, needle)
-            mode = "fuzzy"
-        if not exact_in_base:
-            # 原文里并不字面包含 old，只是在归一化后才能定位：如实上报模糊命中。
             mode = "fuzzy"
         if not starts:
             raise EditMatchError(
@@ -327,28 +276,25 @@ def plan_edits(original: str, ops: Sequence[EditOp], *, allow_fuzzy: bool = True
                 details={"edit_index": index, "matches": len(starts),
                          "lines": [_line_number_at(domain, start) for start in starts[:10]]},
             )
-        chosen = starts if op.count == 0 else starts[: max(op.count, 1)]
+        replacement = _normalize_lf(op.new)
+        chosen = starts if op.count == 0 else starts[:op.count]
         for start in chosen:
-            score = 1.0 if mode == "exact" else _fuzzy_score(base, domain, start, len(needle), old_lf)
-            matches.append(
-                EditMatch(
-                    edit_index=index,
-                    start=start,
-                    length=len(needle),
-                    mode=mode,
-                    score=round(score, 4),
-                    line=_line_number_at(domain, start),
-                )
-            )
-            replacements.append((start, len(needle), _normalize_lf(op.new)))
+            end = start + len(needle)
+            score = 1.0
+            if mode == "fuzzy":
+                assert fuzzy is not None
+                start = fuzzy.source_offset(start, start=True)
+                end = fuzzy.source_offset(end, start=False)
+                actual = base[start:end]
+                if _normalize_for_fuzzy(actual) != needle:
+                    raise EditMatchError("模糊匹配无法确定原文范围，未修改文件")
+                score = difflib.SequenceMatcher(None, old, actual).ratio()
+            matches.append(EditMatch(index, start, end - start, mode, round(score, 4), _line_number_at(base, start)))
+            replacements.append((start, end - start, replacement))
 
     matches.sort(key=lambda m: (m.start, m.edit_index))
     _check_overlap(matches)
-    after = (
-        _apply_preserving_lines(base, domain, replacements)
-        if fuzzy_needed
-        else _apply_replacements(domain, replacements)
-    )
+    after = _apply_replacements(base, replacements)
     return EditPlan(matches=tuple(matches), before=base, after=after)
 
 
