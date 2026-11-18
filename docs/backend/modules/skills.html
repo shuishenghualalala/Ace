@@ -60,7 +60,7 @@
     <thead><tr><th>源</th><th>目录</th><th>常量</th><th>安装方式</th></tr></thead>
     <tbody>
       <tr><td>Optional</td><td>&lt;repo&gt;/optional-skills/</td><td>get_optional_skills_dir()</td><td>原子复制（copytree）</td></tr>
-      <tr><td>本地</td><td>~/.agents/skills/</td><td>get_local_skills_dir()</td><td>软链（symlink）</td></tr>
+      <tr><td>本地</td><td>~/.agents/skills/</td><td>get_local_skills_dir()</td><td>目录符号链接或 Windows junction</td></tr>
     </tbody>
   </table>
   <p>本地源是跨 agent 共享的 skill 仓库（如 <code>npx skills add larksuite/cli</code> 安装的飞书 skills），默认 <code>~/.agents/skills</code>，可用 env <code>CREW_LOCAL_SKILLS_DIR</code> 覆盖。不扫 <code>~/.claude/skills</code>（其内容为软链到 <code>~/.agents/skills</code>，会重复）。</p>
@@ -103,7 +103,7 @@
   <h3>4.1 Optional（仓库随附）</h3>
   <p><code>install_skill</code> 从 <code>list_optional_skills()</code> 解析源，<code>_install_skill_tree</code> 在 user dir 内分阶段 <code>copytree</code> + <code>_validate_skill_tree</code> 校验后同文件系统 <code>rename</code> 原子发布。失败回滚 tombstone。</p>
   <h3>4.2 本地（软链）</h3>
-  <p>optional 找不到时 fallback <code>list_local_skills()</code>。<code>_install_local_skill_link</code> 在 user dir 建 <code>os.symlink</code> 指向 <code>~/.agents/skills/&lt;name&gt;</code>，源更新自动同步；卸载仅 <code>os.unlink</code> 软链，<b>不递归删源</b>。</p>
+  <p>从 <code>list_local_skills()</code> 安装时，先在用户技能目录内创建暂存链接。Windows 普通账户缺少符号链接特权时通过本机 junction 连接本地源目录。校验通过后，原子重命名发布链接。源文件的更新会出现在已安装技能中。卸载删除链接入口，保留源文件。</p>
   <pre><code>get_crew_home()/skills/lark-doc  --symlink-->  ~/.agents/skills/lark-doc</code></pre>
   <p><code>list_skills</code> 的 <code>is_user</code> 判定用 <code>resolve_skill_path</code>：软链 skill 因受信任根放行通过，正确标记 <code>source=user</code>（不误判 builtin）。</p>
 
@@ -113,8 +113,8 @@
     <b>软链放行边界（本地 skill 关键）</b>：本地 skill 软链指向 <code>~/.agents/skills</code>（在 user dir 外），默认会被判越界、全链路加载失败。为此引入 <code>_trusted_link_target_roots()</code>（返回 <code>[~/.agents/skills]</code>），<code>resolve_skill_path</code> 越界时追加检查——resolved 落在受信任根内则放行。
     <ul>
       <li><code>resolve</code> 递归跟随所有软链到最终真实路径，<code>~/.agents/skills</code> 内的二级逃逸软链（如指向 <code>/etc</code>、<code>~/.ssh</code>）最终 resolved 落在外部仍被拒。</li>
-      <li>skill 内部若有越界软链，<code>_walk_contained</code> 记录 finding，<code>_validate_skill_tree</code> 失败，安装被拒、已建软链由调用方清理。</li>
-      <li>卸载时 <code>_is_trusted_local_link</code> 区分本地软链（<code>os.unlink</code> 删链）与普通目录 / 不受信软链（拒绝，防 <code>rmtree</code> 删源）。</li>
+      <li>技能内部有越界链接时，<code>_validate_skill_tree</code> 拒绝发布并清理暂存目录。审计失败时仅回收本次发布的链接。</li>
+      <li>卸载时通过 <code>os.readlink</code> 识别符号链接和 junction，再校验最终目标所在的受信源根。Windows 用 <code>rmdir</code> 移除目录链接，POSIX 用 <code>unlink</code>。</li>
     </ul>
   </div>
   <div class="ok">
@@ -147,7 +147,7 @@ get_crew_home()/skills/&lt;name&gt;  --symlink-->  ~/.agents/skills/&lt;name&gt;
 
   <h2>8. 测试</h2>
   <p><code>tests/test_skills.py</code> 使用真实目录监听覆盖双实例关闭与重新读取。Windows 打包资源验收覆盖发送、停止、渲染进程恢复、Gateway 重启及两次正常退出。修复前退出时有四条目录读取线程仍停在 <code>ReadDirectoryChangesExW</code>，25 秒等待超时。修复后的独立包态验证中，首次退出耗时 1.78 秒，重启并读取历史后退出耗时 2.35 秒，两次均释放 Gateway 和健康检查端口。</p>
-  <p><code>tests/test_local_skills.py</code>（8 例）：扫描发现、软链安装、scan 加载、source 判定（user 不误判 builtin）、卸载删链不删源、安全边界（软链到白名单外被拒）、已安装不重复、slug 不存在。</p>
+  <p><code>tests/test_local_skills.py</code> 覆盖发现、安装、源更新、装载、卸载、源目录边界、并发发布及审计失败回滚。Windows 普通账户通过真实 Gateway 的技能商店 API 验证了发现、安装、读取更新后的正文、卸载及再次安装。</p>
   <p><code>tests/gateway/test_global_skills_api.py</code>：store 路由响应含 <code>local</code> 字段。</p>
   <p><code>desktop/tests/unit/skills-global-scope.test.ts</code>：本地徽章、软链文案、<code>~/.agents/skills</code> 文案断言。</p>
   <p><code>tests/test_compact.py</code>：覆盖超过工具保留窗口后 Skill 仍完整、引用资源按 identity 去重、完整压缩后 Skill 可跨多次压缩恢复；<code>tests/test_agent_loop.py</code> 覆盖重复 <code>skill_view</code> 防循环。</p>

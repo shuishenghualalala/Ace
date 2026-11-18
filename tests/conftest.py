@@ -8,6 +8,22 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture
+def directory_link():
+    """Create a live directory alias in a test-owned root without elevation."""
+    def create(link: Path, target: Path) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            if os.name != "nt" or exc.winerror != 1314:
+                raise
+            from _winapi import CreateJunction
+
+            CreateJunction(str(target), str(link))
+
+    return create
+
 # Windows 的 PATH 里常同时存在 WSL 转发桩（%SystemRoot%\System32\bash.exe）和
 # Git for Windows 的 bash；转发桩对 `bash -c` 直接失败，且输出是 UTF-16，
 # 混进 PATH 顺序就会让 shell 契约用例红。这里按固定优先级定位真实 POSIX shell。

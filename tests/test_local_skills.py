@@ -63,15 +63,17 @@ def test_list_local_skills_excludes_installed(isolated_skill_env):
     assert not any(s["slug"] == "lark-doc" for s in local)
 
 
-def test_install_local_skill_creates_symlink(isolated_skill_env):
+def test_install_local_skill_creates_live_directory_link(isolated_skill_env):
     """install 在 user dir 建软链指向本地源目录。"""
     src = _make_skill(isolated_skill_env.local_dir, "lark-doc")
     user_dir = skills.get_user_skills_dir()
 
     assert skills.install_skill("lark-doc", operator_account_id="test", source="test")
     dst = user_dir / "lark-doc"
-    assert dst.is_symlink()
-    assert dst.resolve() == src.resolve()
+    assert os.readlink(dst)
+    assert dst.samefile(src)
+    (src / "revision.txt").write_text("updated", encoding="utf-8")
+    assert (dst / "revision.txt").read_text(encoding="utf-8") == "updated"
 
 
 def test_scan_loads_symlink_skill(isolated_skill_env):
@@ -108,7 +110,7 @@ def test_uninstall_removes_symlink_keeps_source(isolated_skill_env):
     assert src.exists(), "源目录应完好"
 
 
-def test_untrusted_symlink_rejected(isolated_skill_env, tmp_path):
+def test_untrusted_symlink_rejected(isolated_skill_env, tmp_path, directory_link):
     """软链到受信任根（~/.agents/skills）外的目录被拒（安全边界不破）。"""
     user_dir = skills.get_user_skills_dir()
     user_dir.mkdir(parents=True, exist_ok=True)
@@ -119,16 +121,46 @@ def test_untrusted_symlink_rejected(isolated_skill_env, tmp_path):
     )
 
     dst = user_dir / "evil"
-    os.symlink(evil_src, dst)
-    try:
-        with pytest.raises(skills.SkillPathError):
-            skills._validate_skill_tree(dst, user_dir)
-        with pytest.raises(skills.SkillPathError):
-            skills.resolve_skill_path(dst, user_dir)
-    finally:
-        os.unlink(dst)
+    directory_link(dst, evil_src)
+    with pytest.raises(skills.SkillPathError):
+        skills._validate_skill_tree(dst, user_dir)
+    with pytest.raises(skills.SkillPathError):
+        skills.resolve_skill_path(dst, user_dir)
 
 
 def test_install_local_skill_not_found(isolated_skill_env):
     """install 不存在的 slug 返回 False。"""
     assert not skills.install_skill("nope", operator_account_id="test", source="test")
+
+
+def test_local_install_audit_failure_retires_only_published_link(isolated_skill_env, monkeypatch):
+    src = _make_skill(isolated_skill_env.local_dir, "lark-doc")
+    dst = skills.get_user_skills_dir() / src.name
+    original = skills._append_global_skill_audit
+
+    def record(**event):
+        if event["result"] == "success":
+            assert dst.samefile(src)
+            raise OSError("audit unavailable")
+        return original(**event)
+
+    monkeypatch.setattr(skills, "_append_global_skill_audit", record)
+    assert not skills.install_skill("lark-doc", operator_account_id="test", source="test")
+    assert not os.path.lexists(dst)
+    assert (src / "SKILL.md").is_file()
+
+
+def test_local_install_preserves_concurrent_publish(isolated_skill_env, monkeypatch, directory_link):
+    from crew.agent.skills import manage
+
+    src = _make_skill(isolated_skill_env.local_dir, "lark-doc")
+    dst = skills.get_user_skills_dir() / src.name
+    publish = manage._rename_directory_noreplace
+
+    def publish_second(staged, target):
+        directory_link(target, src)
+        publish(staged, target)
+
+    monkeypatch.setattr(manage, "_rename_directory_noreplace", publish_second)
+    assert not skills.install_skill("lark-doc", operator_account_id="test", source="test")
+    assert dst.samefile(src)

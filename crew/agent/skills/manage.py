@@ -175,28 +175,39 @@ def _install_skill_tree(
             shutil.rmtree(staging_root, ignore_errors=True)
 
 
-def _install_local_skill_link(source: Path, target: Path, *, target_root: Path) -> None:
-    """在 target_root 内为本地 skill 建立软链 -> source（~/.agents/skills/<name>）。
+def _remove_directory_link(path: Path) -> None:
+    """Remove the link entry without traversing its target."""
+    os.readlink(path)
+    if os.name == "nt":
+        path.rmdir()
+    else:
+        path.unlink()
 
-    与 _install_skill_tree（copytree）对应：本地 skill 以软链发布，源更新自动同步。
-    安全校验：source 必须位于本地源根内；target 必须尚未存在；建链后用
-    _validate_skill_tree 验证（受信任软链根放行其内文件；skill 内越界软链则失败抛出）。
-    失败时已建的软链由调用方清理。
-    """
+
+def _install_local_skill_link(
+    source: Path, target: Path, *, target_root: Path
+) -> tuple[int, int]:
+    """校验私有暂存目录中的链接，发布后返回链接本身的身份。"""
     local_root = _patched("get_local_skills_dir")()
     source_resolved = resolve_skill_path(source, local_root)
     resolve_skill_path(target, target_root, must_exist=False)
     if os.path.lexists(target):
         raise SkillPathError("skill_target_exists", target, f"Skill 目标已存在: {target}")
-    try:
-        os.symlink(source_resolved, target)
-    except OSError as exc:
-        raise SkillPathError(
-            "skill_link_failed",
-            target,
-            f"建立本地 skill 软链失败: {target} -> {source_resolved}: {exc}",
-        ) from exc
-    _validate_skill_tree(target, target_root)
+    with tempfile.TemporaryDirectory(prefix=f".{target.name}-", dir=target_root) as tmp:
+        staged = Path(tmp) / "skill"
+        try:
+            os.symlink(source_resolved, staged, target_is_directory=True)
+        except OSError as exc:
+            if os.name != "nt" or exc.winerror != 1314:
+                raise
+            # CPython's native junction needs no symbolic-link privilege.
+            from _winapi import CreateJunction
+
+            CreateJunction(str(source_resolved), str(staged))
+        _validate_skill_tree(staged, Path(tmp))
+        published = staged.lstat()
+        _rename_directory_noreplace(staged, target)
+        return published.st_dev, published.st_ino
 
 
 def _skill_operator(operator_account_id: str | None) -> str:
@@ -553,49 +564,14 @@ def install_skill(
         dst = user_dir / src.name
         version = _declared_skill_version(src)
 
-        # 本地 skill：在用户目录建软链指向 ~/.agents/skills/<name>，源更新自动同步
-        if is_local_source:
-            try:
-                _install_local_skill_link(src, dst, target_root=user_dir)
-                _patched("_append_global_skill_audit")(
-                    action="install",
-                    slug=slug,
-                    operator_account_id=operator_account_id,
-                    source=source,
-                    version=version,
-                    result="success",
-                )
-            except (OSError, SkillPathError) as exc:
-                # 清理可能残留的半成品软链（_validate_skill_tree 失败时软链已建）
-                if os.path.lexists(dst) and dst.is_symlink():
-                    try:
-                        os.unlink(dst)
-                    except OSError:
-                        logger.exception("清理失败的本地 skill 软链 %s", dst)
-                _patched("_append_failed_global_skill_audit")(
-                    action="install",
-                    slug=slug,
-                    operator_account_id=operator_account_id,
-                    source=source,
-                    version=version,
-                    error_code=exc.code if isinstance(exc, SkillPathError) else type(exc).__name__,
-                )
-                logger.warning("本地 skill 软链安装失败 '%s': %s", slug, exc)
-                return False
-            _invalidate_cache()
-            logger.info("已安装本地 skill（软链）'%s' -> %s operator=%s", slug, dst, _skill_operator(operator_account_id))
-            return True
-
-        # 仓库 optional skill：原子复制
-        optional_root = _patched("get_optional_skills_dir")()
         published_identity: tuple[int, int] | None = None
         try:
-            published_identity = _install_skill_tree(
-                src,
-                dst,
-                source_root=optional_root,
-                target_root=user_dir,
-            )
+            if is_local_source:
+                published_identity = _install_local_skill_link(src, dst, target_root=user_dir)
+            else:
+                published_identity = _install_skill_tree(
+                    src, dst, source_root=_patched("get_optional_skills_dir")(), target_root=user_dir
+                )
             _patched("_append_global_skill_audit")(
                 action="install",
                 slug=slug,
@@ -618,7 +594,10 @@ def install_skill(
                     logger.exception("隐藏未提交的全局 Skill 失败 slug=%s", slug)
             _invalidate_cache()
             if retired is not None:
-                shutil.rmtree(retired, ignore_errors=True)
+                if is_local_source:
+                    _remove_directory_link(retired)
+                else:
+                    shutil.rmtree(retired, ignore_errors=True)
             _patched("_append_failed_global_skill_audit")(
                 action="install",
                 slug=slug,
@@ -1022,7 +1001,7 @@ def uninstall_skill(
         # 本地 skill 软链：直接 unlink 软链本身，绝不递归删源目录（源仍归 ~/.agents/skills）
         if _is_trusted_local_link(skill_path):
             try:
-                os.unlink(skill_path)
+                _remove_directory_link(skill_path)
             except OSError as exc:
                 _patched("_append_failed_global_skill_audit")(
                     action="uninstall",

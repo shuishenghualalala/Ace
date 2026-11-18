@@ -347,9 +347,9 @@ def _is_trusted_local_link(path: Path) -> bool:
     卸载时据此区分"本地 skill 软链"（unlink 软链本身，绝不递归删源）与普通目录 /
     不受信软链（拒绝）。非软链、悬空软链、指向白名单外的软链均返回 False。
     """
-    if not path.is_symlink():
-        return False
     try:
+        # readlink also recognizes NTFS directory junctions on Windows.
+        os.readlink(path)
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError):
         return False
