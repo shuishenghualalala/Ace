@@ -53,6 +53,7 @@
 <p>规划提示词指向 <code>glob</code> 和 <code>grep</code>，Plan 白名单仍写 <code>search_files</code>。用真实工具注册表核对，文件模块注册的 <code>glob</code>、<code>grep</code>、<code>patch</code> 与 Plan 白名单交集为空。模型会碰到缺失工具或用终端绕行，权限拒绝和额外轮次随之增加。ZCode 的 Plan 权限会按内置工具能力识别 Glob/Grep。</p>
 <p><strong>修复</strong> 保留 Plan manager 的状态机和现有写入门控。以工具能力或单一声明生成模型 schema 与提示词工具表，并由运行时执行同一授权。计划文件保留单独、精确的写入例外。验证 Desktop、Web 和 CLI 的实际模型请求包含读取与搜索能力，执行阶段按预期恢复写工具。</p>
 <p><strong>验收</strong> <code>9673fa74</code> 已提交。Windows Electron、Chrome 和 CLI 均连接本地测试模型，检查出站工具 schema、实际搜索、计划文件落盘和审批后执行。审批前尝试写普通文件被拒绝。Plan 使用结构化搜索和读取工具，通用终端在审批后按会话权限恢复。后端回归 227 项通过、1 项跳过。已配置的远端模型最小请求仍返回 <code>InvalidSubscription</code>。</p>
+<p><strong>真实模型复验（2026-11-18）</strong> <code>deepseek-flash</code> 从维护者指定的配置发出真实请求。已绑定项目的规划轮调用 <code>file_read</code>、<code>file_write</code>、<code>exit_plan_mode</code>；计划含从文件读出的随机标记，审批前项目文件字节保持不变。批准后实际调用读取、<code>patch</code>、重读，文件只有指定状态变更，未产生第二次审批。仓库的 <code>tests/e2e_plan_mode.py</code> 已显式绑定临时项目和会话并独立管理运行数据。另一次真实模型运行在审批后修改玩具 CLI，启动该程序输入 <code>/version</code> 得到 <code>9.9.9</code>。可通过 <code>--config</code> 选择测试模型，凭据从其配置的环境变量读取。</p>
 <p class="evidence">Ace <code>crew/agent/plan/prompts.py:24</code>，<code>crew/agent/plan/tools.py:27</code>，<code>crew/agent/runtime.py:555</code>，<code>crew/tools/file_tools.py:781</code>。ZCode <code>apps/zcode-cli/packages/core/src/permission/service.ts:451</code>、<code>:605</code>。</p>
 </article>
 <article id="instructions">

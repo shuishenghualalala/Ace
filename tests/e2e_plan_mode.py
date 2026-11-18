@@ -1,9 +1,10 @@
 # ruff: noqa: E402 -- e2e test configures environment/path before application imports
 """端到端：真实 LLM 驱动下走完整 Plan 模式闭环。
 
-默认用 default profile，需要环境变量 CREW_MODEL_API_KEY。
+使用测试配置选择的模型，凭据由该模型的 api_key_env 环境变量提供。
 运行：
     CREW_MODEL_API_KEY=... python tests/e2e_plan_mode.py
+    python tests/e2e_plan_mode.py --config /path/to/test-config.yaml
 
 安全：脚本在一个**临时项目目录**里运行（os.chdir + 临时 CREW_HOME），并在其中放一个
 玩具 cli.py 作为待改对象——agent 的 terminal/file_write 只作用于临时目录，绝不触碰真实仓库。
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -27,8 +29,6 @@ from pathlib import Path
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-
-os.environ.setdefault("CREW_MODEL_PROFILE", "default")
 
 # 真实 LLM：默认不跑；`pytest -m e2e tests/e2e_plan_mode.py` 或直接 python 本文件。
 import pytest
@@ -85,22 +85,30 @@ async def _run_turn(app, envelope, label: str) -> list[tuple[str, str]]:
     return tool_events
 
 
-async def main() -> int:
-    work = Path(tempfile.mkdtemp(prefix="crew_plan_e2e_"))
+async def main(config_path: Path | None = None) -> int:
+    root = Path(tempfile.mkdtemp(prefix="crew_plan_e2e_"))
+    work = root / "project"
+    work.mkdir()
     (work / "cli.py").write_text(TOY_CLI, encoding="utf-8")
-    os.environ["CREW_HOME"] = str(work / ".crew")
-    os.chdir(work)  # agent 的 terminal/file 工具只作用于此临时目录
+    os.environ["CREW_HOME"] = str(root / "profile")
+    os.chdir(work)
 
     from crew.app import build_app
     from crew.core.envelope import Envelope
     from crew.agent.plan import plan_path, read_plan
 
-    app = build_app(enable_team=False)
+    from crew.state.config import load_config
+
+    config = load_config(config_path)
+    config.db_path = str(root / "profile" / "crew.db")
+    config.log_file = str(root / "profile" / "logs" / "test.log")
+    app = build_app(config, enable_team=False)
     if not app.config.has_llm_key:
         print(
             f"[跳过] profile={app.config.active_model_id} 未配置 API Key。"
-            f"请 export CREW_MODEL_API_KEY=... 后重跑。"
+            f"请设置模型配置的 api_key_env 后重跑。"
         )
+        await app.shutdown()
         return 2
 
     print(f"使用 profile={app.config.active_model_id} model={app.config.model}")
@@ -111,10 +119,12 @@ async def main() -> int:
     try:
         # Envelope.user_id 默认 "local"，plan 状态按 (owner, sid) 隔离——enter 必须用同一 owner，
         # 否则 dispatch 时 is_active 查不到 plan 态，plan 工作流提醒不会注入，模型就退化为普通 Q&A。
+        workspace_id = app.workspace_store.create("Plan E2E", root_path=str(work), owner_account_id="local")["id"]
+        app.session_store.ensure_session(sid, workspace_id=workspace_id, owner_account_id="local")
         app.plan_manager.enter(sid, owner_account_id="local")
         print(f"[进入 plan 模式] 计划文件: {plan_path(sid, owner_account_id='local')}")
 
-        env1 = Envelope.of(TASK, session_id=sid, channel="cli", mode="agent")
+        env1 = Envelope.of(TASK, session_id=sid, channel="cli", mode="agent", workspace_id=workspace_id)
         events = await _run_turn(app, env1, "规划轮（只读探索 + 写计划 + exit_plan_mode）")
 
         used = {n for n, p in events if p == "start"}
@@ -148,14 +158,20 @@ async def main() -> int:
             print("\n[用户批准计划]")
             env2 = Envelope.of(
                 "计划已批准，请按计划开始执行（只在当前目录操作，勿用 git）。",
-                session_id=sid, channel="cli", mode="agent",
+                session_id=sid, channel="cli", mode="agent", workspace_id=workspace_id,
             )
             exec_events = await _run_turn(app, env2, "执行轮（已解锁写工具）")
-            after = (work / "cli.py").read_text(encoding="utf-8")
-            if "/version" in after and "VERSION" in after:
-                print("[OK] 执行轮已在 cli.py 中实现 /version 命令")
+            child_env = {k: v for k, v in os.environ.items() if k.upper() in {"SYSTEMROOT", "WINDIR", "PATH"}}
+            cli = subprocess.run(
+                [sys.executable, "-I", "-B", str(work / "cli.py")],
+                cwd=work, env=child_env, input="/version\n/quit\n", capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=10,
+            )
+            if cli.returncode == 0 and "9.9.9" in cli.stdout:
+                print("[OK] 执行轮修改的 CLI 可运行，/version 返回 VERSION")
             else:
-                print("[WARN] 执行轮未见 cli.py 出现 /version（模型可能换了实现路径）")
+                print("[FAIL] 执行轮修改的 CLI 未正确返回版本号")
+                ok = False
 
             # 回归：执行轮收尾后不应再次进入待审批。
             # 若模型在收尾误调 exit_plan_mode，awaiting 会变 True → plan_review 二次弹卡。
@@ -179,5 +195,20 @@ async def main() -> int:
     return 0 if ok else 1
 
 
+@pytest.mark.asyncio
+async def test_plan_mode(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "profile"))
+    result = await main()
+    if result == 2:
+        pytest.skip("本次测试环境没有配置模型凭据")
+    assert result == 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, help="使用指定测试配置及其模型环境变量")
+    args = parser.parse_args()
+    raise SystemExit(asyncio.run(main(args.config.resolve() if args.config else None)))
