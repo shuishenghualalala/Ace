@@ -684,6 +684,7 @@ helper 响应
       <thead><tr><th>测试层</th><th>主要覆盖</th><th>入口</th></tr></thead>
       <tbody>
         <tr><td>Python 安全套件</td><td>上下文、模式、文件竞态、审批生命周期、规则、审计、Gateway API、执行面清单。</td><td><code>pytest tests/security tests/gateway/test_security_api.py</code></td></tr>
+        <tr><td>终端管道端到端</td><td>向实际终端传入两行内容。Windows 通过 PowerShell 的 <code>Select-Object -First 1</code> 取第一行，POSIX 通过 <code>head -n 1</code> 取第一行。断言命令成功且只返回第一行。</td><td><code>TestE2ETerminalHandler.test_safe_pipe_command_executes</code></td></tr>
         <tr><td>Rust 单元/对抗测试</td><td>协议、路径计划、平台沙箱、ACL/token/job/WFP、代理策略与重放防护。</td><td><code>cargo test --manifest-path security-runtime/Cargo.toml --release --locked</code></td></tr>
         <tr><td>Desktop 单元测试</td><td>安全中心、审批、规则、审计、模式与安装流程。</td><td><code>npm test --prefix desktop</code></td></tr>
         <tr><td>真实平台矩阵</td><td>工作空间写入、项目外普通读取、项目外写入拒绝、元数据可读不可写、离线直连失败、批准目标代理可达。</td><td><code>python tests/security/security_matrix.py --platform … --runtime …</code></td></tr>

@@ -7,6 +7,7 @@ hardline / dangerous 正则模式匹配。
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -711,14 +712,20 @@ class TestE2ETerminalHandler:
         monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
         monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
 
+        command = (
+            "Write-Output hello,ignored | Select-Object -First 1"
+            if os.name == "nt"
+            else "printf '%s\\n' hello ignored | head -n 1"
+        )
         result = await handle_terminal(
-            {"command": "echo hello | head -1"},
+            {"command": command},
             timeout=5.0,
             workspace_store=object(),
             security_service=_FullAccessService(),
         )
         parsed = json.loads(result)
         assert parsed["success"] is True
+        assert parsed["output"].splitlines() == ["hello"]
 
 
 class TestE2EWorkspaceGuard:
