@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ace 与 ZCode 基础能力和稳定性评估</title>
+<style>
+  :root{color:#111;background:#fff;font:15px/1.7 system-ui,"Microsoft YaHei",sans-serif}
+  *{box-sizing:border-box}
+  main{max-width:960px;margin:auto;padding:36px 24px 72px}
+  h1{line-height:1.3;font-size:30px}
+  h2{margin-top:44px;padding-bottom:8px;border-bottom:1px solid #e8e8e8}
+  h3{margin-top:30px}
+  a{color:inherit;text-underline-offset:3px}
+  p,li,td{color:#555}
+  code{font:0.9em ui-monospace,monospace;color:#111;overflow-wrap:anywhere}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px}
+  th,td{border:1px solid #e8e8e8;text-align:left;padding:8px 10px;vertical-align:top}
+  th{background:#fafafa}
+  .table{overflow-x:auto}
+  .evidence{font-size:14px}
+  blockquote{margin:12px 0;padding:2px 16px;border-left:3px solid #e8e8e8;background:#fafafa}
+</style>
+</head>
+<body>
+<main>
+<p><a href="../index.html">Ace 文档总览</a> / 测试与评估</p>
+<h1>Ace 与 ZCode 基础能力和稳定性评估</h1>
+<p>2026-11-17 · Ace <code>dev</code> <code>91943a5569497570301d68237d337d0e65a7a833</code> · 本地 <code>D:\Codes\ZCode</code> <code>main</code> <code>3c5b227649371507ddc4eb46ac5133afe6db1cab</code></p>
+<nav aria-label="目录"><a href="#summary">修复顺序</a> · <a href="#agent">Agent 工具和提示词</a> · <a href="#desktop">桌面稳定性</a> · <a href="#performance">性能</a> · <a href="#handoff">合并后复核</a> · <a href="#validation">证据和验收</a></nav>
+
+<section id="summary">
+<h2>1. 修复顺序</h2>
+<p><strong>接手目标与真实模型验收（2026-11-18）</strong> 在现有审计工作树上合入安全模块，按 Agent 基础能力、工具与提示词、桌面稳定性和性能继续核对 ZCode 源码。每项修复做定向回归、端到端验证并独立提交。真实模型测试使用维护者指定的本机配置文件 <code>D:\Codes\env</code>，以其中当前的模型和接口为准，测试数据放在隔离目录。故障、断连与重复请求用可控端点注入，分别记录两种验证的结果。</p>
+<p>在日常开发场景，Ace 首先要保证一轮请求能被明确受理、在故障后恢复，并保留完整结果。当前应优先处理网关卡死后的替换流程、回放游标失效后的状态恢复和 Plan 工具契约。应用层已有会话事件日志、写入意图与恢复、工具隔离、Markdown 合帧及历史分页，可以沿用这些模块。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">批次</th><th scope="col">影响和代码归属</th><th scope="col">提交验收条件</th></tr></thead>
+<tbody>
+<tr><td>第一批</td><td>无法自恢复或显示错误结果。桌面 Supervisor 回收、就绪与所有权、Gateway 与 Desktop/Web 回放协议、草稿发送失败保留、Agent Plan 暴露工具。</td><td>卡死后自动启动新一代；断线或重启后内容完整、无重复；Plan 能真实调用搜索工具，普通文件仍保持只读。</td></tr>
+<tr><td>第二批</td><td>减少任务失败与用户返工。项目指令和上下文预算、搜索完成度、文件编辑契约、终端日志、请求受理回执、退出收尾和窗口恢复。</td><td>固定任务集检查指令命中、无效工具调用率、文件冲突行为及终端输出完整性；同一逻辑请求最多执行一次。</td></tr>
+<tr><td>第三批</td><td>降低长会话变慢和启动波动。历史分页代次、流式片段重组、活跃轮渲染、会话列表及可见区、推送隔离和打包态门禁。</td><td>2000 轮长会话流式性能达到本报告目标；每个平台的已打包产物通过安装、首聊、故障恢复、退出与升级验证。</td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section id="agent">
+<h2>2. Agent 工具和提示词</h2>
+<article id="plan-tools">
+<h3>A1 · P1 · Plan 模式要求搜索，却不提供搜索工具</h3>
+<p>规划提示词指向 <code>glob</code> 和 <code>grep</code>，Plan 白名单仍写 <code>search_files</code>。用真实工具注册表核对，文件模块注册的 <code>glob</code>、<code>grep</code>、<code>patch</code> 与 Plan 白名单交集为空。模型会碰到缺失工具或用终端绕行，权限拒绝和额外轮次随之增加。ZCode 的 Plan 权限会按内置工具能力识别 Glob/Grep。</p>
+<p><strong>修复</strong> 保留 Plan manager 的状态机和现有写入门控。以工具能力或单一声明生成模型 schema 与提示词工具表，并由运行时执行同一授权。计划文件保留单独、精确的写入例外。验证 Desktop、Web 和 CLI 的实际模型请求包含读取与搜索能力，执行阶段按预期恢复写工具。</p>
+<p><strong>验收</strong> <code>9673fa74</code> 已提交。Windows Electron、Chrome 和 CLI 均连接本地测试模型，检查出站工具 schema、实际搜索、计划文件落盘和审批后执行。审批前尝试写普通文件被拒绝。Plan 使用结构化搜索和读取工具，通用终端在审批后按会话权限恢复。后端回归 227 项通过、1 项跳过。已配置的远端模型最小请求仍返回 <code>InvalidSubscription</code>。</p>
+<p class="evidence">Ace <code>crew/agent/plan/prompts.py:24</code>，<code>crew/agent/plan/tools.py:27</code>，<code>crew/agent/runtime.py:555</code>，<code>crew/tools/file_tools.py:781</code>。ZCode <code>apps/zcode-cli/packages/core/src/permission/service.ts:451</code>、<code>:605</code>。</p>
+</article>
+<article id="instructions">
+<h3>A2 · P1 · 项目指令入口和提示词不一致</h3>
+<p>Ace 从工作目录向上寻找第一份 <code>.crew.md</code> 或 <code>CREW.md</code>，但委派规则声称会依据 <code>AGENTS.md</code>。只使用 <code>AGENTS.md</code> 的项目无法自动注入这份规范。应在验收中同时覆盖普通 Git checkout 与 worktree 边界。ZCode 默认识别 <code>AGENTS.md</code>，合并用户级与一个工作区来源，并附带读取或截断诊断。</p>
+<p><strong>修复</strong> 在现有 prompt builder 增加指令加载子模块，明确全局、项目根与目标目录的顺序和作用域。兼容已有 CREW 格式，规定同级文件同时存在时的优先级。按路径记录生效来源，切换工作区或目标路径时重新解析。将项目规则、记忆、技能描述和文件内容标为不同来源，文件或工具正文不得覆盖权限及用户约束。验收仅有 AGENTS、根与子目录规则冲突、双格式、worktree 边界、文件更新、不同目录任务。</p>
+<p><strong>验收</strong> <code>ab07b21a</code> 已提交。内置主 Agent 先载入账号级默认、工作区配置，再载入最近的一份项目规则。同一目录按 <code>AGENTS.md</code>、<code>.crew.md</code>、<code>CREW.md</code> 查找。无 Git 时限于当前目录。268 项回归、真实 Gateway 连续 9 轮和 Windows Electron 的 worktree 根目录及子目录两个用例通过。动态验证覆盖切换目录、修改或删除文件、账号目录与 worktree 隔离。</p>
+<p class="evidence">Ace <code>crew/agent/prompt_builder.py:135</code>、<code>:178</code>、<code>:194</code>、<code>:321</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/context/index.ts:24</code>、<code>:94</code>、<code>:159</code>。</p>
+</article>
+<article id="context">
+<h3>A3 · P2 · 提示词体积与工具指引缺少统一约束</h3>
+<p>Ace 已按稳定 system 与动态 user reminder 拆分提示词，并在执行器中对包含动态提醒的临时请求再估算。前置压缩与执行器估算采用不同视图，后者还早于 <code>pre_llm</code> 最终处理。项目规则、技能索引和记忆各自拼接，技能描述有单项截断，组合长度随技能和资源数量增加。ZCode 的 skills section 在约 20,000 字符时降级为名称和路径，降级结果也需要关注总量。</p>
+<p><strong>修复</strong> 用实际请求组装结果统一做 token 估算，预留最大输出，分别给工具 schema、项目规则、技能、记忆和近期消息预算。首先减小低优先级工具正文及检索片段，项目规则按来源保留并报告超限。能力说明由当前工具集渲染，工具执行仍沿用现有权限判定。端到端验收比较 mock provider 捕获的最终请求和预检视图，覆盖大量技能、长指令、低窗口模型、工具结果突增及中途压缩。</p>
+<p><strong>实现</strong> Builtin Agent 在 <code>pre_llm</code>、请求中间件、执行中间件和文件结果投影后检查实际待发视图。已知模型窗口按本次请求的输出额度预留空间，必要时缩小显式输出上限。用户规则、工作区规则、项目规则、技能索引和记忆有独立预算，截断注明来源。会话级压缩保留本轮指令块和用户请求，工具搜索的自动阈值采用模型窗口。文件结果在压力下保留有效 JSON、路径、版本及重读指引，会话历史继续保存完整结果。超限时有界压缩与备选模型尝试均受最终检查，仍无法满足时返回 <code>context_window_exceeded</code>。</p>
+<p><strong>验收</strong> <code>bf842f1c</code> 已提交。以真实 Gateway、WebSocket 与本地协议兼容模型对照提交前后，7 项端到端通过。40,000 窗口下的规则与技能密集请求由估算 97,573 降至 39,985，保留三类规则来源和截断提示。中间件设为 62,000 的输出上限实际收敛至 15,369。44,865 字节的完整文件结果留在历史，模型收到带版本及重读指引的 2,544 字节有效 JSON。8,192 窗口的不可容纳输入返回结构化错误，模型端点收到零次请求。模拟上游拒绝时完成一次有界摘要和一次缩小后的重试。Windows Electron 普通模式首轮对话通过。Python 扩展回归通过 641 项、跳过 8 项，另外 3 项在修复前提交独立复现。默认远端模型仍返回 HTTP 400 <code>InvalidSubscription</code>。</p>
+<p><strong>边界</strong> 本地 token 与图像计数均为估算。窗口未知的模型沿用上游限制，未配置且无可用默认输出元数据的模型由上游选择实际输出上限。实际严格预算覆盖内置 Agent 的模型请求与会话摘要调用；其它执行器使用自身策略。</p>
+<blockquote><p>动态工具指引可写成如下内容。用 <code>glob</code> 定位候选文件，用 <code>grep</code> 定位符号，用 <code>file_read</code> 查看匹配位置。搜索结果标明未完成时缩小目录或续查。修改现有文件前先读取目标位置，编辑返回版本冲突时重新读取并计算修改。完成后核对变更并记录实际运行的测试。</p></blockquote>
+<p class="evidence">Ace <code>crew/agent/prompt_builder.py:54</code>、<code>:298</code>，<code>crew/agent/skills/index.py:625</code>，<code>crew/agent/compact/pipeline.py:427</code>，<code>crew/agent/executor/builtin.py:727</code>、<code>:831</code>、<code>:875</code>。ZCode <code>apps/zcode-cli/packages/core/src/context/sections/skills.ts:9</code>、<code>:39</code>。</p>
+</article>
+<article id="prompt-recovery">
+<h3>A4 · P2 · 工具失败后的提示词会引入新的失败</h3>
+<p>终端重复失败提示给出 <code>pwd &amp;&amp; ls -la</code>，与 PowerShell 5.1 的语法不兼容，还建议调用不存在的 <code>read_file</code> 和 <code>write_file</code>。加载 profile 时，默认工具、安全与输出说明被整体跳过。内置 profile 鼓励主动委派，随后 explicit 模式禁止模型自行委派。ZCode 将共用 Harness 说明与可替换的 style 分开。</p>
+<p><strong>修复</strong> 将权限、工具命名、读取与验证等工程约束作为常驻底层，profile 补充身份、语气和角色范围，委派规则只生成一份。失败消息从工具注册表和 shell resolver 取能力，分别说明参数错误、完整零匹配、部分扫描、超时、版本冲突和权限拒绝的下一步。验收普通、profile、轻量 Agent 的提示词组合，并用三平台 shell fixture 运行恢复建议。</p>
+<p class="evidence">Ace <code>crew/agent/loop/tool_guardrails.py:452</code>，<code>crew/agent/prompt_builder.py:194</code>、<code>:225</code>、<code>:268</code>，<code>config/prompts/profiles/internal.md:12</code>。ZCode <code>apps/zcode-cli/packages/core/src/context/sections/identity.ts:19</code>。</p>
+</article>
+<article id="search">
+<h3>A5 · P1 · 目录扫描超时可以表现为“没有匹配”</h3>
+<p>受托管的安全执行路径使用 Python 扫描。<code>glob</code> 十秒截止后返回已经找到的路径，外层仅按条数给出 <code>truncated</code>。<code>grep</code> 十五秒截止，并跳过超过 10 MB 或无法按预期编码读取的文件，完成与部分完成可得到相同的空结果。固定时钟探针让这两条路径返回空结果。ZCode Glob 同样有条数限制，支持取消，并在扫描结果中显式传递截断及耗时。</p>
+<p><strong>修复</strong> 保持现有路径授权和目录链接约束。两个后端统一返回完成度、部分结果原因、已扫描或略过数量、可继续的范围。<code>glob</code> 增加有界续查，<code>grep</code> 保留现有分页参数并明确分页适用的扫描范围。验证零匹配、超时并已有部分匹配、正常截断、文件被跳过、取消，以及不同 OS 上同一 fixture 的相同语义。</p>
+<p><strong>验收</strong> <code>c9564f2a</code> 已提交。扫描完成度与分页截断分别返回，超时保留已有结果和原因，完成扫描后才会提供下一页偏移量。Windows Electron 工具卡片、Gateway 九种场景与 13 次实际工具调用、252 项回归均通过，4 项跳过。原生进程回归覆盖取消、超时和缓冲超限后的回收。托管 Python 在下一次扫描检查退出，当前的系统调用或正则匹配须先返回。本轮使用 Windows 和本地受控模型。</p>
+<p class="evidence">Ace <code>crew/tools/file_tools.py:60</code>、<code>:82</code>、<code>:259</code>、<code>:298</code>、<code>:504</code>、<code>:582</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/glob.ts:56</code>、<code>:127</code>。</p>
+</article>
+<article id="edit">
+<h3>A6 · P1 · 文件编辑的参数契约和版本保护</h3>
+<p>Ace 的 <code>patch</code> schema 把应成对提交的旧文本和新文本分别描述为二选一，顶层只要求路径，模型能生成通过 schema 却被 handler 拒绝的参数。<code>file_read</code> 已记录读取版本，写入服务已有原子替换、同路径序列化和写入时版本检查。读取后再编辑的保护默认关闭，覆盖不了模型读完后用户或其他进程先修改的情况。ZCode 的 Write/Edit 默认检查读取状态及预期版本，Read 的 token 限额可提供精确续读位置。</p>
+<p><strong>修复</strong> 以共享 schema 和解析器统一两种 patch 参数形态，给单匹配、多匹配、旧值不存在、并发冲突提供结构化错误及下一步。复用文件写入服务，分开新建、基于局部读取的精确替换、基于完整已确认版本的整文件覆盖。版本从读取结果传到写入，检测外部编辑后要求重读。验收空字符串替换、CRLF/LF、Unicode、并发改同一文件、只读文件和 Windows 文件被占用等场景，同时检查编辑失败后原内容仍可读取。</p>
+<p><strong>验收</strong> <code>c0f19bfd</code> 已提交。模型可传入 <code>expected_version</code>，同账号、同会话的观察记录也会自动参与检查。完整覆盖需要读完同一版本；局部补丁只作用于已完整显示的命中行。回归 343 项通过、4 项跳过。真实 Gateway 的 11 个场景共执行 20 次工具调用，核对了相同文件大小及修改时间下的内容冲突、删除后防止重建、参数错误、局部修改及覆盖保护。Windows Electron 验证了可见错误、重读后 Unicode 与空串补丁、BOM/CRLF 和 Plan 审批后写入。</p>
+<p class="evidence">Ace <code>crew/tools/file_tools.py:672</code>、<code>:694</code>，<code>crew/tools/builtin.py:1018</code>，<code>crew/agent/file_mutation.py:403</code>，<code>config/config.yaml.example:150</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/write.ts:98</code>，<code>edit.ts:421</code>，<code>read-text.ts:165</code>。</p>
+</article>
+<article id="terminal">
+<h3>A7 · P1 · 长终端输出的流式游标失效</h3>
+<p><code>terminal</code> 前台输出按内存尾缓冲的字符串长度计算增量。缓冲到上限后长度不再增加，后来的输出可能失去实时增量。虽然进程日志可落盘，<code>process log</code> 仍从内存尾部取；默认尾页和非零偏移读取采用不同起点。非零退出码也可以出现在 <code>success: true</code> 的工具返回中，模型必须另读退出码。Agent guardrail 会额外判退出码，其他消费者仍需遵守同一契约。用 8 字符尾窗运行真实 ProcessRegistry，第三次追加后按现有游标计算的增量为空，两种页偏移返回同一行。ZCode 的 Bash 交付持久输出路径，TaskOutput 读取结果时有预算和制品路径。</p>
+<p><strong>修复</strong> 用累计字节或序号作为进程输出游标，每段输出附相同计数，定义 stdout/stderr、内存尾窗、持久日志的读法。返回 <code>next_offset</code>、截断及保留状态，单列进程退出、超时、取消和调用失败。验收跨越内存容量后的流式输出、UTF-8 切片、前台转后台、分页边界、应用重启读日志、取消后进程树收敛。</p>
+<p><strong>验收</strong> <code>80ab9e57</code> 已提交。实时端与工具日志使用同一 UTF-8 字节游标。磁盘按任务保留最多 64 MiB，内存有独立尾窗，缺口显式报告。真实 Gateway 通过 6 个场景、30 次工具调用，包含超过原缓冲上限、原地转后台、分段 Unicode、合并输出、退出码 7、超时、实际终止及重启后归档查询。Windows Electron 验证可见增量、停止子进程和结果落盘。后端 238 项通过、2 项跳过，2 项在托管沙箱身份准备阶段失败。桌面全量 2028 项通过、2 项跳过，保留两项符号链接权限失败和一项已有的模型分组顺序失败。</p>
+<p class="evidence">Ace <code>crew/tools/builtin.py:872</code>、<code>:962</code>，<code>crew/tools/process_registry.py:600</code>、<code>:931</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts:283</code>，<code>task-output.ts:60</code>、<code>:211</code>。</p>
+</article>
+<article id="read">
+<h3>A8 · P2 · 重复读取和取消没有用足已有文件版本</h3>
+<p>Ace 的 <code>file_read</code> 支持流式文本行窗和续读，也记录文件版本。重复读取同版本同区间时仍返回相同文本。工具 runner 可取消外层任务，<code>to_thread</code> 的文件读取或搜索没有合作式停止信号。ZCode 读取同一版本的同区间可返回重复读取提示，取消信号会传到读取器和搜索子进程。两端精确计算总行数都可能扫描全文。</p>
+<p><strong>修复</strong> <code>file_read</code> 在同一个已验证的文件句柄上以 SHA-256 校验原始字节，按版本缓存精确总行数、稀疏行索引及读取窗口。仅当最终发给模型的消息仍包含同版本、同行窗的完整结果时，重复读取才使用 <code>unchanged</code> 和 <code>source_tool_call_id</code>。会话保存每次读取的完整正文，<code>force_refresh</code> 可强制重读，循环检测告警随结果保留。文件读取线程在每个有界读块前后及行扫描中检查停止信号。</p>
+<p><strong>验收</strong> <code>cb0eb527</code> 已提交。真实 Gateway 通过 5 个端到端场景。Windows Electron 验证重复读取引用、强制返回正文、原文件大小和修改时间不变的外部改写、持久记录保留全文，以及点击停止后线程退出、同会话再次读取成功。停止后那一轮的工具卡可见、正文预览缺失，Gateway 原始事件和持久记录仍有全文。后端 468 项通过、3 项跳过。补跑 Provider 和工具结果相关的 56 项通过，运行前加载 Sites 以避开在 dev 基线已复现的独立收集循环导入。按现有配置请求默认模型仍返回 HTTP 400 <code>InvalidSubscription</code>，端到端使用隔离的本地协议测试模型。</p>
+<p><strong>性能</strong> Windows 上用 15,960,000 字节、12 万行文本测试，操作系统文件缓存为热态，每个窗口和模式运行 15 次。相对修复前，首次首窗 P50 从 131.2 ms 降到 70.5 ms，首次尾窗从 212.4 ms 降到 153.1 ms。同窗热读约 29.6–31.5 ms，同版本新窗口约 31.1–39.7 ms。热读仍读完整原始字节做 SHA-256 校验，省下的是解码、行扫描和重复渲染。</p>
+<p class="evidence">Ace <code>crew/tools/builtin.py:1058</code>，<code>crew/tools/file_utils.py:1421</code>，<code>crew/agent/executor/file_read_projection.py:45</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/read.ts:186</code>，<code>apps/zcode-cli/packages/adapters/src/fs/text-range-reader.ts:104</code>。</p>
+</article>
+<article id="agent-outcome">
+<h3>A9 · P1 · 回合结束状态与任务实际结局没有统一契约</h3>
+<p>内置执行器多次收到空结果、部分停止路径或达到迭代上限时仍用默认成功的 final。Gateway 据终态更新回执和任务状态。另一条错误路径已有类别、错误码与重试提示，桌面错误 reducer 仅取错误文案，重连历史也主要依赖 <code>last_error</code>。ZCode 桌面分别显示已中断和失败的回合状态。</p>
+<p><strong>修复</strong> 将完成、部分完成、失败、停止和等待确认作为可恢复的回合结局，保留已生成正文和工具事实。用同一结局更新 Gateway、历史、通知与桌面。瞬时限流、配置错误、预算耗尽及可能已经产生副作用的失败分别提供可核对的下一步。验收用真实 Gateway 注入连续空回复、显式迭代上限和失败，核对实时、重连、重启三处的状态一致。</p>
+<p><strong>实现</strong> 旧桌面发送协议保留原终态枚举，精确结局由 <code>body.outcome</code> 提供。SQLite 同一事务写入前台回合的历史标记、会话摘要和发送回执。回执写入失败会回滚标记并进入待核对状态。历史分页继续沿用原修订号，回退按所选分支恢复摘要，模型请求仍只接收原有消息角色及正文。</p>
+<p><strong>端到端验收</strong> 隔离的 Windows Electron 和实际 Gateway 覆盖正常答复、迭代耗尽、连续空回复、点击停止、等待 Plan 审批、HTTP 401。六个场景均通过实时显示、渲染器重载和 Gateway 进程重启检查，原请求未重发。停止前已显示的正文在实时界面和重启历史中完整保留。另用工作树配置的真实 DeepSeek 完成一次搜索、读取、补丁和终端校验，核对目标文件、相邻文件和持久历史。该次真实模型执行早于停止改动，停止分支由可控提供方单独覆盖。</p>
+<p><strong>提交与回归</strong> <code>6a8056c1</code> 已提交。后端 489 项通过，Lark SDK 缺失相关的 1 项跳过。Windows 桌面 2,156 项通过、2 项跳过，已知的两项符号链接权限失败和一项语言环境排序失败仍可复现。TypeScript、局部 ESLint、Stylelint、Ruff 和 Git 差异检查通过。</p>
+<p class="evidence">Ace <code>crew/agent/executor/builtin.py:509</code>、<code>:1215</code>、<code>:1339</code>，<code>crew/core/envelope.py:141</code>，<code>crew/gateway/dispatcher.py:972</code>、<code>:1100</code>，<code>desktop/src/ui/reducers/chat-reducer.ts:1262</code>。ZCode <code>packages/ui/src/v4/conversationTurnRenderUnits.ts:187</code>。</p>
+</article>
+<article id="agent-interactions">
+<h3>A10 · P1 · 追问、工具审批和 Plan 批准缺少权威提交确认</h3>
+<p>普通聊天输入已有持久发送回执。追问答复仍在发出 WebSocket 消息后立即关卡片，有的路径还会先写入一条本地用户答复并恢复生成。Gateway 可能回报过期，桌面 reducer 会清理等待项而没有保留草稿和失败反馈。在途追问依赖 Gateway 内存中的 Future。Plan 确认也需要绑定具体版本。ZCode 权限对话框会保留提交中和应答失败状态。</p>
+<p><strong>修复</strong> 关卡片与写入确认答复以服务端回执为准。交互绑定账号、会话、回合和具体内容版本，重复提交返回同一结局。过期时保留答复或说明该交互已结束，Gateway 重启后需要重新确认的审批不能直接执行。对工具执行中间件改写参数的路径，按最终调用再核对工作区与审批范围。验收覆盖接受后丢回执、重复点击、旧 Plan、新进程收到旧审批、测试工具无害参数变化。</p>
+<p><strong>追问与通用工具确认</strong> 已实现按账号、会话、原始回合、问题和提交 ID 关联的回执。明确未收到时允许显式重试，相同提交复用结果，结果不确定时只查询。普通答复与回执在同一 SQLite 事务提交，回合历史合并保留稳定的答复 ID，遇到并发变更时重新读取后再合并。工具确认只记录必要的提交元数据，检查最终调用的完整参数和实际工作目录，等待用户确认工具权限时暂停执行计时。未完成草稿保留在当前桌面进程，覆盖重连和页面切换，账号退出时清理。</p>
+<p><strong>第一批验收</strong> Windows Electron 五个端到端场景通过。受理前丢包后，显式重试复用原提交身份；受理后丢回执只查询确认；一次性工具确认只执行一次且不写入用户对话正文；重启后旧问题不能恢复执行；普通答复与回执提交后、等待方继续前强制关闭 Gateway，首次重启仍只显示一条答复。验证同时覆盖首次启动时本地待确认请求不能遮蔽服务端历史，以及已结束的追问不能继续阻塞输入。后端两组共 1,087 项通过、2 项跳过。桌面完整回归 2,185 项通过、2 项跳过，3 项既有 Windows 权限与语言排序失败保持原状。TypeScript、局部 ESLint、Ruff 和差异检查通过。</p>
+<p><strong>真实模型</strong> 使用工作树已有的 DeepSeek 配置，模型依次调用 <code>ask_followup_question</code>、<code>file_read</code> 和 <code>file_write</code>。在隐藏的原生桌面提交合成答复，回执确认后模型继续，目标文件内容完全匹配预期，答复正文及稳定历史 ID 只保存一次。测试窗口、Gateway 和监听端口均已退出。</p>
+<p><strong>第一批提交</strong> <code>5d58b57a</code> 已提交追问回执、普通答复持久化和通用工具确认修复。</p>
+<p><strong>Plan 审批</strong> 计划具有跨重启稳定的版本。现代客户端先核对预期版本，再把编辑内容、审批结果和唯一执行请求在同一 SQLite 事务中提交。已批准与待修订的模型回合都接收本次提交的冻结正文，排队请求在真正进入 Agent 前再次验证版本。旧稿、跨会话回执和过期操作不能覆盖新稿。界面保留失败或过期时的本地编辑，确认只清理同一会话的同一编辑版本。旧 Gateway 保留原操作路径，并用状态查询核对结果。</p>
+<p><strong>Plan 验收</strong> Windows Electron 五项端到端测试覆盖旧版本拒绝、丢回执恢复、编辑后批准、反馈修订，以及已批准请求入队后强制重启。再用更新后的源码补测旧稿拒绝与重启执行，两项均通过。反馈链路使用实际文件读取与写入校验，模型请求包含精确提交的计划和反馈。后端九文件回归 342 项通过，最终调度与版本竞争回归 75 项通过，桌面完整回归 2,200 项通过、2 项跳过。桌面仍有两项 Windows 符号链接权限失败和一项语言环境排序失败，与已有基线一致。此批原生测试使用隔离的本地可控模型，未新增真实模型调用。</p>
+<p><strong>Plan 提交</strong> <code>b27b896b</code> 已提交。按用户要求，完成此批后暂停后续修复。</p>
+<p><strong>后续部分</strong> 独立安全审批接口的重复决策查询仍待实现和验证。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts:683</code>，<code>crew/gateway/ws.py:791</code>、<code>:912</code>，<code>crew/core/followup.py:99</code>，<code>crew/agent/loop/tool_runner.py:1122</code>。ZCode <code>packages/ui/src/v4/V4InteractionDialogs.tsx:344</code>。</p>
+</article>
+<article id="agent-execution-recovery">
+<h3>A11 · P1 · 已完成的工作缺少可安全接续的执行检查点</h3>
+<p>Ace 的 D4 将旧 Gateway 已派发的请求标记为不确定，工具审计会补上中断事件和未知副作用状态。它还不能将已完成的工具结果与在途中断的调用重新组装成模型可见上下文。模型流中途失败目前能接续文字，但会取消并清理预执行调用，其中可能包含已完成的只读结果。ZCode 会重建已持久化的工具结果，并为非终态调用补出带中断语义的工具结果。</p>
+<p><strong>修复</strong> 按回合、步骤和工具调用 ID 确认执行意图、结果或可读引用。工具已完成的验证结果只注入一次，对没有完整参数的调用标记未执行，可能已经产生副作用的调用停在核对边界。验收分别在工具结果已完成后断开模型流、文件变更后杀 Gateway、持久结果提交后重启三个位置验证。</p>
+<p class="evidence">Ace <code>crew/gateway/send_inbox.py:88</code>，<code>crew/state/session_store.py:2122</code>，<code>crew/agent/executor/builtin.py:1627</code>。ZCode <code>apps/zcode-cli/packages/core/src/agent/session-history-hydrator.ts:184</code>。</p>
+</article>
+<article id="agent-stop">
+<h3>A12 · P1 · 工具的实际退出缺少独立确认</h3>
+<p>桌面的停止目前主要发送会话 ID。工具运行器对未退出的任务做有界等待，超时后仍可写入取消结果。会话停止和工具实际退出可能发生在不同时间，后续回合需要知道前一工具是否仍占用进程或可能改写资源。</p>
+<p><strong>修复</strong> 停止绑定具体回合，记录已请求停止、已确认退出或结果待核实。持续收尾和注销超时的任务，必要时隔离可杀死的执行单元。分别测量从停止到界面反馈、终端或 MCP 实际退出的时间，并验证停止后无新增写入、相邻新回合不被误停。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts:2030</code>，<code>crew/gateway/ws.py:744</code>，<code>crew/agent/loop/tool_runner.py:859</code>。</p>
+</article>
+</section>
+
+<section id="desktop">
+<h2>3. 桌面稳定性</h2>
+<article id="supervisor">
+<h3>D1 · P1 · 网关卡死后的回收没有闭环</h3>
+<p>卡死 watchdog 调用 <code>stopManagedGateway</code> 并发布 restarting。停止函数先把 <code>managedGateway</code> 清空，子进程 exit handler 则仅在当前句柄等于退出句柄时调度重启。这个回收分支可以停止旧进程，却要依赖另一个调用重新触发启动。使用原 TypeScript 分支与模拟子进程注入卡死后，实际观察到状态为 restarting、句柄清空、重启调度次数为 0。重启控制器还有无子进程标识的 intentional-stop 状态。ZCode 的 Electron utility host 以明确的进程句柄和 dispose 协议等待退出，并设强制退出时限。</p>
+<p><strong>修复</strong> 在现有 Supervisor 中用每代进程记录统一 boot、ready、stalled、recycling、stopped、failed。回收显式等待旧进程退出，然后调度一次替换。将退出原因绑定到旧进程对象，退出应用、认证变更、意外退出各走相应状态转移。共同的状态机调用现有三平台启动适配器，区分进程已启动、健康接口可用、聊天 transport 可用。</p>
+<p class="evidence">Ace <code>desktop/src/main/index.ts:1446</code>、<code>:1655</code>、<code>:1726</code>、<code>:2053</code>、<code>:2092</code>，<code>desktop/src/main/gateway-restart-controller.ts:96</code>。ZCode <code>packages/desktop/src/main/desktopHostProcess.ts:647</code>、<code>:714</code>。</p>
+</article>
+<article id="ownership">
+<h3>D2 · P1 · 进程清理的范围超过当前实例</h3>
+<p>macOS 和 Linux 启动分支会异步按同用户与进程命令行清理匹配的网关，启动新进程前没有等待该清理完成。相同账号下的另一个 profile、另一个 checkout 或外置网关可能被误停。Windows 打包分支已有避免广泛清理的处理，开发模式另有命令行匹配。ZCode 的 utility host 采用自身持有的进程句柄管理退出。</p>
+<p><strong>修复</strong> 删除开发版及打包版启动路径的进程扫描，以及 Linux 更新脚本里的按名称终止。桌面为每次受管启动持有专属管道，网关收到 EOF 后执行现有关停流程。健康探针验证应用目录证明和本次启动的证明，避免把同目录下其他托管实例当成当前网关。开发版和打包版在候选范围内检查主端口及相邻健康端口，遇到占用就继续选择。允许复用的独立网关保留原有协议和独立生命周期。</p>
+<p><strong>验收</strong> <code>856fb5cc</code> 已提交。真实 Windows Electron 双实例覆盖 API 和健康端口占用、就绪前后强退、正常退出、重启、独立 CLI 网关复用及五轮端到端回复。临时打包布局另走真实 Windows 打包分支，内嵌 Python 启动并完成一轮回复，强退后释放端口，独立网关存活。Linux 离线容器验证真实管道、Unix socketpair、父进程强退、端口回退和启动证明。Python 636 项通过、2 项跳过。桌面全量 2030 项通过、2 项跳过，仍有两项 Windows 符号链接权限失败及一项已知模型分组顺序失败。默认模型的最小请求仍返回 HTTP 400 <code>InvalidSubscription</code>，端到端使用本地协议测试模型。</p>
+<p><strong>仍待验证</strong> 正式安装包和 macOS 原生端到端，以及 Python 完全失去执行能力时的子进程树回收。同一 <code>CREW_HOME</code> 下独立运行多个网关时，后台终端任务的旧恢复文件仍可能被其他实例读取。后续需按实例保存恢复记录并核对进程启动身份。应用显式等待关停和完成写入见 D6。</p>
+<p class="evidence">Ace <code>desktop/src/main/index.ts:1396</code>、<code>:1404</code>、<code>:2012</code>，<code>crew/gateway/desktop_parent_lease.py:30</code>，<code>crew/gateway/app.py:527</code>。ZCode <code>packages/desktop/src/main/desktopHostProcess.ts:669</code>、<code>:714</code>，<code>packages/server/src/stdio-lifecycle.ts:103</code>。</p>
+</article>
+<article id="replay">
+<h3>D3 · P1 · 断线游标失效时缺少权威恢复</h3>
+<p>Ace 将回放存在每进程、每会话 2000 条的内存队列。恢复只有 <code>seq &gt; after</code> 筛选。以生产 ConnectionManager 和内存 socket 生成 2005 帧，从序号 1 恢复只得到序号 6–2005，没有缺口提示。新的 ConnectionManager 产生 3 帧后用旧游标 2005 回放，收到 0 帧。队列超限后只能给出后缀，网关重启后序号从头计数。桌面按 session 保存最大号和已见集合，游标没有网关代次。现有 watchdog 和持久历史能在部分场景最终补齐，无法保证进行中的回复在这两种游标失效时立刻恢复。ZCode 的 publisher 校验 <code>logEpoch</code> 和可回放下界，超出范围时发布权威 snapshot。</p>
+<p><strong>修复</strong> 订阅明确携带会话事件代次和已应用水位。Gateway 返回可回放下界、当前水位及恢复模式，游标失效时以有界快照替换活跃状态。区分可丢弃的临时帧与需要重建的正文、终态和交互状态。Desktop 与 Web 共用语义，按版本原子应用快照并与后续实时流衔接。继续沿用现有持久化投影和工具意图日志，恢复时只重建状态。验收同代断网、长时间断网、网关重启、较大序号先到、回放与实时并发、审批状态、文本和工具结果无重复。</p>
+<p class="evidence">Ace <code>crew/gateway/connections.py:34</code>、<code>:440</code>、<code>:523</code>，<code>crew/gateway/ws.py:324</code>，<code>desktop/src/ui/features/gateway-sequence.ts:11</code>，<code>desktop/src/ui/api/feature-session.ts:1049</code>，<code>desktop/src/ui/features/stream-watchdog.ts:71</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:883</code>。</p>
+</article>
+<article id="ack">
+<h3>D4 · P1 · “已发送”缺少网关持久受理回执</h3>
+<p>Desktop 主进程调用 <code>socket.send</code> 后即返回成功，Gateway 是否受理仍未知。即使内部发送函数检测到失败并返回 false，外层 <code>sendMessage</code> 也把结果变成 void。输入框在 promise 正常结束后清空，附件列表也已被消费。在 UI 已可发送后连接断开，用户可能看到错误提示却丢失草稿及附件。忙时待发队列还只驻留内存。ZCode 有按请求身份去重的 command inbox，并将结果事实持久化、供连接恢复后查询。</p>
+<p><strong>修复</strong> 以现有 <code>request_id</code> 加 owner、session 作为受理身份。网关持久记录受理，发送明确的 <code>accepted</code> 或拒绝结果。桌面保留待确认内容，重连后查询同一标识，需重投时保持相同 ID。持久记录与执行意图区分，相关 side effect 使用现有意图对账，避免重放执行。验收在发送前、网关已受理、回执丢失和工具已执行等阶段断连或重启，统计重复执行和静默丢失均为零。</p>
+<p><strong>实现</strong> Electron 在发送前原子写入待发记录，存放原请求 ID、正文和附件引用。Gateway 在 SQLite 事务提交后返回受理回执，再竞争执行权。桌面查询原数据库中的记录，只有未确认的请求得到 <code>unknown</code> 时才按原样重发。已受理且尚未执行的请求可在重连时接续。执行已开始但终态无法确认时，界面将消息保留为待核对项，避免再次执行工具。回执跟踪按账号和数据库校验。停止或删除前先保存撤销意图，避免重连复活待发消息。重载遇到终态回执时，界面重新加载权威历史。</p>
+<p><strong>验收</strong> <code>ffce87d8</code> 已提交。最终构建通过六项 Windows Electron 端到端测试。覆盖发送前断线、落库回执丢失后重载、拒绝后保留草稿和真实上传附件、持久受理后首次执行前崩溃、实际文件写入后执行进程崩溃、忙时排队后重载。恢复后请求 ID 与内容一致，会话历史无重复。执行中崩溃场景保留待核对项，原文件内容和修改时间均未改变。Gateway 定向回归通过 194 项，较早的广泛回归通过 735 项、跳过 1 项。最终桌面全量通过 2072 项、跳过 2 项，保留 3 项基线失败。默认模型仍返回 HTTP 400 <code>InvalidSubscription</code>，Windows 故障测试使用本地协议兼容模型驱动真实 Gateway 和 Electron。</p>
+<p><strong>边界</strong> 队列重启恢复为原始入队顺序，手动排序只在当前运行期间有效。撤销持久化覆盖尚未调度的请求，已经开始的任务仍由运行时停止。外部渠道送达由渠道模块独立确认。故障测试覆盖进程终止，SQLite 使用现有 WAL 同步设置。macOS 和 Linux 尚待同场景原生复验。</p>
+<p class="evidence">Ace <code>desktop/src/main/index.ts:3919</code>，<code>desktop/src/ui/features/chat-controller.ts:1661</code>、<code>:1755</code>，<code>desktop/src/ui/features/attachments.ts:222</code>，<code>composer-view.ts:348</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/command-inbox.ts:120</code>、<code>:223</code>，<code>persistent-command-facts.ts:144</code>。</p>
+</article>
+<article id="readiness">
+<h3>D5 · P1 · 进程健康与聊天就绪存在时间差</h3>
+<p>Ace 的独立健康端口可在 ASGI 和延迟初始化完成前返回，主进程探针优先尝试它，并可能将进程从 starting 提升为 ready。界面还允许 unknown transport，忽略 <code>components.startup</code>。此时 REST 仍可能等待或返回 503，WS 仍可能拒绝接入。ZCode 以可查询、可重试的启动 attempt 管理数据库和本地请求受理。</p>
+<p><strong>修复</strong> 独立端口证明进程存活。通过实例校验的主端口报告核心状态及启动代次。核心初始化完成前，业务 REST 返回可识别的 503，经过认证的 WebSocket 客户端收到阶段对应的关闭码。桌面只有在当前代次核心就绪且本窗口 WebSocket 已打开时才允许发消息。旧探针和旧 socket 回调不能改变新代次。首屏先读取已知鉴权状态，Gateway 就绪后再验证账号。恢复期间可保留草稿，Cron 和 MCP 故障单独显示。</p>
+<p><strong>验收</strong> <code>ec6b6b86</code> 已提交。真实 Windows Electron 的五项端到端覆盖核心启动阻塞、独立健康端口先起、WebSocket 握手延迟、启动失败后重试、上一代健康响应迟到、Cron 和 MCP 同时失败，以及普通本地模式从鉴权未知进入免账号对话。各场景的首条消息在连接就绪后只发送和落盘一次。最终后端定向回归 193 项通过、1 项跳过。桌面全量 2058 项通过、2 项跳过，仍有 3 项原有失败。默认模型返回 HTTP 400 <code>InvalidSubscription</code>，对话用本地协议测试模型验证。</p>
+<p><strong>边界</strong> 核心异步启动限时 90 秒。监听前的同步数据库构建若卡住，仍由桌面的冷启动时限处理。macOS 和 Linux 原生桌面尚未执行这组端到端。</p>
+<p class="evidence">Ace <code>crew/gateway/app.py</code>、<code>crew/gateway/ws.py</code>，<code>desktop/src/main/gateway-readiness.ts</code>、<code>desktop/src/main/index.ts</code>、<code>desktop/src/ui/features/backend-status-guard.ts</code>。ZCode <code>packages/desktop/src/host/databaseStartupCoordinator.ts:58</code>、<code>:63</code>、<code>:143</code>。</p>
+</article>
+<article id="shutdown">
+<h3>D6 · P1 · 应用退出缺少等待子进程收尾的屏障</h3>
+<p>Ace 退出钩子异步发起 Gateway 停止，应用可以在停止 promise 完成前继续退出。强制终止回退主要面向直接子进程。ZCode 首次退出可被拦截并等待受管宿主执行 dispose，超时再结束进程。</p>
+<p><strong>修复</strong> 第一次原生退出会被拦截，后续退出请求等待同一次收尾。桌面暂停新请求，并行等待 WebSocket、浏览器、下载句柄和自有 Gateway。Gateway 收到关闭信号后停止接收新回合，保护正在写入的历史，并在原调度任务里关闭被暂停的异步流。排队请求退出时停止执行。正常退出有硬截止时间，超时仍可退出。更新和卸载须确认资源关闭及系统启动助手，失败后恢复桌面服务并保留更新包。托盘隐藏不进入退出流程。</p>
+<p><strong>验收</strong> <code>8b9a0e63</code> 已提交。Windows Electron 实测关窗隐藏和托盘重开，托盘退出等待真实浏览器标签页和 Gateway 收尾，耗时 2.65 秒。重开同一会话，已完成的回复仍可见，中断回合的用户消息只保存一次，持久状态为 <code>stopped</code>。用缩短的测试超时模拟 Gateway 卡死，到期只回收自有进程，另一实例继续对话。有效签名的临时程序验证 Windows 更新交接顺序，无法启动的签名测试程序验证保留下载记录和恢复服务。下载回归实测写入关闭及 Range 续传，Linux 离线验证模块与真实子进程，卸载交接使用模拟助手。</p>
+<p><strong>覆盖范围</strong> 后端 324 项通过、2 项跳过。桌面 2048 项通过、2 项跳过，仍有基线中的两项 Windows 符号链接权限失败和一项模型分组顺序失败。默认模型最小请求仍返回 HTTP 400 <code>InvalidSubscription</code>，对话端到端使用本地协议测试模型。macOS 原生退出和正式安装、卸载待验；超时强退时还未提交的写入可能中断。</p>
+<p class="evidence">Ace <code>desktop/src/main/desktop-shutdown.ts:15</code>，<code>desktop/src/main/index.ts:3957</code>，<code>crew/gateway/dispatcher.py:297</code>。ZCode <code>packages/desktop/src/main/index.ts:1228</code>、<code>:2602</code>，<code>desktopHostProcess.ts:714</code>。</p>
+</article>
+<article id="renderer-recovery">
+<h3>D7 · P2 · Renderer 恢复主要覆盖崩溃和加载失败</h3>
+<p>Ace 能在部分 renderer 异常退出和主页面失败时限次重载。OOM、启动失败、长期无响应或重载耗尽时，缺少同等明确的交互恢复路径。ZCode 额外存储有界本地崩溃归档，采集冻结和 ANR 事件。</p>
+<p><strong>修复</strong> 区分进程崩溃、初始化失败、长卡顿和 OOM，有限次重建窗口，从已落盘 session 与 draft 恢复。重试耗尽后显示可重开或导出本地诊断的窗口。验收多数情况下界面自动回到原会话，连续失败后仍可退出或重新打开。</p>
+<p><strong>实现</strong> 主进程记录当前渲染文档和连续失败次数。常见进程异常退出、主页面加载失败、首屏 20 秒未就绪，或收到原生无响应事件后 12 秒仍未恢复，都会触发受限重建。可见前台窗口另有 16 秒心跳失联检测，覆盖 Chromium 未发出事件的卡死。后台窗口允许节流，主进程长时间暂停后重新开始计时。最多自动重试三次，文档连续健康 60 秒后重新获得预算。恢复会新建 BrowserWindow，回收上一文档的连接和流式请求，保留 Gateway 及其正在运行的 WebSocket 对话。耗尽后由系统原生对话框提供重试、诊断导出和退出。活动会话必须在当前账号可访问的会话列表中才能自动打开。正文和上传附件引用按账号落盘，已受理的草稿版本由发送回执去重。</p>
+<p><strong>验收</strong> <code>e7230ad6</code> 已提交。最终 Windows 构建通过 9 项原生生命周期端到端和 1 项诊断对话框打开、取消测试。验证流式回复中崩溃后回到原会话并接续同一轮、保留草稿和上传附件、托盘隐藏时重建、隐藏启动标志下正常显示、重试耗尽后从托盘进入原生弹窗、脚本缺失后的原生重试与退出，以及主页面缺失后恢复。真实渲染线程阻塞约 10.14 秒时继续使用原窗口，持续卡顿约 20.28 秒时自动重建，Gateway PID 保持一致。最终桌面全量 2090 项通过、2 项跳过、3 项基线失败；Gateway 回归 40 项通过、1 项跳过。默认配置模型实测返回 HTTP 400 <code>InvalidSubscription</code>，对话由真实 Electron 和 Gateway 接本地协议测试模型验证。</p>
+<p><strong>边界</strong> 草稿写入采用 150 毫秒合并提交，崩溃时间早于最近一次落盘时可能丢失最后的编辑。原生故障启动用例缩短了测试版就绪时限。诊断保存窗口已验证打开和取消，实际生成诊断文件以及 macOS、Linux 原生场景仍待复验。</p>
+<p class="evidence">Ace <code>desktop/src/main/index.ts:1164</code>、<code>:1189</code>、<code>:1199</code>。ZCode <code>packages/desktop/src/main/desktopCrashCapture.ts:360</code>、<code>:422</code>，<code>desktopStabilityTelemetry.ts:864</code>。</p>
+</article>
+<article id="release">
+<h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
+<p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>
+<p><strong>修复</strong> 候选产物运行安装或解包、首次启动、发送/停止、后台重启恢复、renderer 恢复、退出清理及有旧数据的升级。Ace 已有事务化会话存储及写租约，在现有模块上增加迁移提交前后异常退出、文件系统空间不足与重新打开用例。ZCode 自带迁移前后中断的用例。覆盖 Windows 非 ASCII 用户目录、macOS arm64/x64、Linux 发布支持的包格式和桌面环境。将阶段耗时及失败阶段纳入产物报告。</p>
+<p class="evidence">Ace <code>.github/workflows/ci.yml:28</code>，<code>.github/workflows/nightly-desktop.yml:49</code>、<code>:78</code>、<code>:110</code>，<code>desktop/electron-builder.yml</code>。Ace 发布脚本 <code>deb-package/pack_exe.ps1:357</code>、<code>deb-package/pack_mac.sh:344</code>。ZCode <code>packages/desktop/test/e2e/smoke.test.ts:12</code>，<code>packages/desktop/package.json:28</code>，<code>apps/zcode-cli/packages/adapters/tests/migration-crash-recovery.test.ts:10</code>。</p>
+</article>
+</section>
+
+<section id="performance">
+<h2>4. 性能</h2>
+<article id="render">
+<h3>F1 · 聊天渲染每一帧会重复计算历史</h3>
+<p>Ace 已合并同帧更新并复用 DOM 节点，命中活动轮时，正文和推理可局部 patch。定位活动轮仍有消息列表搜索和全容器 marker 查询。结构变化或局部路径未命中时，全量 panel 路径重算历史内容签名、比较和排序节点并执行容器级后处理。ZCode 的 V4 ConversationTimeline 有可变行高的可见区虚拟化。用 Ace 实际签名函数在 Node v22.20.0 做合成数据微测，80 次预热和 100 次采样，100/500/2000 轮的单次签名遍历 P95 为 0.449/1.239/7.561 ms。结果仅包含签名计算。</p>
+<p><strong>修复</strong> 先将已完成轮投影改为按消息 ID 和版本更新，活动尾部单独 patch，将复制按钮、图表和 widget 后处理限定到变更节点。之后根据帧预算引入可变高窗口，保留选区、折叠状态、查找跳转、向上加载时的锚点。分别记录 reducer、DOM patch、绘制和长任务。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/conversation-panel.ts:232</code>，<code>conversation-renderer.ts:607</code>、<code>:733</code>、<code>:878</code>，<code>chat-controller.ts:439</code>、<code>:543</code>。ZCode <code>packages/ui/src/v4/ConversationTimeline.tsx:839</code>、<code>:2065</code>。</p>
+</article>
+<article id="stream-reassembly">
+<h3>F2 · 长回复的流式重组反复排序和拼接已收片段</h3>
+<p>每个 delta 都同步把已有片段排序并拼回全文，渲染合帧无法省下这部分计算。运行 Ace 原始函数，顺序无重叠、每片 213 字符，5 次预热及 11 次采样。100/500/2000/5000 片的整轮重组中位数约为 0.38/9.02/145.82/1052.93 ms。该结果只包括重组 CPU，仍可看到成本随单轮长度快速上升。</p>
+<p>ZCode 按会话流合并短时间内的相邻片段，以批次和字节上限保留桌面回放，水位超出回放窗口时发送 gap。进行中的 Markdown 与已完成正文采用不同渲染路径。</p>
+<p><strong>修复</strong> Gateway 合并 delta 时保留原始 Gateway 序号及 UTF-16 片段长度，历史回放继续发送原始帧。桌面按序直接追加，保留最近最多 512 个片段用于去重与重排。记录清退、工具边界或片段冲突导致正文无法确认时，暂停应用增量，对当前账号和会话发起带关联 ID 的快照请求。快照按服务端水位切换，回合已完成或快照不可用时使用已落盘历史补齐。Markdown 稳定块保留 DOM 节点，后续增量只重新解析活动尾部。收尾应用完整 Markdown 规则。</p>
+<p><strong>性能</strong> 同机 Node.js 重组基准使用 5,000 个片段与一致的最终 UTF-8 校验。顺序追加的整轮 CPU 中位数约从 848.90 ms 降至 0.75 ms，含同样局部乱序与重复帧的路径从 909.36 ms 降至 16.96 ms。新协议下合并片段与原始回放混排约 26.53 ms。此处只计重组，独立于 Electron 布局和模型时间。</p>
+<p>Windows Chromium 内对 600 次相同 Markdown 追加做成对测量，文本 28,951 UTF-8 字节，单次更新 P95 从 43.9 ms 降至 1.2 ms，累计 13.54 秒降至 0.39 秒。两版的最终 HTML 一致。另在真实 DOMPurify 上对照 5,556 次流式更新与 252 次最终渲染，覆盖代码、表格、数学公式、引用、Wiki 链接和不安全 HTML；输出一致。</p>
+<p><strong>验收</strong> <code>4db2395e</code> 已提交。Windows 原生 Electron、真实 Gateway 与脚本模型通过六种场景。422 个片段的 30,587 字节长答、合并成员回放、乱序和重复、断线重连、终态替换均逐字节匹配。损坏片段触发带关联 ID 的活跃快照，在最终帧放行前，恢复的前缀与后续实时正文已显示完整。追加安全 Markdown 时，标题、段落、行内代码、代码块和复制按钮保持节点身份。工作树配置的真实 DeepSeek 另通过一次 <code>file_read</code>，桌面显示与持久历史一致。Gateway 扩展回归 161 项通过，桌面全量 2,129 项通过、2 项跳过，3 项已有失败为两个 Windows 文件符号链接用例及模型列表排序。两组构建的模型端到端耗时来自单次场景运行，仅报告重组与 Markdown 的独立性能测量。</p>
+<p><strong>边界</strong> 单个未闭合的长块以及依赖后续引用定义的内容仍需重新解析活动区。结构变化时会话整行重建仍可能重置选区。超出 Gateway 活跃快照容量的回合等待持久历史恢复。</p>
+<p class="evidence">ZCode <code>packages/services/src/session/continuousStreamCoalescer.ts:63</code>，<code>packages/desktop/src/main/taskRealtimeBus.ts:736</code>。Ace <code>crew/gateway/connections.py</code>，<code>desktop/src/ui/stream-reassembly.ts</code>，<code>desktop/src/ui/features/session-controller.ts</code>，<code>desktop/src/ui/components/transcript.ts</code>。</p>
+</article>
+<article id="history">
+<h3>F3 · 历史恢复走全量路径，分页结果缺少统一代次</h3>
+<p>普通历史首屏已走索引窗口。恢复非空会话仍可能下载完整 history，Team 历史页也会全量聚合，多次向上翻页会把加载过的所有轮保留在 DOM。部分首屏请求先更新游标再检查是否过期，旧页返回也缺少对应快照或请求代次校验。迟到结果可能改写当前分页边界或混入旧页。</p>
+<p>ZCode V4 使用日志 epoch 和最旧 row ID 裁决历史续页，用有界日志补齐重连缺口。桌面时间线按稳定行 ID 测量窗口并保留阅读锚点。Ace 已有 SQLite 活链索引，原窗口按存储事件直接截断，页面边界可能拆开一条助手消息与独立工具结果。</p>
+<p><strong>实现</strong> 普通会话使用持久记录 ID、历史版本、向前检查点和向后游标。SQLite 在同一读事务内读取版本及数据。纯追加保持版本稳定，回退、重写和会话重建使旧游标过期。重连优先补齐已确认检查点之后的增量，无法校验或超过上限时返回最近窗口。窗口优先按用户轮次对齐，常规工具结果与调用一同投影。迟到页面同时验证账号、当前会话、导航代次、历史代次以及发起时的游标，消息与分页状态一次提交。历史使用持久 ID 去重，保留相同正文的不同消息。前插与重连后按行 ID 和像素偏移锚定，屏内及邻近行和活动尾部保留 DOM，已加载的其余行用测量高度占位。</p>
+<p><strong>单项测量</strong> Windows SQLite 合成 2,000 与 20,000 轮历史，最近窗口均为 100 条可见记录，10 次读取中位数为 1.40 ms 与 1.90 ms。另用隔离 Chromium 装入全部 4,000 与 40,000 个逻辑行，分别最多挂载 13 与 14 条消息。连续向前插入五页时，首条可见消息的位置、原文本选区和焦点保持一致。20,000 轮全加载后，前插仍会重新投影逻辑行，每次同步处理 48.7–99.2 ms。</p>
+<p><strong>端到端</strong> 隐藏的 Windows Electron 与真实 Gateway 对 2,000、20,000 轮历史分别抽查十页。末次样本均由前版的 1,022 条挂载行降为 11 条，旧阅读行的最大测量偏移为 0.05 px。无新消息时，同一轮断连恢复的两个历史响应合计由 1,993,188 和 20,025,718 字节降到 448 和 450 字节。20,000 轮前版全量响应在 Gateway 编码完毕后截住，避免将 40,000 行反序列化并挂到桌面。模拟快速滚动包含重复置顶，实测实际不同旧页请求为 21 和 23 次。实际回退并重连后放行之前挂起的旧页，下一页继续使用新版本，行 ID 和内容哈希一致。工作树的真实 DeepSeek 在最后两处滚动修正前完成 <code>file_read</code> 回合，用户消息、模型正文和工具记录各落盘一次。</p>
+<p><strong>提交与回归</strong> <code>5c4c49e7</code> 已提交。修复过期测高回调覆盖新定位、首次跳底后紧接滚动被拉回，以及历史前插期间编辑位置按旧下标漂移。Gateway 扩展回归 205 项通过，桌面最终全量 2,143 项通过、2 项跳过，3 项已有失败仍可复现。TypeScript、Python 局部 Ruff、CSS 样式检查通过。</p>
+<p><strong>边界</strong> Team 多源历史继续完整聚合以保留排序与去重，迁移前的旧历史仍需解码已有 blob。Chromium 原生页内查找覆盖已挂载的内容，应用内消息定位可挂载并跳转到已加载的屏外行。窗口高度和耗时随消息内容、屏幕尺寸而变。</p>
+<p><strong>测试隔离</strong> 首次测试的 Python 启动隔离失效，测试 Gateway 短暂打开本机默认 Crew 主目录。已停止测试进程。日志未显示模型或任务调用，部分数据库修改时间与该时段重叠，具体内容是否变化未能确认。正式证据均来自路径先验校验通过的临时环境，桌面主进程和 Python 均在路径不符时先于应用加载退出。</p>
+<p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>crew/gateway/routers/sessions.py</code>、<code>desktop/src/ui/features/session-controller.ts</code>、<code>desktop/src/ui/features/conversation-viewport.ts</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:833</code>、<code>packages/ui/src/v4/conversationProjectionStore.ts:1058</code>、<code>packages/ui/src/v4/ConversationTimeline.tsx:825</code>。</p>
+</article>
+<article id="startup">
+<h3>F4 · 首屏依赖全量会话列表和串行初始化</h3>
+<p>初次 hydrate 串行等待会话列表、状态、工作区、配置和渠道处理，侧栏存在包含归档项的全量读取。存储查询未分页，批查配置还会生成随列表增长的绑定参数。用内存 SQLite 3.45.3 和 Ace 当前查询及索引合成 100/1000/5000/20000 会话，25 次采样的数据库查询加配置批读 P95 约为 3.7/46.4/112.7/519.1 ms，基础 JSON 约 17 KB/175 KB/878 KB/3.52 MB。查询计划还出现临时排序，现有索引缺少置顶排序组成项。测量不含 HTTP、附属数据和 UI。后端启动时还有同步的旧 owner 回填与中断恢复。ZCode V4 按工作区订阅会话索引，侧栏顶层列表按可见区渲染，Desktop E2E 检查首次打开多个项目时只预热活动项目。</p>
+<p><strong>修复</strong> 以当前工作区最近会话和首条聊天就绪作为关键路径。按依赖关系并行有界请求，延后归档、次要配置和非首屏资源。为启动回填与恢复分段计时，将明确线程安全的同步工作移出事件循环。服务端给会话列表稳定分页和轻量 DTO，前端按 workspace 缓存和接收有版本的变化。用 100/1000/10000 会话测启动、打开侧栏、检索、切换工作区与首次可发送。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/session-controller.ts:543</code>，<code>desktop/src/ui/features/workspaces.ts:1144</code>、<code>:1201</code>，<code>crew/state/session_store.py:2267</code>、<code>:2462</code>，<code>crew/app.py:2422</code>、<code>:2480</code>。ZCode <code>packages/ui/src/v4/agentSessionsIndexTransport.ts:80</code>，<code>packages/ui/src/project-sidebar/grouped/virtualized-top-level-list.tsx:132</code>。</p>
+</article>
+<article id="backpressure">
+<h3>F5 · 慢订阅与回放占用实时推送路径</h3>
+<p>Ace 实时侧已约 50 ms 合包，回放缓存仍以 raw 帧计数，回放逐条等待发送并持有会话级共享锁。发送给多个订阅连接时顺序等待，慢客户端可能延迟其他客户端。队列只有每会话条数上限，实际内存还与帧字节数和缓存会话数相关。ZCode 先归并订阅操作并按操作数和 UTF-8 字节设限，resume 接入同一增量管线。</p>
+<p><strong>修复</strong> 在 D3 的恢复契约明确后，为每个订阅独立排队，按帧、字节、活跃会话和队列年龄设限。小文本可合并，关键状态保留序列语义。超过水位切换到重新同步。验证同时连接两个页面、慢连接不阻塞正常连接、断连后内存回落、终态可靠且未重复。</p>
+<p class="evidence">Ace <code>crew/gateway/connections.py:249</code>、<code>:438</code>、<code>:538</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:224</code>、<code>:908</code>。</p>
+</article>
+</section>
+
+<section id="handoff">
+<h2>安全工作树合并后的复核 · 2026-11-18</h2>
+<p>原对话以 <code>b27b896b</code> 提交 Plan 版本审批。安全分支尖端 <code>a8247225</code> 已在审计分支祖先链中。合并提交 <code>1936c227</code> 的第二父提交 <code>7c3ef920</code> 保存了源工作树的 102 个修改文件和 3 个新增文件。10 处冲突逐项处理，保留审批模式确认、聊天发送回执、进程所有权及退出清理。源工作树的分支和暂存区保留了原状态。</p>
+<p><strong>合并验收</strong> Windows 隔离 Electron、真实 Gateway 与本地模型端点通过三个场景。安全和系统设置可分别打开。首次发送时权限确认返回 HTTP 503，草稿仍在，模型请求数为零。重试后 Gateway 先确认权限，再收到会话消息，桌面正文及已保存轮次均核对成功。桌面全量 2,243 项通过、2 项跳过，另有两项 Windows 符号链接权限和一项中文地区排序的既有失败。TypeScript、Rust 测试目标编译及 7 项原生协议测试通过。后端首轮 470 项通过、2 项跳过。CLI 用例按新的默认审批模式修正后通过。两项原生文件测试使用本次构建的 helper、已配置的 Windows 沙箱和测试账号可管理的临时 Python 环境复测通过；使用主 checkout 的 Python 环境时，Windows 返回 ACL 访问拒绝。macOS、Linux 原生包态留待各自的 runner 验证。</p>
+<p><strong>真实模型</strong> 从维护者指定来源核对 worktree 凭据与模型配置后，使用隔离 <code>CREW_HOME</code> 和开发账号。<code>deepseek-flash</code> 经 Ace 模型工厂与执行器返回预期的 11 字符正文，流中收到思考、正文与完成帧。禁止重试、网络断开和崩溃窗口另用可控端点测量。</p>
+<div class="table"><table>
+<thead><tr><th>项目</th><th>本次新增证据</th><th>代码和验收</th></tr></thead>
+<tbody>
+<tr><td>A13 · 同行模糊编辑</td><td>只改 JSON 中的引号文本，旧实现会把同一行无关字段中的全角字符和圈号数字也归一化。现在逐个匹配映射回原文区间，不能可靠定位的边界拒绝写入。</td><td><code>6a8b409c</code>。Gateway、WebSocket、模型及真实文件的 3 个场景共 8 次工具调用，包括过期版本与歧义。151 项回归通过、1 项跳过。Ace <code>crew/agent/file_mutation.py</code>；ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/edit.ts</code>。</td></tr>
+<tr><td>A14 · Provider 重试指令</td><td>同一回合遇到带 <code>x-should-retry: false</code> 的 429，旧版发送 3 次，终态仍显示可重试。ZCode 在读取退避时间前检查该标记。</td><td><code>c3f5a2cc</code>。本机 HTTP 端点接入实际 SDK 和执行器，修复后只收到 1 次请求，终态不可重试。毫秒、日期和零等待覆盖在 210 项通过的回归中。Ace <code>crew/providers/classify.py</code>；ZCode <code>apps/zcode-cli/packages/adapters/src/model/failure-inspection.ts</code>。</td></tr>
+<tr><td>A10 · 客户端兼容分支</td><td>桌面直连模式未申请 WebSocket 回执能力，重连时能力帧未到也可能把带版本草稿送入旧协议。旧反馈发送失败后仅查询到计划处于修订阶段，界面就可能误判反馈已送达。独立 React Web 有自己的协议入口。</td><td>Ace <code>desktop/src/ui/features/plan-actions.ts</code>、<code>desktop/src/ui/api/feature-session.ts</code>、<code>web/src/ws.ts</code>；ZCode <code>packages/ui/src/v4/V4InteractionDialogs.tsx</code>。分别验收 Electron、直连渲染器及独立 Web。</td></tr>
+<tr><td>D9 · 身份刷新</td><td>登录状态验证短暂返回 503 会清除现有凭据。旧验证成功回包晚于用户退出时，会使内存恢复为已登录。ZCode 对凭据变动记录代次并区分临时服务失败与明确注销。</td><td>Ace <code>desktop/src/main/auth-session.ts</code>；ZCode <code>packages/services/src/oauth/oauthService.ts</code>。验收服务恢复、显式退出、切换账号后旧回包。</td></tr>
+<tr><td>D10 · 更新包准备与选择</td><td>已有可安装包时，申请下个版本会先删除旧文件及记录。新 URL 被拒后，本机临时目录里原本可用的包已消失。macOS 下载地址固定选 arm64，现有打包脚本也生产 x64。</td><td>Ace <code>desktop/src/main/update/download-controller.ts</code>、<code>update-url.ts</code>、<code>deb-package/pack_mac.sh</code>；ZCode <code>packages/desktop/src/main/autoUpdater.ts</code>、<code>manifestUpdateProvider.ts</code>。验收同名包、新下载失败及两种 Mac 架构。</td></tr>
+<tr><td>F6 · 工作区根路径与列表请求</td><td>渲染器在所有平台把路径转小写。在区分大小写的卷上，两个工作区可能被当成同一个。查找不存在的根目录时，测试替换目录 IO 后，500 个候选发起 500 次列表查询，实际函数累计处理 250,000 行。</td><td>Ace <code>desktop/src/ui/features/workspaces.ts</code>、<code>desktop/src/main/workspace-directory.ts</code>；ZCode <code>packages/services/src/session/claude-native/claudeNativeSessionImportRepo.ts</code>。验收大小写敏感卷、链接、目录复用和批量查找请求数。</td></tr>
+<tr><td>F7 · Gateway 子进程日志</td><td>轮转仅在接管子进程时检查。一次合成突发产生 6,304,566 字节，跨过 2 MiB 阈值后同一活动文件仍在增长，写队列一度容纳全部数据。</td><td>Ace <code>desktop/src/main/index.ts</code> 的 <code>attachGatewayLog</code>；ZCode <code>packages/desktop/src/main/desktopCrashCapture.ts</code> 为诊断目录实施留存上限。验收长时间运行、慢盘、交错输出、磁盘故障与退出。</td></tr>
+</tbody></table></div>
+<p>此前已列出的 A11 工具结果恢复、A12 实际停止、D8 包态发布、F4 首屏列表与 F5 慢客户端隔离仍需分别验收。新发现以具体入口及实测范围为准。</p>
+</section>
+<section id="validation">
+<h2>5. 证据和验收</h2>
+<p>源码观察定位可以确定的契约与控制流。运行证据来自 Windows 的本地测试和小范围探针。产品性能排名、安装包行为和三平台市场环境下的故障率需要同条件实测。ZCode 作为指定的本地对照，源码快照工作区干净，分支落后本地记录的 <code>origin/main</code> 五个提交。</p>
+<h3>本次运行记录</h3>
+<ul>
+<li>Agent 源码探针验证 <code>AGENTS.md</code> 漏读、Plan schema 缺少搜索、扫描超时返回无匹配、长终端日志断流与分页重复。文件编辑和提示词的 13 项同步单测通过。</li>
+<li>桌面全量 Vitest 首轮报告 1950 通过、3 失败、2 跳过，另有 2 个套件因隔离 worktree 缺 Electron 二进制未加载。用本机同版 Electron 复跑这 5 个文件，两个加载失败的套件通过。剩余两处失败在 Windows 创建文件符号链接时返回 <code>EPERM</code>；另一处为设置页模型分组顺序断言，复跑仍然失败。</li>
+<li>设置页分组在无厂商目录时让未知 provider 与“自定义”共享同一排序权重，最终取决于环境的 <code>localeCompare</code>。实际 Collator 校验显示 en-US 将自定义放在末尾，zh-CN 将它放在开头。建议先用明确的分组优先级固定“自定义”在末尾，再按本地化名称排序。Ace <code>desktop/src/ui/features/config-panes.ts:903</code>、<code>:941</code>，<code>desktop/tests/unit/model-list-grouping.test.ts:79</code>。</li>
+<li>网关回放、watchdog、长对话性能均用内存 fixture 或合成输入验证。真实模型差异、双端整体性能和跨平台包态结果需要按下述矩阵测量。</li>
+<li>Windows 后端定向 pytest 共 1007 项，1004 通过、2 跳过、1 失败。失败用例 <code>test_mac_pack_script_logs_app_path_with_nounset</code> 在 Windows 默认 GBK 下用 <code>Path.read_text()</code> 读取 UTF-8 打包脚本，触发 <code>UnicodeDecodeError</code>。复跑确认默认编码失败，Python <code>-X utf8</code> 下通过。建议在用例的文件读取和子进程文本解码显式声明 UTF-8。Ace <code>tests/test_release_delivery_matrix.py:62</code>。</li>
+</ul>
+<h3>对标场景</h3>
+<div class="table"><table>
+<thead><tr><th scope="col">场景</th><th scope="col">固定条件与观测</th><th scope="col">建议初始门槛</th></tr></thead>
+<tbody>
+<tr><td>Agent 完成率</td><td>同模型、温度、provider、仓库快照、网络条件。固定项目规则、范围搜索、精准编辑、终端测试、用户澄清、Plan 六组任务。按工具统计参数错误、错误空结果、操作轮次和最终任务成功。</td><td>确定性工具契约失败为 0；真实模型任务每组多次重复，报告成功率与分布，再按 ZCode 同条件数据定门槛。</td></tr>
+<tr><td>恢复正确性</td><td>固定模型事件序列。逐个断开 renderer、WS、Gateway。记录 accepted、持久化完成、已应用 watermark 和最终历史。</td><td>每平台每种故障至少 30 次；静默丢请求、重复执行和终态不一致均为 0。恢复 P95 ≤ 10 s（从本地网关可用开始），另报进程重新就绪 P95。</td></tr>
+<tr><td>长会话</td><td>100/500/2000 轮，含代码块、工具调用、折叠、图片占位。20/100 delta 每秒，背景分别无慢连接和有慢连接。采集节点数、堆、DOM patch、滚动与输入。</td><td>60 Hz 机器上聊天更新 P95 ≤ 8 ms，输入到下一次绘制 P95 ≤ 50 ms。长会话每帧成本不再随已加载历史近似线性上涨。</td></tr>
+<tr><td>启动和首 token</td><td>同机同平台分别测冷启动、热启动和 100/1000/10000 会话。固定本地 provider 分段测 app→窗口交互、app→聊天可发、provider 首文本→送达→首次绘制。</td><td>每个案例至少 30 次，报 P50/P95 与失败数。app→聊天可发 P95 ≤ 5 s，provider 首文本→可见 P95 ≤ 150 ms，均为待校准目标。</td></tr>
+<tr><td>发行与工作集</td><td>Windows、macOS、Linux 的支持矩阵，干净 profile 与已有会话升级。记录 30 分钟空闲和长会话连续输出 RSS、队列驻留字节、退出残留，以及恢复后的历史。</td><td>零数据丢失和自有子进程残留；队列和 DOM 规模在稳定工作集下收敛。绝对内存门槛用各平台同条件首轮结果设定。</td></tr>
+</tbody>
+</table></div>
+<h3>观测如何归因</h3>
+<p>沿用 <a href="../frontend/stream-performance-diagnostics.html">首 token 诊断</a> 和 <a href="observability-tracing.html">已有 tracing</a>。以 <code>request_id</code> 串起 Desktop 接收、网关受理、provider 首事件、首正文、持久化和首绘，以 <code>gateway_instance_id</code>、进程代次、退出原因串起启动与回收。恢复路径记录模式、游标距离、缺口、队列字节与同步耗时。按平台、通道、事件类别等有限维度报 P50/P95/P99，实例和请求 ID 留在结构化事件。采样只记行为类别、计时和大小。当前前端 <code>first-visible-text</code> 早于 turn gate，<code>first-dom-patch</code> 可早于实际定位及修改 DOM。将基准拆成收到正文、接纳正文、完成 DOM patch 和下一绘制时机，并以实现位置命名。用故障测试验证每个阶段都能找到，便于判断慢在模型、路由、重放、磁盘或绘制。</p>
+</section>
+</main>
+</body>
+</html>
