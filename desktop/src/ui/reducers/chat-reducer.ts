@@ -136,6 +136,8 @@ export interface ErrorChunk {
 export interface PlanReviewChunk {
   kind: 'plan_review';
   body: {
+    version?: string;
+    active?: boolean;
     plan?: string;
     plan_file?: string;
     empty?: boolean;
@@ -1365,6 +1367,7 @@ export function planReviewReducer(chunk: PlanReviewChunk, snapshot: ReducerSnaps
       ? rawStatus as PlanReviewStatus
       : 'pending');
   const planReview = {
+    ...(typeof chunk.body.version === 'string' ? { version: chunk.body.version } : {}),
     plan: typeof chunk.body.plan === 'string' ? chunk.body.plan : '',
     planFile: typeof chunk.body.plan_file === 'string' ? chunk.body.plan_file : '',
     status,
@@ -1375,8 +1378,9 @@ export function planReviewReducer(chunk: PlanReviewChunk, snapshot: ReducerSnaps
     plan: planReview.plan,
     planFile: planReview.planFile,
     status: planReview.status,
+    ...(planReview.version ? { version: planReview.version } : {}),
   };
-  book.planActive = true;
+  book.planActive = chunk.body.active ?? !['approved', 'readonly', 'rejected', 'cancelled'].includes(status);
   const upserts: MessageUpsert[] = [];
   if (book.assistantId) {
     upserts.push({ op: 'patch', messageId: book.assistantId, patch: { planReview } });

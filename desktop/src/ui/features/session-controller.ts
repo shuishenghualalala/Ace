@@ -1,3 +1,4 @@
+import { disconnectPlanReceipts, receivePlanCapability, receivePlanReceipt, reconnectPlanActions, resetPlanActions } from './plan-actions';
 /**
  * 会话生命周期：打开 / 历史回填 / 网关 socket 引导 / 后端状态水合。
  *
@@ -48,6 +49,10 @@ import {
 import {
   applyChunk,
   applyFollowupReceipt,
+  appendMessage,
+  finalizeStreamingTurn,
+  setBusyWithUi,
+  setStatusWithUi,
   chatOutboxObserver,
   consumePending,
   flushPendingChunks,
@@ -87,7 +92,7 @@ import {
   cancelSessionStreamRecovery,
   getSessionStreamRecovery,
 } from './session-stream-recovery';
-import { newTurnRequestId, syncSessionLiveFromBackend } from './session-busy';
+import { newTurnRequestId, resumeSessionGeneration, syncSessionLiveFromBackend } from './session-busy';
 import { startStreamWatchdog, stopStreamWatchdog } from './stream-watchdog';
 import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { logStream } from '../stream-debug';
@@ -362,6 +367,7 @@ export async function loadBackendHistory(
             ? 'editing'
             : 'readonly';
       const review = {
+        ...(planState!.version ? { version: planState!.version } : {}),
         plan: planState!.plan!,
         planFile: planState!.plan_file ?? '',
         status,
@@ -444,6 +450,7 @@ export async function loadBackendHistory(
           plan: planState.plan,
           planFile: planState.plan_file,
           status,
+          ...(planState.version ? { version: planState.version } : {}),
         },
       });
     } else {
@@ -458,6 +465,14 @@ export async function loadBackendHistory(
       historyMsgCount: merged.length,
     });
     syncSessionLiveFromBackend(sessionId, st?.live, st?.last_status, st?.active_request_id);
+    const approvedRequest = planState?.execution_request_id;
+    if (approvedRequest && ['accepted', 'running', 'uncertain'].includes(planState.execution_status ?? '')) {
+      const activeRequest = sessionStore.get().books[sessionId]?.activeRequestId;
+      if (!activeRequest || activeRequest === approvedRequest) {
+        if (!activeRequest) resumeSessionGeneration(sessionId, approvedRequest);
+        resumeApprovedPlanExecution(sessionId, approvedRequest);
+      }
+    }
     logStream('history', 'sync-live-after', {
       sessionId,
       book: sessionStore.get().books[sessionId],
@@ -625,6 +640,52 @@ export function installHistoryPagingScroll(): void {
   );
 }
 
+const approvedExecutions = new Map<string, { owner: string; requestId: string; storeId?: string }>();
+
+export function resumeApprovedPlanExecution(sessionId: string, requestId: string): void {
+  const book = sessionStore.get().books[sessionId];
+  if (book?.activeRequestId && book.activeRequestId !== requestId) return;
+  const existing = approvedExecutions.get(sessionId);
+  const owner = interactiveOwnerKey();
+  if (!existing || existing.owner !== owner || existing.requestId !== requestId) {
+    approvedExecutions.set(sessionId, { owner, requestId });
+  }
+  const watched = approvedExecutions.get(sessionId)!;
+  const identity = chatOutbox.transportIdentity();
+  const socket = state.socket;
+  if (!socket || (!identity && desktopOutboxBridge()) || (identity && watched.storeId && watched.storeId !== identity.storeId)) return;
+  const query = { action: 'send_receipt_query' as const, session_id: sessionId, request_id: requestId };
+  if (identity) {
+    watched.storeId = identity.storeId;
+    void socket.send(query, identity.scope, identity.storeId).catch(() => {});
+  } else {
+    void socket.send(query).catch(() => {});
+  }
+}
+
+function receiveApprovedExecutionReceipt(chunk: ChatChunk): void {
+  if (chunk.kind !== 'send_receipt' || !chunk.session_id) return;
+  const watch = approvedExecutions.get(chunk.session_id);
+  if (!watch || watch.owner !== interactiveOwnerKey() || watch.requestId !== chunk.request_id) return;
+  const status = chunk.body.status;
+  if (status === 'accepted' || status === 'running') return;
+  if (!['completed', 'failed', 'cancelled', 'partial', 'awaiting_input', 'uncertain'].includes(String(status))) return;
+  approvedExecutions.delete(chunk.session_id);
+  const sessionId = chunk.session_id;
+  if (sessionStore.get().books[sessionId]?.activeRequestId !== watch.requestId) return;
+  if (status === 'uncertain') {
+    finalizeStreamingTurn(sessionId);
+    patchBook(sessionId, { turnSealed: true, acceptingNewRequest: false });
+    setBusyWithUi(sessionId, false);
+    setStatusWithUi(sessionId, 'idle');
+    appendMessage(sessionId, 'error', '计划执行结果尚未确认，请核对会话记录。', { requestId: watch.requestId });
+    if (state.activeSessionId === sessionId) renderChat();
+    return;
+  }
+  const connection = recoveryConnection;
+  if (connection?.()) void reconcileSessionAfterReconnect(sessionId, true, connection);
+}
+
 let recoveryConnection: (() => boolean) | null = null;
 const recoveryChecks = new Map<string, { recovery: object; connection: () => boolean; retry: boolean }>();
 
@@ -774,8 +835,15 @@ function withoutInteractionTurnGate(chunk: ChatChunk): ChatChunk {
 
 function handleGatewayChunk(chunk: ChatChunk): void {
   receiveFollowupCapability(chunk);
+  receivePlanCapability(chunk);
+  receiveApprovedExecutionReceipt(chunk);
+  if (receivePlanReceipt(chunk)) return;
   if (chatOutbox.handle(chunk)) {
-    if (chunk.kind === 'send_receipt_capability') reconnectFollowupDecisions();
+    if (chunk.kind === 'send_receipt_capability') {
+      reconnectFollowupDecisions();
+      reconnectPlanActions();
+      for (const [sessionId, watched] of approvedExecutions) resumeApprovedPlanExecution(sessionId, watched.requestId);
+    }
     return;
   }
   const receiptResult = applyFollowupReceipt(chunk);
@@ -941,6 +1009,7 @@ export function bootstrapBackend(): void {
   state.socket?.dispose();
   chatOutbox.disconnect();
   disconnectFollowupReceipts();
+  disconnectPlanReceipts();
   setBackendTransportState('unknown');
   recoveryConnection = null;
   let transportVersion = 0;
@@ -953,6 +1022,7 @@ export function bootstrapBackend(): void {
         recoveryConnection = null;
         chatOutbox.disconnect();
         disconnectFollowupReceipts();
+        disconnectPlanReceipts();
       }
       logStream('ws-renderer', open ? 'socket-open' : 'socket-close', {
         subscribed: Array.from(state.subscribedSessions),
@@ -975,6 +1045,7 @@ export function bootstrapBackend(): void {
       recoveryConnection = isCurrentConnection;
       subscribeSessions(Array.from(state.subscribedSessions));
       reconnectFollowupDecisions();
+      reconnectPlanActions();
       const active = state.activeSessionId;
       const sessions = new Set(state.subscribedSessions);
       if (active) sessions.add(active);
@@ -1050,6 +1121,8 @@ export function bindBackendAuth(): () => void {
     socket?.dispose();
     chatOutbox.reset();
     resetFollowupDecisions();
+    resetPlanActions();
+    approvedExecutions.clear();
     stopStreamWatchdog();
     setBackendTransportState('unknown');
     recoveryConnection = null;

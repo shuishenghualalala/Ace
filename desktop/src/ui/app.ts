@@ -1,3 +1,6 @@
+import { queryPlanAction, submitLegacyPlanAction, submitPlanAction, supportsPlanReceipts } from './features/plan-actions';
+import { interactiveOwnerKey } from './features/interactive-owner';
+import type { PlanReviewStatus } from './chat-render';
 /**
  * Crew desktop v2 — 渲染层入口（网关对话 + crew 能力接入）。
  *
@@ -101,7 +104,7 @@ import { armSubScenario, clearScenarioChip } from './features/scenario-arm';
 import { loadRunningIntroCopy } from './features/running-intro';
 import { installStreamDebugGlobal } from './stream-debug';
 import { installGlobalErrorReporting } from './renderer-error-report';
-import { newTurnRequestId, resumeSessionGeneration } from './features/session-busy';
+import { resumeSessionGeneration } from './features/session-busy';
 import {
   $,
   $$,
@@ -114,6 +117,7 @@ import {
 import {
   bookFor,
   getMessages,
+  dispatchWs,
   patchPlanReviewMessages,
   refreshSessions,
   renderChat,
@@ -127,6 +131,7 @@ import {
 } from './features/chat-controller';
 import {
   bindBackendAuth,
+  resumeApprovedPlanExecution,
   openSession,
   setSessionControllerSetTab,
 } from './features/session-controller';
@@ -366,100 +371,61 @@ function bindGlobalEvents(): () => void {
 
   // 计划看板四动作：编辑后批准 / 撤销 / 其他（落盘手改 + 反馈消息）。
   setPlanBoardActions({
-    onApprove: async (plan) => {
-      const planSid = state.activeSessionId;
-      if (!planSid) return;
-      const requestId = newTurnRequestId();
-      const sent = await (state.socket?.planApprove(
-        planSid,
-        state.mode || 'agent',
-        state.currentWorkspaceId,
-        requestId,
-        plan,
-      ) ?? false);
-      if (!sent) {
-        notify('服务未连接，无法提交计划审批');
-        return;
+    recheck: queryPlanAction,
+    submit: (submission, notifyResult) => {
+      const { owner, revision: _revision, ...plan } = submission;
+      if (interactiveOwnerKey() !== owner) return;
+      const beforeRequest = bookFor(plan.sessionId).activeRequestId;
+      const input = { ...plan, mode: state.mode || 'agent', workspaceId: state.currentWorkspaceId };
+      const onResult: Parameters<typeof submitPlanAction>[1] = (notice) => {
+        if (interactiveOwnerKey() !== owner) return;
+        const current = bookFor(plan.sessionId);
+        const snapshot = notice.planState;
+        const currentVersion = current.pendingPlan?.version;
+        const canUpdatePlan = !currentVersion || currentVersion === input.expectedVersion || currentVersion === snapshot?.version;
+        if (snapshot && canUpdatePlan) {
+          const status = (snapshot.status ?? (snapshot.awaiting_approval ? 'pending' : snapshot.active ? 'editing' : 'readonly')) as PlanReviewStatus;
+          patchBook(plan.sessionId, {
+            planActive: snapshot.active,
+            pendingPlan: snapshot.has_plan ? {
+              plan: snapshot.plan, planFile: snapshot.plan_file, status,
+              ...(snapshot.version ? { version: snapshot.version } : {}),
+            } : null,
+          });
+          patchPlanReviewMessages(plan.sessionId, status, snapshot.plan, {
+            ...(input.expectedVersion ? { previousVersion: input.expectedVersion } : {}),
+            ...(snapshot.version ? { version: snapshot.version } : {}),
+          });
+        }
+        if (notice.status === 'applied' || notice.status === 'confirmed') {
+          const execution = notice.executionRequestId;
+          const activeRequest = current.activeRequestId;
+          const ownRequest = !activeRequest || activeRequest === beforeRequest || activeRequest === execution;
+          const alreadyFinished = activeRequest === execution && current.turnSealed;
+          if (execution && ownRequest && !alreadyFinished) {
+            setBusyWithUi(plan.sessionId, true);
+            setStatusWithUi(plan.sessionId, 'running');
+            resumeSessionGeneration(plan.sessionId, execution);
+            resumeApprovedPlanExecution(plan.sessionId, execution);
+          }
+          if (ownRequest && plan.action === 'plan_approve' && state.activeSessionId === plan.sessionId && state.composerMode === 'plan') {
+            state.composerMode = 'craft';
+            syncCraftLabel();
+          }
+        }
+        notifyResult(notice);
+        if (state.activeSessionId === plan.sessionId) {
+          renderChat();
+          refreshInspector();
+        }
+      };
+      if (supportsPlanReceipts(input.expectedVersion)) {
+        submitPlanAction(input, onResult);
+      } else {
+        void submitLegacyPlanAction(input,
+          () => dispatchWs(plan.sessionId, '请根据以下反馈修改计划：\n' + (plan.feedback ?? ''), [], { planActive: true }),
+          onResult);
       }
-      const cur = bookFor(planSid).pendingPlan;
-      // 批准后立即落地为 approved（不可再改）；执行中看板只读，不再伪装成 pending。
-      patchBook(planSid, {
-        planActive: false,
-        pendingPlan: cur ? { ...cur, plan, status: 'approved' } : { plan, planFile: '', status: 'approved' },
-      });
-      patchPlanReviewMessages(planSid, 'approved', plan);
-      // 切回普通模式，避免后续消息再带 plan_active 把已落地计划重新拉回 active。
-      // 不走 applyComposerMode：它会 planExit 把 phase 改成 cancelled。
-      if (state.composerMode === 'plan') {
-        state.composerMode = 'craft';
-        syncCraftLabel();
-      }
-      setBusyWithUi(planSid, true);
-      setStatusWithUi(planSid, 'running');
-      resumeSessionGeneration(planSid, requestId);
-      renderChat();
-      refreshInspector();
-    },
-    onRejectAndExit: async () => {
-      const planSid = state.activeSessionId;
-      if (!planSid) return;
-      const sent = await (state.socket?.planRejectAndExit(planSid) ?? false);
-      if (!sent) {
-        notify('服务未连接，无法撤销计划');
-        return;
-      }
-      const cur = bookFor(planSid).pendingPlan;
-      patchBook(planSid, {
-        planActive: false,
-        pendingPlan: cur ? { ...cur, status: 'rejected' } : null,
-      });
-      patchPlanReviewMessages(planSid, 'rejected');
-      setBusyWithUi(planSid, false);
-      setStatusWithUi(planSid, 'idle');
-      renderChat();
-      refreshInspector();
-    },
-    onFeedback: async (plan, feedback) => {
-      const planSid = state.activeSessionId;
-      if (!planSid) return;
-      // C1：先落盘手改，再 revise，最后把反馈当用户消息发出。任一步失败须可见停在哪一步。
-      const updated = await (state.socket?.planUpdate(planSid, plan) ?? false);
-      if (!updated) {
-        notify('无法更新计划（服务未连接或写入失败）。计划文件可能未改动，请重试。');
-        return;
-      }
-      const rejected = await (state.socket?.planReject(planSid) ?? false);
-      if (!rejected) {
-        notify(
-          '计划正文已写入，但未能进入修订状态。请刷新后重试「其他」反馈，或手动退出再进入 Plan。',
-        );
-        // 本地仍切到 editing，避免看板卡在待批；与磁盘已更新对齐
-        const cur = bookFor(planSid).pendingPlan;
-        patchBook(planSid, {
-          planActive: true,
-          pendingPlan: cur
-            ? { ...cur, plan, status: 'editing' }
-            : { plan, planFile: '', status: 'editing' },
-        });
-        patchPlanReviewMessages(planSid, 'editing', plan);
-        renderChat();
-        refreshInspector();
-        return;
-      }
-      const cur = bookFor(planSid).pendingPlan;
-      patchBook(planSid, {
-        planActive: true,
-        pendingPlan: cur
-          ? { ...cur, plan, status: 'editing' }
-          : { plan, planFile: '', status: 'editing' },
-      });
-      patchPlanReviewMessages(planSid, 'editing', plan);
-      setBusyWithUi(planSid, false);
-      setStatusWithUi(planSid, 'idle');
-      renderChat();
-      refreshInspector();
-      // sendMessage 同步入队；连接失败时内部会 notify，此处再提示修订已落地
-      sendMessage(`请根据以下反馈修改计划：\n${feedback}`);
     },
   });
 

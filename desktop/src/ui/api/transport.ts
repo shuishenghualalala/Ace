@@ -84,6 +84,19 @@ export type FollowupCommand =
   | (FollowupCommandIdentity & { action: 'followup_cancel' })
   | (Required<FollowupCommandIdentity> & { action: 'followup_receipt_query' });
 
+export type PlanActionKind = 'plan_approve' | 'plan_reject_and_exit' | 'plan_reject' | 'plan_update';
+export interface PlanCommand {
+  action: PlanActionKind | 'plan_receipt_query';
+  session_id: string;
+  request_id: string;
+  submission_id: string;
+  expected_version: string;
+  plan?: string;
+  feedback?: string;
+  mode?: string;
+  workspace_id?: string;
+}
+
 export interface GatewayCursor {
   epoch: string;
   sequence: number;

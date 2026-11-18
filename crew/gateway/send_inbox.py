@@ -110,23 +110,31 @@ class DesktopSendInbox:
         if len(wire) > _MAX_PAYLOAD_BYTES:
             return SendReceipt(key, "rejected", "payload_too_large")
         digest = hashlib.sha256(wire).hexdigest()
+        return await self._execute(lambda conn: self._accept_encoded(conn, key, canonical, digest))
 
-        def write(conn):
-            row = conn.execute(_SELECT, key.values).fetchone()
-            if row is not None:
-                if row[3] is not None and row[3] != digest:
-                    return SendReceipt(key, "rejected", "request_id_conflict")
-                return self._receipt(key, row)
-            conn.execute("""
-                INSERT INTO desktop_send_inbox
-                    (owner_account_id, session_id, request_id, status, payload_hash, payload_json, updated_at)
-                VALUES (?, ?, ?, 'accepted', ?, ?, ?)
-            """, (*key.values, digest, canonical, time.time()))
-            workspace_id = str(payload.get("workspace_id") or "default")
-            self._ensure_session(conn, key.session_id, workspace_id, "", key.owner)
-            return SendReceipt(key, "accepted", payload=json.loads(canonical))
+    def accept_in_transaction(self, conn, key: SendKey, payload: dict[str, Any]) -> SendReceipt:
+        """Queue a host-created request in the caller's state transition transaction."""
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        wire = canonical.encode("utf-8")
+        if len(wire) > _MAX_PAYLOAD_BYTES:
+            return SendReceipt(key, "rejected", "payload_too_large")
+        return self._accept_encoded(conn, key, canonical, hashlib.sha256(wire).hexdigest())
 
-        return await self._execute(write)
+    def _accept_encoded(self, conn, key: SendKey, canonical: str, digest: str) -> SendReceipt:
+        row = conn.execute(_SELECT, key.values).fetchone()
+        if row is not None:
+            if row[3] is not None and row[3] != digest:
+                return SendReceipt(key, "rejected", "request_id_conflict")
+            return self._receipt(key, row)
+        payload = json.loads(canonical)
+        conn.execute("""
+            INSERT INTO desktop_send_inbox
+                (owner_account_id, session_id, request_id, status, payload_hash, payload_json, updated_at)
+            VALUES (?, ?, ?, 'accepted', ?, ?, ?)
+        """, (*key.values, digest, canonical, time.time()))
+        workspace_id = str(payload.get("workspace_id") or "default")
+        self._ensure_session(conn, key.session_id, workspace_id, "", key.owner)
+        return SendReceipt(key, "accepted", payload=payload)
 
     async def query(self, key: SendKey) -> SendReceipt:
         row = await asyncio.to_thread(

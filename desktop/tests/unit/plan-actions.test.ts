@@ -1,0 +1,154 @@
+/** @vitest-environment happy-dom */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { backendApi, type ChatChunk } from '../../src/ui/backend-client';
+import {
+  disconnectPlanReceipts, queryPlanAction, receivePlanCapability, receivePlanReceipt, reconnectPlanActions,
+  resetPlanActions, submitLegacyPlanAction, submitPlanAction, supportsPlanReceipts, type PlanActionInput,
+} from '../../src/ui/features/plan-actions';
+import { chatOutbox } from '../../src/ui/features/chat-outbox';
+import { state } from '../../src/ui/state';
+import { __resetAllStoresForTest, authStore } from '../../src/ui/stores/stores';
+
+const input: PlanActionInput = {
+  action: 'plan_approve', sessionId: 'plan-session', expectedVersion: 'version-one',
+  plan: '# Plan', mode: 'agent', workspaceId: 'workspace-one',
+};
+const snapshot = {
+  session_id: input.sessionId, version: 'version-two', active: false, awaiting_approval: false,
+  has_plan: true, plan: input.plan!, plan_file: 'plans/plan.md', status: 'approved', phase: 'approved',
+};
+let send: ReturnType<typeof vi.fn>;
+const capability = (enabled = true): ChatChunk => ({
+  kind: 'send_receipt_capability', sequence: 0, is_final: false,
+  body: { version: 1, store_id: 'a'.repeat(32), ...(enabled ? { plan_receipts: 1 } : {}) },
+});
+function receipt(status: string, body: Record<string, unknown> = {}): ChatChunk {
+  const command = send.mock.calls.find(([frame]) => frame.action === input.action)?.[0];
+  return {
+    kind: 'interaction_receipt', session_id: input.sessionId, request_id: command.request_id, sequence: 0, is_final: false,
+    body: { type: 'plan', submission_id: command.submission_id, status, ...body },
+  };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  __resetAllStoresForTest();
+  resetPlanActions();
+  authStore.set({ isLoggedIn: true, userInfo: { staffCode: 'owner-one' } });
+  send = vi.fn(async () => true);
+  state.socket = {
+    send, planApprove: vi.fn(async () => true), planUpdate: vi.fn(async () => true),
+    planReject: vi.fn(async () => true), planRejectAndExit: vi.fn(async () => true),
+  } as unknown as typeof state.socket;
+  receivePlanCapability(capability());
+});
+afterEach(() => {
+  resetPlanActions();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+describe('versioned Plan decisions', () => {
+  it('requires the explicit Plan feature flag and preserves original protocol fallback', () => {
+    receivePlanCapability(capability(false));
+    expect(supportsPlanReceipts('version-one')).toBe(false);
+    receivePlanCapability(capability());
+    expect(supportsPlanReceipts('version-one')).toBe(true);
+    expect(supportsPlanReceipts(undefined)).toBe(false);
+  });
+
+  it('submits once with captured version and confirms only an exact receipt', () => {
+    const notify = vi.fn();
+    submitPlanAction(input, notify);
+    submitPlanAction(input, notify);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+      action: 'plan_approve', expected_version: 'version-one', plan: '# Plan',
+      session_id: input.sessionId, submission_id: expect.any(String), request_id: expect.any(String),
+    }));
+    const frame = receipt('applied', { plan_state: snapshot, current_version: 'version-two', execution_request_id: 'exec-one' });
+    receivePlanReceipt({ ...frame, request_id: 'wrong-request' });
+    expect(notify).toHaveBeenLastCalledWith({ status: 'confirming' });
+    receivePlanReceipt(frame);
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({
+      status: 'applied', planState: snapshot, currentVersion: 'version-two', executionRequestId: 'exec-one',
+    }));
+    receivePlanReceipt(frame);
+    expect(notify.mock.calls.filter(([notice]) => notice.status === 'applied')).toHaveLength(1);
+  });
+
+  it('queries a lost acknowledgement and only repeats an explicitly unknown command', async () => {
+    const notify = vi.fn();
+    submitPlanAction(input, notify);
+    const command = send.mock.calls[0]![0];
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(send).toHaveBeenLastCalledWith({
+      action: 'plan_receipt_query', session_id: command.session_id,
+      expected_version: command.expected_version, request_id: command.request_id, submission_id: command.submission_id,
+    });
+    receivePlanReceipt(receipt('unknown'));
+    expect(send.mock.calls.filter(([frame]) => frame.action === input.action)).toHaveLength(1);
+    submitPlanAction(input, notify);
+    expect(send).toHaveBeenLastCalledWith(command);
+  });
+
+  it('retains stale plan state and does not turn expiry into an execution', () => {
+    const notify = vi.fn();
+    submitPlanAction(input, notify);
+    receivePlanReceipt(receipt('expired', { code: 'stale_plan', current_version: 'version-two', plan_state: snapshot }));
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'expired', code: 'stale_plan', planState: snapshot }));
+    expect(send.mock.calls.filter(([frame]) => frame.action === input.action)).toHaveLength(1);
+  });
+
+  it('does not query or repeat a captured decision against a replacement backing store', () => {
+    const identity = vi.spyOn(chatOutbox, 'transportIdentity').mockReturnValue({ scope: 'owner', storeId: 'a'.repeat(32) });
+    const notify = vi.fn();
+    submitPlanAction(input, notify);
+    identity.mockReturnValue({ scope: 'owner', storeId: 'b'.repeat(32) });
+    reconnectPlanActions();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'uncertain' });
+  });
+
+  it('does not replay after the new connection omits Plan receipt support', () => {
+    const notify = vi.fn();
+    submitPlanAction(input, notify);
+    disconnectPlanReceipts();
+    receivePlanCapability(capability(false));
+    reconnectPlanActions();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'uncertain' });
+  });
+
+  it('keeps an unfulfilled send bounded and provides status-only rechecking', async () => {
+    send.mockImplementation(() => new Promise(() => {}));
+    const notify = vi.fn();
+    submitPlanAction(input, notify);
+    await vi.advanceTimersByTimeAsync(4001);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'uncertain' });
+    queryPlanAction(input.sessionId);
+    expect(send.mock.calls.filter(([frame]) => frame.action === input.action)).toHaveLength(1);
+  });
+
+  it('uses existing legacy approval but reports REST-confirmed state separately', async () => {
+    receivePlanCapability(capability(false));
+    vi.spyOn(backendApi, 'sessionPlan').mockResolvedValue(snapshot);
+    const notify = vi.fn();
+    await submitLegacyPlanAction(input, vi.fn(async () => true), notify);
+    expect(state.socket?.planApprove).toHaveBeenCalledWith(input.sessionId, input.mode, input.workspaceId, expect.any(String), input.plan);
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'confirmed', planState: snapshot }));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('preserves a failed legacy decision for status-only checking', async () => {
+    vi.mocked(state.socket!.planApprove).mockResolvedValue(false);
+    const notify = vi.fn();
+    await submitLegacyPlanAction(input, vi.fn(async () => true), notify);
+    expect(notify).toHaveBeenLastCalledWith({ status: 'unavailable' });
+    vi.spyOn(backendApi, 'sessionPlan').mockResolvedValue(snapshot);
+    queryPlanAction(input.sessionId);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.socket?.planApprove).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'confirmed' }));
+  });
+});

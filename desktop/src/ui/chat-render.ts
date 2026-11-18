@@ -155,6 +155,7 @@ export interface ChatMessage {
   turnFileChangesPersistedPaths?: string[] | undefined;
   /** 该回合内产生的 plan 审批卡片。 */
   planReview?: {
+    version?: string;
     plan: string;
     planFile: string;
     status: PlanReviewStatus;

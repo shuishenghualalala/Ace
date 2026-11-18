@@ -9,7 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { __resetAllStoresForTest, configStore, messageStore, sessionStore } from '../../src/ui/stores/stores';
 import { ensureSessionBook, patchBook, setActiveSessionId, setBookTodos } from '../../src/ui/state';
-import { openInspectorToTab, refreshInspector } from '../../src/ui/features/inspector';
+import { openInspectorToTab, refreshInspector, setPlanBoardActions } from '../../src/ui/features/inspector';
 
 vi.mock('../../src/ui/backend-client', () => ({
   backendApi: {
@@ -197,5 +197,102 @@ describe('Inspector「计划」页签：计划正文 + todo 同步', () => {
     expect(text).toContain('历史计划只读展示');
     expect(html).not.toContain('data-plan-board-action="approve"');
     expect(text).toMatch(/4\s*\/\s*4/);
+  });
+});
+
+
+describe('versioned Plan board drafts', () => {
+  let sequence = 0;
+  function prepare() {
+    const sessionId = 'plan-draft-' + (++sequence);
+    setActiveSessionId(sessionId);
+    ensureSessionBook(sessionId);
+    messageStore.set({ messages: { ...messageStore.get().messages,
+      [sessionId]: [{ id: sessionId + '-user', role: 'user', content: 'Plan this task', timestamp: 1 }],
+    } });
+    patchBook(sessionId, { planActive: true, pendingPlan: {
+      plan: '# Original', planFile: 'plan.md', status: 'pending', version: 'version-one',
+    } });
+    openInspectorToTab('plan');
+    const click = (selector: string) => document.querySelector<HTMLButtonElement>(selector)!.click();
+    click('[data-plan-mode="edit"]');
+    return { sessionId, click, editor: () => document.querySelector<HTMLTextAreaElement>('[data-plan-editor]')! };
+  }
+  function type(input: HTMLTextAreaElement, value: string) {
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  it('keeps edited text after an unavailable submission', () => {
+    const { click, editor } = prepare();
+    setPlanBoardActions({ submit: (_input, notify) => notify({ status: 'unavailable' }), recheck: vi.fn() });
+    type(editor(), '# Local draft');
+    click('[data-plan-board-action="approve"]');
+    expect(editor().value).toBe('# Local draft');
+    expect(document.querySelector('[data-plan-submission-status="unavailable"]')).not.toBeNull();
+  });
+
+  it('keeps the old draft when the authoritative version changes and blocks its approval', () => {
+    const { sessionId, click, editor } = prepare();
+    const submit = vi.fn();
+    setPlanBoardActions({ submit, recheck: vi.fn() });
+    type(editor(), '# Local draft');
+    patchBook(sessionId, { pendingPlan: { plan: '# New plan', planFile: 'plan.md', status: 'pending', version: 'version-two' } });
+    refreshInspector();
+    expect(editor().value).toBe('# Local draft');
+    expect(document.querySelector('[data-plan-submission-status="stale"]')).not.toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('[data-plan-board-action="approve"]')?.disabled).toBe(true);
+    click('[data-plan-load-current]');
+    expect(editor().value).toBe('# New plan');
+    click('[data-plan-board-action="approve"]');
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ expectedVersion: 'version-two', plan: '# New plan' }), expect.any(Function));
+  });
+
+  it('clears only the confirmed draft without recapturing the old textarea', () => {
+    const { sessionId, click, editor } = prepare();
+    setPlanBoardActions({
+      submit: (_input, notify) => {
+        const snapshot = {
+          session_id: sessionId, plan: '# Accepted', plan_file: 'plan.md', status: 'approved',
+          active: false, awaiting_approval: false, has_plan: true, version: 'version-two',
+        };
+        patchBook(sessionId, { planActive: false, pendingPlan: {
+          plan: snapshot.plan, planFile: snapshot.plan_file, status: 'approved', version: snapshot.version,
+        } });
+        notify({ status: 'applied', planState: snapshot });
+      },
+      recheck: vi.fn(),
+    });
+    type(editor(), '# Accepted');
+    click('[data-plan-board-action="approve"]');
+    expect(document.querySelector('[data-plan-editor]')).toBeNull();
+    expect(document.querySelector('[data-plan-submission-status="stale"]')).toBeNull();
+    expect(document.querySelector('.inspector-plan-board__doc-body')?.textContent).toContain('Accepted');
+  });
+
+  it('does not clear newer edits after a late applied response', () => {
+    const { click, editor } = prepare();
+    let answer: Parameters<Parameters<typeof setPlanBoardActions>[0]['submit']>[1] | undefined;
+    setPlanBoardActions({ submit: (_input, notify) => { answer = notify; }, recheck: vi.fn() });
+    type(editor(), '# Submitted draft');
+    click('[data-plan-board-action="approve"]');
+    type(editor(), '# Newer local draft');
+    answer!({ status: 'applied' });
+    expect(editor().value).toBe('# Newer local draft');
+  });
+
+  it('keeps drafts separated across session switches and late responses', () => {
+    const first = prepare();
+    let answer: Parameters<Parameters<typeof setPlanBoardActions>[0]['submit']>[1] | undefined;
+    setPlanBoardActions({ submit: (_input, notify) => { answer = notify; }, recheck: vi.fn() });
+    type(first.editor(), '# First draft');
+    first.click('[data-plan-board-action="approve"]');
+    const second = prepare();
+    type(second.editor(), '# Second draft');
+    answer!({ status: 'applied' });
+    expect(second.editor().value).toBe('# Second draft');
+    setActiveSessionId(first.sessionId);
+    openInspectorToTab('plan');
+    expect(document.querySelector<HTMLTextAreaElement>('[data-plan-editor]')).toBeNull();
   });
 });

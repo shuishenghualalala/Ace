@@ -15,7 +15,7 @@ import {
   wsBase,
   readDynamicKanbanResumeStream,
 } from './transport';
-import type { SendPayload, SendReceiptAction, FollowupCommand, ChatChunk, BackendSocketStatusMeta, GatewayCursor } from './transport';
+import type { SendPayload, SendReceiptAction, FollowupCommand, PlanCommand, ChatChunk, BackendSocketStatusMeta, GatewayCursor } from './transport';
 
 // ── 会话 / Agent 配置 ──
 
@@ -135,6 +135,10 @@ export interface TeamArtifactCard {
 
 export interface SessionPlanState {
   session_id: string;
+  version?: string;
+  execution_request_id?: string;
+  execution_status?: 'accepted' | 'running' | 'uncertain';
+  submission_id?: string;
   active: boolean;
   awaiting_approval: boolean;
   phase?: string;
@@ -1087,6 +1091,7 @@ export class BackendChatSocket {
           web_search_enabled?: boolean;
         }
       | FollowupCommand
+      | PlanCommand
       | { kind: 'pong' },
     outboxScope?: string,
     outboxStoreId?: string,

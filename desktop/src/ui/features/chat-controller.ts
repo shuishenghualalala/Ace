@@ -782,16 +782,20 @@ export function patchPlanReviewMessages(
   sessionId: string,
   status: NonNullable<ChatMessage['planReview']>['status'],
   plan?: string,
+  revision?: { previousVersion?: string; version?: string },
 ): void {
   const messages = getMessages(sessionId);
+  const target = revision ? messages.findLastIndex((message) => message.planReview
+    && (!revision.previousVersion || message.planReview.version === revision.previousVersion)) : -1;
   if (!messages.some((m) => m.planReview)) return;
-  const updated = messages.map((m) =>
-    m.planReview
+  const updated = messages.map((m, index) =>
+    m.planReview && (!revision || index === target)
       ? {
           ...m,
           planReview: {
             ...m.planReview,
             status,
+            ...(revision?.version ? { version: revision.version } : {}),
             // 批准手改后同步最新正文，避免对话态残留编辑前版本。
             ...(typeof plan === 'string' ? { plan } : {}),
           },
@@ -1429,7 +1433,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
     setBusyWithUi(sid, false);
     setQueueHintWithUi(sid, '');
     const planText = typeof parsed.body.plan === 'string' ? parsed.body.plan : '';
-    resetPlanBoardDraft(planText);
+    resetPlanBoardDraft(planText, sid, parsed.body.version);
     // A1：仅在看板未开、或已在计划页时切到 Plan，避免打断用户正在看的 Files/Context。
     if (sid === state.activeSessionId && (!isInspectorOpen() || getInspectorActiveTab() === 'plan')) {
       openInspectorToTab('plan');

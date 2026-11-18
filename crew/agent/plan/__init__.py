@@ -14,6 +14,9 @@ from __future__ import annotations
 from .manager import (
     PlanModeManager,
     PlanPhase,
+    PlanSnapshot,
+    PlanTransition,
+    PlanVersionConflict,
     clear_plan_dir,
     plan_display_path,
     plan_path,
@@ -45,6 +48,9 @@ from .tools import PLAN_MODE_TOOLS, register_plan_tools
 __all__ = [
     "PlanModeManager",
     "PlanPhase",
+    "PlanSnapshot",
+    "PlanTransition",
+    "PlanVersionConflict",
     "TodoStore",
     "register_plan_tools",
     "plan_path",

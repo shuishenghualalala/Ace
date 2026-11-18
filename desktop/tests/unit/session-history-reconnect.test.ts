@@ -270,6 +270,40 @@ describe('conversation recovery after a socket outage', () => {
     }
   });
 
+  it('restores an accepted Plan execution and binds its request before querying delivery', async () => {
+    const execution = 'plan-execution-restored';
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
+    vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult([
+      { role: 'user', content: 'Prepare a plan', request_id: oldRequest },
+    ]));
+    vi.mocked(backendApi.sessionPlan).mockResolvedValue({
+      session_id: sid, active: false, awaiting_approval: false, has_plan: true,
+      plan: '# Approved', plan_file: 'plan.md', version: 'plan-v2',
+      status: 'approved', execution_request_id: execution, execution_status: 'accepted',
+    });
+    vi.spyOn(chatOutbox, 'transportIdentity').mockReturnValue({ scope: 'owner-a', storeId: 'a'.repeat(32) });
+    emitSocket({ type: 'open' });
+    await vi.advanceTimersByTimeAsync(1);
+    vi.mocked(window.Crew!.gatewayWsSend!).mockImplementation(async (payload) => {
+      const frame = payload as { action?: string; request_id?: string };
+      if (frame.action === 'send_receipt_query' && frame.request_id === execution) {
+        expect(sessionStore.get().books[sid]?.activeRequestId).toBe(execution);
+      }
+      return { ok: true };
+    });
+    await loadBackendHistory(sid);
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe(execution);
+    expect(window.Crew!.gatewayWsSend).toHaveBeenCalledWith({
+      action: 'send_receipt_query', session_id: sid, request_id: execution,
+    }, 'owner-a', 'a'.repeat(32));
+    emitSocket({ type: 'message', data: JSON.stringify({
+      kind: 'send_receipt', session_id: sid, request_id: execution, sequence: 0, is_final: false,
+      body: { status: 'uncertain' },
+    }) });
+    expect(sessionStore.get().busySessions[sid]).toBe(false);
+    expect(sessionStore.get().books[sid]?.turnSealed).toBe(true);
+  });
+
   it('holds suspect text, retries one repair on a new socket, and accepts only its matching same-cut snapshot', () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: oldRequest });
     emitSocket({ type: 'open' });

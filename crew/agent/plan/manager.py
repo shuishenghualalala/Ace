@@ -23,11 +23,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import re
 import secrets
 import shutil
+import tempfile
+from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
-from typing import Literal
+from threading import RLock
+from typing import Any, Callable, Literal
 
 from crew.core.runctx import current_owner_account_id
 from crew.state.home import safe_path_segment
@@ -41,6 +48,87 @@ PlanPhase = Literal["inactive", "active", "review", "approved", "revising", "rej
 ACTIVE_PHASES: set[str] = {"active", "review", "revising"}
 AWAITING_PHASES: set[str] = {"review"}
 VALID_PHASES: set[str] = ACTIVE_PHASES | {"inactive", "approved", "rejected", "cancelled"}
+_STATE_LOCK = RLock()
+
+
+def _serialized_plan_state(method):
+    @wraps(method)
+    def locked(*args, **kwargs):
+        with _STATE_LOCK:
+            return method(*args, **kwargs)
+    return locked
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False) as output:
+            temporary = Path(output.name)
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+@dataclass(frozen=True)
+class PlanSnapshot:
+    owner_account_id: str
+    session_id: str
+    version: str
+    plan_id: str
+    phase: PlanPhase
+    text: str
+
+    def to_body(self) -> dict[str, Any]:
+        status = {
+            "review": "pending", "revising": "revising", "approved": "approved",
+            "rejected": "rejected", "cancelled": "cancelled", "active": "editing",
+        }.get(self.phase, "readonly")
+        return {
+            "session_id": self.session_id,
+            "version": self.version,
+            "plan_id": self.plan_id,
+            "phase": self.phase,
+            "status": status,
+            "active": self.phase in ACTIVE_PHASES,
+            "awaiting_approval": self.phase in AWAITING_PHASES,
+            "empty": not bool(self.text.strip()),
+            "has_plan": bool(self.text.strip()),
+            "plan": self.text,
+            "plan_file": str(_plan_dir(self.session_id, self.owner_account_id) / f"{self.plan_id}.md") if self.plan_id else "",
+        }
+
+    @classmethod
+    def from_body(cls, owner: str, session_id: str, body: object) -> PlanSnapshot | None:
+        if not isinstance(body, dict):
+            return None
+        if body.get("session_id", session_id) != session_id:
+            return None
+        version, plan_id, phase, text = (body.get(field) for field in ("version", "plan_id", "phase", "plan"))
+        if (
+            not isinstance(version, str) or re.fullmatch(r"[a-f0-9]{32}", version) is None
+            or not isinstance(plan_id, str) or (plan_id and re.fullmatch(r"plan_[A-Za-z0-9_]+", plan_id) is None)
+            or not isinstance(phase, str) or phase not in VALID_PHASES or not isinstance(text, str)
+        ):
+            return None
+        return cls(owner, session_id, version, plan_id, phase, text)
+
+
+@dataclass(frozen=True)
+class PlanTransition:
+    base: PlanSnapshot
+    target: PlanSnapshot
+    action: str
+
+
+class PlanVersionConflict(ValueError):
+    def __init__(self, current: PlanSnapshot):
+        super().__init__("计划版本已变化，请读取当前计划后重试")
+        self.current = current
 
 
 # --------------------------------------------------------------------------- #
@@ -80,6 +168,7 @@ def plans_dir() -> Path:
     return get_crew_home() / "plans"
 
 
+@_serialized_plan_state
 def clear_plan_dir(session_id: str, owner_account_id: str | None = None) -> bool:
     """删除某会话的整个计划目录 ``plans/<owner>/<session_id>/``（含历史 plan_*.md 与 state.json）。
 
@@ -135,6 +224,7 @@ def _existing_plan_id(session_id: str, owner_account_id: str | None = None) -> s
     return files[-1].stem if files else None
 
 
+@_serialized_plan_state
 def current_plan_id(
     session_id: str,
     *,
@@ -157,6 +247,7 @@ def current_plan_id(
     return plan_id
 
 
+@_serialized_plan_state
 def start_new_plan(session_id: str, owner_account_id: str | None = None) -> str:
     """为本 session 开启一个新的计划文件 id（/plan 命令或 enter_plan_mode 时调用）。"""
     key = _plan_key(session_id, owner_account_id)
@@ -179,6 +270,7 @@ def plan_display_path(session_id: str, owner_account_id: str | None = None) -> s
     return str(plan_path(session_id, owner_account_id=owner_account_id))
 
 
+@_serialized_plan_state
 def read_plan(session_id: str, owner_account_id: str | None = None) -> str | None:
     """读取计划内容；不存在或为空返回 None。"""
     plan_id = current_plan_id(session_id, create=False, owner_account_id=owner_account_id)
@@ -195,11 +287,11 @@ def read_plan(session_id: str, owner_account_id: str | None = None) -> str | Non
     return text or None
 
 
+@_serialized_plan_state
 def write_plan(session_id: str, text: str, owner_account_id: str | None = None) -> Path:
     """写入计划内容（覆盖），返回路径。"""
     p = plan_path(session_id, owner_account_id=owner_account_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(text, encoding="utf-8")
+    _atomic_text(p, text)
     return p
 
 
@@ -228,6 +320,152 @@ class PlanModeManager:
         self._loaded: set[SessionKey] = set()
         # 可选：传入 session_store 后，todo_store 首次创建会从历史 hydrate（见下）。
         self._session_store = session_store
+        self._snapshots: dict[SessionKey, PlanSnapshot] = {}
+        self._durable_missing: set[SessionKey] = set()
+        self._durable_load: Callable[[str, str], object] | None = None
+        self._durable_save: Callable[[str, str, dict, str | None], None] | None = None
+        load = getattr(session_store, "load_plan_state", None)
+        save = getattr(session_store, "save_plan_state", None)
+        if callable(load) and callable(save):
+            self.bind_durable_state(load, save)
+
+    def bind_durable_state(
+        self,
+        load: Callable[[str, str], object],
+        save: Callable[[str, str, dict, str | None], None],
+    ) -> None:
+        self._durable_load, self._durable_save = load, save
+
+    @staticmethod
+    def _read_text(key: SessionKey, plan_id: str) -> str:
+        if not plan_id:
+            return ""
+        if re.fullmatch(r"plan_[A-Za-z0-9_]+", plan_id) is None:
+            raise ValueError("计划文件标识无效")
+        path = _plan_dir(key[1], key[0]) / f"{plan_id}.md"
+        if not path.is_file():
+            return ""
+        with path.open("r", encoding="utf-8", newline="") as source:
+            return source.read()
+
+    def _read_projected_state(self, key: SessionKey) -> dict:
+        path = self._state_path(key)
+        if not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+
+    def _materialize(self, snapshot: PlanSnapshot) -> None:
+        key = (snapshot.owner_account_id, snapshot.session_id)
+        if snapshot.plan_id:
+            path = _plan_dir(key[1], key[0]) / f"{snapshot.plan_id}.md"
+            if (path.is_file() and self._read_text(key, snapshot.plan_id) != snapshot.text) or (
+                snapshot.text and not path.exists()
+            ):
+                _atomic_text(path, snapshot.text)
+            _CURRENT_PLAN_ID_BY_SESSION[key] = snapshot.plan_id
+        self._set_phase(key, snapshot.phase)
+        self._snapshots[key] = snapshot
+        self._loaded.add(key)
+        _atomic_text(self._state_path(key), json.dumps({
+            **snapshot.to_body(),
+            "awaiting": snapshot.phase in AWAITING_PHASES,
+            "content_hash": hashlib.sha256(snapshot.text.encode("utf-8")).hexdigest(),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }, ensure_ascii=False))
+
+    def _save_snapshot(self, snapshot: PlanSnapshot, expected_version: str | None) -> None:
+        key = (snapshot.owner_account_id, snapshot.session_id)
+        if self._durable_save is not None:
+            from crew.state.session_store import SessionWriteConflict
+
+            try:
+                self._durable_save(
+                    *key, snapshot.to_body(), None if key in self._durable_missing else expected_version,
+                )
+                self._durable_missing.discard(key)
+            except SessionWriteConflict as exc:
+                current = PlanSnapshot.from_body(
+                    snapshot.owner_account_id, snapshot.session_id,
+                    self._durable_load(snapshot.owner_account_id, snapshot.session_id),
+                )
+                raise PlanVersionConflict(current or snapshot) from exc
+        self._materialize(snapshot)
+
+    @_serialized_plan_state
+    def snapshot(self, session_id: str, owner_account_id: str | None = None) -> PlanSnapshot:
+        key = self._key(session_id, owner_account_id)
+        self._restore(key)
+        current = self._snapshots.get(key)
+        plan_id = current_plan_id(session_id, create=False, owner_account_id=key[0]) or ""
+        text = self._read_text(key, plan_id)
+        phase = self._phase_of_key(key)
+        if current is not None and (current.plan_id, current.phase, current.text) == (plan_id, phase, text):
+            if key in self._durable_missing:
+                self._save_snapshot(current, None)
+            return current
+        if current is not None and current.text != text and phase in {"approved", "rejected", "cancelled"}:
+            phase = "active"
+            self._just_approved.discard(key)
+            self._plan_exit_attachment_pending.discard(key)
+            self._todo_reminder_pending.discard(key)
+        result = PlanSnapshot(key[0], key[1], secrets.token_hex(16), plan_id, phase, text)
+        self._save_snapshot(result, current.version if current is not None else None)
+        return result
+
+    @_serialized_plan_state
+    def prepare_transition(
+        self, session_id: str, expected_version: str, action: str, edited_plan: str | None = None,
+        owner_account_id: str | None = None,
+    ) -> PlanTransition:
+        current = self.snapshot(session_id, owner_account_id)
+        if current.version != expected_version:
+            raise PlanVersionConflict(current)
+        if current.phase not in ACTIVE_PHASES:
+            raise ValueError("当前计划已结束")
+        text = current.text if edited_plan is None else edited_plan
+        if not isinstance(text, str):
+            raise ValueError("计划正文必须是字符串")
+        phase: PlanPhase = current.phase
+        if action == "plan_approve":
+            if not text.strip():
+                raise ValueError("计划为空，请先完善计划再批准")
+            phase = "approved"
+        elif action == "plan_update":
+            if edited_plan is None:
+                raise ValueError("计划正文不能为空值")
+            if phase == "review" and not text.strip():
+                phase = "active"
+        elif action == "plan_reject":
+            phase = "revising"
+        elif action == "plan_reject_and_exit":
+            phase = "rejected"
+        else:
+            raise ValueError("不支持的计划操作")
+        changed = (phase, text) != (current.phase, current.text)
+        target = replace(current, version=secrets.token_hex(16), phase=phase, text=text) if changed else current
+        return PlanTransition(current, target, action)
+
+    @_serialized_plan_state
+    def apply_committed_transition(self, transition: PlanTransition) -> PlanSnapshot:
+        target = transition.target
+        key = (target.owner_account_id, target.session_id)
+        if self._durable_load is not None:
+            current = PlanSnapshot.from_body(*key, self._durable_load(*key))
+            if current is None or current.version != target.version:
+                raise PlanVersionConflict(current or transition.base)
+        actual_text = self._read_text(key, target.plan_id)
+        if actual_text not in {transition.base.text, target.text}:
+            raise PlanVersionConflict(target)
+        self._materialize(target)
+        if transition.action == "plan_approve":
+            self._just_approved.discard(key)
+            self._todo_reminder_pending.add(key)
+            self._plan_exit_attachment_pending.add(key)
+        elif transition.action in {"plan_reject", "plan_reject_and_exit"}:
+            self._just_approved.discard(key)
+        self._pending_review.pop(key, None)
+        return target
 
     @staticmethod
     def _key(session_id: str, owner_account_id: str | None = None) -> SessionKey:
@@ -239,27 +477,65 @@ class PlanModeManager:
         """某会话的 plan 状态文件路径：plans/<owner>/<sid>/state.json。"""
         return _plan_dir(key[1], key[0]) / "state.json"
 
+    @_serialized_plan_state
     def _persist(self, key: SessionKey) -> None:
-        """把 phase 落盘。just_approved / todo_reminder 是瞬时态，不持久化。"""
+        """Persist the next state before publishing its file projection."""
+        previous = self._snapshots.get(key)
         try:
-            p = self._state_path(key)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            plan_id = current_plan_id(key[1], create=False, owner_account_id=key[0])
+            plan_id = current_plan_id(key[1], create=False, owner_account_id=key[0]) or ""
             phase = self._phase_of_key(key)
-            data = {
-                "phase": phase,
-                # 兼容旧前端/测试/人工排查字段；权威字段是 phase。
-                "active": phase in ACTIVE_PHASES,
-                "awaiting": phase in AWAITING_PHASES,
-                "plan_id": plan_id,
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-            }
-            p.write_text(json.dumps(data), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001 — 持久化失败不得阻断主流程
+            text = self._read_text(key, plan_id)
+            if previous is not None and (plan_id, phase, text) == (previous.plan_id, previous.phase, previous.text):
+                if key in self._durable_missing:
+                    self._save_snapshot(previous, None)
+                return
+            snapshot = PlanSnapshot(key[0], key[1], secrets.token_hex(16), plan_id, phase, text)
+            self._save_snapshot(snapshot, previous.version if previous else None)
+        except Exception as exc:  # noqa: BLE001 — legacy file-only callers keep their established behavior
+            if self._durable_save is not None:
+                if previous is not None:
+                    self._set_phase(key, previous.phase)
+                    _CURRENT_PLAN_ID_BY_SESSION[key] = previous.plan_id
+                self._pending_review.pop(key, None)
+                raise
             log.warning("plan 状态持久化失败 %s: %s", key, exc)
 
+    @_serialized_plan_state
     def _restore(self, key: SessionKey) -> None:
         """惰性恢复：首次查询某会话状态时从磁盘读回 phase，兼容旧 active / awaiting。"""
+        if self._durable_load is not None:
+            data = self._durable_load(*key)
+            if data is not None:
+                self._durable_missing.discard(key)
+                current = PlanSnapshot.from_body(*key, data)
+                if current is None:
+                    raise ValueError("持久计划状态无效")
+                projected = self._read_projected_state(key)
+                old_id = str(projected.get("plan_id") or current.plan_id)
+                if old_id and re.fullmatch(r"plan_[A-Za-z0-9_]+", old_id) is None:
+                    raise ValueError("计划文件标识无效")
+                disk_text = self._read_text(key, old_id)
+                projected_hash = projected.get("content_hash")
+                unchanged_projection = (
+                    projected_hash == hashlib.sha256(disk_text.encode("utf-8")).hexdigest()
+                    or (old_id == current.plan_id and disk_text == current.text)
+                    or (not projected and not disk_text)
+                )
+                if not unchanged_projection:
+                    phase = "active" if current.phase in {"approved", "rejected", "cancelled"} else current.phase
+                    current = replace(current, version=secrets.token_hex(16), phase=phase, text=disk_text)
+                    self._just_approved.discard(key)
+                    self._plan_exit_attachment_pending.discard(key)
+                    self._todo_reminder_pending.discard(key)
+                    self._save_snapshot(current, data["version"])
+                elif self._snapshots.get(key) != current or projected.get("version") != current.version:
+                    self._materialize(current)
+                else:
+                    self._set_phase(key, current.phase)
+                    if current.plan_id:
+                        _CURRENT_PLAN_ID_BY_SESSION[key] = current.plan_id
+                return
+            self._durable_missing.add(key)
         if key in self._loaded:
             return
         self._loaded.add(key)
@@ -280,6 +556,9 @@ class PlanModeManager:
             plan_id = str(data.get("plan_id") or "").strip()
             if plan_id:
                 _CURRENT_PLAN_ID_BY_SESSION[key] = plan_id
+            snapshot = PlanSnapshot.from_body(*key, data)
+            if snapshot is not None:
+                self._snapshots[key] = snapshot
             # 旧 state.json 可能含 options 字段，直接忽略即可。
         except Exception as exc:  # noqa: BLE001 — 恢复失败回退到默认非 plan 态
             log.warning("plan 状态恢复失败 %s: %s", key, exc)
@@ -300,6 +579,7 @@ class PlanModeManager:
             self._phase[key] = phase
 
     # ---- 进入 / 查询 ----
+    @_serialized_plan_state
     def enter(self, session_id: str, owner_account_id: str | None = None) -> None:
         """进入 plan 模式（CLI /plan 或模型调用 enter_plan_mode）。
 
@@ -342,6 +622,7 @@ class PlanModeManager:
         return self._phase_of_key(key) in AWAITING_PHASES
 
     # ---- 退出 / 审批 ----
+    @_serialized_plan_state
     def request_approval(self, session_id: str, owner_account_id: str | None = None) -> None:
         """模型调用 exit_plan_mode：计划已写盘，等待用户在 CLI 确认。仍保持只读。"""
         key = self._key(session_id, owner_account_id)
@@ -350,6 +631,7 @@ class PlanModeManager:
         self._persist(key)
         log.info("plan 等待审批 session=%s", session_id)
 
+    @_serialized_plan_state
     def submit_review(
         self,
         session_id: str,
@@ -388,10 +670,20 @@ class PlanModeManager:
         self._persist(key)
         log.info("plan 提交 review session=%s empty=%s", session_id, not plan)
 
+    @_serialized_plan_state
     def take_pending_review(self, session_id: str, owner_account_id: str | None = None) -> dict | None:
         """ws.py 在本轮 dispatch 结束后消费一次（pop，幂等防重复推）。"""
-        return self._pending_review.pop(self._key(session_id, owner_account_id), None)
+        pending = self._pending_review.pop(self._key(session_id, owner_account_id), None)
+        if pending is not None:
+            snapshot = self.snapshot(session_id, owner_account_id)
+            if snapshot.phase == "review":
+                return snapshot.to_body()
+            if pending.get("empty") and snapshot.phase == "active" and not snapshot.text.strip():
+                return {**snapshot.to_body(), "plan": None, "status": "empty"}
+            return None
+        return pending
 
+    @_serialized_plan_state
     def update_plan(
         self,
         session_id: str,
@@ -435,59 +727,64 @@ class PlanModeManager:
             "status": status,
         }
 
+    @_serialized_plan_state
     def approve(self, session_id: str, owner_account_id: str | None = None) -> None:
         """用户批准：退出 plan 模式（解锁写工具），并打一次性 just_approved 标记。"""
         key = self._key(session_id, owner_account_id)
         self._restore(key)
         self._set_phase(key, "approved")
+        self._persist(key)
         self._just_approved.add(key)
         self._todo_reminder_pending.add(key)
         self._plan_exit_attachment_pending.add(key)
         self._pending_review.pop(key, None)
-        self._persist(key)
         log.info("plan 已批准 session=%s", session_id)
 
+    @_serialized_plan_state
     def revise(self, session_id: str, owner_account_id: str | None = None) -> None:
         """用户要求修订：离开 review，留在 plan 模式继续完善同一份计划。"""
         key = self._key(session_id, owner_account_id)
         self._restore(key)
         self._set_phase(key, "revising")
+        self._persist(key)
         self._plan_exit_attachment_pending.discard(key)
         self._plan_reentry_attachment_pending.discard(key)
         self._pending_review.pop(key, None)
-        self._persist(key)
         log.info("plan 进入修订 session=%s", session_id)
 
     def reject(self, session_id: str, owner_account_id: str | None = None) -> None:
         """兼容旧入口：前端「继续修改」仍走 plan_reject，内部语义是 revise。"""
         self.revise(session_id, owner_account_id=owner_account_id)
 
+    @_serialized_plan_state
     def reject_and_exit(self, session_id: str, owner_account_id: str | None = None) -> None:
         """用户拒绝并退出：不执行计划，保留 rejected 阶段用于审计。"""
         key = self._key(session_id, owner_account_id)
         self._restore(key)
         self._set_phase(key, "rejected")
+        self._persist(key)
         self._just_approved.discard(key)
         self._plan_exit_attachment_pending.add(key)
         self._pending_review.pop(key, None)
-        self._persist(key)
         log.info("plan 被拒绝并退出 session=%s", session_id)
 
+    @_serialized_plan_state
     def cancel(self, session_id: str, owner_account_id: str | None = None) -> None:
         """用户取消 Plan 模式：不执行计划，保留 cancelled 阶段用于审计。"""
         key = self._key(session_id, owner_account_id)
         self._restore(key)
         self._set_phase(key, "cancelled")
+        self._persist(key)
         self._just_approved.discard(key)
         self._plan_exit_attachment_pending.add(key)
         self._pending_review.pop(key, None)
-        self._persist(key)
         log.info("plan 已取消 session=%s", session_id)
 
     def exit(self, session_id: str, owner_account_id: str | None = None) -> None:
         """兼容旧入口：用户主动退出 plan 模式等价于 cancel。"""
         self.cancel(session_id, owner_account_id=owner_account_id)
 
+    @_serialized_plan_state
     def take_just_approved(self, session_id: str, owner_account_id: str | None = None) -> bool:
         """一次性消费 just_approved 标记（用于下一轮注入「开始执行」提示）。"""
         key = self._key(session_id, owner_account_id)
@@ -496,6 +793,7 @@ class PlanModeManager:
             return True
         return False
 
+    @_serialized_plan_state
     def reset(self, session_id: str, owner_account_id: str | None = None) -> None:
         """彻底清除某会话的 plan 状态与磁盘目录（删会话 / CLI /new）。
 
@@ -503,6 +801,14 @@ class PlanModeManager:
         ``state.json``），避免删会话后计划文件长期占盘。
         """
         key = self._key(session_id, owner_account_id)
+        if self._durable_load is not None and self._durable_save is not None:
+            data = self._durable_load(*key)
+            if data is not None:
+                previous = PlanSnapshot.from_body(*key, data)
+                if previous is None:
+                    raise ValueError("持久计划状态无效")
+                cleared = replace(previous, version=secrets.token_hex(16), plan_id="", phase="inactive", text="")
+                self._durable_save(*key, cleared.to_body(), previous.version)
         self._phase.pop(key, None)
         self._just_approved.discard(key)
         self._todo_reminder_pending.discard(key)
@@ -512,6 +818,8 @@ class PlanModeManager:
         self._todos.pop(key, None)
         self._file_changes.pop(key, None)
         self._turn_file_changes.pop(key, None)
+        self._snapshots.pop(key, None)
+        self._durable_missing.discard(key)
         _CURRENT_PLAN_ID_BY_SESSION.pop(key, None)
         self._loaded.discard(key)
         clear_plan_dir(key[1], owner_account_id=key[0])

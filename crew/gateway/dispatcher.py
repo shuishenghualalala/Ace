@@ -971,7 +971,7 @@ class SessionDispatcher:
                         if not sidechain_id or envelope.mode == "team" or envelope.params.get("internal_task_resume"):
                             capture = None
                         started_at = time.time()
-                        stream = self._inner(exec_envelope)
+                        stream = self._validated_inner(exec_envelope)
                         async for chunk in stream:
                             if capture is not None and chunk.kind in {"delta", "thinking", "tool", "todo_updated", "file_changes"}:
                                 # The executor has now committed the canonical user row,
@@ -1370,6 +1370,39 @@ class SessionDispatcher:
     # loop）：dispatcher 侧同一会话的回合天然串行，无需队列的跨调用串行化；
     # to_thread 零持久任务、零 loop 绑定，临时事件循环（测试/TestClient）下
     # 不会成为关停悬挂源。连接级串行由 store 的 threading.RLock 保证。
+    async def _validated_inner(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+        plan = envelope.params.get("approved_plan") or envelope.params.get("plan_revision")
+        if isinstance(plan, dict):
+            session_id = str(envelope.params.get("task_session_id") or envelope.session_id)
+            manager = getattr(self._controller, "plan_manager", None)
+            try:
+                current = await asyncio.to_thread(manager.snapshot, session_id, owner_account_id=envelope.user_id)
+                valid = (
+                    plan.get("session_id") == session_id
+                    and current.version == plan.get("version")
+                    and current.phase == plan.get("phase")
+                )
+                reason = "plan_superseded"
+                message = "计划已更新，此次执行已取消，请审阅当前计划。"
+            except Exception:
+                valid = False
+                reason = "plan_unavailable"
+                message = "计划暂时无法恢复，请核对当前计划后重试。"
+            if not valid:
+                yield ResponseChunk.error(
+                    envelope.request_id, message, code=reason,
+                    outcome=TurnOutcome("failed", reason=reason, message=message),
+                )
+                return
+        stream = self._inner(envelope)
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                await close()
+
     async def _store_load(self, session_id: str, owner: str) -> list[Message]:
         return await asyncio.to_thread(self._store.load, session_id, owner_account_id=owner)
 

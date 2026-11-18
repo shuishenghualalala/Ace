@@ -10,6 +10,8 @@
 """
 
 import json
+from contextlib import closing
+from dataclasses import replace
 
 import pytest
 
@@ -22,6 +24,8 @@ from crew.tools.registry import Registry, register_builtin_tools
 from crew.agent.plan import (
     PLAN_MODE_TOOLS,
     PlanModeManager,
+    PlanSnapshot,
+    PlanVersionConflict,
     count_user_turns_since_last_plan_attachment,
     create_plan_attachment_message,
     get_plan_mode_attachment_messages,
@@ -31,7 +35,7 @@ from crew.agent.plan import (
 )
 from crew.agent.plan.todo import TodoStore
 from crew.agent.plan.tools import register_plan_tools
-from crew.state.session_store import SQLiteSessionStore
+from crew.state.session_store import SQLiteSessionStore, SessionWriteConflict
 
 
 @pytest.fixture(autouse=True)
@@ -124,6 +128,240 @@ def test_plan_manager_state_machine():
     # just_approved 一次性
     assert mgr.take_just_approved(sid) is True
     assert mgr.take_just_approved(sid) is False
+
+
+def test_plan_snapshot_version_survives_restart_and_changes_on_external_edit(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Original\n", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        reviewed = manager.snapshot("plan", owner_account_id="owner")
+        assert reviewed.phase == "review"
+        assert PlanModeManager(store).snapshot("plan", owner_account_id="owner") == reviewed
+        assert manager.snapshot("plan", owner_account_id="owner") == reviewed
+
+        plan_path("plan", owner_account_id="owner").write_text("# Changed externally\n", encoding="utf-8", newline="")
+        current = manager.snapshot("plan", owner_account_id="owner")
+        assert current.version != reviewed.version and current.text == "# Changed externally\n"
+        with pytest.raises(PlanVersionConflict) as error:
+            manager.prepare_transition("plan", reviewed.version, "plan_approve", owner_account_id="owner")
+        assert error.value.current == current
+        assert store.load_plan_state("owner", "plan")["version"] == current.version
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_plan_edited_approval_preparation_is_pure_and_materialization_requires_commit(tmp_path, monkeypatch, newline):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Original\n", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        reviewed = manager.snapshot("plan", owner_account_id="owner")
+        edited = newline.join(["# Approved edit", "", "Exact trailing newline.", ""])
+        transition = manager.prepare_transition("plan", reviewed.version, "plan_approve", edited, owner_account_id="owner")
+        assert transition.base == reviewed
+        assert transition.target.text == edited and transition.target.phase == "approved"
+        assert manager.snapshot("plan", owner_account_id="owner") == reviewed
+        assert plan_path("plan", owner_account_id="owner").read_text(encoding="utf-8") == reviewed.text
+        with pytest.raises(PlanVersionConflict):
+            manager.apply_committed_transition(transition)
+        store.save_plan_state("owner", "plan", transition.target.to_body(), reviewed.version)
+        assert manager.apply_committed_transition(transition) == transition.target
+        assert manager.apply_committed_transition(transition) == transition.target
+        assert manager.snapshot("plan", owner_account_id="owner") == transition.target
+        assert not manager.take_just_approved("plan", owner_account_id="owner")
+
+
+def test_plan_committed_snapshot_recovers_without_reusing_mutable_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Original", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        reviewed = manager.snapshot("plan", owner_account_id="owner")
+        transition = manager.prepare_transition("plan", reviewed.version, "plan_approve", "# Approved edit", owner_account_id="owner")
+        store.save_plan_state("owner", "plan", transition.target.to_body(), reviewed.version)
+        recovered = PlanModeManager(store)
+        assert recovered.snapshot("plan", owner_account_id="owner") == transition.target
+        assert read_plan("plan", owner_account_id="owner") == "# Approved edit"
+        assert recovered.take_just_approved("plan", owner_account_id="owner") is False
+
+
+def test_plan_materialization_does_not_overwrite_concurrent_external_edit(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Original", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        reviewed = manager.snapshot("plan", owner_account_id="owner")
+        transition = manager.prepare_transition("plan", reviewed.version, "plan_approve", owner_account_id="owner")
+        store.save_plan_state("owner", "plan", transition.target.to_body(), reviewed.version)
+        write_plan("plan", "# Concurrent edit", owner_account_id="owner")
+        with pytest.raises(PlanVersionConflict):
+            manager.apply_committed_transition(transition)
+        assert read_plan("plan", owner_account_id="owner") == "# Concurrent edit"
+        current = manager.snapshot("plan", owner_account_id="owner")
+        assert current.version != transition.target.version and current.text == "# Concurrent edit"
+
+
+def test_plan_phase_changes_version_and_failed_write_does_not_approve(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Original", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        first = manager.snapshot("plan", owner_account_id="owner")
+        manager.revise("plan", owner_account_id="owner")
+        manager.request_approval("plan", owner_account_id="owner")
+        second = manager.snapshot("plan", owner_account_id="owner")
+        assert second.text == first.text and second.version != first.version
+
+        def unavailable(*args):
+            raise OSError("fixture storage unavailable")
+        manager.bind_durable_state(store.load_plan_state, unavailable)
+        with pytest.raises(OSError):
+            manager.approve("plan", owner_account_id="owner")
+        assert manager.phase("plan", owner_account_id="owner") == "review"
+        assert manager.take_just_approved("plan", owner_account_id="owner") is False
+
+
+def test_runtime_uses_approved_snapshot_and_rejects_invalid_supplied_snapshot(tmp_path, monkeypatch):
+    from crew.agent.runtime import SingleAgent
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    manager = PlanModeManager()
+    manager.enter("plan", owner_account_id="owner")
+    write_plan("plan", "# Unreviewed file", owner_account_id="owner")
+    approved = PlanSnapshot("owner", "plan", "a" * 32, "plan_approved", "approved", "# Exact approved snapshot")
+    agent = SingleAgent.__new__(SingleAgent)
+    agent.plan_manager = manager
+    blocks = agent._plan_reminder_blocks("plan", "owner", approved_plan=approved.to_body())
+    assert "# Exact approved snapshot" in blocks[0]
+    assert "# Unreviewed file" not in blocks[0]
+    with pytest.raises(ValueError, match="快照"):
+        agent._plan_reminder_blocks("plan", "owner", approved_plan={"plan": "# Invalid"})
+
+
+def test_runtime_uses_frozen_revision_draft_and_rejects_invalid_revision(tmp_path, monkeypatch):
+    from crew.agent.runtime import SingleAgent
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    manager = PlanModeManager()
+    manager.enter("plan", owner_account_id="owner")
+    write_plan("plan", "# Changed after feedback", owner_account_id="owner")
+    revision = PlanSnapshot("owner", "plan", "a" * 32, "plan_reviewed", "revising", "# Draft for requested revision")
+    agent = SingleAgent.__new__(SingleAgent)
+    agent.plan_manager = manager
+    blocks = agent._plan_reminder_blocks("plan", "owner", revision_plan=revision.to_body())
+    assert "# Draft for requested revision" in blocks[0]
+    assert "# Changed after feedback" not in blocks[0]
+    assert "只读探索" in blocks[0] and "重新提交审批" in blocks[0]
+    with pytest.raises(ValueError, match="修订快照"):
+        agent._plan_reminder_blocks("plan", "owner", revision_plan={"plan": "# Invalid"})
+    with pytest.raises(ValueError, match="修订快照"):
+        agent._plan_reminder_blocks("plan", "owner", revision_plan=replace(revision, phase="approved").to_body())
+
+
+def test_plan_reset_persists_inactive_without_recreating_deleted_database_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        store.ensure_session("plan", owner_account_id="owner")
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Content", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        manager.reset("plan", owner_account_id="owner")
+        assert store.load_plan_state("owner", "plan")["phase"] == "inactive"
+        assert manager.snapshot("plan", owner_account_id="owner").text == ""
+        assert manager.phase("plan", owner_account_id="owner") == "inactive"
+        store.clear("plan", owner_account_id="owner")
+        manager.reset("plan", owner_account_id="owner")
+        assert store.load_plan_state("owner", "plan") is None
+
+
+def test_plan_compare_and_swap_conflict_exposes_current_authoritative_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Original", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        current = manager.snapshot("plan", owner_account_id="owner")
+        concurrent = replace(current, version="b" * 32, phase="revising")
+
+        def changed(owner, sid, body, expected):
+            store.save_plan_state(owner, sid, concurrent.to_body(), current.version)
+            raise SessionWriteConflict("fixture concurrent state")
+        manager.bind_durable_state(store.load_plan_state, changed)
+        with pytest.raises(PlanVersionConflict) as failure:
+            manager.approve("plan", owner_account_id="owner")
+        assert failure.value.current == concurrent
+        assert not manager.take_just_approved("plan", owner_account_id="owner")
+        manager.bind_durable_state(store.load_plan_state, store.save_plan_state)
+        assert manager.snapshot("plan", owner_account_id="owner") == concurrent
+
+
+def test_plan_snapshot_payload_validates_session_scope_and_file_identity():
+    body = PlanSnapshot("owner", "plan", "a" * 32, "plan_example", "review", "# Plan").to_body()
+    assert PlanSnapshot.from_body("owner", "plan", body) is not None
+    assert PlanSnapshot.from_body("owner", "other", body) is None
+    assert PlanSnapshot.from_body("owner", "plan", {**body, "plan_id": "../outside"}) is None
+    assert PlanSnapshot.from_body("owner", "plan", {**body, "phase": []}) is None
+
+
+def test_existing_file_only_review_bootstraps_durable_state_without_changing_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    legacy = PlanModeManager()
+    legacy.enter("plan", owner_account_id="owner")
+    write_plan("plan", "# Existing review", owner_account_id="owner")
+    legacy.submit_review("plan", owner_account_id="owner")
+    reviewed = legacy.snapshot("plan", owner_account_id="owner")
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        assert manager.snapshot("plan", owner_account_id="owner") == reviewed
+        assert store.load_plan_state("owner", "plan")["version"] == reviewed.version
+        transition = manager.prepare_transition("plan", reviewed.version, "plan_approve", owner_account_id="owner")
+        store.save_plan_state("owner", "plan", transition.target.to_body(), reviewed.version)
+        assert manager.apply_committed_transition(transition).phase == "approved"
+
+
+def test_pending_review_observes_committed_phase_before_local_apply(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Review", owner_account_id="owner")
+        manager.submit_review("plan", owner_account_id="owner")
+        current = manager.snapshot("plan", owner_account_id="owner")
+        transition = manager.prepare_transition("plan", current.version, "plan_approve", owner_account_id="owner")
+        store.save_plan_state("owner", "plan", transition.target.to_body(), current.version)
+        assert manager.take_pending_review("plan", owner_account_id="owner") is None
+        assert manager.phase("plan", owner_account_id="owner") == "approved"
+
+
+@pytest.mark.parametrize("terminal_action", ["approve", "reject_and_exit", "cancel"])
+def test_external_edit_after_terminal_state_requires_new_review(tmp_path, monkeypatch, terminal_action):
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / "home"))
+    with closing(SQLiteSessionStore(str(tmp_path / "state.db"))) as store:
+        manager = PlanModeManager(store)
+        manager.enter("plan", owner_account_id="owner")
+        write_plan("plan", "# Reviewed content", owner_account_id="owner")
+        manager.request_approval("plan", owner_account_id="owner")
+        getattr(manager, terminal_action)("plan", owner_account_id="owner")
+        terminal = manager.snapshot("plan", owner_account_id="owner")
+        write_plan("plan", "# Unreviewed external edit", owner_account_id="owner")
+        changed = manager.snapshot("plan", owner_account_id="owner")
+        assert changed.phase == "active" and changed.version != terminal.version
+        assert changed.text == "# Unreviewed external edit"
+        assert changed.to_body()["status"] == "editing"
+        assert not manager.take_just_approved("plan", owner_account_id="owner")
+        assert PlanModeManager(store).snapshot("plan", owner_account_id="owner") == changed
 
 
 def test_plan_manager_enter_after_approve_starts_new_plan():
@@ -866,7 +1104,10 @@ def test_submit_review_empty_vs_nonempty(tmp_path, monkeypatch):
     mgr.submit_review(sid, owner_account_id="A:uid-a")
     assert not mgr.is_awaiting_approval(sid, owner_account_id="A:uid-a")
     review = mgr.take_pending_review(sid, owner_account_id="A:uid-a")
-    assert review == {"plan": None, "empty": True, "phase": "active", "status": "empty"}
+    assert {key: review[key] for key in ("plan", "empty", "phase", "status")} == {
+        "plan": None, "empty": True, "phase": "active", "status": "empty",
+    }
+    assert review["version"] == mgr.snapshot(sid, owner_account_id="A:uid-a").version
 
     # take 后再取为 None（一次性消费，幂等防重复推）
     assert mgr.take_pending_review(sid, owner_account_id="A:uid-a") is None

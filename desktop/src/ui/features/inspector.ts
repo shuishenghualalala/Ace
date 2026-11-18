@@ -1,3 +1,5 @@
+import type { PlanActionInput, PlanActionNotice } from './plan-actions';
+import { interactiveOwnerKey } from './interactive-owner';
 /**
  * 聊天右侧 Inspector 面板（codex / opencode 风格）
  *
@@ -77,7 +79,7 @@ import {
   createPlanBoardUiState,
   isPlanActionable,
   planStatusLabel,
-  syncPlanBoardUiSession,
+  adoptCurrentPlan, editPlanDraft, editPlanFeedback, syncPlanDocument,
 } from './inspector-workflow';
 
 type TabKey = InspectorTabKey;
@@ -664,7 +666,7 @@ function todosToPlanSteps(todos: TodoItem[]): PlanStep[] {
 }
 
 /** Plan 模式批准后的方案正文（book.pendingPlan）；与 todo 进度并列展示。 */
-function getPendingPlanDoc(): { plan: string; planFile: string; status: PlanReviewStatus } | null {
+function getPendingPlanDoc(): { plan: string; planFile: string; status: PlanReviewStatus; version?: string } | null {
   const sid = state.activeSessionId;
   if (!sid) return null;
   const book = sessionStore.get().books[sid];
@@ -685,50 +687,61 @@ function getPendingPlanDoc(): { plan: string; planFile: string; status: PlanRevi
     plan: pending.plan,
     planFile: pending.planFile || '',
     status,
+    ...(pending.version ? { version: pending.version } : {}),
   };
 }
 
 /** Plan 看板本地 UI 态：跨 refreshInspector 保留编辑草稿，避免 todo 刷新冲掉输入。 */
-const planBoardUi = createPlanBoardUiState();
+let planBoardUi = createPlanBoardUiState();
+let mountedPlanUi: ReturnType<typeof createPlanBoardUiState> | null = null;
+let mountedPlanVersion: string | undefined;
+let mountedPlanRevision = 0;
+const planBoardDrafts = new Map<string, ReturnType<typeof createPlanBoardUiState>>();
 
-export type PlanBoardActions = {
-  /** 批准：传入当前看板正文（含手改）。 */
-  onApprove: (plan: string) => void | Promise<void>;
-  /** 撤销并退出 Plan 模式。 */
-  onRejectAndExit: () => void | Promise<void>;
-  /** 其他：先落盘手改，再把反馈当用户消息发出。 */
-  onFeedback: (plan: string, feedback: string) => void | Promise<void>;
-};
-
+export interface PlanBoardSubmission extends Omit<PlanActionInput, 'mode' | 'workspaceId'> {
+  owner: string;
+  revision: number;
+}
+export interface PlanBoardActions {
+  submit(input: PlanBoardSubmission, notify: (notice: PlanActionNotice) => void): void;
+  recheck(sessionId: string): void;
+}
 let planBoardActions: PlanBoardActions | null = null;
 
-/** 由 index / chat-controller 注入看板审批动作，避免 inspector ↔ chat 循环依赖。 */
 export function setPlanBoardActions(actions: PlanBoardActions): void {
   planBoardActions = actions;
 }
 
-/** 服务端推送新计划正文时清空本地草稿，避免手改残留盖住模型修订。 */
-export function resetPlanBoardDraft(nextPlan?: string): void {
-  planBoardUi.draft = typeof nextPlan === 'string' ? nextPlan : null;
-  planBoardUi.mode = 'preview';
-  planBoardUi.otherOpen = false;
-  planBoardUi.otherText = '';
+function planDraftFor(sessionId: string | null): ReturnType<typeof createPlanBoardUiState> {
+  if (!sessionId) return createPlanBoardUiState();
+  const key = JSON.stringify([interactiveOwnerKey(), sessionId]);
+  let draft = planBoardDrafts.get(key);
+  if (!draft) {
+    draft = { ...createPlanBoardUiState(), sessionId };
+    planBoardDrafts.set(key, draft);
+  }
+  return draft;
+}
+
+/** Refresh the authoritative document while keeping edits bound to their original version. */
+export function resetPlanBoardDraft(nextPlan?: string, sessionId = state.activeSessionId, version?: string): void {
+  if (!sessionId) return;
+  const draft = planDraftFor(sessionId);
+  syncPlanDocument(draft, nextPlan ?? '', version);
 }
 
 function syncPlanBoardSession(sessionId: string | null): void {
-  syncPlanBoardUiSession(planBoardUi, sessionId);
+  planBoardUi = planDraftFor(sessionId);
+  const plan = sessionId ? sessionStore.get().books[sessionId]?.pendingPlan : null;
+  if (plan) syncPlanDocument(planBoardUi, plan.plan, plan.version);
 }
 
-/** 重渲前从 DOM 捞回草稿，防止 todo_updated 刷新冲掉用户输入。 */
 function capturePlanDraftFromDom(): void {
-  if (activeTab !== 'plan') return;
+  if (activeTab !== 'plan' || !mountedPlanUi || mountedPlanUi.revision !== mountedPlanRevision) return;
   const editor = document.querySelector<HTMLTextAreaElement>('[data-plan-editor]');
-  if (editor) {
-    planBoardUi.draft = editor.value;
-    planBoardUi.sessionId = state.activeSessionId;
-  }
+  if (editor) editPlanDraft(mountedPlanUi, editor.value);
   const other = document.querySelector<HTMLTextAreaElement>('[data-plan-other-input]');
-  if (other) planBoardUi.otherText = other.value;
+  if (other) editPlanFeedback(mountedPlanUi, other.value);
 }
 
 function currentPlanDraft(fallback: string): string {
@@ -1377,23 +1390,48 @@ function renderPlanActions(doc: { plan: string; status: PlanReviewStatus }): str
     return `<div class="inspector-plan-board__actions inspector-plan-board__actions--readonly"><span class="inspector-plan-board__note">历史计划只读展示</span></div>`;
   }
   const otherOpen = planBoardUi.otherOpen;
+  const blocked = planBoardUi.busy || planBoardUi.stale || planBoardUi.submissionStatus === 'uncertain';
+  const disabled = blocked ? ' disabled' : '';
   return `
     <div class="inspector-plan-board__actions" role="group" aria-label="计划审批">
       <div class="inspector-plan-board__action-row">
         <button type="button" class="inspector-plan-board__btn" data-plan-board-action="other" aria-pressed="${otherOpen ? 'true' : 'false'}">其他</button>
-        <button type="button" class="inspector-plan-board__btn" data-plan-board-action="reject_and_exit">撤销</button>
-        <button type="button" class="inspector-plan-board__btn inspector-plan-board__btn--primary" data-plan-board-action="approve">批准并执行</button>
+        <button type="button" class="inspector-plan-board__btn" data-plan-board-action="reject_and_exit"${disabled}>撤销</button>
+        <button type="button" class="inspector-plan-board__btn inspector-plan-board__btn--primary" data-plan-board-action="approve"${disabled}>批准并执行</button>
       </div>
       <div class="inspector-plan-board__other"${otherOpen ? '' : ' hidden'}>
         <label class="inspector-plan-board__other-label" for="inspector-plan-other-input">修改要求</label>
         <textarea id="inspector-plan-other-input" class="inspector-plan-board__other-input" data-plan-other-input rows="3" placeholder="说明哪里不满意，例如：去掉粒子特效，改成更简洁的 UI">${escapeHtml(planBoardUi.otherText)}</textarea>
-        <button type="button" class="inspector-plan-board__btn inspector-plan-board__btn--primary" data-plan-board-action="submit_other">提交修改要求</button>
+        <button type="button" class="inspector-plan-board__btn inspector-plan-board__btn--primary" data-plan-board-action="submit_other"${disabled}>提交修改要求</button>
       </div>
     </div>
   `;
 }
 
-function renderPlanDocSection(doc: { plan: string; planFile: string; status: PlanReviewStatus }): string {
+function renderPlanSubmissionState(): string {
+  const status = planBoardUi.stale ? 'stale' : planBoardUi.submissionStatus;
+  if (!status || status === 'applied' || status === 'confirmed') return '';
+  const labels: Record<string, string> = {
+    stale: '计划已更新。你的编辑仍保留，请先查看并载入当前版本。',
+    confirming: '等待服务确认计划操作…',
+    expired: '当前计划版本已变化，你的编辑仍保留。',
+    rejected: '计划操作未被接受，你的编辑仍保留。',
+    unknown: '服务未收到这次计划操作，可以重新提交。',
+    unavailable: '服务暂时无法确认计划操作，你的编辑仍保留。',
+    uncertain: '计划操作结果尚未确认，请查询结果后继续。',
+  };
+  const reload = planBoardUi.stale
+    ? '<button type="button" class="inspector-plan-board__btn" data-plan-load-current>载入当前版本</button>' : '';
+  const query = status === 'uncertain' || status === 'unavailable'
+    ? '<button type="button" class="inspector-plan-board__btn" data-plan-recheck>重新查询结果</button>' : '';
+  return '<div class="inspector-plan-board__note" role="status" data-plan-submission-status="'
+    + escapeHtml(status) + '">' + escapeHtml(labels[status] ?? status) + reload + query + '</div>';
+}
+
+function renderPlanDocSection(doc: { plan: string; planFile: string; status: PlanReviewStatus; version?: string }): string {
+  mountedPlanUi = planBoardUi;
+  mountedPlanVersion = doc.version;
+  mountedPlanRevision = planBoardUi.revision;
   const draft = currentPlanDraft(doc.plan);
   const title = firstPlanHeading(draft) || '计划方案';
   const actionable = isPlanActionable(doc.status);
@@ -1420,6 +1458,7 @@ function renderPlanDocSection(doc: { plan: string; planFile: string; status: Pla
         </div>
         ${doc.planFile ? `<div class="inspector-plan-board__doc-file" title="${escapeHtml(doc.planFile)}">${escapeHtml(doc.planFile)}</div>` : ''}
         ${body}
+        ${renderPlanSubmissionState()}
         ${renderPlanActions(doc)}
       </div>
     </section>
@@ -1935,13 +1974,20 @@ function bindBodyEvents(): void {
 function readPlanBoardDraft(fallback = ''): string {
   const editor = document.querySelector<HTMLTextAreaElement>('[data-plan-editor]');
   if (editor) {
-    planBoardUi.draft = editor.value;
+    editPlanDraft(planBoardUi, editor.value);
     return editor.value;
   }
   return planBoardUi.draft ?? fallback;
 }
 
 function bindPlanBoardEvents(): void {
+  document.querySelector('[data-plan-load-current]')?.addEventListener('click', () => {
+    adoptCurrentPlan(planBoardUi);
+    renderBody();
+  });
+  document.querySelector('[data-plan-recheck]')?.addEventListener('click', () => {
+    if (planBoardUi.sessionId) planBoardActions?.recheck(planBoardUi.sessionId);
+  });
   document.querySelectorAll<HTMLElement>('[data-plan-mode]').forEach((el) => {
     el.addEventListener('click', () => {
       const mode = el.getAttribute('data-plan-mode');
@@ -1954,14 +2000,13 @@ function bindPlanBoardEvents(): void {
   const editor = document.querySelector<HTMLTextAreaElement>('[data-plan-editor]');
   if (editor) {
     editor.addEventListener('input', () => {
-      planBoardUi.draft = editor.value;
-      planBoardUi.sessionId = state.activeSessionId;
+      if (mountedPlanUi) editPlanDraft(mountedPlanUi, editor.value);
     });
   }
   const otherInput = document.querySelector<HTMLTextAreaElement>('[data-plan-other-input]');
   if (otherInput) {
     otherInput.addEventListener('input', () => {
-      planBoardUi.otherText = otherInput.value;
+      if (mountedPlanUi) editPlanFeedback(mountedPlanUi, otherInput.value);
     });
   }
   document.querySelectorAll<HTMLElement>('[data-plan-board-action]').forEach((el) => {
@@ -1972,82 +2017,76 @@ function bindPlanBoardEvents(): void {
 }
 
 async function handlePlanBoardAction(action: string): Promise<void> {
-  if (!action || planBoardUi.busy) return;
+  syncPlanBoardSession(state.activeSessionId);
+  const draft = planBoardUi;
   const doc = getPendingPlanDoc();
-  if (!doc || !isPlanActionable(doc.status)) return;
+  if (!action || draft.busy || !doc || !isPlanActionable(doc.status)) return;
+  if (doc.version && doc.version !== mountedPlanVersion) {
+    refreshInspector();
+    return;
+  }
+  if (action === 'other') {
+    draft.otherOpen = !draft.otherOpen;
+    renderBody();
+    if (draft.otherOpen) document.querySelector<HTMLTextAreaElement>('[data-plan-other-input]')?.focus();
+    return;
+  }
+  if (draft.stale || draft.submissionStatus === 'uncertain') return;
   const actions = planBoardActions;
-  if (!actions) {
+  if (!actions || !draft.sessionId) {
     notify('计划审批动作未就绪');
     return;
   }
-
-  if (action === 'other') {
-    planBoardUi.otherOpen = !planBoardUi.otherOpen;
-    renderBody();
-    if (planBoardUi.otherOpen) {
-      document.querySelector<HTMLTextAreaElement>('[data-plan-other-input]')?.focus();
-    }
+  const plan = readPlanBoardDraft(doc.plan);
+  if (action === 'approve' && !plan.trim()) {
+    notify('计划为空，请先完善计划再批准');
     return;
   }
-
-  if (action === 'reject_and_exit') {
-    planBoardUi.busy = true;
-    try {
-      await actions.onRejectAndExit();
-      planBoardUi.draft = null;
-      planBoardUi.otherOpen = false;
-      planBoardUi.otherText = '';
-      planBoardUi.mode = 'preview';
-    } finally {
-      planBoardUi.busy = false;
-      refreshInspector();
-    }
-    return;
-  }
-
-  if (action === 'approve') {
-    const plan = readPlanBoardDraft(doc.plan).trim();
-    if (!plan) {
-      notify('计划为空，请先完善计划再批准');
-      return;
-    }
-    planBoardUi.busy = true;
-    try {
-      await actions.onApprove(plan);
-      planBoardUi.draft = null;
-      planBoardUi.otherOpen = false;
-      planBoardUi.otherText = '';
-      planBoardUi.mode = 'preview';
-    } finally {
-      planBoardUi.busy = false;
-      refreshInspector();
-    }
-    return;
-  }
-
   if (action === 'submit_other') {
-    const feedback = (document.querySelector<HTMLTextAreaElement>('[data-plan-other-input]')?.value
-      ?? planBoardUi.otherText).trim();
-    if (!feedback) {
+    const text = document.querySelector<HTMLTextAreaElement>('[data-plan-other-input]')?.value ?? draft.otherText;
+    editPlanFeedback(draft, text);
+    if (!text.trim()) {
       notify('请先填写修改要求');
-      planBoardUi.otherOpen = true;
-      renderBody();
-      document.querySelector<HTMLTextAreaElement>('[data-plan-other-input]')?.focus();
       return;
     }
-    const plan = readPlanBoardDraft(doc.plan);
-    planBoardUi.busy = true;
-    try {
-      await actions.onFeedback(plan, feedback);
-      planBoardUi.otherOpen = false;
-      planBoardUi.otherText = '';
-      planBoardUi.mode = 'preview';
-      // draft 保留到服务端回推 plan_review 后再被覆盖
-    } finally {
-      planBoardUi.busy = false;
-      refreshInspector();
-    }
   }
+  const kind = action === 'approve' ? 'plan_approve'
+    : action === 'reject_and_exit' ? 'plan_reject_and_exit'
+    : action === 'submit_other' ? 'plan_reject' : null;
+  if (!kind) return;
+  const owner = interactiveOwnerKey();
+  const revision = draft.revision;
+  draft.busy = true;
+  draft.submissionStatus = 'confirming';
+  actions.submit({
+    owner, sessionId: draft.sessionId, revision, action: kind,
+    ...(draft.baseVersion ? { expectedVersion: draft.baseVersion } : {}),
+    ...(kind !== 'plan_reject_and_exit' ? { plan } : {}),
+    ...(kind === 'plan_reject' ? { feedback: draft.otherText.trim() } : {}),
+  }, (notice) => {
+    if (interactiveOwnerKey() !== owner) return;
+    draft.busy = notice.status === 'confirming';
+    draft.submissionStatus = notice.status;
+    if ((notice.status === 'applied' || notice.status === 'confirmed') && draft.revision === revision) {
+      draft.revision += 1;
+      draft.draft = null;
+      draft.otherOpen = false;
+      draft.otherText = '';
+      draft.mode = 'preview';
+      draft.stale = false;
+      if (notice.planState) {
+        draft.basePlan = notice.planState.plan;
+        draft.baseVersion = notice.planState.version;
+        draft.latestPlan = notice.planState.plan;
+        draft.latestVersion = notice.planState.version;
+      }
+    } else if (notice.status === 'expired' && notice.planState) {
+      syncPlanDocument(draft, notice.planState.plan, notice.planState.version);
+      draft.stale = true;
+    }
+    if (planBoardUi === draft && state.activeSessionId === draft.sessionId) refreshInspector();
+  });
+  renderBody();
 }
 
 function setTab(tab: TabKey): void {

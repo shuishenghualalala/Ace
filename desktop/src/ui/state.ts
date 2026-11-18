@@ -169,7 +169,7 @@ export interface Bookkeeping {
   /** 当前回合是否已出现团队成员消息；final 仅作封口，不能再生成团队自身气泡。 */
   hadTeamInternal: boolean;
   planActive: boolean;
-  pendingPlan: { plan: string; planFile: string; status: PlanReviewStatus; options?: { label: string; description: string }[] } | null;
+  pendingPlan: { plan: string; planFile: string; status: PlanReviewStatus; version?: string; options?: { label: string; description: string }[] } | null;
   /** ask_followup_question 待答追问（followup_question 帧 → followupQuestionReducer 写入）。 */
   pendingFollowup: PendingFollowup | null;
   /** 后端 todo 工具最新快照（todo_updated 帧 → todoUpdatedReducer 写入）。Inspector Plan tab 读它。 */

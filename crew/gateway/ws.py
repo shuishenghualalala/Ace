@@ -24,7 +24,7 @@ from crew.agent.skills import (
     install_skill,
 )
 from crew.core.runctx import current_active_skill_packages
-from crew.core.envelope import Envelope
+from crew.core.envelope import Envelope, TurnOutcome
 from crew.channels.channel_sessions import is_channel_session_id
 from crew.features import FeatureEventContributionFailedError
 from crew.gateway.auth import AuthenticationError, authenticate_websocket
@@ -32,6 +32,7 @@ from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey, Se
 from crew.gateway.followup_receipts import (
     FollowupKey, FollowupReceipt, FollowupReceiptJournal, followup_decision_hash,
 )
+from crew.gateway.plan_receipts import PlanReceipt, PlanReceiptJournal, PlanSubmissionKey, plan_submission_hash
 from crew.scenarios import resolve_binding as resolve_scenario_binding
 from crew.gateway.helpers import (
     WS_PING_INTERVAL_S,
@@ -104,6 +105,16 @@ def create_ws_router(
             transaction, read_query, getattr(crew.session_store, "append_followup_answer_in_transaction", None),
         )
         if callable(transaction) and callable(read_query) else None
+    )
+    plan_manager = getattr(crew, "plan_manager", None)
+    bind_plan_state = getattr(plan_manager, "bind_durable_state", None)
+    load_plan_state = getattr(crew.session_store, "load_plan_state", None)
+    save_plan_state = getattr(crew.session_store, "save_plan_state", None)
+    if callable(bind_plan_state) and callable(load_plan_state) and callable(save_plan_state):
+        bind_plan_state(load_plan_state, save_plan_state)
+    plan_journal = (
+        PlanReceiptJournal(crew.session_store, send_inbox)
+        if send_inbox is not None and callable(bind_plan_state) and callable(load_plan_state) else None
     )
 
     @router.websocket("/ws")
@@ -320,6 +331,91 @@ def create_ws_router(
                 release.set()
                 followup_journal.release(key)
 
+        async def _handle_plan_submission(session_id: str, data: dict[str, Any]) -> None:
+            from crew.agent.plan import PlanSnapshot, PlanTransition, PlanVersionConflict
+
+            key = PlanSubmissionKey.from_frame(owner, session_id, data)
+            if key is None:
+                await _send_status(session_id, "计划提交信息不完整，请重新打开计划")
+                return
+            if plan_journal is None or plan_manager is None:
+                await connections.send_socket(socket, PlanReceipt(key, "unavailable", "plan_receipts_unavailable").frame())
+                return
+            if not _session_owned(session_id):
+                await connections.send_socket(socket, PlanReceipt(key, "expired", "session_expired").frame())
+                return
+            _register_session(session_id)
+            action = data["action"]
+            query = action == "plan_receipt_query"
+            receipt = PlanReceipt(key, "unavailable", "plan_unavailable")
+            try:
+                digest = None if query else plan_submission_hash(data)
+                receipt = await plan_journal.query(key, digest)
+                if receipt.status == "unknown" and not query:
+                    if (
+                        ("plan" in data and not isinstance(data["plan"], str))
+                        or ("feedback" in data and not isinstance(data["feedback"], str))
+                    ):
+                        receipt = PlanReceipt(key, "rejected", "invalid_plan_submission")
+                    else:
+                        transition = await asyncio.to_thread(
+                            plan_manager.prepare_transition, session_id, key.expected_version, action,
+                            edited_plan=data.get("plan"), owner_account_id=owner,
+                        )
+                        feedback = str(data.get("feedback") or "").strip()
+                        execution = None
+                        if action == "plan_approve" or (action == "plan_reject" and feedback):
+                            execution = {
+                                "session_id": session_id, "request_id": key.request_id,
+                                "query": "计划已批准，请按上述计划开始执行。" if action == "plan_approve" else feedback,
+                                "mode": data.get("mode") or "agent",
+                                "workspace_id": crew.session_store.get_workspace_id(session_id, owner) or "default",
+                                "_plan_submission_id": key.submission_id,
+                            }
+                        receipt = await plan_journal.commit(key, digest, transition, execution)
+                        if receipt.status == "applied" and receipt.state is not None:
+                            committed = PlanSnapshot.from_body(owner, session_id, receipt.state)
+                            if committed is not None:
+                                await asyncio.to_thread(
+                                    plan_manager.apply_committed_transition,
+                                    PlanTransition(transition.base, committed, action),
+                                )
+                current = await asyncio.to_thread(plan_manager.snapshot, session_id, owner_account_id=owner)
+                receipt = receipt.with_state(current.to_body())
+                if receipt.status == "applied" and not query:
+                    _register_session(session_id)
+                    await connections.push_payload(session_id, {
+                        "kind": "plan_review", "request_id": "", "session_id": session_id,
+                        "is_final": False, "sequence": 0, "body": current.to_body(),
+                    }, owner_account_id=owner)
+                    with suppress(Exception):
+                        crew.mark_plan_review_notification_read(session_id, owner)
+            except PlanVersionConflict as exc:
+                if receipt.status == "applied":
+                    # The decision and inbox row already committed together.
+                    # A later external edit supersedes execution, not that receipt.
+                    try:
+                        current = await asyncio.to_thread(plan_manager.snapshot, session_id, owner_account_id=owner)
+                        receipt = receipt.with_state(current.to_body())
+                    except Exception:
+                        receipt = PlanReceipt(key, "unavailable", "plan_unavailable")
+                else:
+                    receipt = PlanReceipt(key, "expired", "stale_plan", exc.current.to_body())
+            except ValueError as exc:
+                receipt = PlanReceipt(key, "rejected", "invalid_plan_submission")
+                log.info("计划提交被拒绝 session=%s reason=%s", session_id, exc)
+            except Exception:
+                log.exception("计划提交失败 session=%s submission=%s", session_id, key.submission_id)
+                # A committed decision remains queryable even if materializing its
+                # local files or delivering its first receipt failed.
+                receipt = PlanReceipt(key, "unavailable", "plan_unavailable")
+            try:
+                await asyncio.wait_for(connections.send_socket(socket, receipt.frame()), timeout=2.0)
+            finally:
+                if receipt.status == "applied" and receipt.execution_request_id and not query:
+                    queued = await send_inbox.query(SendKey(owner, session_id, receipt.execution_request_id))
+                    send_inbox.reserve(queued, _execute_accepted)
+
         async def _heartbeat() -> None:
             with suppress(asyncio.CancelledError):
                 while not disconnected.is_set():
@@ -374,6 +470,7 @@ def create_ws_router(
                             {
                                 "kind": "plan_review",
                                 "body": {
+                                    **review,
                                     "plan": review.get("plan") or "",
                                     "plan_file": plan_display_path(sid, owner_account_id=owner),
                                     "empty": bool(review.get("empty")),
@@ -464,6 +561,7 @@ def create_ws_router(
 
         async def _handle_chat(
             data: dict[str, Any], session_id: str, execution: SendExecution | None = None,
+            *, approved_plan: dict[str, Any] | None = None, revision_plan: dict[str, Any] | None = None,
         ) -> None:
             attachments = data.get("attachments", [])
             if not isinstance(attachments, list):
@@ -636,6 +734,10 @@ def create_ws_router(
                 user_id=owner,
                 mode=mode,
             )
+            if approved_plan is not None:
+                envelope.params["approved_plan"] = approved_plan
+            if revision_plan is not None:
+                envelope.params["plan_revision"] = revision_plan
             log.info(
                 "[PERF] gateway_request_received request_id=%s session=%s query_len=%d mode=%s",
                 envelope.request_id,
@@ -714,8 +816,50 @@ def create_ws_router(
                 return
             assert send_inbox is not None and receipt.payload is not None
             execution = SendExecution(send_inbox, receipt.key)
+
+            async def fail_plan(code: str, message: str) -> None:
+                outcome = TurnOutcome("failed", reason=code, message=message)
+                persist = getattr(crew.session_store, "record_turn_outcome", None)
+                if callable(persist):
+                    await asyncio.to_thread(
+                        persist, receipt.key.session_id, receipt.key.request_id, outcome.to_body(),
+                        owner_account_id=owner, last_status="failed", error=message,
+                        settle_receipt=lambda conn: execution.finish_in_transaction(conn, "failed", code, outcome),
+                    )
+                    execution.finished = True
+                else:
+                    await execution.finish("failed", code, outcome=outcome)
+                await connections.push_payload(receipt.key.session_id, {
+                    "kind": "error", "is_final": True, "sequence": 0,
+                    "session_id": receipt.key.session_id, "request_id": receipt.key.request_id,
+                    "body": {"message": message, "code": code, "outcome": outcome.to_body()},
+                }, owner_account_id=owner)
+
             try:
-                await _handle_chat(receipt.payload, receipt.key.session_id, execution)
+                approved_plan = None
+                revision_plan = None
+                if "_plan_submission_id" in receipt.payload:
+                    if plan_journal is None or plan_manager is None:
+                        await fail_plan("plan_unavailable", "计划暂时无法恢复，请核对当前计划后重试。")
+                        return
+                    committed = await plan_journal.execution_state(owner, receipt.key.session_id, receipt.key.request_id)
+                    try:
+                        current = await asyncio.to_thread(plan_manager.snapshot, receipt.key.session_id, owner_account_id=owner)
+                    except Exception:
+                        log.exception("恢复已批准计划失败 session=%s", receipt.key.session_id)
+                        await fail_plan("plan_unavailable", "计划暂时无法恢复，请核对当前计划后重试。")
+                        return
+                    if committed is None or current.version != committed.get("version"):
+                        await fail_plan("plan_superseded", "计划已更新，此次执行已取消，请审阅当前计划。")
+                        return
+                    if committed.get("phase") == "approved":
+                        approved_plan = committed
+                    elif committed.get("phase") == "revising":
+                        revision_plan = committed
+                await _handle_chat(
+                    receipt.payload, receipt.key.session_id, execution,
+                    approved_plan=approved_plan, revision_plan=revision_plan,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -787,7 +931,10 @@ def create_ws_router(
             if receipt_capability:
                 await connections.send_socket(socket, {
                     "kind": "send_receipt_capability",
-                    "body": {"version": 1, "store_id": send_inbox.store_id, "followup_receipts": 1},
+                    "body": {
+                        "version": 1, "store_id": send_inbox.store_id, "followup_receipts": 1,
+                        **({"plan_receipts": 1} if plan_journal is not None else {}),
+                    },
                     "sequence": 0,
                     "is_final": False,
                 })
@@ -950,6 +1097,12 @@ def create_ws_router(
                     continue
 
                 # ---- Plan 模式控制 ----
+                if data.get("action") == "plan_receipt_query" or (
+                    data.get("action") in {"plan_approve", "plan_update", "plan_reject", "plan_reject_and_exit"}
+                    and ("submission_id" in data or "expected_version" in data)
+                ):
+                    await _handle_plan_submission(session_id, data)
+                    continue
                 if data.get("action") in (
                     "plan_enter",
                     "plan_approve",
@@ -1001,6 +1154,7 @@ def create_ws_router(
                             {
                                 "kind": "plan_review",
                                 "body": {
+                                    **review,
                                     "plan": review.get("plan") or "",
                                     "plan_file": plan_display_path(
                                         session_id, owner_account_id=owner

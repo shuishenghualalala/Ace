@@ -737,6 +737,13 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         from crew.agent.plan import plan_display_path, read_plan
 
         pm = getattr(crew, "plan_manager", None)
+        snapshot = getattr(pm, "snapshot", None)
+        if callable(snapshot):
+            state = snapshot(session_id, owner_account_id=owner).to_body()
+            pending_execution = getattr(crew.session_store, "pending_plan_execution", None)
+            if callable(pending_execution):
+                state.update(pending_execution(owner, session_id, state["version"]))
+            return JSONResponse(state)
         active = bool(pm is not None and pm.is_active(session_id, owner_account_id=owner))
         awaiting = bool(pm is not None and pm.is_awaiting_approval(session_id, owner_account_id=owner))
         phase = pm.phase(session_id, owner_account_id=owner) if pm is not None else "inactive"

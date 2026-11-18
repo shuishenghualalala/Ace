@@ -504,6 +504,35 @@ class SQLiteSessionStore(SessionStore):
         """)
         if "answer_seq" not in {row[1] for row in conn.execute("PRAGMA table_info(followup_receipts)")}:
             conn.execute("ALTER TABLE followup_receipts ADD COLUMN answer_seq INTEGER")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS plan_gateway_state (
+                owner_account_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(owner_account_id, session_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS plan_receipts (
+                owner_account_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                submission_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                expected_version TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                code TEXT NOT NULL DEFAULT '',
+                state_json TEXT NOT NULL,
+                execution_request_id TEXT NOT NULL DEFAULT '',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(owner_account_id, session_id, submission_id)
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_receipts_execution "
+            "ON plan_receipts(owner_account_id,session_id,execution_request_id) WHERE execution_request_id!=''",
+        )
         conn.execute("INSERT OR IGNORE INTO desktop_send_identity VALUES (1, ?)", (uuid.uuid4().hex,))
         self.desktop_send_store_id = str(conn.execute(
             "SELECT store_id FROM desktop_send_identity WHERE singleton=1"
@@ -2405,6 +2434,8 @@ class SQLiteSessionStore(SessionStore):
             "DELETE FROM followup_receipts WHERE session_id = ? AND owner_account_id = ?",
             (session_id, owner_account_id),
         )
+        conn.execute("DELETE FROM plan_receipts WHERE session_id=? AND owner_account_id=?", (session_id, owner_account_id))
+        conn.execute("DELETE FROM plan_gateway_state WHERE session_id=? AND owner_account_id=?", (session_id, owner_account_id))
         conn.execute(
             "DELETE FROM writer_leases WHERE session_id = ? AND owner_account_id = ?",
             (session_id, owner_account_id),
@@ -2665,6 +2696,51 @@ class SQLiteSessionStore(SessionStore):
                 self._conn.rollback()
         return [self._message_from_dict(json.loads(row[0])) for row in rows], cursor
 
+    def load_plan_state(self, owner_account_id: str, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state_json FROM plan_gateway_state WHERE owner_account_id=? AND session_id=?",
+                (owner_account_id, session_id),
+            ).fetchone()
+        return json.loads(row[0]) if row is not None else None
+
+    def save_plan_state(
+        self, owner_account_id: str, session_id: str, state: dict[str, Any], expected_version: str | None,
+    ) -> None:
+        def write(conn) -> None:
+            row = conn.execute(
+                "SELECT state_json FROM plan_gateway_state WHERE owner_account_id=? AND session_id=?",
+                (owner_account_id, session_id),
+            ).fetchone()
+            actual_version = json.loads(row[0]).get("version") if row is not None else None
+            if expected_version != actual_version:
+                raise SessionWriteConflict("Plan changed before state could be saved")
+            self.write_plan_state_in_transaction(conn, owner_account_id, session_id, state)
+        self._writer.execute(write)
+
+    @staticmethod
+    def write_plan_state_in_transaction(conn, owner_account_id: str, session_id: str, state: dict[str, Any]) -> None:
+        conn.execute(
+            "INSERT INTO plan_gateway_state(owner_account_id,session_id,state_json,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(owner_account_id,session_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at",
+            (owner_account_id, session_id, json.dumps(state, ensure_ascii=False), time.time()),
+        )
+
+    def pending_plan_execution(self, owner_account_id: str, session_id: str, version: str) -> dict[str, str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT r.submission_id,r.execution_request_id,i.status FROM plan_receipts r "
+                "JOIN desktop_send_inbox i ON i.owner_account_id=r.owner_account_id "
+                "AND i.session_id=r.session_id AND i.request_id=r.execution_request_id "
+                "WHERE r.owner_account_id=? AND r.session_id=? AND r.status='applied' "
+                "AND json_extract(r.state_json,'$.version')=? AND i.status IN ('accepted','running','uncertain') "
+                "ORDER BY r.updated_at DESC LIMIT 1",
+                (owner_account_id, session_id, version),
+            ).fetchone()
+        if row is None:
+            return {}
+        return {"submission_id": row[0], "execution_request_id": row[1], "execution_status": row[2]}
+
     def get_workspace_id(self, session_id: str, owner_account_id: str) -> str | None:
         """读取会话所属 workspace_id，不存在时返回 None。"""
         with self._lock:
@@ -2832,6 +2908,11 @@ class SQLiteSessionStore(SessionStore):
                 f"(SELECT owner_account_id, session_id FROM sessions WHERE {where})",
                 params,
             )
+            for table in ("plan_receipts", "plan_gateway_state"):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE (owner_account_id, session_id) IN "
+                    f"(SELECT owner_account_id, session_id FROM sessions WHERE {where})", params,
+                )
             cursor = conn.execute(f"DELETE FROM sessions WHERE {where}", params)
             self._expired_keys = [(str(o), str(s)) for o, s in expired]
             return cursor.rowcount

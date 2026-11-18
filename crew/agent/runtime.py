@@ -504,7 +504,10 @@ class SingleAgent(Agent):
         # Plan 模式：当前待办快照与审批通过执行提示仍是动态 reminder；
         # Plan workflow / revision / exit / todo_reminder 等事件走 hidden attachment。
         if self.plan_manager is not None:
-            reminder_parts.extend(self._plan_reminder_blocks(mem_sid, owner_account_id=envelope.user_id))
+            reminder_parts.extend(self._plan_reminder_blocks(
+                mem_sid, owner_account_id=envelope.user_id, approved_plan=envelope.params.get("approved_plan"),
+                revision_plan=envelope.params.get("plan_revision"),
+            ))
         user_reminder = "\n\n".join(p for p in reminder_parts if p)
 
         return system_static, user_reminder
@@ -539,7 +542,9 @@ class SingleAgent(Agent):
             )
         return list(report.persistent_messages)
 
-    def _plan_reminder_blocks(self, session_id: str, owner_account_id: str) -> list[str]:
+    def _plan_reminder_blocks(
+        self, session_id: str, owner_account_id: str, *, approved_plan: object = None, revision_plan: object = None,
+    ) -> list[str]:
         """Plan 模式相关的动态 reminder 块（前置注入部分）。
 
         注意：plan 工作流与审批/修订/退出事件不在这里——它们由 hidden attachment
@@ -550,11 +555,32 @@ class SingleAgent(Agent):
             format_approved_plan_content,
             plan_display_path,
             read_plan,
+            PlanSnapshot,
         )
 
         blocks: list[str] = []
         pm = self.plan_manager
-        if not pm.is_active(session_id, owner_account_id=owner_account_id) and pm.take_just_approved(
+        if approved_plan is not None and revision_plan is not None:
+            raise ValueError("计划执行快照和修订快照不能同时提供")
+        snapshot = PlanSnapshot.from_body(owner_account_id, session_id, approved_plan)
+        if approved_plan is not None:
+            if snapshot is None or snapshot.phase != "approved":
+                raise ValueError("批准计划快照无效")
+            blocks.append(PLAN_APPROVED_REMINDER.format(
+                plan_file=snapshot.to_body()["plan_file"],
+                plan_content=format_approved_plan_content(snapshot.text),
+            ))
+        elif revision_plan is not None:
+            snapshot = PlanSnapshot.from_body(owner_account_id, session_id, revision_plan)
+            if snapshot is None or snapshot.phase not in {"active", "revising"}:
+                raise ValueError("计划修订快照无效")
+            blocks.append(
+                "用户要求修改以下计划。继续遵循 Plan 模式的只读探索与计划文件编辑权限。"
+                "依据本轮反馈修改这份草稿，完成后重新提交审批。\n"
+                f"计划文件\n{snapshot.to_body()['plan_file']}\n"
+                f"BEGIN PLAN REVISION\n{format_approved_plan_content(snapshot.text)}\nEND PLAN REVISION"
+            )
+        elif not pm.is_active(session_id, owner_account_id=owner_account_id) and pm.take_just_approved(
             session_id,
             owner_account_id=owner_account_id,
         ):
