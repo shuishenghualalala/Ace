@@ -26,7 +26,7 @@ vi.mock('../../src/ui/state', () => ({
 }));
 
 import { appendMessage } from '../../src/ui/features/chat-controller';
-import { state } from '../../src/ui/state';
+import { authStore } from '../../src/ui/stores/auth-store';
 import { bindSecurityApprovalUi } from '../../src/ui/features/security-approval';
 
 type MockCrew = {
@@ -254,6 +254,7 @@ describe('security approval always-confirm (U2)', () => {
     cleanup();
   });
   it('recovers only the captured receipt after a lost response and rebind', async () => {
+    authStore.set({ isLoggedIn: true, userInfo: { staffCode: 'owner-a' } });
     localStorage.clear();
     const mw = mockCrew();
     const request = { request_id: 'r1', session_id: 's1', workspace_id: 'default', task_id: 't1', decision_receipts: 1 };
@@ -275,15 +276,14 @@ describe('security approval always-confirm (U2)', () => {
     cleanup();
     setupDom();
     mw.securityPending.mockResolvedValue({ ok: true, body: { requests: [] } });
-    const originalUser = state.userInfo;
     try {
-      state.userInfo = { ...originalUser!, uid: 'other-owner' };
+      authStore.set({ userInfo: { staffCode: 'other-owner' } });
       mw.securityDecisionReceipt.mockClear();
       cleanup = bindSecurityApprovalUi();
       await vi.advanceTimersByTimeAsync(1000);
       expect(mw.securityDecisionReceipt).not.toHaveBeenCalled();
       vi.mocked(appendMessage).mockClear();
-      state.userInfo = originalUser;
+      authStore.set({ userInfo: { staffCode: 'owner-a' } });
       const receipt = { request_id: 'r1', decision: 'reject', submission_id: command.submissionId, status: 'recorded' };
       mw.securityDecisionReceipt.mockResolvedValue({ ok: true, body: { ...receipt, submission_id: 'mismatch' } });
       await vi.advanceTimersByTimeAsync(20000);
@@ -296,7 +296,7 @@ describe('security approval always-confirm (U2)', () => {
       expect(mw.securityDecide).toHaveBeenCalledTimes(1);
     } finally {
       cleanup();
-      state.userInfo = originalUser;
+      authStore.set({ isLoggedIn: false, userInfo: null });
       localStorage.clear();
     }
   });
