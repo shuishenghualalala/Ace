@@ -404,14 +404,13 @@ async def test_subscribe_replays_before_queued_live_push(conn: ConnectionManager
     replay = asyncio.create_task(conn.replay("s1", subscriber, owner_account_id="", register_for_live=True))
     await asyncio.sleep(0)
     live = asyncio.create_task(conn.push_payload("s1", {"kind": "final", "is_final": True}, owner_account_id=""))
-    await asyncio.sleep(0)
-    assert subscriber.sent == []
-    release.set()
-
     await asyncio.wait_for(asyncio.gather(first, replay, live), timeout=1)
     assert replay.result() is True
-    for socket in (observer, subscriber):
-        assert [frame["gateway_sequence"] for frame in socket.sent] == [1, 2]
+    assert [frame["gateway_sequence"] for frame in subscriber.sent] == [1, 2]
+    assert not observer.sent
+    release.set()
+    await asyncio.sleep(0)
+    assert [frame["gateway_sequence"] for frame in observer.sent] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -899,3 +898,45 @@ async def test_replay_window_limits_preserve_contiguous_suffix_and_resync(monkey
     assert conn._journal.count(("b", "9")) == 1
     await conn.close_owner("b")
     assert conn._journal.size == 0
+
+
+@pytest.mark.asyncio
+async def test_overflow_disconnects_only_the_slow_subscriber_and_can_resume(conn):
+    from crew.gateway.socket_delivery import SocketDelivery
+
+    conn._delivery = SocketDelivery(conn.send_socket, conn._disconnect_failed_socket,
+                                    max_bytes=1500, max_frames=3, max_age=1)
+    blocked = asyncio.Event()
+
+    class Slow(_FakeWS):
+        async def send_json(self, data):
+            await blocked.wait()
+
+    slow, fast = Slow(), _FakeWS()
+    for ws in (slow, fast):
+        conn.register_owner("owner", ws)
+        conn.register("s", ws, owner_account_id="owner")
+    for i in range(6):
+        await conn.push_payload("s", {"kind": "delta", "body": {"text": str(i)}}, owner_account_id="owner")
+    await asyncio.sleep(0)
+    assert slow.close_code == 1013 and not slow.sent
+    assert slow not in conn._ws_to_sessions and slow not in conn._ws_to_owners
+    assert [f["gateway_sequence"] for f in fast.sent] == list(range(1, 7))
+    resumed = _FakeWS()
+    assert await conn.replay("s", resumed, owner_account_id="owner",
+                             resume_cursor={"epoch": fast.sent[0]["gateway_epoch"], "sequence": 3})
+    assert [f["gateway_sequence"] for f in resumed.sent] == [4, 5, 6]
+
+
+@pytest.mark.asyncio
+async def test_long_batch_interval_cannot_accumulate_unbounded_frames(monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._MAX_PENDING_BYTES", 800)
+    conn = ConnectionManager(min_interval=600)
+    ws = _FakeWS()
+    conn.register("s", ws, owner_account_id="a")
+    for _ in range(20):
+        await conn.push_payload("s", {"kind": "tool", "body": {"result": "x" * 200}}, owner_account_id="a")
+        assert conn._pending_bytes.get(("a", "s"), 0) < 800
+    await conn.push_payload("s", {"kind": "final", "is_final": True}, owner_account_id="a")
+    assert [frame["gateway_sequence"] for frame in ws.sent] == list(range(1, 22))
+    assert ("a", "s") not in conn._pending_bytes

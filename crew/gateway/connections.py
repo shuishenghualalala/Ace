@@ -29,6 +29,7 @@ from fastapi import WebSocket
 
 from crew.core.followup import get_followup_waiter
 from crew.gateway.replay_journal import ReplayJournal
+from crew.gateway.socket_delivery import SocketDelivery
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.connections")
@@ -40,6 +41,8 @@ _CHUNK_BUFFER_SIZE = 2000
 _REPLAY_SESSION_BYTES = 2 * 1024 * 1024
 _REPLAY_TOTAL_BYTES = 16 * 1024 * 1024
 _REPLAY_SESSIONS = 128
+_MAX_PENDING_FRAMES = 256
+_MAX_PENDING_BYTES = 256 * 1024
 _MAX_PENDING_FOLLOWUPS = 8
 _MAX_FOLLOWUP_SESSIONS = 128
 _MAX_FOLLOWUP_FRAME_BYTES = 32_768
@@ -82,8 +85,12 @@ class ConnectionManager:
         self._last_push_ts: dict[tuple[str, str], float] = {}  # key -> 上次推送时间戳
         self._consecutive_failures: dict[tuple[str, str], int] = {}  # key -> 连续失败次数
         self._pending_payloads: dict[tuple[str, str], list[dict]] = defaultdict(list)  # 限流期间缓存的帧
+        self._pending_bytes: dict[tuple[str, str], int] = {}
         self._flush_tasks: dict[tuple[str, str], asyncio.Task] = {}  # key -> 延迟推送 task
         self._send_locks: dict[WebSocket, asyncio.Lock] = {}  # 同一 socket 的 send_json 必须串行
+        self._closing: set[asyncio.Task] = set()
+        self._delivery = SocketDelivery(self.send_socket, self._disconnect_failed_socket,
+                                        max_bytes=4 * 1024 * 1024, max_frames=4096, max_age=15.0)
         self._ws_to_sessions: dict[WebSocket, set[tuple[str, str]]] = defaultdict(set)
         self._ws_to_owners: dict[WebSocket, set[str]] = defaultdict(set)
         # 断线回放：每个 session 的有界 payload 缓存 + 单调 gateway_sequence + 回放锁
@@ -135,6 +142,7 @@ class ConnectionManager:
             if not owners:
                 self._ws_to_owners.pop(ws, None)
         if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
+            self._delivery.retire(ws)
             self._send_locks.pop(ws, None)
 
     def _unregister_socket_owners(self, ws: WebSocket, owner_account_id: str) -> None:
@@ -146,7 +154,7 @@ class ConnectionManager:
         for owner, session_id in list(self._ws_to_sessions.get(ws, set())):
             self.unregister(session_id, ws, owner_account_id=owner)
 
-    def unregister(self, session_id: str, ws: WebSocket, *, owner_account_id: str) -> None:
+    def unregister(self, session_id: str, ws: WebSocket, *, owner_account_id: str, preserve_failures: bool = False) -> None:
         key = self._key(session_id, owner_account_id)
         self._conns[key].discard(ws)
         sessions = self._ws_to_sessions.get(ws)
@@ -156,8 +164,9 @@ class ConnectionManager:
                 self._ws_to_sessions.pop(ws, None)
         if not self._conns[key]:
             del self._conns[key]
-            self._cleanup_session_state(key)
+            self._cleanup_session_state(key, preserve_failures=preserve_failures)
         if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
+            self._delivery.retire(ws)
             self._send_locks.pop(ws, None)
 
     def unregister_all(
@@ -191,6 +200,7 @@ class ConnectionManager:
         if flush_task is not None and not flush_task.done():
             flush_task.cancel()
         self._pending_payloads.pop(key, None)
+        self._pending_bytes.pop(key, None)
 
     def has_connection(self, session_id: str, *, owner_account_id: str) -> bool:
         return bool(self._conns.get(self._key(session_id, owner_account_id)))
@@ -211,13 +221,28 @@ class ConnectionManager:
         for (own, _sid), conns in self._conns.items():
             if own == owner:
                 sockets.update(conns)
-        for ws in sockets:
+        if sockets:
+            encoded = _encode_snapshot_part(payload)
+            batch = (json.loads(encoded),)
+            for ws in sockets:
+                self._delivery.submit(ws, batch, len(encoded))
+            await asyncio.sleep(0)
+
+    def _disconnect_failed_socket(self, ws: WebSocket) -> None:
+        for owner, sid in tuple(self._ws_to_sessions.get(ws, ())):
+            self.unregister(sid, ws, owner_account_id=owner, preserve_failures=True)
+        self._unregister_socket_owners(ws, "")
+        self._send_locks.pop(ws, None)
+
+        async def close() -> None:
             try:
-                await self.send_socket(ws, payload)
-            except Exception:  # noqa: BLE001
-                self._unregister_socket_sessions(ws)
-                self._unregister_socket_owners(ws, owner)
-                log.debug("notify_owner 推送失败 owner=%s", owner)
+                async with asyncio.timeout(1):
+                    await ws.close(code=1013, reason="Reconnect to resume delivery")
+            except Exception:
+                pass
+        task = asyncio.create_task(close())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
 
     async def close_owner(
         self,
@@ -294,36 +319,22 @@ class ConnectionManager:
         同一 WebSocket 可能同时收到多个 session 的后台推送，按 socket 加锁避免并发
         send_json 交错破坏 ASGI WebSocket 状态机。
         """
-        replay_lock = self._replay_locks[key]
-        sockets = list(self._conns.get(key, set()))
-        dead: list[WebSocket] = []
-        any_ok = False
-        for ws in sockets:
-            if ws is skip_socket:
-                continue
-            try:
-                await self.send_socket(ws, payload)
-                any_ok = True
-            except Exception:
-                dead.append(ws)
-            if self._replay_locks.get(key) is not replay_lock:
-                return False
-        for ws in dead:
-            self._conns[key].discard(ws)
-            sessions = self._ws_to_sessions.get(ws)
-            if sessions is not None:
-                sessions.discard(key)
-            if sessions is not None and not sessions:
-                self._ws_to_sessions.pop(ws, None)
-            self._unregister_socket_owners(ws, owner_account_id="local")
-            if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
-                self._send_locks.pop(ws, None)
-        if not self._conns[key]:
-            self._conns.pop(key, None)
-            # 发送失败导致的死连接清理需要保留失败计数，才能维持连续失败降级语义；
-            # 主动 unregister 仍会清掉计数，让正常断线重连不继承旧状态。
-            self._cleanup_session_state(key, preserve_failures=True)
-        return any_ok
+        sockets = [ws for ws in self._conns.get(key, ()) if ws is not skip_socket]
+        if not sockets:
+            return False
+        encoded = _encode_snapshot_part(payload)
+        if len(encoded) > self._delivery.max_bytes:
+            head = self._gateway_seq[key]
+            epoch = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
+            active = self._active_snapshots.get(key)
+            payload = self._resync_frame(key, epoch, head - self._journal.count(key), head,
+                                         "frame_too_large", active.request_id if active else None)
+            encoded = _encode_snapshot_part(payload)
+        batch = (json.loads(encoded),)
+        receipts = [self._delivery.submit(ws, batch, len(encoded)) for ws in sockets]
+        # Let writable connections drain immediately. A blocked transport owns only its queue.
+        await asyncio.sleep(0)
+        return any(not receipt.done() or receipt.result() for receipt in receipts)
 
     async def _flush_pending(self, key: tuple[str, str]) -> None:
         """延迟推送：等 min_interval 后把缓存的帧一次性推送。"""
@@ -336,6 +347,7 @@ class ConnectionManager:
         self, key: tuple[str, str], *, skip_socket: WebSocket | None = None
     ) -> None:
         """在 replay lock 保护下刷新限流缓存帧。"""
+        self._pending_bytes.pop(key, None)
         payloads = self._pending_payloads.pop(key, [])
         self._flush_tasks.pop(key, None)
         if not payloads or not self._conns.get(key):
@@ -525,9 +537,9 @@ class ConnectionManager:
                 return
             # Keep journaling while disconnected without recording a push failure.
             if self._conns.get(key):
-                await self._push_under_lock(key, payload)
+                await self._push_under_lock(key, payload, len(encoded) if encoded is not None else 0)
 
-    async def _push_under_lock(self, key: tuple[str, str], payload: dict) -> None:
+    async def _push_under_lock(self, key: tuple[str, str], payload: dict, size: int) -> None:
         """在 replay lock 保护下执行限流判断与推送。"""
         lock = self._replay_locks[key]
         now = time.monotonic()
@@ -537,7 +549,10 @@ class ConnectionManager:
         # final / 用户可感知控制帧必须立即推送，不限流。若已有 pending，
         # 先按原序刷新 pending，避免 tool/start 跑到前面的 delta 之前。
         is_final = bool(payload.get("is_final", False))
-        is_priority = self._is_priority_payload(payload)
+        pending_size = self._pending_bytes.get(key, 0) + size
+        is_priority = (self._is_priority_payload(payload)
+                       or pending_size >= _MAX_PENDING_BYTES
+                       or len(self._pending_payloads.get(key, ())) >= _MAX_PENDING_FRAMES)
         if (is_final or is_priority) and self._pending_payloads.get(key):
             flush_task = self._flush_tasks.pop(key, None)
             if flush_task is not None and not flush_task.done():
@@ -562,6 +577,7 @@ class ConnectionManager:
 
         if not is_final and self._pending_payloads.get(key):
             self._pending_payloads[key].append(payload)
+            self._pending_bytes[key] = pending_size
             if self._min_interval <= 0 or elapsed >= self._min_interval:
                 flush_task = self._flush_tasks.pop(key, None)
                 if flush_task is not None and not flush_task.done():
@@ -577,6 +593,7 @@ class ConnectionManager:
         if not is_final and self._min_interval > 0 and elapsed < self._min_interval:
             # 限流：缓存帧，安排延迟推送
             self._pending_payloads[key].append(payload)
+            self._pending_bytes[key] = pending_size
             if key not in self._flush_tasks:
                 delay = self._min_interval - elapsed
                 self._flush_tasks[key] = asyncio.create_task(
@@ -790,36 +807,30 @@ class ConnectionManager:
                     flush_task.cancel()
                 await self._flush_pending_locked(key, skip_socket=ws)
 
-            sent = False
-            if reason:
-                if self._replay_locks.get(key) is not lock:
-                    return False
-                try:
-                    active_request_id = snapshot_request_id() if snapshot_request_id is not None else None
-                    await self.send_socket(ws, self._resync_frame(
-                        key, epoch, floor, head, reason, active_request_id, repair_id=repair_id,
-                    ))
-                except Exception:  # noqa: BLE001
-                    return False
-                sent = True
-            for seq, payload in sorted(frames.items()):
-                if self._replay_locks.get(key) is not lock:
-                    return False
-                if seq not in live_sequences and filter_fn is not None and not filter_fn(payload):
-                    continue
-                try:
-                    await self.send_socket(ws, payload)
-                except Exception:  # noqa: BLE001
-                    return False
-                sent = True
-
             if self._replay_locks.get(key) is not lock:
                 return False
-            if register_for_live and sent:
-                self._consecutive_failures.pop(key, None)
+            if reason:
+                active_request_id = snapshot_request_id() if snapshot_request_id is not None else None
+                batch = (self._resync_frame(key, epoch, floor, head, reason, active_request_id, repair_id=repair_id),)
+            else:
+                batch = tuple(payload for seq, payload in sorted(frames.items())
+                              if seq in live_sequences or filter_fn is None or filter_fn(payload))
+            receipt = None
+            if batch:
+                receipt = self._delivery.submit(ws, batch, sum(len(_encode_snapshot_part(item)) for item in batch))
+                if receipt.done() and not receipt.result():
+                    return False
             if register_for_live:
                 self.register(session_id, ws, owner_account_id=owner_account_id)
-            return True
+        # The replay reservation precedes live frames in this socket's FIFO. Other subscribers
+        # and producers can advance while this connection waits for the transport.
+        if receipt is not None and not await receipt:
+            return False
+        if self._replay_locks.get(key) is not lock:
+            return False
+        if register_for_live and batch:
+            self._consecutive_failures.pop(key, None)
+        return True
 
     def clear_buffer(self, session_id: str, *, owner_account_id: str) -> None:
         """新一轮请求开始时清空回放缓存，但保持 gateway_sequence 会话级单调递增。
