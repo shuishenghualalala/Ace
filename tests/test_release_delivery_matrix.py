@@ -13,6 +13,55 @@ from crew.agent.skills import core as skills_core
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_member_wheel_cache_compares_packaged_sources_and_removes_stale_assets(tmp_path, monkeypatch):
+    import importlib.metadata
+    import runpy
+    from pathlib import PurePosixPath
+
+    checker = runpy.run_path(str(ROOT / "deb-package" / "sync_workspace_wheels.py"))
+    member = tmp_path / "packages" / "fixture"
+    sources = member / "src" / "crew" / "fixture"
+    sources.mkdir(parents=True)
+    (member / "pyproject.toml").write_text(
+        '[project]\nname="fixture"\n[tool.hatch.build.targets.wheel]\npackages=["src/crew"]\n',
+        encoding="utf-8",
+    )
+    installed = tmp_path / "site-packages"
+    (installed / "crew" / "fixture").mkdir(parents=True)
+    module = PurePosixPath("crew/fixture/worker.py")
+    asset = PurePosixPath("crew/fixture/template.md")
+
+    class InstalledWheel:
+        files = [module, asset, PurePosixPath("fixture.dist-info/METADATA")]
+
+        @staticmethod
+        def locate_file(entry):
+            return installed / entry
+
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda _: InstalledWheel())
+    for relative in (module, asset):
+        (member / "src" / relative).write_bytes(b"v1")
+        (installed / relative).write_bytes(b"v1")
+    assert checker["wheel_matches"](member)
+
+    (member / "src" / module).write_bytes(b"v2")
+    assert not checker["wheel_matches"](member)
+    (installed / module).write_bytes(b"v2")
+    (member / "src" / asset).unlink()
+    assert not checker["wheel_matches"](member)
+
+    InstalledWheel.files.remove(asset)
+    assert checker["wheel_matches"](member)
+    (sources / "new.md").write_bytes(b"new")
+    assert not checker["wheel_matches"](member)
+
+
+def test_warm_packaging_checks_member_wheels_before_staging() -> None:
+    for name, cache_copy in (("pack_exe.ps1", "Copy-Item -Path $pythonCacheDir"), ("pack_mac.sh", 'cp -R "$PY_CACHE"')):
+        script = (ROOT / "deb-package" / name).read_text(encoding="utf-8")
+        assert script.index("sync_workspace_wheels.py") < script.index(cache_copy)
+
+
 def test_optional_catalog_development_path_is_repository_root() -> None:
     assert skills.get_optional_skills_dir() == ROOT / "optional-skills"
 

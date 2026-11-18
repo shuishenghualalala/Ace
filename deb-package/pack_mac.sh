@@ -246,6 +246,9 @@ else
     echo "✓ 内嵌 Python 依赖戳未变，跳过安装"
 fi
 
+# 依赖声明相同也可能发布新版的本地成员源码或资源。
+"$PY_CACHE_BIN" -I "$SCRIPT_DIR/sync_workspace_wheels.py"
+
 # 关键依赖自检：gateway 入口 + 技能高频依赖 + MCP
 "$PY_CACHE_BIN" -c "import fastapi, uvicorn, openai, pandas, markitdown; from mcp.server.mcpserver import MCPServer; print('deps ok')"
 

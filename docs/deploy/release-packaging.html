@@ -29,6 +29,7 @@
   <p>桌面更新器在仅收到版本号时，用当前 Electron 进程的架构选择 macOS 安装包。Intel 构建选择 <code>_x64.dmg</code>，Apple Silicon 原生构建选择 <code>_arm64.dmg</code>。</p>
 
   <h2>打包架构</h2>
+  <p>Windows 与 macOS 可复用内嵌 Python 的第三方依赖缓存。每次复制运行时之前，<code>deb-package/sync_workspace_wheels.py</code> 会按 wheel 的 RECORD 核对本地成员发布的文件名和内容，包括模板与种子资料。只有发生增删或内容变化的成员才交给 pip 原位重装，使用 <code>--no-deps</code> 保留其余依赖。Linux 构建把各成员源码作为 Docker 层输入，源码变化会使该安装层重建。</p>
   <p>安装包内 gateway 以<strong>源码形态</strong>携带（不再是 PyInstaller 二进制）：desktop 主进程用安装包内嵌的 Python 以 <code>python -m crew.gateway.server</code> 直接启动（<code>CREW_PACKAGED=1</code> 标记打包态）。gateway 与技能脚本共用同一个内嵌 Python，消除了原先 PyInstaller 解释器与技能运行时重复携带一套 Python 的体积浪费。</p>
   <table>
     <tr><th>目录</th><th>内容</th></tr>

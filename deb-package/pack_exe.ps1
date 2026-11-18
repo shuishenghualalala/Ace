@@ -275,6 +275,10 @@ if ($needDeps) {
     Write-Host "✓ 内嵌 Python 依赖戳未变，跳过安装" -ForegroundColor Green
 }
 
+# 依赖声明相同也可能发布新版的本地成员源码或资源。
+& $pythonCacheExe -I (Join-Path $PSScriptRoot "sync_workspace_wheels.py")
+if ($LASTEXITCODE -ne 0) { throw "内嵌 Python 的 workspace wheel 校验失败" }
+
 # 关键依赖自检：gateway 入口 + 技能高频依赖 + MCP
 & $pythonCacheExe -c "import fastapi, uvicorn, openai, pandas, markitdown; from mcp.server.mcpserver import MCPServer; print('deps ok')"
 if ($LASTEXITCODE -ne 0) { throw "内嵌 Python 关键依赖自检失败" }
