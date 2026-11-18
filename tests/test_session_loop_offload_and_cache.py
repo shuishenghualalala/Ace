@@ -157,6 +157,9 @@ def test_get_agent_configs_batch_reads_only_requested(tmp_path):
         assert set(out.keys()) == {"s1", "s3"}
         assert out["s1"]["executor"] == "team"
         assert out["s3"]["executor"] == "external"
+        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        ids = ["missing-" + str(index) for index in range(1400)] + ["s1", "s2"]
+        assert set(store.get_agent_configs(ids, OWNER)) == {"s1", "s2"}
         assert store.get_agent_configs([], OWNER) == {}
     finally:
         store.close()

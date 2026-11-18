@@ -38,7 +38,7 @@ export interface SessionHistoryViewOptions {
   refreshSessions(): Promise<void>;
   retrySessions(): Promise<void>;
   retryWorkspaces(): Promise<void>;
-  getLoadErrors(): { sessions: string | null; workspaces: string | null };
+  getLoadErrors(): { sessions: string | null; workspaces: string | null; loadingSessions?: boolean };
   renderStudioHistory?: () => void;
 }
 
@@ -612,17 +612,18 @@ export function createSessionHistoryView(
       + appendSection(fragment, '对话', SECTION_KEYS.conversations, conversations, query)
       + appendSection(fragment, '已归档', SECTION_KEYS.archived, archived, query);
 
+    const errors = options.getLoadErrors();
+    if (errors.sessions) appendFailure(fragment, `会话加载失败：${errors.sessions}`, 'sessions');
     if (visibleCount === 0) {
-      const errors = options.getLoadErrors();
       if (!query && errors.workspaces) appendFailure(fragment, `工作空间加载失败：${errors.workspaces}`, 'workspaces');
-      if (!query && errors.sessions) appendFailure(fragment, `会话加载失败：${errors.sessions}`, 'sessions');
-      if (query || (!errors.sessions && !errors.workspaces)) {
+      if (!errors.sessions && (query || !errors.workspaces)) {
         const empty = document.createElement('div');
         empty.className = 'mw-session-history__empty';
-        empty.dataset.sessionHistoryEmpty = '';
+        if (errors.loadingSessions) empty.setAttribute('role', 'status');
+        else empty.dataset.sessionHistoryEmpty = '';
         empty.append(createIcon('icon-search', { size: 20 }));
         const text = document.createElement('span');
-        text.textContent = query ? '没有找到匹配的会话' : '尚无会话';
+        text.textContent = errors.loadingSessions ? '正在加载会话…' : query ? '没有找到匹配的会话' : '尚无会话';
         empty.append(text);
         fragment.append(empty);
       }

@@ -14,6 +14,7 @@ import {
   createSessionInWorkspace,
   isDraftSession,
   isWorkspaceHidden,
+  loadSessionForNavigation,
   type OpenSessionFn,
 } from './workspaces';
 
@@ -200,6 +201,10 @@ export function bindPrimaryRendererCheckpoint(input: HTMLTextAreaElement): {
     await hydration;
     const saved = current?.pendingNavigation;
     if (!current || binding !== current || !saved) return;
+    if (saved.sessionId && !saved.draftSession && !findChannelSession(saved.sessionId)) {
+      await loadSessionForNavigation(saved.sessionId);
+      if (binding !== current || current.pendingNavigation !== saved) return;
+    }
     delete current.pendingNavigation;
     const accessible = (workspaceId: string): boolean => workspaceId === 'default' ||
       state.workspaces.some((workspace) => workspace.id === workspaceId && !isWorkspaceHidden(workspace));

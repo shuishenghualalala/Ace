@@ -56,6 +56,7 @@
   </ul>
 
   <h2>2. 功能拆解</h2>
+  <p>桌面首屏先请求当前工作空间最多 32 条未归档会话，同时读取工作空间、配置与渠道。<code>/api/sessions</code> 的 <code>sidebar_status=true</code> 把状态附在会话摘要中。窗口可以在其余分页读完前使用首批会话，恢复旧检查点时按 <code>session_id</code> 读取一个归属本账号的摘要。完整目录随后按每页 256 条拉取，供跨工作空间搜索、归档和管理使用。新一次刷新会取消前一次，切换账号会丢弃旧请求的结果。向旧 Gateway 请求时也兼容未分页的数组响应。</p>
   <p><code>GET /api/sessions/status</code> 为桌面侧栏恢复状态点。Gateway 一次读取本账号可见会话及其最近终态，再以调度器内存中的运行和排队状态为准。后台失败的会话显示错误。桌面将整份快照合并为一次状态更新，保留正在处理的本地流和后台完成的未读标记。侧栏只刷新已挂载的对应行。</p>
   <p>WebSocket 回放日志为每个账号和会话保存连续的序列后缀。每个会话最多保存 2,000 帧、2 MiB 编码内容，全部会话合计最多 16 MiB，最多保留 128 个窗口。较旧窗口按最近写入顺序淘汰。单帧超过会话限额时清除旧前缀，序列水位继续递增；带游标的客户端落在保留范围外会收到 <code>gateway_resync</code>，仍位于范围内则只重放缺失的后缀。活跃回合快照与回放共用同一份不可变帧字节。</p>
 
@@ -156,6 +157,7 @@ loop_lag_ms                         业务循环滞后毫秒：哨兵 task 每�
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-18</td><td>增加会话目录的游标分页、按 ID 恢复和活动工作空间首屏读取。</td><td>会话列表、检查点与桌面首屏。</td></tr>
       <tr><td>2026-11-18</td><td>会话状态批量恢复，合并磁盘终态及实时调度状态。</td><td>桌面侧栏启动与重连。</td></tr>
       <tr><td>2026-11-18</td><td>托管 Gateway 按实时字节数轮转启动日志，共用有界队列并在退出时排空。</td><td>桌面端 Gateway 生命周期、故障诊断与交接。</td></tr>
       <tr><td>2026-09-09</td><td>阶段 4D-1：渠道代码迁入 <code>crew/channels/</code> 包（channel_manager / delivery / platform_registry / channel_sessions / channel_config / channel_presets / broadcast），<code>product.channels</code> Feature Generation 统一拥有 Manager/Router/平台注册/<code>new_conversation</code> 工具并发布 <code>channels</code> Service；Channel ABC 扩展显式生命周期契约；Lifespan 与 LogoutCoordinator 改经 Service 同代 Lease 启停；<code>crew.channel_manager</code>/<code>delivery_router</code> 改动态 compat 属性，Feature 非激活 fail-closed（ADR-0030）。</td><td>渠道装配与启停主权；gateway 不再手工构造渠道运行时</td></tr>

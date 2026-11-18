@@ -6,11 +6,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from crew.agent.capabilities import canonicalize_capability_config
@@ -416,21 +417,44 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         request: Request,
         workspace_id: str | None = None,
         include_archived: bool = False,
+        limit: int | None = Query(None, ge=1, le=256),
+        before: str | None = Query(None, max_length=8192),
+        session_id: str | None = None,
+        sidebar_status: bool = False,
     ) -> JSONResponse:
         owner = account_from_request(request).owner_account_id
+        page: dict[str, Any] = {}
+        if limit is not None:
+            page["limit"] = limit
+        if session_id is not None:
+            page["session_id"] = session_id
+        if before is not None:
+            try:
+                pin, timestamp, sid = json.loads(before)
+                if (type(pin) is not int or pin not in (0, 1) or type(timestamp) not in (int, float)
+                        or not math.isfinite(timestamp) or not isinstance(sid, str) or not sid or limit is None):
+                    raise ValueError
+                page["before"] = (pin, timestamp, sid)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise HTTPException(422, "Invalid sessions cursor") from exc
         items = with_session_agent_labels(
             crew,
             crew.session_store.list_sessions(
-                workspace_id,
+                workspace_id=workspace_id,
                 owner_account_id=owner,
                 include_archived=include_archived,
+                **page,
             ),
             owner_account_id=owner,
         )
+        if sidebar_status:
+            for item in items:
+                item["sidebar_status"] = sidebar_session_status(item, owner)
         # D4 断点报告：开放回合（上次会话在第 N 步被中断）随列表下发，不自动续跑
         scan = getattr(crew.session_store, "scan_breakpoints", None)
         if callable(scan):
-            breakpoints = {b["session_id"]: b for b in scan(owner)}
+            scope = {"session_ids": [item["session_id"] for item in items]} if page else {}
+            breakpoints = {b["session_id"]: b for b in scan(owner, **scope)}
             for item in items:
                 bp = breakpoints.get(item.get("session_id"))
                 if bp:
@@ -1758,12 +1782,14 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         live=running/queued 直接映射；live=idle 时若上轮失败则 error，否则 idle。
         """
         owner = _owner(request)
-        result: dict[str, str] = {}
-        for s in crew.session_store.list_sessions(owner_account_id=owner):
-            sid = s["session_id"]
-            live = dispatcher.live_status(sid, owner_account_id=owner)
-            result[sid] = "error" if live == "idle" and s["last_status"] == "failed" else live
-        return JSONResponse(result)
+        return JSONResponse({
+            row["session_id"]: sidebar_session_status(row, owner)
+            for row in crew.session_store.list_sessions(owner_account_id=owner)
+        })
+
+    def sidebar_session_status(row: dict, owner: str) -> str:
+        live = dispatcher.live_status(row["session_id"], owner_account_id=owner)
+        return "error" if live == "idle" and row["last_status"] == "failed" else live
 
     @router.get("/api/usage")
     def usage(request: Request) -> JSONResponse:

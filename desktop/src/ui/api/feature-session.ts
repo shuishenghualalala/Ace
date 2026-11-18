@@ -1,5 +1,7 @@
 import type { SettledTurnOutcome, TurnOutcome } from '../turn-outcome';
 import type { SessionStatus } from '../chat-render';
+import { authStore } from '../stores/auth-store';
+import { interactiveOwnerKey } from '../features/interactive-owner';
 /**
  * 会话/Agent 客户端：会话生命周期、Agent 配置、外部 Agent/Team、运行时、
  * 浏览器、Cron、Task、Dynamic Kanban、追问，以及 BackendChatSocket。
@@ -42,6 +44,7 @@ export interface SessionAgentBinding {
 }
 
 export interface BackendSession {
+  sidebar_status?: SessionStatus;
   session_id: string;
   title: string;
   message_count: number;
@@ -1300,12 +1303,38 @@ export const sessionApi = {
       }),
     }),
 
-  sessions: (workspaceId?: string, opts?: { includeArchived?: boolean }) => {
+  sessions: async (workspaceId?: string, opts?: {
+    includeArchived?: boolean; limit?: number; sessionId?: string; sidebarStatus?: boolean; signal?: AbortSignal;
+  }): Promise<BackendSession[]> => {
     const params = new URLSearchParams();
     if (workspaceId) params.set('workspace_id', workspaceId);
     if (opts?.includeArchived) params.set('include_archived', 'true');
-    const q = params.toString();
-    return getJSON<BackendSession[]>(`/api/sessions${q ? `?${q}` : ''}`);
+    if (opts?.sidebarStatus) params.set('sidebar_status', 'true');
+    if (opts?.sessionId) params.set('session_id', opts.sessionId);
+    const limit = opts?.limit ?? 256;
+    params.set('limit', String(limit));
+    const records = new Map<string, BackendSession>();
+    const owner = interactiveOwnerKey();
+    let changedOwner = false;
+    const release = authStore.subscribe(() => { changedOwner ||= interactiveOwnerKey() !== owner; });
+    try {
+      while (true) {
+        const page = await getJSON<BackendSession[]>(`/api/sessions?${params}`, opts?.signal ? { signal: opts.signal } : undefined);
+        if (changedOwner) throw new DOMException('Session list owner changed', 'AbortError');
+        if (opts?.sessionId) return page.filter(row => row.session_id === opts.sessionId);
+        if (opts?.limit) return page.slice(0, limit);
+        for (const row of page) records.set(row.session_id, row);
+        if (page.length !== limit) break;
+        const last = page[page.length - 1]!;
+        const cursor = JSON.stringify([Number(Boolean(last.pinned)), last.updated_at, last.session_id]);
+        // An older Gateway may ignore pagination and return its complete inventory.
+        if (params.get('before') === cursor) break;
+        params.set('before', cursor);
+      }
+      return [...records.values()];
+    } finally {
+      release();
+    }
   },
   ensureSession: (id: string, payload: { workspace_id: string; title?: string }) =>
     getJSON<{ ok: boolean; session_id: string }>(`/api/session/${encodeURIComponent(id)}/ensure`, {

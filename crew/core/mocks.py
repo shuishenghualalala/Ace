@@ -206,10 +206,13 @@ class InMemorySessionStore(SessionStore):
         *,
         include_archived: bool = False,
         exclude_channel_sessions: bool = True,
+        limit: int | None = None,
+        before: tuple[int, float, str] | None = None,
+        session_id: str | None = None,
     ) -> list[dict]:
         out: list[dict] = []
         for (owner, sid), msgs in self._data.items():
-            if owner != owner_account_id:
+            if owner != owner_account_id or (session_id is not None and sid != session_id):
                 continue
             if "::" in sid:  # 排除 Team 内部子会话
                 continue
@@ -243,8 +246,13 @@ class InMemorySessionStore(SessionStore):
                 }
             )
         # 置顶优先，再按更新时间倒序（内存 store updated_at 恒为 0，稳定排序）
-        out.sort(key=lambda r: (not r["pinned"], -r["updated_at"]))
-        return out
+        def order(row: dict) -> tuple[int, float, str]:
+            return int(row["pinned"]), row["updated_at"], row["session_id"]
+
+        out.sort(key=order, reverse=True)
+        if before is not None:
+            out = [row for row in out if order(row) < before]
+        return out[:limit]
 
     def get_status(self, session_id: str, owner_account_id: str) -> tuple[str, str]:
         """测试辅助：取 (last_status, last_error)。"""

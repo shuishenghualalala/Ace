@@ -480,6 +480,9 @@ class SessionStore(ABC):
         *,
         owner_account_id: str,
         include_archived: bool = False,
+        limit: int | None = None,
+        before: tuple[int, float, str] | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出会话摘要：[{session_id, title, message_count, updated_at, workspace_id, archived, pinned}]。
         默认按 pinned DESC, updated_at DESC 排序（置顶优先）。

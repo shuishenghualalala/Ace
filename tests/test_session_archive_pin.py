@@ -110,6 +110,34 @@ def test_inmemory_archive_and_pin_match_sqlite_semantics():
 
 
 @pytest.mark.asyncio
+async def test_sessions_keyset_pages_keep_ties_owners_archives_and_exact_resume(tmp_path, auth_headers):
+    import json
+
+    crew = build_app(config=Config(db_path=str(tmp_path / "pages.db"), cron_enabled=False), enable_team=False)
+    store = crew.session_store
+    for sid in ["a", "b", "c", "d", "z"]:
+        store.ensure_session(sid, workspace_id="project", owner_account_id=OWNER_A)
+    store.ensure_session("other-project", workspace_id="default", owner_account_id=OWNER_A)
+    store.ensure_session("other-owner", workspace_id="project", owner_account_id=OWNER_B)
+    store.set_pinned("a", True, owner_account_id=OWNER_A)
+    store.set_archived("z", True, owner_account_id=OWNER_A)
+    with store._conn:
+        store._conn.execute("UPDATE sessions SET updated_at=123.5")
+    async with AsyncClient(transport=ASGITransport(app=create_app(crew)), base_url="http://test", headers=auth_headers) as client:
+        params = {"workspace_id": "project", "limit": 2}
+        first = (await client.get("/api/sessions", params=params)).json()
+        assert [s["session_id"] for s in first] == ["a", "d"]
+        after = json.dumps([0, 123.5, "d"])
+        second = (await client.get("/api/sessions", params={**params, "before": after})).json()
+        assert [s["session_id"] for s in second] == ["c", "b"]
+        for sid, expected in [("z", ["z"]), ("other-owner", []), ("other-project", [])]:
+            rows = (await client.get("/api/sessions", params={**params, "include_archived": True, "session_id": sid})).json()
+            assert [s["session_id"] for s in rows] == expected
+        assert (await client.get("/api/sessions", params={**params, "before": "invalid"})).status_code == 422
+        assert (await client.get("/api/sessions", params={"limit": 10000})).status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_gateway_archive_and_pin_endpoints(tmp_path, auth_headers, monkeypatch):
     crew = build_app(config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False), enable_team=False)
     crew.session_store.save("s-a", [Message.user("hello A")], owner_account_id=OWNER_A)

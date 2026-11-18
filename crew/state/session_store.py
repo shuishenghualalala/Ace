@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -594,6 +595,8 @@ class SQLiteSessionStore(SessionStore):
         stamp_baseline(conn, SESSIONS_SCHEMA_FEATURE, version=SESSIONS_SCHEMA_VERSION)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_updated ON sessions(owner_account_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_workspace ON sessions(owner_account_id, workspace_id, updated_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_list ON sessions(owner_account_id, pinned DESC, updated_at DESC, session_id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_workspace_sessions_list ON sessions(owner_account_id, workspace_id, pinned DESC, updated_at DESC, session_id DESC)")
         # fork 子会话枚举（list_branches）按 (owner, source_session_id) 等值查询
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(owner_account_id, source_session_id)")
         # 存储级 KV 标记（当前仅 legacy 回填完成标记，P1-4）
@@ -2327,7 +2330,7 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         return str(row[0]) if row is not None else None
 
-    def scan_breakpoints(self, owner_account_id: str) -> list[dict[str, Any]]:
+    def scan_breakpoints(self, owner_account_id: str, *, session_ids: list[str] | None = None) -> list[dict[str, Any]]:
         """扫描各会话开放回合（turn_start 无 turn_end），产出断点报告（D4）。
 
         「上次会话在第 N 步被中断」：N = 开放回合内已落盘的消息事件数。
@@ -2340,13 +2343,19 @@ class SQLiteSessionStore(SessionStore):
         role_types = tuple(e.value for e in _ROLE_EVENT_TYPES.values())
         marks = ",".join("?" for _ in role_types)
         reports: list[dict[str, Any]] = []
+        query = (
+            "SELECT session_id, title, leaf_seq FROM sessions "
+            "WHERE owner_account_id = ? AND session_id NOT LIKE '%::%' AND leaf_seq > 0 "
+            "AND last_status IN ('', 'running')"
+        )
+        params = [owner_account_id]
+        if session_ids is not None:
+            if not session_ids:
+                return []
+            query += " AND session_id IN (" + ",".join("?" for _ in session_ids) + ")"
+            params.extend(session_ids)
         with self._lock:
-            sessions = self._conn.execute(
-                "SELECT session_id, title, leaf_seq FROM sessions "
-                "WHERE owner_account_id = ? AND session_id NOT LIKE '%::%' AND leaf_seq > 0 "
-                "AND last_status IN ('', 'running')",
-                (owner_account_id,),
-            ).fetchall()
+            sessions = self._conn.execute(query, params).fetchall()
         for sid, title, leaf in sessions:
             sid = str(sid)
             leaf = int(leaf)
@@ -2823,6 +2832,9 @@ class SQLiteSessionStore(SessionStore):
         owner_account_id: str,
         include_archived: bool = False,
         exclude_channel_sessions: bool = True,
+        limit: int | None = None,
+        before: tuple[int, float, str] | None = None,
+        session_id: str | None = None,
     ) -> list[dict]:
         # 排除内部子会话（Team 的 leader/teammate，id 含 "::"）
         # 直接取存储的元数据列，无需反序列化 messages（title/message_count 在 save 时写好）
@@ -2838,8 +2850,16 @@ class SQLiteSessionStore(SessionStore):
         if workspace_id is not None:
             sql += " AND workspace_id = ?"
             params.append(workspace_id)
-        # 置顶优先，再按更新时间倒序
-        sql += " ORDER BY pinned DESC, updated_at DESC"
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if before is not None:
+            sql += " AND (pinned, updated_at, session_id) < (?, ?, ?)"
+            params.extend(before)
+        sql += " ORDER BY pinned DESC, updated_at DESC, session_id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
         with self._lock:
             rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [
@@ -3024,20 +3044,24 @@ class SQLiteSessionStore(SessionStore):
     def get_agent_configs(
         self, session_ids: list[str], owner_account_id: str
     ) -> dict[str, dict[str, Any]]:
-        """批量读取会话 agent 配置：列表页 N+1 治理，一次 IN 查询替代逐会话查询。
+        """批量读取会话 agent 配置，兼容旧客户端的大列表和 SQLite 绑定参数上限。
 
         返回 {session_id: config}；无配置行的会话不在结果里（调用方按 None 语义处理）。
         """
         sids = [str(sid) for sid in dict.fromkeys(session_ids) if sid]
         if not sids:
             return {}
-        marks = ",".join("?" for _ in sids)
         with self._lock:
-            rows = self._conn.execute(
-                f"SELECT session_id, config_json, created_at, updated_at "
-                f"FROM session_agent_config WHERE owner_account_id = ? AND session_id IN ({marks})",
-                (owner_account_id, *sids),
-            ).fetchall()
+            batch_size = min(512, self._conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - 1)
+            rows = []
+            for start in range(0, len(sids), batch_size):
+                batch = sids[start:start + batch_size]
+                marks = ",".join("?" for _ in batch)
+                rows.extend(self._conn.execute(
+                    "SELECT session_id, config_json, created_at, updated_at "
+                    f"FROM session_agent_config WHERE owner_account_id = ? AND session_id IN ({marks})",
+                    (owner_account_id, *batch),
+                ))
         out: dict[str, dict[str, Any]] = {}
         for sid, config_json, created_at, updated_at in rows:
             try:

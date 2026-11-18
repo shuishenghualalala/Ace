@@ -20,7 +20,7 @@ import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './board-hooks';
 import { refreshCronJobs } from './cron-page';
 import { findChannelSession, loadChannelSessions } from './channel-sessions';
-import { discardDraft, getHistoryLoadError, loadWorkspaces, loadSessionsList, refreshSidebarAfterHydrate } from './workspaces';
+import { discardDraft, getHistoryLoadError, loadWorkspaces, startSessionList, refreshSidebarAfterHydrate } from './workspaces';
 import { loadConfig } from './model-picker';
 import { externalAgentsEnabled, isExternalAgentOrTeamSession } from './external-agents-feature';
 import { resetToAgentMode } from './session-mode';
@@ -1150,19 +1150,10 @@ export function bindBackendAuth(): () => void {
 
 export async function hydrateBackendState(): Promise<void> {
   if (!isRendererLoggedIn() || !canSendToBackend()) return;
-  // 各路后端加载相互隔离：任一路失败不阻断其余，也不再让 sessions 挂掉连累 workspaces。
-  // loadSessionsList / loadWorkspaces 内部已自带 try-catch + 错误态（区分「加载失败 vs 真空」），
-  // 这里只对没有内部容错的 loadConfig/loadChannelSessions 包一层。
-  const sessions = await loadSessionsList();
-  // loadSessionsList 内部已调 syncSessionsFromBackend（含 mergeSessionModelsFromBackend），
-  // 这里不再重复同步；sessions 仅用于判断是否拿到数据。
-  const statuses = await backendApi.sessionsStatus().catch(() => ({}));
-  if (sessions.length) {
-    // sessions 已同步进 state；保留判断分支以兼容空数据态。
-  }
-  seedStatuses(statuses);
-  await loadWorkspaces();
-  await loadConfig().catch((err) => notify(`加载模型配置失败：${(err as Error).message}`));
+  const owner = interactiveOwnerKey();
+  const list = startSessionList();
+  await Promise.all([list.preview, loadWorkspaces(), loadConfig(), loadChannelSessions()]);
+  if (owner !== interactiveOwnerKey() || !isRendererLoggedIn()) return;
   const activeSession = state.activeSessionId
     ? state.sessions.find((session) => session.id === state.activeSessionId)
     : undefined;
@@ -1172,11 +1163,15 @@ export async function hydrateBackendState(): Promise<void> {
     resetToAgentMode();
     renderChat();
   }
-  await loadChannelSessions().catch((err) => notify(`加载渠道会话失败：${(err as Error).message}`));
   const { sessions: sessionLoadError, workspaces: workspaceLoadError } = getHistoryLoadError();
   if (!sessionLoadError && !workspaceLoadError) await restoreRendererCheckpointNavigation(openSession);
   updateGatewayDot();
   refreshSidebarAfterHydrate(openSession);
+  const sessions = await list.complete;
+  if (owner === interactiveOwnerKey() && sessions.length && !sessions[0]?.sidebar_status) {
+    const statuses = await backendApi.sessionsStatus().catch(() => ({}));
+    if (owner === interactiveOwnerKey() && isRendererLoggedIn()) seedStatuses(statuses);
+  }
 }
 
 export async function ensureDesktopGateway(): Promise<void> {

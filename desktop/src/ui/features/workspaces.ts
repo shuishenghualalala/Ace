@@ -43,6 +43,8 @@ import { sessionStatusClass } from '../chat-render';
 
 import type { SessionStatus } from '../chat-render';
 import { sessionStore } from '../stores/session-store';
+import { authStore } from '../stores/stores';
+import { batchStoreUpdates } from '../reducers/store-bus';
 
 /** 历史拉取失败状态（不写到 store，避免破坏现有 Proxy 消费者）。
  *  原实现把 catch 静默吞掉写 `state.workspaces = []`，导致「加载失败」和「真空」
@@ -53,8 +55,10 @@ const historyLoadError: { workspaces: string | null; sessions: string | null } =
   workspaces: null,
   sessions: null,
 };
-export function getHistoryLoadError(): { workspaces: string | null; sessions: string | null } {
-  return historyLoadError;
+let sessionListRequest: AbortController | undefined;
+
+export function getHistoryLoadError(): { workspaces: string | null; sessions: string | null; loadingSessions: boolean } {
+  return { ...historyLoadError, loadingSessions: Boolean(sessionListRequest) };
 }
 export function clearHistoryLoadError(kind: 'workspaces' | 'sessions' | 'all' = 'all'): void {
   if (kind === 'all') {
@@ -74,6 +78,7 @@ import {
   escapeHtml,
 
   isBusySession,
+  mergeSessionStatuses,
 
   newSessionId,
 
@@ -211,7 +216,12 @@ export function isPlaceholderSessionTitle(title: string): boolean {
 
 
 export function syncSessionsFromBackend(rows: BackendSession[]): void {
+  sessionListRequest?.abort();
+  sessionListRequest = undefined;
+  applySessionRows(rows);
+}
 
+function applySessionRows(rows: BackendSession[]): void {
   state.backendSessions = rows;
   mergeSessionModelsFromBackend(rows);
 
@@ -818,14 +828,23 @@ export async function deleteWorkspaceById(id: string, openSession: OpenSessionFn
 
   const ws = state.workspaces.find((w) => w.id === id);
   const owner = interactiveOwnerKey();
-
-  const sessionCount = state.sessions.filter((s) => s.workspaceId === id).length;
+  const ids = new Set(state.sessions.filter((s) => s.workspaceId === id).map((s) => s.id));
+  if (sessionListRequest || historyLoadError.sessions) {
+    try {
+      const members = await backendApi.sessions(id, { includeArchived: true });
+      if (owner !== interactiveOwnerKey()) return;
+      for (const member of members) ids.add(member.session_id);
+    } catch {
+      notify('暂时无法读取此工作空间的会话，请重试。');
+      return;
+    }
+  }
 
   const confirmed = await showConfirmDialog({
 
     title: '删除工作空间',
 
-    message: `确认删除「${ws?.name || id}」？其下 ${sessionCount} 条对话将一并删除且无法恢复。`,
+    message: `确认删除「${ws?.name || id}」？其下 ${ids.size} 条对话将一并删除且无法恢复。`,
 
     confirmText: '删除',
 
@@ -835,7 +854,7 @@ export async function deleteWorkspaceById(id: string, openSession: OpenSessionFn
 
   if (!confirmed || interactiveOwnerKey() !== owner) return;
 
-  const ids = new Set(state.sessions.filter((s) => s.workspaceId === id).map((s) => s.id));
+  for (const row of state.sessions) if (row.workspaceId === id) ids.add(row.id);
   await Promise.all(Array.from(ids, (sessionId) => chatOutbox.withdraw(sessionId)));
   if (interactiveOwnerKey() !== owner) return;
   await backendApi.deleteWorkspace(id);
@@ -1116,24 +1135,66 @@ export async function loadWorkspaces(): Promise<void> {
 
 }
 
-/** 与 loadWorkspaces 同构：会话列表的「加载失败 vs 真空」区分。
- *  现有调用方在 [session-controller.ts:400](Ace/desktop/src/ui/features/session-controller.ts#L400)（Promise.all 里），
- *  这里提供一个同款 try-catch 包装让调用方用，不重写主调用链。 */
-export async function loadSessionsList(): Promise<BackendSession[]> {
-  if (!isRendererLoggedIn()) return [];
+export function startSessionList(): { preview: Promise<void>; complete: Promise<BackendSession[]> } {
+  if (!isRendererLoggedIn()) return { preview: Promise.resolve(), complete: Promise.resolve([]) };
+  sessionListRequest?.abort();
+  const request = new AbortController();
+  const owner = interactiveOwnerKey();
+  const unsubscribe = authStore.subscribe(() => {
+    if (owner !== interactiveOwnerKey() || !isRendererLoggedIn()) request.abort();
+  });
+  sessionListRequest = request;
   historyLoadError.sessions = null;
-  try {
-    const list = await backendApi.sessions(undefined, { includeArchived: true });
-    // syncSessionsFromBackend 是 BackendSession→SessionRow 的正规转换器
-    // （顺带 mergeSessionModelsFromBackend + 写 state.backendSessions），
-    // 不能裸 state.sessions = list（类型是 SessionRow[]，且会丢字段映射）。
-    syncSessionsFromBackend(list);
-    return list;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    historyLoadError.sessions = msg;
-    notify(`加载会话失败：${msg}`);
-    return [];
+  function publish(rows: BackendSession[]): void {
+    if (request.signal.aborted) return;
+    batchStoreUpdates(() => {
+      const statuses: Record<string, SessionStatus> = Object.create(null);
+      for (const row of rows) if (row.sidebar_status) statuses[row.session_id] = row.sidebar_status;
+      mergeSessionStatuses(statuses, true);
+      applySessionRows(rows);
+    });
+  }
+  const options = { sidebarStatus: true, signal: request.signal };
+  const preview = (async () => {
+    if (!state.sessions.length) {
+      publish(await backendApi.sessions(state.currentWorkspaceId || 'default', { ...options, limit: 32 }));
+    }
+  })().catch(() => {});  // A complete refresh can still recover a failed preview.
+  const complete = preview.then(async () => {
+    try {
+      if (request.signal.aborted) return [];
+      const rows = await backendApi.sessions(undefined, { ...options, includeArchived: true });
+      publish(rows);
+      return request.signal.aborted ? [] : rows;
+    } catch (error) {
+      if (!request.signal.aborted) {
+        historyLoadError.sessions = error instanceof Error ? error.message : String(error);
+        notify(`加载会话失败：${historyLoadError.sessions}`);
+      }
+      return [];
+    } finally {
+      unsubscribe();
+      if (sessionListRequest === request) {
+        sessionListRequest = undefined;
+        renderSessionHistory();
+      }
+    }
+  });
+  return { preview, complete };
+}
+
+export function loadSessionsList(): Promise<BackendSession[]> {
+  return startSessionList().complete;
+}
+
+export async function loadSessionForNavigation(id: string): Promise<void> {
+  const request = sessionListRequest;
+  if (!request || state.sessions.some(row => row.id === id)) return;
+  const [row] = await backendApi.sessions(undefined, {
+    sessionId: id, includeArchived: true, limit: 1, sidebarStatus: true, signal: request.signal,
+  });
+  if (row && !request.signal.aborted && sessionListRequest === request && !state.sessions.some(item => item.id === id)) {
+    applySessionRows([...state.backendSessions, row]);
   }
 }
 

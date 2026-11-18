@@ -11,7 +11,7 @@
  * - backendApi.archiveSession / pinSession 调用正确端点与 payload
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __resetAllStoresForTest, sessionStore } from '../../src/ui/stores/stores';
+import { __resetAllStoresForTest, authStore, sessionStore } from '../../src/ui/stores/stores';
 import type { SessionRow } from '../../src/ui/state';
 import { renderWorkspaceHistory, syncSessionsFromBackend } from '../../src/ui/features/workspaces';
 import { backendApi } from '../../src/ui/backend-client';
@@ -233,5 +233,32 @@ describe('backendApi.archiveSession / pinSession', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  it('handles older Gateways that ignore the page size and cursor', async () => {
+    const rows = Array.from({ length: 256 }, (_, i) => backendRow(`legacy-${i}`));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json(rows));
+    try {
+      expect(await backendApi.sessions(undefined, { limit: 32 })).toHaveLength(32);
+      expect(await backendApi.sessions(undefined, { limit: 1, sessionId: 'legacy-255' })).toEqual([rows[255]]);
+      expect(await backendApi.sessions()).toEqual(rows);
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
+    } finally { fetchSpy.mockRestore(); }
+  });
+
+  it('discards pages when an intervening login changes their owner', async () => {
+    authStore.set({ isLoggedIn: true, userInfo: { staffCode: 'owner-a' } });
+    const rows = Array.from({ length: 256 }, (_, i) => backendRow(`old-${i}`));
+    let release!: (response: Response) => void;
+    const nextPage = new Promise<Response>(resolve => { release = resolve; });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(Response.json(rows)).mockReturnValueOnce(nextPage);
+    try {
+      const inventory = backendApi.sessions();
+      await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+      authStore.set({ isLoggedIn: true, userInfo: { staffCode: 'owner-b' } });
+      authStore.set({ isLoggedIn: true, userInfo: { staffCode: 'owner-a' } });
+      release(Response.json([backendRow('foreign')]));
+      await expect(inventory).rejects.toMatchObject({ name: 'AbortError' });
+    } finally { fetchSpy.mockRestore(); }
   });
 });
