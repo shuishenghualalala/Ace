@@ -311,6 +311,16 @@ class Message:
         return Message(role="assistant", content=content, tool_calls=tool_calls or [], model=model)
 
     @staticmethod
+    def tool_image(tool_call_id: str, tool_name: str, data_url: str, alt: str, detail: str) -> "Message":
+        text = alt or f"{tool_name} 生成的视觉输入"
+        return Message(
+            role="user", content=text, is_meta=True,
+            content_parts=[{"type": "text", "text": text},
+                           {"type": "image_url", "image_url": {"url": data_url, "detail": detail}}],
+            attachment_type="tool_media", attachment_data={"tool_call_id": tool_call_id, "tool_name": tool_name},
+        )
+
+    @staticmethod
     def tool(tool_call_id: str, content: str, name: str | None = None) -> "Message":
         return Message(role="tool", content=content, tool_call_id=tool_call_id, name=name)
 
@@ -393,6 +403,9 @@ class ToolResult:
     retry_delay: float | None = None
     side_effect_state: Literal["none", "unknown", "committed"] = "none"
     details: dict[str, Any] = field(default_factory=dict)
+
+    # Digest for the managed Stage-6 file, kept inside the model checkpoint.
+    result_file_digest: str = ""
 
     def protocol_metadata(self) -> dict[str, Any]:
         """返回不含正文的稳定工具错误/执行元数据。"""

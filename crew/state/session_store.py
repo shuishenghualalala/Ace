@@ -1528,6 +1528,7 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens: int | None,
         last_prompt_tokens_source: str | None,
         expected_cursor: tuple[int, int] | None = None,
+        branch_from: tuple[int, int] | None = None,
     ) -> Callable[[Any], tuple[int, int]]:
         now = time.time()
         # title_fallback=None 保持旧行为（首条 user 消息截断），兼容未传该参数的调用方；
@@ -1545,6 +1546,8 @@ class SQLiteSessionStore(SessionStore):
         prefix = len(proj.messages)
         is_append = not proj.from_blob and messages[:prefix] == proj.messages
         tail = messages[prefix:] if is_append else messages
+        if branch_from is not None:
+            tail = messages[branch_from[1]:]
         retained_outcome = None if is_append else next(
             (message.turn_outcome for message in reversed(messages) if message.turn_outcome), None,
         )
@@ -1590,6 +1593,8 @@ class SQLiteSessionStore(SessionStore):
                 # 链锚 = 当前 leaf：rewind 之后的新事件挂在回退点上形成新分支，
                 # seq 取 MAX+1 保证旧分支行（seq > leaf）不被覆盖。
                 parent: int | None = current_leaf or None
+            elif branch_from is not None:
+                seq, parent = base + 1, branch_from[0]
             else:
                 conn.execute(
                     "DELETE FROM session_events WHERE owner_account_id = ? AND session_id = ?",
@@ -2240,6 +2245,76 @@ class SQLiteSessionStore(SessionStore):
             payload=payload,
         )
 
+    def recover_interrupted_tool_checkpoints(self) -> int:
+        """Publish the last dead writer's tool checkpoints before accepting another turn."""
+        with self._lock:
+            candidates = self._conn.execute("""
+                SELECT s.owner_account_id, s.session_id, s.leaf_seq, s.events_generation,
+                       s.workspace_id, lease.owner_pid
+                FROM sessions AS s LEFT JOIN writer_leases AS lease
+                  ON lease.owner_account_id=s.owner_account_id AND lease.session_id=s.session_id
+                WHERE s.last_status IN ('running','') AND s.leaf_seq>0 AND EXISTS (
+                    SELECT 1 FROM session_events AS e
+                    WHERE e.owner_account_id=s.owner_account_id AND e.session_id=s.session_id
+                    AND e.type IN ('assistant_tool_calls','tool_execution_intent','tool_result_commit')
+                )
+            """).fetchall()
+        recovered = 0
+        for owner, sid, leaf, generation, workspace, holder in candidates:
+            if holder and _lease_holder_pid_alive(holder):
+                continue
+            try:
+                recovered += self._recover_session_tools(owner, sid, leaf, generation, workspace)
+            except SessionWriteConflict:
+                continue
+            except (SessionEventLogError, ValueError, KeyError, TypeError, AttributeError):
+                log.exception("工具检查点无法恢复 session=%s", sid)
+        return recovered
+
+    def _recover_session_tools(self, owner: str, sid: str, leaf: int, generation: int, workspace: str) -> bool:
+        from crew.state.tool_checkpoints import merge_tool_messages, recover_tool_messages
+
+        history = self.load(sid, owner_account_id=owner)
+        user = next((m for m in reversed(history) if m.role == "user" and not m.is_meta and m.request_id), None)
+        if user is None or not user.request_id:
+            return False
+        rows = self._resolve_chain(owner, sid, leaf)
+        additions, uncertain = recover_tool_messages(rows, sid, user.request_id)
+        if not additions:
+            return False
+        content = "上次回合在工具执行后中断。请核对未确认的工具结果。" if uncertain else "上次回合中断，已恢复工具记录。"
+        outcome = {"status": "partial", "reason": "interrupted", "message": content,
+                   "code": "tool_outcome_unknown" if uncertain else "tool_checkpoints_recovered"}
+        merged = merge_tool_messages(history, user, additions)
+        branch_from = None
+        if merged[:len(history)] != history:
+            # Keep source rows and fork anchors when a partially published block needs reordering.
+            prefix = next(i for i, message in enumerate(history) if message is user) + 1
+            anchor = role_count = 0
+            for source, seq, kind, _ in rows:
+                if kind in _ROLE_EVENT_TYPES.values():
+                    if role_count == prefix:
+                        break
+                    role_count += 1
+                if source == sid:
+                    anchor = seq
+            branch_from = (anchor, prefix)
+        save = self._save_write(
+            sid, merged, workspace, owner_account_id=owner, title_fallback=None, branch_from=branch_from,
+            last_prompt_tokens=None, last_prompt_tokens_source=None, expected_cursor=(leaf, generation),
+        )
+        finish = self._turn_outcome_write(
+            sid, user.request_id, outcome, owner_account_id=owner, last_status="stopped", error=content,
+        )
+
+        def publish(conn):
+            save(conn)
+            finish(conn)
+
+        self._writer.execute(publish)
+        self._projections.pop((owner, sid), None)
+        return True
+
     def reconcile_open_tool_events(
         self,
         session_id: str,
@@ -2593,6 +2668,22 @@ class SQLiteSessionStore(SessionStore):
         settle_receipt: Callable[[Any], None] | None = None,
     ) -> None:
         """Commit the transcript marker and last-turn summary in the same write."""
+        self._writer.execute(self._turn_outcome_write(
+            session_id, request_id, outcome, owner_account_id=owner_account_id,
+            last_status=last_status, error=error, settle_receipt=settle_receipt,
+        ))
+
+    def _turn_outcome_write(
+        self,
+        session_id: str,
+        request_id: str,
+        outcome: dict[str, Any],
+        *,
+        owner_account_id: str,
+        last_status: str,
+        error: str = "",
+        settle_receipt: Callable[[Any], None] | None = None,
+    ) -> Callable[[Any], None]:
         now = time.time()
         encoded = json.dumps({**outcome, "request_id": request_id, "timestamp": now}, ensure_ascii=False)
 
@@ -2634,7 +2725,7 @@ class SQLiteSessionStore(SessionStore):
             if settle_receipt is not None:
                 settle_receipt(conn)
 
-        self._writer.execute(write)
+        return write
 
     def append_followup_answer_in_transaction(
         self, conn, session_id: str, request_id: str, history_id: str, text: str, *, owner_account_id: str,

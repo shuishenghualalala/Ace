@@ -96,6 +96,13 @@ def truncate_or_persist(
     *,
     max_chars: int = DEFAULT_MAX_RESULT_SIZE_CHARS,
 ) -> str:
+    preview, _ = prepare_tool_result(tool_call_id, tool_name, content, max_chars=max_chars)
+    return preview
+
+
+def prepare_tool_result(
+    tool_call_id: str, tool_name: str, content: str, *, max_chars: int,
+) -> tuple[str, str]:
     """结果超过 max_chars 时落盘，返回「路径 + 头尾预览 + 截断标记」。
 
     完整内容写到
@@ -104,29 +111,41 @@ def truncate_or_persist(
 
     非 str 内容原样返回（理论不会出现——registry.execute 已规整成 str）。
     """
-    if not isinstance(content, str):
-        return content
-    if len(content) <= max_chars:
-        return content
-    if max_chars <= 0:
-        return content
+    if not isinstance(content, str) or max_chars <= 0 or len(content) <= max_chars:
+        return content, ""
 
     try:
         path = _persist_tool_result(tool_call_id, content)
     except Exception as exc:  # noqa: BLE001 - 落盘失败降级为就地截断，不丢整段
         log.warning("工具 %s 大结果落盘失败，就地截断: %s", tool_name, exc)
-        return _inline_truncate(content, max_chars)
+        return _inline_truncate(content, max_chars), ""
 
     head = content[:_RESULT_PREVIEW_HEAD].rstrip()
     tail = content[-_RESULT_PREVIEW_TAIL:].lstrip() if _RESULT_PREVIEW_TAIL else ""
     truncated = len(content) - _RESULT_PREVIEW_HEAD - _RESULT_PREVIEW_TAIL
-    return (
+    preview = (
         f"<truncated>结果共 {len(content)} 字符，已超过 {max_chars} 上限，"
         f"完整内容已保存到：\n{path}\n</truncated>\n\n"
         f"--- 预览（开头 {_RESULT_PREVIEW_HEAD} 字符）---\n{head}\n"
         f"--- 省略 {max(truncated, 0)} 字符 ---\n"
         f"--- 预览（结尾 {_RESULT_PREVIEW_TAIL} 字符）---\n{tail}"
     )
+    return preview, hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def restore_tool_result_reference(tool_call_id: str, content: str, digest: str) -> str:
+    """Only advertise the managed large-result file while its bytes still match the checkpoint."""
+    path = _tool_result_path(tool_call_id)
+    header = re.compile(r"(<truncated>[^\n]*完整内容已保存到：\n)[^\n]*(\n</truncated>)")
+    try:
+        if path.is_file() and not path.is_symlink() and not path.parent.is_symlink():
+            with path.open("rb") as source:
+                if hashlib.file_digest(source, "sha256").hexdigest() == digest:
+                    return header.sub(lambda m: f"{m[1]}{path}{m[2]}", content, count=1)
+    except OSError:
+        pass
+    warning = "[完整工具结果文件已改变或不可用。以下为执行时保存的预览。]"
+    return header.sub(warning, content, count=1)
 
 
 def _inline_truncate(content: str, max_chars: int) -> str:
@@ -141,17 +160,18 @@ def _inline_truncate(content: str, max_chars: int) -> str:
     )
 
 
+def _tool_result_path(tool_call_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(tool_call_id or "result"))[:128]
+    return get_crew_home() / "tool-results" / f"{safe_id or 'result'}.txt"
+
+
 def _persist_tool_result(tool_call_id: str, content: str) -> Path:
     """把完整结果原子写入 {CREW_HOME}/tool-results/{id}.txt，返回路径。"""
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(tool_call_id or "result"))[:128]
-    if not safe_id:
-        safe_id = "result"
-    out_dir = get_crew_home() / "tool-results"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{safe_id}.txt"
+    path = _tool_result_path(tool_call_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     # 先写临时文件再 rename，避免并发/中断读到半截内容
-    tmp = out_dir / f".{safe_id}.{_random_suffix()}.tmp"
-    tmp.write_text(content, encoding="utf-8")
+    tmp = path.with_name(f".{path.stem}.{_random_suffix()}.tmp")
+    tmp.write_bytes(content.encode("utf-8"))
     tmp.replace(path)
     return path
 

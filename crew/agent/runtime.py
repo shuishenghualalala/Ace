@@ -1041,7 +1041,7 @@ class SingleAgent(Agent):
                 task_sid,
                 owner_account_id=owner,
                 kind=event_kind,
-                payload=payload,
+                payload={**payload, "request_id": envelope.request_id, "execution_session_id": sid},
             )
 
         ctx = ExecutionContext(

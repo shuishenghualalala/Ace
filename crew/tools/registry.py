@@ -23,7 +23,7 @@ from crew.core.types import ToolCall, ToolOutput, ToolPermissionDecision, ToolRe
 from crew.state.logging import get_logger
 from crew.tools.pipeline import (
     DEFAULT_MAX_RESULT_SIZE_CHARS,
-    truncate_or_persist,
+    prepare_tool_result,
     validate_arguments,
     validate_input_hook,
 )
@@ -498,10 +498,10 @@ class Registry(ToolRegistry):
             content = output.content if isinstance(output, ToolOutput) else output
             # Crew Stage 6：大结果落盘 + 预览回灌（非 str 原样返回）
             max_chars = getattr(tool, "max_result_size_chars", DEFAULT_MAX_RESULT_SIZE_CHARS)
-            content = truncate_or_persist(tool_call.id, tool.name, content, max_chars=max_chars)
+            content, digest = prepare_tool_result(tool_call.id, tool.name, content, max_chars=max_chars)
             if deprecation_note:
                 content = f"{deprecation_note}\n\n{content}"
-            return ToolResult(tool_call.id, tool.name, content, is_error=False, media=media)
+            return ToolResult(tool_call.id, tool.name, content, is_error=False, media=media, result_file_digest=digest)
         except StructuredToolError as exc:
             return _structured_error_result(tool_call.id, tool.name, exc)
         except ToolError as exc:

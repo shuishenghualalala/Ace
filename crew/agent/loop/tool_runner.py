@@ -163,6 +163,7 @@ class ToolRunner:
         self._pending_media: list[tuple[str, str, MediaPart]] = []
         self._latest_outcomes: dict[tuple[str, str], tuple[ToolResult, dict[str, Any]]] = {}
         self._leaked_tasks: set[asyncio.Task[Any]] = set()
+        self.tool_step = 0
         self.approval_rejected = False
         self.security_boundary_failed = False
 
@@ -848,30 +849,18 @@ class ToolRunner:
         therefore queued during execution and appended at the batch boundary.
         """
         for tool_call_id, tool_name, part in self._pending_media:
-            data_url = part.data_url
-            if not data_url and part.path:
-                try:
-                    data_url = await asyncio.to_thread(_read_media_data_url, part)
-                except OSError as exc:
-                    log.warning("读取工具媒体失败 tool=%s: %s", tool_name, type(exc).__name__)
-                    continue
-            if not data_url:
-                continue
-            text = part.alt or f"{tool_name} 生成的视觉输入"
-            messages.append(
-                Message(
-                    role="user",
-                    content=text,
-                    is_meta=True,
-                    content_parts=[
-                        {"type": "text", "text": text},
-                        {"type": "image_url", "image_url": {"url": data_url, "detail": part.detail}},
-                    ],
-                    attachment_type="tool_media",
-                    attachment_data={"tool_call_id": tool_call_id, "tool_name": tool_name},
-                )
-            )
+            if await self._load_tool_media(part, tool_name):
+                messages.append(Message.tool_image(tool_call_id, tool_name, part.data_url, part.alt, part.detail))
         self._pending_media = []
+
+    @staticmethod
+    async def _load_tool_media(part: MediaPart, tool_name: str) -> bool:
+        if not part.data_url and part.path:
+            try:
+                part.data_url = await asyncio.to_thread(_read_media_data_url, part)
+            except OSError as exc:
+                log.warning("读取工具媒体失败 tool=%s: %s", tool_name, type(exc).__name__)
+        return bool(part.data_url)
 
     def _install_progress_sink(self, tc):
         """注入进度回调，工具执行中可经 emit_tool_progress 发增量。
@@ -935,8 +924,9 @@ class ToolRunner:
         started = started_at if started_at is not None else self._mark_tool_started(tc)
         timeout = self.tool_total_timeout_seconds
         total_deadline = _ToolExecutionDeadline(timeout) if timeout > 0 else None
-        from crew.core.runctx import current_tool_exit_probes
+        from crew.core.runctx import current_tool_exit_probes, current_tool_step
 
+        step_token = current_tool_step.set(self.tool_step)
         token = current_tool_exit_probes.set([])
         try:
             async def _run_pipeline() -> ToolResult:
@@ -951,6 +941,7 @@ class ToolRunner:
             return self._normalize_result(result)
         finally:
             current_tool_exit_probes.reset(token)
+            current_tool_step.reset(step_token)
             self._mark_tool_finished(tc, started=started)
 
     async def _cancel_task_with_grace(self, task: asyncio.Task[Any], label: str) -> bool:
@@ -1259,7 +1250,8 @@ class ToolRunner:
                         return self._timeout_result(exec_tc, timeout)
                     await self._record_durable_event(
                         "tool_execution_intent",
-                        {"tool_call_id": exec_tc.id, "name": exec_tc.name, "side_effect_state": "unknown"},
+                        {"tool_call_id": exec_tc.id, "name": exec_tc.name, "arguments": exec_tc.arguments,
+                         "side_effect_state": "unknown"},
                     )
                     if self._interrupted:
                         return self._aborted_result(exec_tc, time.perf_counter() - t)
@@ -1334,18 +1326,7 @@ class ToolRunner:
             failed = True if result.is_error else None
             post = self.guardrails.after_call(tc.name, tc.arguments, result.content, failed=failed)
             if post.action in ("warn", "halt"):
-                result = ToolResult(
-                    tc.id,
-                    tc.name,
-                    append_toolguard_guidance(result.content, post),
-                    is_error=result.is_error,
-                    media=list(result.media),
-                    code=result.code,
-                    retryable=result.retryable,
-                    retry_delay=result.retry_delay,
-                    side_effect_state=result.side_effect_state,
-                    details=dict(result.details),
-                )
+                result = replace(result, content=append_toolguard_guidance(result.content, post))
 
             # 6. plugin 后置观测
             await self.plugins.post_tool_call(tc, result, session_id=self.session_id)
@@ -1363,10 +1344,14 @@ class ToolRunner:
         if sink is None:
             return
         try:
-            value = sink(kind, payload)
+            from crew.core.runctx import current_tool_step
+
+            value = sink(kind, {"step": current_tool_step.get() or self.tool_step, **payload})
             if hasattr(value, "__await__"):
                 await value
         except Exception:  # noqa: BLE001 - 审计边界失败不能吞掉工具结果
+            if kind == "tool_execution_intent":
+                raise RuntimeError("未能记录工具执行意图，调用未执行") from None
             log.warning("工具 durable boundary 写入失败 session=%s kind=%s", self.session_id, kind)
 
     async def _record_tool_result_commit(
@@ -1376,11 +1361,20 @@ class ToolRunner:
         *,
         status: str | None = None,
     ) -> None:
+        if self.durable_event_sink is None:
+            return
+        media = [
+            {"data_url": part.data_url, "alt": part.alt, "detail": part.detail}
+            for part in result.media if await self._load_tool_media(part, tc.name) and part.data_url.startswith("data:image/")
+        ]
         await self._record_durable_event(
             "tool_result_commit",
             {
                 "tool_call_id": tc.id,
                 "name": tc.name,
+                "result": result.content,
+                **({"result_file_digest": result.result_file_digest} if result.result_file_digest else {}),
+                **({"media": media, "missing_media": len(result.media) != len(media)} if result.media else {}),
                 "status": "unconfirmed" if result.code == "tool_exit_unconfirmed" else (
                     status or ("error" if result.is_error else "ok")
                 ),

@@ -23,6 +23,7 @@ current_subagent_notify_session: ContextVar[str] = ContextVar(
 )
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
 current_tool_call_id: ContextVar[str] = ContextVar("current_tool_call_id", default="")
+current_tool_step: ContextVar[int] = ContextVar("current_tool_step", default=0)
 # Each tool invocation owns its probes. They distinguish a cancelled awaiter from work still running.
 current_tool_exit_probes: ContextVar[list[Callable[[], bool]] | None] = ContextVar(
     "current_tool_exit_probes", default=None,

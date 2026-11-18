@@ -860,3 +860,63 @@ async def test_tool_execution_watchdog_disabled_when_zero():
     tool_msgs = [m for m in messages if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert tool_msgs[0].content == "quick-ok"
+
+
+async def test_checkpoint_preserves_media_and_validates_externalized_output(tmp_path, monkeypatch):
+    from crew.core.types import MediaPart, ToolOutput
+    from crew.state.tool_checkpoints import recover_tool_messages
+
+    monkeypatch.setattr(pipeline, "get_crew_home", lambda: tmp_path)
+    image = tmp_path / "image.png"
+    image.write_bytes(b"fixture")
+    text = "first line\\n" + "abcd" * 5000 + "last line"
+
+    async def sample(_args):
+        return ToolOutput(text, [MediaPart("image/png", path=str(image), detail="low")])
+
+    reg = Registry()
+    reg.register(name="fixture", toolset="test", schema={"name": "fixture", "parameters": {"type": "object"}},
+                 handler=sample, is_async=True, max_result_size_chars=500)
+    runner = _watchdog_runner(reg, tool_timeout=0)
+    events = [("s", 1, "user_message", json.dumps({"request_id": "r"}))]
+
+    def record(kind, payload):
+        events.append(("s", len(events) + 1, kind, json.dumps(payload)))
+
+    runner.durable_event_sink = record
+    live = await runner._execute_one(ToolCall("same-call", "fixture", {}))
+    assert "result_file_digest" not in live.protocol_metadata()
+    image.unlink()
+    path = tmp_path / "tool-results" / "same-call.txt"
+    assert path.read_text(encoding="utf-8") == text
+    for state in ("present", "overwritten", "deleted"):
+        if state == "overwritten":
+            pipeline.persist_tool_result("same-call", "different result")
+        if state == "deleted":
+            path.unlink()
+        restored, unknown = recover_tool_messages(events, "s", "r")
+        assert not unknown
+        output = restored[1].content
+        assert "first line" in output and "last line" in output
+        assert (str(path) in output) == (state == "present")
+        assert ("完整工具结果文件已改变" in output) == (state != "present")
+        assert restored[2].content_parts[-1]["image_url"]["url"] == "data:image/png;base64,Zml4dHVyZQ=="
+
+
+async def test_missing_durable_intent_prevents_tool_dispatch(monkeypatch):
+    runner = _watchdog_runner(_watchdog_registry(), tool_timeout=0)
+    dispatched = []
+
+    async def forbidden_dispatch(tc):
+        dispatched.append(tc.id)
+        raise AssertionError("tool unexpectedly ran")
+
+    def broken_journal(kind, _payload):
+        if kind == "tool_execution_intent":
+            raise OSError("fixture disk unavailable")
+
+    monkeypatch.setattr(runner.registry, "execute", forbidden_dispatch)
+    runner.durable_event_sink = broken_journal
+    with pytest.raises(RuntimeError, match="未能记录"):
+        await runner._execute_one(ToolCall("sample", "quick_tool", {}))
+    assert not dispatched

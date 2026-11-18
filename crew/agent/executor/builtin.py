@@ -761,6 +761,7 @@ class BuiltinExecutor(AgentExecutor):
         iteration_number = 0
         while budget.consume() or grace:
             iteration_number += 1
+            runner.tool_step = iteration_number
             event(
                 "agent.loop.iteration.started",
                 module="agent",
@@ -1266,8 +1267,11 @@ class BuiltinExecutor(AgentExecutor):
                     value = ctx.durable_event_sink(
                         "assistant_tool_calls",
                         {
+                            "step": iteration_number,
+                            "text": assistant_msg.content,
+                            "model": assistant_msg.model,
                             "tool_calls": [
-                                {"tool_call_id": tc.id, "name": tc.name}
+                                {"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments}
                                 for tc in tool_calls
                             ],
                         },

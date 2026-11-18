@@ -1331,3 +1331,92 @@ def test_compaction_checkpoint_event_roundtrip(tmp_path):
         assert [m.content for m in store.load("s1", owner_account_id=owner)] == ["m0", "m1", "m2"]
     finally:
         store.close()
+
+
+def test_cold_tool_checkpoints_preserve_verified_results_and_only_recover_dead_owners(tmp_path):
+    from crew.core.types import ToolCall
+
+    db = tmp_path / "tools.db"
+    store = SQLiteSessionStore(db)
+    user = Message.user("read and check")
+    user.request_id = "r"
+    store.save("same", [user], owner_account_id="A")
+    store.set_status("same", "running", owner_account_id="A")
+
+    def add(kind, step, **payload):
+        store.record_durable_event("same", owner_account_id="A", kind=SessionEventType(kind),
+                                   payload={"step": step, "request_id": "r", **payload})
+
+    calls = [{"tool_call_id": cid, "name": "fixture", "arguments": {"n": n}}
+             for n, cid in enumerate(("verified", "unknown", "not-dispatched"))]
+    add("assistant_tool_calls", 1, tool_calls=calls)
+    add("tool_execution_intent", 1, **calls[0])
+    add("tool_execution_intent", 1, **calls[1])
+    image = {"data_url": "data:image/png;base64,YWJj", "alt": "fixture image", "detail": "low"}
+    for _ in range(2):
+        add("tool_result_commit", 1, tool_call_id="verified", name="fixture", status="ok", result="observed", media=[image])
+    add("assistant_tool_calls", 2, tool_calls=[calls[0]])
+    add("tool_execution_intent", 2, **calls[0])
+    add("tool_result_commit", 2, tool_call_id="verified", name="fixture", status="ok", result="second-step")
+
+    # A previously published result must retain its branch even if recovery fills earlier calls.
+    existing = Message.assistant("", [ToolCall(c["tool_call_id"], "fixture", c["arguments"]) for c in calls])
+    store.save("same", [user, existing, Message.tool("not-dispatched", "既有结果", name="fixture")], owner_account_id="A")
+    old_leaf = store._read_event_cursor("A", "same")[0]
+    reader = SQLiteSessionStore(db)
+    try:
+        assert reader.recover_interrupted_tool_checkpoints() == 0
+        store.close()
+        # This owner's live lease in the same database remains independent.
+        reader.save("same", [user], owner_account_id="B")
+        reader.set_status("same", "running", owner_account_id="B")
+        reader.record_durable_event("same", owner_account_id="B", kind=SessionEventType.TOOL_EXECUTION_INTENT,
+                                    payload={"request_id": "r", "name": "fixture", "tool_call_id": "owner_b"})
+        assert reader.recover_interrupted_tool_checkpoints() == 1
+        recovered = reader.load("same", owner_account_id="A")
+        assert [m.role for m in recovered] == ["user", "assistant", "tool", "tool", "tool", "user", "assistant", "tool"]
+        assert recovered[2].content == "observed" and recovered[-1].content == "second-step"
+        assert "请先核对" in recovered[3].content and recovered[4].content == "既有结果"
+        assert reader._chain_at_cut("A", "same", old_leaf)[0][-1].content == "既有结果"
+        assert recovered[5].content_parts[-1]["image_url"]["url"] == image["data_url"]
+        assert reader.load("same", owner_account_id="B") == [user]
+        assert reader.recover_interrupted_tool_checkpoints() == 0
+    finally:
+        reader.set_status("same", "idle", owner_account_id="B")
+        reader.close()
+    reopened = SQLiteSessionStore(db)
+    try:
+        assert reopened.recover_interrupted_tool_checkpoints() == 0
+        assert reopened.load("same", owner_account_id="A") == recovered
+    finally:
+        reopened.close()
+
+
+def test_cold_tool_checkpoint_does_not_combine_foreign_calls_or_invent_results():
+    from crew.state.tool_checkpoints import recover_tool_messages
+
+    rows = []
+
+    def event(kind, *, source="session", **payload):
+        rows.append((source, len(rows) + 1, kind, json.dumps(payload)))
+
+    event("user_message", request_id="current")
+    calls = [{"name": "sample", "tool_call_id": key, "arguments": {}} for key in ("started", "new", "legacy", "stopped")]
+    calls.append({"name": "sample", "tool_call_id": "legacy-unknown"})
+    event("assistant_tool_calls", step=1, tool_calls=calls, request_id="current")
+    event("tool_execution_intent", step=1, **calls[0])
+    event("turn_outcome", request_id="previous")
+    event("tool_result_commit", source="fork-parent", step=1, **calls[0], status="ok", result="foreign")
+    event("tool_result_commit", execution_session_id="different-child", step=1, **calls[0], status="ok", result="foreign")
+    event("tool_result_commit", request_id="previous", step=1, **calls[0], status="ok", result="foreign")
+    event("tool_result_commit", step=1, **calls[2], status="ok")
+    event("tool_result_commit", step=1, **calls[3], status="cancelled", result="stopped",
+          code="aborted", details={"exit_confirmed": True})
+    restored, uncertain = recover_tool_messages(rows, "session", "current")
+    assert uncertain and len(restored) == 6
+    assert "先核对" in restored[1].content
+    assert "没有开始执行" in restored[2].content
+    assert "没有保存返回内容" in restored[3].content
+    assert restored[4].content == "stopped" and restored[0].tool_calls[3].exit_confirmed is True
+    assert "无法确认是否已执行" in restored[5].content
+    assert all("foreign" not in msg.content for msg in restored)

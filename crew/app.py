@@ -2480,6 +2480,9 @@ class CrewApp:
             log.exception("legacy owner 检查失败")
         from crew.tools.process_registry import process_registry
 
+        recover_tools = getattr(self.session_store, "recover_interrupted_tool_checkpoints", None)
+        if callable(recover_tools):
+            await asyncio.to_thread(recover_tools)
         recovered_processes = await process_registry.recover_from_checkpoint_async()
         if recovered_processes:
             log.info("崩溃恢复：认领 %d 个后台进程", recovered_processes)
