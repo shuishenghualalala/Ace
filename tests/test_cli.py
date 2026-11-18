@@ -233,6 +233,122 @@ async def test_cancelled_cli_permission_prompt_rejects_only_its_bound_request(
         await app.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_cli_followup_answers_original_request_and_persists_once(cli_home, tmp_path, monkeypatch):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.output import DummyOutput
+
+    from crew.app import build_app
+    from crew.cli import chat
+    from crew.core.envelope import Envelope
+    from crew.core.errors import ToolError
+    from crew.core.followup import send_followup_question_to
+    from crew.core.runctx import current_owner_account_id, current_request_id
+    from crew.core.types import ChatResponse, ToolCall
+    from crew.state.config import Config
+
+    monkeypatch.chdir(tmp_path)
+    app = build_app(Config(api_key="", cron_enabled=False), enable_team=False)
+    turn = Envelope.of("Clarify the requirements.", session_id="cli-question", user_id="cli-test")
+    questions = [
+        {"id": "colors", "question": "Colors", "multiSelect": True,
+         "options": [{"label": "Amber", "value": "a"}, {"label": "Blue", "value": "b"}]},
+        {"id": "note", "question": "Note", "inputMode": "text"},
+    ]
+    replies = []
+    prompt_scopes = []
+
+    async def model_chat(messages, *args, **kwargs):
+        result = next((m for m in messages if m.tool_call_id == "ask-original"), None)
+        if result is None:
+            return ChatResponse(tool_calls=[ToolCall("ask-original", "ask_followup_question", {"questions": questions})])
+        replies.append(json.loads(result.content))
+        return ChatResponse(text="Clarification received.")
+
+    async def answer(_prompt):
+        prompt_scopes.append((current_owner_account_id.get(), current_request_id.get()))
+        if len(prompt_scopes) == 1:
+            with pytest.raises(ToolError):
+                await send_followup_question_to(turn.session_id, questions, request_id="old-request")
+            return "2,1"
+        return "client note"
+
+    monkeypatch.setattr(app.provider, "chat", model_chat)
+    try:
+        with create_app_session(output=DummyOutput()):
+            await asyncio.wait_for(chat._render(app, turn, SimpleNamespace(prompt_async=answer)), timeout=10)
+        assert prompt_scopes == [(turn.user_id, turn.request_id)] * 2
+        reply, = replies
+        assert reply["success"] and reply["answers"] == [
+            {"question_id": "colors", "answers": ["a", "b"]}, {"question_id": "note", "answers": ["client note"]},
+        ]
+        history = app.session_store.load(turn.session_id, owner_account_id=turn.user_id)
+        saved = [(m.role, m.followup_history_id, m.content) for m in history if m.followup_history_id]
+        assert saved == [("user", f"followup:{reply['question_id']}", "已补充：Colors：Amber, Blue；Note：client note")]
+        assert not app.session_store.load(turn.session_id, owner_account_id="another-owner")
+    finally:
+        await app.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cli_followup_timeout_closes_input_before_model_finishes(cli_home, tmp_path, monkeypatch):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.output import DummyOutput
+
+    from crew.app import build_app
+    from crew.cli import chat
+    from crew.core import followup
+    from crew.core.envelope import Envelope
+    from crew.core.types import ChatResponse, ToolCall
+    from crew.state.config import Config
+
+    monkeypatch.chdir(tmp_path)
+    app = build_app(Config(api_key="", cron_enabled=False), enable_team=False)
+    monkeypatch.setattr(followup, "_default_timeout_seconds", 0.2)
+    turn = Envelope.of("Ask for a note.", session_id="cli-timeout", user_id="cli-test")
+    opened, closed = asyncio.Event(), asyncio.Event()
+    continuing, finish = asyncio.Event(), asyncio.Event()
+    replies = []
+
+    async def model_chat(messages, *args, **kwargs):
+        result = next((m for m in messages if m.tool_call_id == "ask-timeout"), None)
+        if result is None:
+            question = {"id": "note", "question": "Note", "inputMode": "text"}
+            return ChatResponse(tool_calls=[ToolCall("ask-timeout", "ask_followup_question", {"questions": [question]})])
+        replies.append(json.loads(result.content))
+        continuing.set()
+        await finish.wait()
+        return ChatResponse(text="No note received.")
+
+    async def answer(_prompt):
+        opened.set()
+        try:
+            await asyncio.Future()
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(app.provider, "chat", model_chat)
+    with create_app_session(output=DummyOutput()):
+        render = asyncio.create_task(chat._render(app, turn, SimpleNamespace(prompt_async=answer)))
+        try:
+            async with asyncio.timeout(10):
+                await opened.wait()
+                await continuing.wait()
+                await closed.wait()
+                assert not render.done()
+                reply, = replies
+                assert reply["success"] and reply["answers"] == [] and "超时" in reply["note"]
+                finish.set()
+                await render
+                history = app.session_store.load(turn.session_id, owner_account_id=turn.user_id)
+                assert not any(m.followup_history_id for m in history)
+        finally:
+            finish.set()
+            render.cancel()
+            await asyncio.gather(render, return_exceptions=True)
+            await app.shutdown()
+
+
 def test_version(capsys, cli_home):
     code, out = run_cli(capsys, "--version")
     assert code == 0

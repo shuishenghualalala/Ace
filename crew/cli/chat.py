@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
@@ -11,6 +12,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
 from crew.cli.app import CliContext, CliError, CliResult
+from crew.cli.followup import conversation_followups
 from crew.cli.security import CliApprovalRequired, consume_conversation_turn
 from crew.core.envelope import Envelope, ResponseChunk
 
@@ -189,10 +191,14 @@ def _plan_execution_envelope(envelope: Envelope) -> Envelope:
     )
 
 
+async def _prompt(session: PromptSession, message: str) -> str:
+    with patch_stdout():
+        return await session.prompt_async(message)
+
+
 async def _confirm(session: PromptSession, message: str, accepted: tuple[str, ...]) -> bool:
     try:
-        with patch_stdout():
-            answer = await session.prompt_async(message)
+        answer = await _prompt(session, message)
     except (EOFError, KeyboardInterrupt):
         return False
     return answer.strip().lower() in accepted
@@ -217,10 +223,17 @@ async def _handle_plan_approval(app: Any, session: PromptSession, envelope: Enve
 
 
 async def _render(app: Any, envelope: Envelope, session: PromptSession) -> None:
-    async def prompt_tool_approval(message: str) -> bool:
-        return await _confirm(session, message, ("once",))
+    input_lock = asyncio.Lock()
 
-    await consume_conversation_turn(app, envelope, _render_chunk, prompt=prompt_tool_approval)
+    async def prompt_tool_approval(message: str) -> bool:
+        async with input_lock:
+            return await _confirm(session, message, ("once",))
+
+    async def ask(message: str) -> str:
+        return await _prompt(session, message)
+
+    async with conversation_followups(envelope, ask, input_lock):
+        await consume_conversation_turn(app, envelope, _render_chunk, prompt=prompt_tool_approval)
 
 
 def _render_chunk(chunk: ResponseChunk) -> None:

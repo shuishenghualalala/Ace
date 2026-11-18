@@ -314,6 +314,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
 
   <h2>交互等待语义：追问与权限确认（2026-09-17）</h2>
   <p><code>wait_for_answer</code> 的等待默认有界：调用方未显式传 <code>timeout</code> 时使用装配层注入的默认上限 <code>runtime.interaction_timeout_seconds</code>（默认 3600s，配置 0 为默认不限）——用户一直不选，到点按「用户未回答」收尾（返回空答案），回合不再无限挂起。显式传 timeout（含 None/0 维持不限语义）始终优先于默认值。<code>ask_followup_question</code> 与权限确认共用这套语义。</p>
+  <p>交互 CLI 为普通问题绑定回合内输入回调。工具先注册 waiter，再异步启动终端输入，等待、超时和答复历史继续使用同一核心机制。等待结束会通知 CLI 关闭同一问题的输入。权限确认以及 Gateway 的事件处理沿用各自通道。<a href="cli.html">CLI 与终端追问</a></p>
   <p>权限确认等待（<code>ToolRunner._wait_permission_answer</code>）与 interrupt 竞争（FIRST_COMPLETED）：interrupt 先到即结算挂起的追问（<code>cancel_followup</code> 回灌取消标记、清理 waiter 注册），返回空答案——上层按<strong>拒绝</strong>处理（安全默认），回合随后走 interrupt 收尾；回答或超时先到则 interrupt 等待 task 立即取消，绝不残留永久挂起的 task。单工具的真实执行段另有看门狗与中断语义，见 agent 模块文档。</p>
 
   <h2>file_read 读取引擎（2026-09-18）</h2>

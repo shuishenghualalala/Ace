@@ -116,6 +116,10 @@
   <p><code>crew chat</code> 在当前回合接收工具审批，显示动作、目标和需要追加的权限。输入 <code>once</code> 可允许当前动作执行一次，输入 <code>reject</code>、空行或结束输入则拒绝。CLI 读取当前任务的审批并在同一进程内提交决定。回合退出时，尚待处理的本回合请求按原作用域拒绝。</p>
   <p><code>crew run</code> 遇到需要人工批准的工具动作时，通过同一审批服务拒绝请求并以状态码 <code>2</code> 退出。JSON 摘要包含 <code>status=stopped</code> 和 <code>error_code=approval_required</code>，<code>stream-json</code> 保留拒绝终态事件。<code>--yes</code> 仅批准 Plan 内容。Plan 获批后，执行回合沿用原会话及其工作区。</p>
 
+  <h3>4.2 模型追问</h3>
+  <p><code>crew chat</code> 按顺序显示普通追问和选项。单选输入编号，多选用逗号分隔。问题允许自定义时可选「其他」，文本题直接填写。提交使用选项的原始值，整组作答完成后才送给模型。<code>/cancel</code>、Ctrl-C 或 EOF 可取消当前问题组。</p>
+  <p><code>conversation_followups</code> 将本回合的输入和审批串行化，按账号、可见会话、原请求和问题 ID 校验 <code>FollowupWaiter</code>。工具超时或回合退出会关闭对应输入。答案经原工具历史路径保存。<code>crew run</code> 无终端输入时，模型仍收到追问工具的可恢复错误。</p>
+
   <h2>5. Wiki Service 消费边界</h2>
   <p>每个 Wiki 叶子命令都在真正执行时调用 <code>acquire_service_lease(KNOWLEDGE_SERVICE_KEY)</code>。同步命令在返回或异常时释放 Lease；异步命令在整个 await 周期持有 Lease。这样新命令只会看到当前 Active Generation，旧 Provider 会等待在途命令结束后再关闭。</p>
   <p>没有 <code>product.wiki</code> 运行记录的嵌入宿主可以提供外部 <code>knowledge_service</code>；一旦产品 Feature 存在但不可用，CLI 不回退到旧对象。SessionStore 仍属于 Host，但 Wiki Agent 会话命令同样先经过 Service Gate。文件读取只处理用户传入的本地路径，上传解析、媒体处理和 Wiki 数据目录均留在 Provider。</p>

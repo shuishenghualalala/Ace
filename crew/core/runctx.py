@@ -140,6 +140,9 @@ async def emit_tool_progress(text: str, *, metadata: dict[str, Any] | None = Non
 PushFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 current_push_fn: ContextVar[PushFn | None] = ContextVar("current_push_fn", default=None)
 
+# Ordinary questions for an interactive host without a general frontend event stream.
+current_followup_push: ContextVar[PushFn | None] = ContextVar("current_followup_push", default=None)
+
 # Security-only responder for hosts that cannot receive general frontend events.
 SecurityApprovalPush = Callable[[str, dict[str, Any]], None]
 current_security_approval_push: ContextVar[SecurityApprovalPush | None] = ContextVar(

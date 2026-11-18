@@ -18,6 +18,7 @@ from typing import Any, Callable
 from crew.core.errors import ToolError
 from crew.core.runctx import (
     current_display_session_id,
+    current_followup_push,
     current_owner_account_id,
     current_push_fn,
     current_request_id,
@@ -520,6 +521,8 @@ async def send_followup_question_to(
         raise ToolError("session_id 不能为空")
 
     push_fn = push_fn or current_push_fn.get()
+    if push_fn is None and record_history:
+        push_fn = current_followup_push.get()
     if push_fn is None:
         raise ToolError("当前运行环境不支持追问交互（无 push 函数）")
 
@@ -615,14 +618,24 @@ async def wait_for_answer(
         effective_timeout = _default_timeout_seconds
     else:
         effective_timeout = None if not timeout else float(timeout)  # type: ignore[arg-type]
-    return await _followup_waiter.wait(
-        session_id,
-        question_id,
-        timeout=effective_timeout,
-        activity_fn=activity_fn,
-        activity_interval=activity_interval,
-        owner_account_id=owner_account_id,
-    )
+    try:
+        return await _followup_waiter.wait(
+            session_id,
+            question_id,
+            timeout=effective_timeout,
+            activity_fn=activity_fn,
+            activity_interval=activity_interval,
+            owner_account_id=owner_account_id,
+        )
+    finally:
+        push = current_followup_push.get()
+        if push is not None:
+            await push(session_id, {
+                "kind": "followup_question",
+                "body": {"question_id": question_id, "status": "closed"},
+                "request_id": current_request_id.get(),
+                "session_id": session_id,
+            })
 
 
 def resolve_answer(
