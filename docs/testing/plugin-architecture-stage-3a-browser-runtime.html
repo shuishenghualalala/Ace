@@ -35,6 +35,7 @@
   <p>各测试组存在重叠，不将数量相加作为全量测试总数。最后补强的 10 个 deferred/restart/rollback/cleanup 定向用例全部通过。</p>
 
   <h2>跨平台断言</h2>
+  <p>Windows 普通账户使用真实 NTFS junction 验证下载路径。工作区的 <code>downloads</code> 或其子目录 <code>browser</code> 已连接其它目录时，浏览器管理器在写入前拒绝操作，目标目录保持为空。此项从审批到下载调用使用测试驱动。</p>
   <p>测试覆盖 Fake Driver 的多 Owner 关闭、后台 Task 回收和重复 <code>aclose()</code>；新增生命周期层未引入 POSIX-only 调用。</p>
 
   <div class="nav"><a href="../backend/adr/0019-browser-host-loop-feature.html">ADR-0019</a> · <a href="../backend/modules/plugins.html">Feature / Plugin 模块</a> · <a href="../todo/ace-plugin-architecture-evolution-plan.md">演进方案</a></div>

@@ -3520,19 +3520,23 @@ async def test_download_completes_without_global_deny_restoration(browser_env):
         await manager.aclose()
 
 
-async def test_download_rejects_preexisting_workspace_symlink(browser_env):
+@pytest.mark.parametrize("link_component", ["downloads", "browser"])
+async def test_download_rejects_preexisting_workspace_symlink(browser_env, directory_link, link_component):
     driver = DownloadReviewDriver()
     manager = BrowserManager(BrowserConfig(), driver)
     token = current_tool_call_id.set("download-symlink")
     workdir = browser_env / "workspace"
     outside = browser_env / "outside"
-    (workdir / "downloads").mkdir(parents=True)
     outside.mkdir()
-    (workdir / "downloads" / "browser").symlink_to(outside, target_is_directory=True)
+    link = workdir / "downloads"
+    if link_component == "browser":
+        link = link / "browser"
+    link.parent.mkdir(parents=True)
+    directory_link(link, outside)
     try:
         await manager.navigate("owner", "session", "https://example.com")
         await _approve_download(manager, filename="report.bin")
-        with pytest.raises(BrowserDriverError, match="符号链接") as captured:
+        with pytest.raises(BrowserDriverError, match="工作区边界之外") as captured:
             await manager.download(
                 "owner",
                 "session",
@@ -3541,7 +3545,7 @@ async def test_download_rejects_preexisting_workspace_symlink(browser_env):
                 workdir=str(workdir),
             )
         assert captured.value.uncertain is False
-        assert not (outside / "report.bin").exists()
+        assert list(outside.iterdir()) == []
     finally:
         current_tool_call_id.reset(token)
         await manager.aclose()
