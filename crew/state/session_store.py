@@ -16,7 +16,8 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -176,13 +177,28 @@ class _SessionProjection:
     见 _save_write 的 is_append 守卫）。
     """
 
-    __slots__ = ("messages", "seq", "generation", "from_blob")
+    __slots__ = ("messages", "seq", "generation", "incarnation", "from_blob")
 
     def __init__(self) -> None:
         self.messages: list[Message] = []
         self.seq: int = 0
         self.generation: int = 0
+        self.incarnation: str | None = None
         self.from_blob: bool = False
+
+    @property
+    def cursor(self) -> tuple[int, int, str | None]:
+        return self.seq, self.generation, self.incarnation
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionCommit:
+    previous: _SessionProjection
+    previous_cursor: tuple[int, int, str | None]
+    leaf: int
+    generation: int
+    incarnation: str
+    publish_prepared: bool
 
 
 class _SessionWriteQueue:
@@ -865,6 +881,10 @@ class SQLiteSessionStore(SessionStore):
     # ---- 事件投影 ----
     PROJECTION_CACHE_LIMIT = 32
 
+    def _evict_projection(self, key: tuple[str, str]) -> None:
+        with self._lock:
+            self._projections.pop(key, None)
+
     def _cache_projection(self, key: tuple[str, str], proj: _SessionProjection) -> None:
         """写入投影缓存并按 LRU 淘汰最久未用的会话。"""
         self._projections[key] = proj
@@ -872,42 +892,60 @@ class SQLiteSessionStore(SessionStore):
         while len(self._projections) > self.PROJECTION_CACHE_LIMIT:
             self._projections.popitem(last=False)
 
+    @contextmanager
+    def _projection_snapshot(self) -> Iterator[None]:
+        """Hold one WAL snapshot for the projection cursor, event chain and legacy blob."""
+        # The caller holds the connection lock; nested reads share any current transaction.
+        if self._conn.in_transaction:
+            yield
+            return
+        self._conn.execute("BEGIN")
+        try:
+            yield
+        finally:
+            self._conn.rollback()
+
     def _get_projection(self, owner: str, session_id: str) -> _SessionProjection:
         key = (owner, session_id)
         proj = self._projections.get(key)
         if proj is None:
-            proj = self._build_projection(owner, session_id)
+            with self._projection_snapshot():
+                cursor = self._read_projection_cursor(owner, session_id)
+                proj = self._build_projection(owner, session_id, cursor)
             self._cache_projection(key, proj)
         else:
             self._projections.move_to_end(key)
         return proj
 
+    def _read_projection_cursor(self, owner: str, session_id: str) -> tuple[int, int, str] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT leaf_seq, events_generation, history_incarnation FROM sessions "
+                "WHERE owner_account_id = ? AND session_id = ?",
+                (owner, session_id),
+            ).fetchone()
+        return (int(row[0]), int(row[1]), row[2]) if row is not None else None
+
     def _read_event_cursor(
         self, owner: str, session_id: str, expected_incarnation: str | None = None,
     ) -> tuple[int, int] | None:
         """读 (leaf_seq, events_generation) 快照；会话行不存在返回 None。"""
-        with self._lock:
-            self._check_history_incarnation(self._conn, session_id, owner, expected_incarnation)
-            row = self._conn.execute(
-                "SELECT leaf_seq, events_generation FROM sessions "
-                "WHERE owner_account_id = ? AND session_id = ?",
-                (owner, session_id),
-            ).fetchone()
-        if row is None:
-            return None
-        return int(row[0]), int(row[1])
+        cursor = self._read_projection_cursor(owner, session_id)
+        if expected_incarnation is not None and (cursor is None or cursor[2] != expected_incarnation):
+            raise SessionIncarnationChanged(f"会话已删除或重建：{session_id}")
+        return cursor[:2] if cursor is not None else None
 
     def _fetch_chain_rows(
-        self, owner: str, session_id: str, upto_seq: int
+        self, owner: str, session_id: str, upto_seq: int, after_seq: int = 0,
     ) -> dict[int, tuple[int | None, str, str]]:
-        """读 seq <= upto_seq 的事件行，返回 {seq: (parent_seq, type, payload)}。"""
+        """读取 (after_seq, upto_seq] 内的事件行。"""
         with self._lock:
             return {
                 int(row[0]): (row[1], str(row[2]), str(row[3]))
                 for row in self._conn.execute(
                     "SELECT seq, parent_seq, type, payload FROM session_events "
-                    "WHERE owner_account_id = ? AND session_id = ? AND seq <= ?",
-                    (owner, session_id, upto_seq),
+                    "WHERE owner_account_id = ? AND session_id = ? AND seq > ? AND seq <= ?",
+                    (owner, session_id, after_seq, upto_seq),
                 ).fetchall()
             }
 
@@ -954,6 +992,8 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         upto_seq: int,
         _seen: frozenset[tuple[str, str]] = frozenset(),
+        *,
+        include_seeds: bool = False,
     ) -> list[tuple[str, int, str, str]]:
         """正序解析投影链（含 fork 前缀拼接）：[(session_id, seq, type, payload)]。
 
@@ -978,7 +1018,9 @@ class SQLiteSessionStore(SessionStore):
             source_seq = meta.get("source_parent_seq")
             if not isinstance(source_id, str) or not source_id or not isinstance(source_seq, int):
                 raise SessionEventLogError(f"end_seed 载荷缺前缀指针（seq={seq}），拒绝加载")
-            resolved.extend(self._resolve_chain(owner, source_id, source_seq, seen))
+            resolved.extend(self._resolve_chain(owner, source_id, source_seq, seen, include_seeds=include_seeds))
+            if include_seeds:
+                resolved.append((session_id, seq, etype, payload))
         return resolved
 
     @staticmethod
@@ -1396,13 +1438,14 @@ class SQLiteSessionStore(SessionStore):
                 break
         return [(sid, index + 1, messages[index]) for index in range(start, end)], (sid, start + 1) if start else None
 
-    def _build_projection(self, owner: str, session_id: str) -> _SessionProjection:
+    def _build_projection(
+        self, owner: str, session_id: str, cursor: tuple[int, int, str] | None,
+    ) -> _SessionProjection:
         """全量构建投影：事件链优先，无事件的旧会话回退读 blob。"""
         proj = _SessionProjection()
-        cursor = self._read_event_cursor(owner, session_id)
         if cursor is None:
             return proj
-        leaf, generation = cursor
+        leaf, generation, proj.incarnation = cursor
         proj.generation = generation
         proj.seq = leaf
         rows = self._fetch_chain_rows(owner, session_id, leaf)
@@ -1421,53 +1464,63 @@ class SQLiteSessionStore(SessionStore):
             proj.from_blob = True
         return proj
 
-    def _catch_up_projection(self, owner: str, session_id: str) -> _SessionProjection:
-        """按 (leaf_seq, events_generation) 快照增量追赶：只解析链上新增事件。
-
-        代际变化（跨进程整体重写）→ 全量重建；leaf 回退（本进程或跨进程
-        rewind）→ 全量重建；链上新增 → 沿父链取 proj.seq 之后的后缀增量应用。
-        链断裂或未知类型报错后全量重建重试一次，仍失败则 fail-closed 抛错。
-        投影允许滞后、禁止超前。
-        """
+    def _load_projected_messages(self, owner: str, session_id: str) -> list[Message]:
         key = (owner, session_id)
-        proj = self._projections.get(key)
-        cursor = self._read_event_cursor(owner, session_id)
-        if cursor is None:
-            # 会话行已不存在（被清理/过期）：缓存一并丢弃
-            self._projections.pop(key, None)
-            return _SessionProjection()
-        leaf, generation = cursor
-        if proj is None or proj.generation != generation or leaf < proj.seq:
-            proj = self._build_projection(owner, session_id)
-            self._cache_projection(key, proj)
-            return proj
+        with self._lock:
+            proj = self._projections.get(key)
+            if proj is not None and proj.cursor == self._read_projection_cursor(owner, session_id):
+                self._projections.move_to_end(key)
+                return list(proj.messages)
+            with self._projection_snapshot():
+                cursor = self._read_projection_cursor(owner, session_id)
+                if cursor is None:
+                    self._projections.pop(key, None)
+                    return []
+                updated = self._catch_up_projection(owner, session_id, proj, cursor)
+                self._cache_projection(key, updated)
+                return list(updated.messages)
+
+    def _projection_suffix(
+        self, owner: str, session_id: str, after: int, leaf: int,
+    ) -> list[tuple[str, int, str, str]] | None:
+        """按活动父链读取新增行；切换分支后旧游标不在链上时返回 None。"""
+        rows = self._fetch_chain_rows(owner, session_id, leaf, after)
+        suffix = []
+        cur = leaf
+        while cur > after:
+            if cur not in rows:
+                raise SessionEventLogError(f"事件链断裂：seq={cur} 缺失（leaf={leaf}），拒绝加载")
+            _, kind, payload = rows[cur]
+            suffix.append((session_id, cur, kind, payload))
+            parent = self._effective_parent(rows, cur) or 0
+            if parent >= cur:
+                raise SessionEventLogError(f"事件链成环：seq={cur}，拒绝加载")
+            cur = parent
+        if cur != after:
+            return None
+        suffix.reverse()
+        return suffix
+
+    def _catch_up_projection(
+        self, owner: str, session_id: str, proj: _SessionProjection | None, cursor: tuple[int, int, str],
+    ) -> _SessionProjection:
+        """在同一读事务内追赶新增事件；实例变更、整链重写或 rewind 时全量重建。"""
+        leaf, generation, incarnation = cursor
+        if proj is None or proj.incarnation != incarnation or proj.generation != generation or leaf < proj.seq:
+            return self._build_projection(owner, session_id, cursor)
         if leaf == proj.seq:
-            self._projections.move_to_end(key)
             return proj
-        try:
-            rows = self._fetch_chain_rows(owner, session_id, leaf)
-            suffix: list[tuple[int, str, str]] = []
-            cur: int | None = leaf
-            while cur is not None and cur != proj.seq:
-                if cur not in rows:
-                    raise SessionEventLogError(
-                        f"事件链断裂：seq={cur} 缺失（leaf={leaf}），拒绝加载"
-                    )
-                suffix.append((cur, rows[cur][1], rows[cur][2]))
-                cur = self._effective_parent(rows, cur)
-            if cur != proj.seq:
-                raise SessionEventLogError("事件链与投影游标对账失败，拒绝加载")
-            suffix.reverse()
-            self._apply_event_rows(
-                proj, [(session_id, seq, etype, payload) for seq, etype, payload in suffix]
-            )
-            proj.seq = leaf
-            return proj
-        except SessionEventLogError:
-            # 缺口/坏行：全量重建重试一次，不可静默跳过
-            rebuilt = self._build_projection(owner, session_id)
-            self._cache_projection(key, rebuilt)
-            return rebuilt
+        if not proj.from_blob:
+            try:
+                suffix = self._projection_suffix(owner, session_id, proj.seq, leaf)
+                if suffix is not None and all(kind != SessionEventType.END_SEED.value for _, _, kind, _ in suffix):
+                    self._apply_event_rows(proj, suffix)
+                    proj.seq = leaf
+                    return proj
+            except SessionEventLogError:
+                # 上次游标后的事件无法应用时，用同一快照重新校验全链。
+                pass
+        return self._build_projection(owner, session_id, cursor)
 
     @staticmethod
     def _event_row_for_message(message: Message) -> tuple[str, str] | None:
@@ -1477,6 +1530,46 @@ class SQLiteSessionStore(SessionStore):
         return event_type.value, json.dumps(
             SQLiteSessionStore._message_to_dict(message), ensure_ascii=False
         )
+
+    @staticmethod
+    def _prefix_anchor(session_id: str, rows: list[tuple[str, int, str, str]], prefix: int) -> int:
+        anchor = role_count = 0
+        for source, seq, kind, _ in rows:
+            if kind in _ROLE_EVENT_TYPES_SET:
+                if role_count == prefix:
+                    break
+                role_count += 1
+            if source == session_id:
+                anchor = seq
+        return anchor
+
+    def _save_prefix_at_leaf(
+        self, owner: str, session_id: str, leaf: int, messages: list[Message],
+    ) -> tuple[int, int | None, dict | None]:
+        """Compare the requested history to the writer's active branch and retain matching event references."""
+        rows = self._resolve_chain(owner, session_id, leaf, include_seeds=True)
+        current = _SessionProjection()
+        self._apply_event_rows(current, rows)
+        prefix = 0
+        for saved, requested in zip(current.messages, messages):
+            if saved != requested and not (
+                saved.turn_outcome and requested.turn_outcome is None and replace(saved, turn_outcome=None) == requested
+            ):
+                break
+            prefix += 1
+        if prefix == len(current.messages):
+            return prefix, leaf, None
+        anchor = self._prefix_anchor(session_id, rows, prefix) if prefix else 0
+        if not anchor:
+            return 0, None, None
+        end = next(i for i, row in enumerate(rows) if row[:2] == (session_id, anchor))
+        retained = _SessionProjection()
+        self._apply_event_rows(retained, rows[:end + 1])
+        outcome = next((m.turn_outcome for m in reversed(retained.messages) if m.turn_outcome), None)
+        return prefix, anchor, outcome
+
+    def _message_event_rows(self, messages: list[Message]) -> list[tuple[str, str]]:
+        return [row for message in messages if (row := self._event_row_for_message(message)) is not None]
 
     # ---- SessionStore 接口 ----
     def load(self, session_id: str, owner_account_id: str) -> list[Message]:
@@ -1488,7 +1581,7 @@ class SQLiteSessionStore(SessionStore):
                     (session_id, owner_account_id),
                 ).fetchone()
             return self._load(row[0]) if row else []
-        return list(self._catch_up_projection(owner_account_id, session_id).messages)
+        return self._load_projected_messages(owner_account_id, session_id)
 
     def load_child_sessions(
         self,
@@ -1523,7 +1616,7 @@ class SQLiteSessionStore(SessionStore):
         return [
             (
                 str(row[0]),
-                list(self._catch_up_projection(owner_account_id, str(row[0])).messages),
+                self._load_projected_messages(owner_account_id, str(row[0])),
             )
             for row in rows
         ]
@@ -1541,7 +1634,7 @@ class SQLiteSessionStore(SessionStore):
         expected_cursor: tuple[int, int] | None = None,
         expected_incarnation: str | None = None,
         branch_from: tuple[int, int] | None = None,
-    ) -> Callable[[Any], tuple[int, int, int]]:
+    ) -> Callable[[Any], _ProjectionCommit]:
         now = time.time()
         # title_fallback=None 保持旧行为（首条 user 消息截断），兼容未传该参数的调用方；
         # title_fallback="" 显式留空占位，等 set_title 写入摘要标题（enable_title=True 时
@@ -1554,20 +1647,15 @@ class SQLiteSessionStore(SessionStore):
         # from_blob 守卫（F2）：投影来自 blob 回退时事件视图尚不存在，「前缀一致」
         # 是假象——必须整链重写一次把 blob 前缀落进事件表，否则该前缀只留在
         # 不再被读的 blob 列里（save 抢在后台回填拿到写锁之前的竞态）。
-        proj = self._get_projection(owner_account_id, session_id)
-        prefix = len(proj.messages)
-        is_append = not proj.from_blob and messages[:prefix] == proj.messages
+        with self._lock:
+            proj = self._get_projection(owner_account_id, session_id)
+            previous_cursor = proj.cursor
+            prefix = len(proj.messages)
+            is_append = not proj.from_blob and messages[:prefix] == proj.messages
         tail = messages[prefix:] if is_append else messages
         if branch_from is not None:
             tail = messages[branch_from[1]:]
-        retained_outcome = None if is_append else next(
-            (message.turn_outcome for message in reversed(messages) if message.turn_outcome), None,
-        )
-        event_rows: list[tuple[str, str]] = []
-        for message in tail:
-            encoded = self._event_row_for_message(message)
-            if encoded is not None:
-                event_rows.append(encoded)
+        event_rows = self._message_event_rows(tail)
         checkpoint_payload: str | None = None
         if last_prompt_tokens is not None:
             checkpoint_payload = json.dumps(
@@ -1579,35 +1667,48 @@ class SQLiteSessionStore(SessionStore):
                 ensure_ascii=False,
             )
 
-        def _write(conn) -> tuple[int, int, int]:
-            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
-            self._ensure_writer_lease(conn, owner_account_id, session_id, now)
+        def _write(conn) -> _ProjectionCommit:
             base_row = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0), "
-                "(SELECT events_generation FROM sessions "
+                "SELECT (SELECT COALESCE(MAX(seq), 0) FROM session_events "
                 "WHERE owner_account_id = ? AND session_id = ?), "
-                "(SELECT leaf_seq FROM sessions "
-                "WHERE owner_account_id = ? AND session_id = ?) "
-                "FROM session_events WHERE owner_account_id = ? AND session_id = ?",
-                (
-                    owner_account_id, session_id,
-                    owner_account_id, session_id,
-                    owner_account_id, session_id,
-                ),
+                "s.events_generation, s.leaf_seq, s.history_incarnation "
+                "FROM (SELECT 1) LEFT JOIN sessions AS s ON s.owner_account_id = ? AND s.session_id = ?",
+                (owner_account_id, session_id, owner_account_id, session_id),
             ).fetchone()
+            incarnation = base_row[3]
+            if expected_incarnation is not None and expected_incarnation != incarnation:
+                raise SessionIncarnationChanged(f"会话已删除或重建：{session_id}")
+            self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             base = int(base_row[0])
             current_generation = int(base_row[1] or 0)
             current_leaf = int(base_row[2] or 0)
             if expected_cursor is not None and expected_cursor != (current_leaf, current_generation):
                 raise SessionWriteConflict(f"会话 {session_id} 在收敛前已变化，请重新读取")
-            new_generation = current_generation + (0 if is_append else 1)
-            if is_append:
+            same_generation = previous_cursor[1:] == (current_generation, incarnation)
+            moved_leaf = same_generation and previous_cursor[0] != current_leaf
+            append = is_append and same_generation and branch_from is None
+            anchor = branch_from[0] if branch_from is not None else None
+            rows = event_rows
+            retained_outcome = None
+            if branch_from is None and not same_generation and is_append:
+                rows = self._message_event_rows(messages[:prefix]) + event_rows
+            elif branch_from is None and moved_leaf:
+                suffix = self._projection_suffix(owner_account_id, session_id, previous_cursor[0], current_leaf)
+                if suffix is None or any(
+                    kind in _ROLE_EVENT_TYPES_SET or kind == SessionEventType.END_SEED.value for _, _, kind, _ in suffix
+                ):
+                    retained, anchor, retained_outcome = self._save_prefix_at_leaf(
+                        owner_account_id, session_id, current_leaf, messages,
+                    )
+                    append = anchor == current_leaf
+                    rows = self._message_event_rows(messages[retained:])
+            outcome = None if append else next(
+                (message.turn_outcome for message in reversed(messages) if message.turn_outcome), retained_outcome,
+            )
+            new_generation = current_generation + (0 if append else 1)
+            if append or anchor is not None:
                 seq = base + 1
-                # 链锚 = 当前 leaf：rewind 之后的新事件挂在回退点上形成新分支，
-                # seq 取 MAX+1 保证旧分支行（seq > leaf）不被覆盖。
-                parent: int | None = current_leaf or None
-            elif branch_from is not None:
-                seq, parent = base + 1, branch_from[0]
+                parent: int | None = (current_leaf or None) if append else anchor
             else:
                 conn.execute(
                     "DELETE FROM session_events WHERE owner_account_id = ? AND session_id = ?",
@@ -1628,11 +1729,11 @@ class SQLiteSessionStore(SessionStore):
                 parent = seq
                 seq += 1
 
-            for etype, payload in event_rows:
+            for etype, payload in rows:
                 _insert(etype, payload)
             if checkpoint_payload is not None:
                 _insert(SessionEventType.METER_CHECKPOINT.value, checkpoint_payload)
-            new_leaf = seq - 1
+            new_leaf = parent or 0
             # P1-3 砍 blob 双写：messages 列不再随保存重写（写放大 O(N)/turn 的根源）。
             # 事件行是唯一事实源；messages 仅在 INSERT 时写入 '[]' 占位（NOT NULL 约束），
             # 读路径优先事件投影，仅无事件行的 legacy 会话回退读 blob（见 _build_projection）。
@@ -1682,10 +1783,12 @@ class SQLiteSessionStore(SessionStore):
                     last_prompt_tokens_source,
                     new_leaf,
                     new_generation,
-                    json.dumps(retained_outcome, ensure_ascii=False) if retained_outcome is not None else "",
+                    json.dumps(outcome, ensure_ascii=False) if outcome is not None else "",
                 ),
             )
-            return new_leaf, len(event_rows), new_generation
+            if incarnation is None:
+                incarnation = self._require_history_incarnation(conn, session_id, owner_account_id)
+            return _ProjectionCommit(proj, previous_cursor, new_leaf, new_generation, incarnation, not moved_leaf)
 
         return _write
 
@@ -1694,17 +1797,21 @@ class SQLiteSessionStore(SessionStore):
         owner_account_id: str,
         session_id: str,
         messages: list[Message],
-        new_leaf: int,
-        new_generation: int,
+        commit: _ProjectionCommit,
     ) -> None:
         # 写序不变量：先持久化（事务已提交）→ 再改内存投影。
         # 提交即意味着本次消息集已完整落进事件表（from_blob 触发的整链重写
         # 亦然），blob 回退标记随之清除。
-        proj = self._get_projection(owner_account_id, session_id)
-        proj.messages = list(messages)
-        proj.seq = new_leaf
-        proj.generation = new_generation
-        proj.from_blob = False
+        # 并发前移可能携带已持久化的 turn_outcome，下一次读按真实事件追赶。
+        if not commit.publish_prepared:
+            return
+        with self._lock:
+            proj = self._projections.get((owner_account_id, session_id))
+            if proj is not commit.previous or proj.cursor != commit.previous_cursor:
+                return
+            proj.messages = list(messages)
+            proj.seq, proj.generation, proj.incarnation = commit.leaf, commit.generation, commit.incarnation
+            proj.from_blob = False
 
     def save(
         self,
@@ -1719,7 +1826,7 @@ class SQLiteSessionStore(SessionStore):
         expected_cursor: tuple[int, int] | None = None,
         expected_incarnation: str | None = None,
     ) -> None:
-        new_leaf, _, new_generation = self._writer.execute(
+        commit = self._writer.execute(
             self._save_write(
                 session_id,
                 messages,
@@ -1732,7 +1839,7 @@ class SQLiteSessionStore(SessionStore):
                 expected_incarnation=expected_incarnation,
             )
         )
-        self._apply_saved_projection(owner_account_id, session_id, messages, new_leaf, new_generation)
+        self._apply_saved_projection(owner_account_id, session_id, messages, commit)
 
     async def save_async(
         self,
@@ -1750,7 +1857,6 @@ class SQLiteSessionStore(SessionStore):
             session_id, messages, workspace_id, owner_account_id=owner_account_id,
             title_fallback=title_fallback, last_prompt_tokens=last_prompt_tokens,
             last_prompt_tokens_source=last_prompt_tokens_source, expected_incarnation=expected_incarnation,
-            after_write=lambda _: None,
         )
 
     async def save_with_incarnation_async(
@@ -1766,14 +1872,10 @@ class SQLiteSessionStore(SessionStore):
         expected_incarnation: str | None = None,
     ) -> str:
         """保存消息并返回本次写入的会话实例。删除并重建同名会话会更换实例。"""
-        def capture(conn: sqlite3.Connection) -> str:
-            return self._require_history_incarnation(conn, session_id, owner_account_id)
-
         return await self._save_history_async(
             session_id, messages, workspace_id, owner_account_id=owner_account_id,
             title_fallback=title_fallback, last_prompt_tokens=last_prompt_tokens,
             last_prompt_tokens_source=last_prompt_tokens_source, expected_incarnation=expected_incarnation,
-            after_write=capture,
         )
 
     async def _save_history_async(
@@ -1787,8 +1889,7 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens: int | None,
         last_prompt_tokens_source: str | None,
         expected_incarnation: str | None,
-        after_write: Callable[[sqlite3.Connection], T],
-    ) -> T:
+    ) -> str:
         queue = self._get_write_queue((owner_account_id, session_id))
         # flush barrier：leaf 与事件批次同事务提交、ack 往返完成后才视为持久化。
         async with queue.lock:
@@ -1803,15 +1904,9 @@ class SQLiteSessionStore(SessionStore):
                 last_prompt_tokens_source=last_prompt_tokens_source,
                 expected_incarnation=expected_incarnation,
             )
-            def write(conn: sqlite3.Connection) -> tuple[int, int, T]:
-                leaf, _, generation = fn(conn)
-                return leaf, generation, after_write(conn)
-
-            new_leaf, new_generation, result = await queue.enqueue(write)
-        self._apply_saved_projection(
-            owner_account_id, session_id, messages, new_leaf, new_generation
-        )
-        return result
+            commit = await queue.enqueue(fn)
+        self._apply_saved_projection(owner_account_id, session_id, messages, commit)
+        return commit.incarnation
 
     async def load_async(self, session_id: str, *, owner_account_id: str) -> list[Message]:
         return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
@@ -2093,7 +2188,7 @@ class SQLiteSessionStore(SessionStore):
                 )
 
         self._writer.execute(_write)
-        self._projections.pop(key, None)
+        self._evict_projection(key)
 
     def fork(
         self,
@@ -2159,7 +2254,7 @@ class SQLiteSessionStore(SessionStore):
             return new_id
 
         self._writer.execute(_write)
-        self._projections.pop(key, None)
+        self._evict_projection(key)
         return new_id
 
     def list_branches(self, session_id: str, *, owner_account_id: str) -> list[dict[str, Any]]:
@@ -2384,15 +2479,7 @@ class SQLiteSessionStore(SessionStore):
         if merged[:len(history)] != history:
             # Keep source rows and fork anchors when a partially published block needs reordering.
             prefix = next(i for i, message in enumerate(history) if message is user) + 1
-            anchor = role_count = 0
-            for source, seq, kind, _ in rows:
-                if kind in _ROLE_EVENT_TYPES.values():
-                    if role_count == prefix:
-                        break
-                    role_count += 1
-                if source == sid:
-                    anchor = seq
-            branch_from = (anchor, prefix)
+            branch_from = (self._prefix_anchor(sid, rows, prefix), prefix)
         save = self._save_write(
             sid, merged, workspace, owner_account_id=owner, title_fallback=None, branch_from=branch_from,
             last_prompt_tokens=None, last_prompt_tokens_source=None, expected_cursor=(leaf, generation),
@@ -2406,7 +2493,7 @@ class SQLiteSessionStore(SessionStore):
             finish(conn)
 
         self._writer.execute(publish)
-        self._projections.pop((owner, sid), None)
+        self._evict_projection((owner, sid))
         return True
 
     def reconcile_open_tool_events(
@@ -2647,7 +2734,7 @@ class SQLiteSessionStore(SessionStore):
             self._delete_session_rows(conn, session_id, owner_account_id)
 
         self._writer.execute(delete)
-        self._projections.pop((owner_account_id, session_id), None)
+        self._evict_projection((owner_account_id, session_id))
 
     @staticmethod
     def _delete_session_rows(conn, session_id: str, owner_account_id: str) -> None:
@@ -2706,7 +2793,7 @@ class SQLiteSessionStore(SessionStore):
 
         self._writer.execute(_write)
         for sid in ids:
-            self._projections.pop((owner_account_id, sid), None)
+            self._evict_projection((owner_account_id, sid))
         return ids
 
     def set_title(
@@ -2920,7 +3007,7 @@ class SQLiteSessionStore(SessionStore):
             "WHERE owner_account_id=? AND session_id=?",
             (sequence, count + 1, tokens + self._estimate_tokens([message]), now, owner_account_id, session_id),
         )
-        self._projections.pop((owner_account_id, session_id), None)
+        self._evict_projection((owner_account_id, session_id))
         return sequence
 
     def accepted_followup_answers(
@@ -3188,7 +3275,7 @@ class SQLiteSessionStore(SessionStore):
 
         deleted = self._writer.execute(_write)
         for key in getattr(self, "_expired_keys", ()):
-            self._projections.pop(key, None)
+            self._evict_projection(key)
         self._expired_keys = []
         return deleted
 

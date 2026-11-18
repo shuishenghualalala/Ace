@@ -171,6 +171,13 @@
 <p><strong>验收</strong> Windows 存储与计量回归 97 项通过，Gateway 回执、归并及历史组合 115 项通过，最终 Agent 和异步存储 73 项通过。专项校验同游标的不同实例、同实例的正常写入和重新合并、只结清原请求的回执、旧私有会话清理、冲突后的单个停止终态，以及正常终态交付后才调度标题。官方 Windows Gateway 副本加载最终四份源文件，以回环模型完成正常聊天。重连后读回同账号的一问一答和同请求的完成回执，退出码为 0，双端口释放。独立 Windows CLI 正常发送后，通过新进程读回同一问答。</p>
 <p class="evidence">Ace <code>crew/gateway/dispatcher.py</code>、<code>crew/state/session_store.py</code>、<code>crew/agent/runtime.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/rewind-message.ts:529</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/subagent-messages.ts:29</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/runtime-command-queue.ts:214</code>。</p>
 </article>
+<article id="session-projection-incarnation">
+<h3>会话投影缓存的代次与读快照</h3>
+<p>旧版缓存比较叶序号和事件修订。删除后重建可以生成相同的游标，旧缓存仍会返回原会话的消息。旧写入确认如果在新缓存建立后才返回，也可能更新新会话的投影。缓存重建时分开查询游标和事件存在另一处窗口，两次查询可能来自不同的会话实例。同一实例上的旧缓存也可能漏掉另一条连接已经追加的正文，造成刚保存的热读与重新打开数据库后的冷读不同。</p>
+<p>ZCode 会话投影要求增量帧具有当前日志代次的已应用基底，异步计划查询结果也要核对代次和目录修订。Ace 在已有主键查询中读取 SQLite 会话实例，冷读和追赶固定在一个读快照内。写入回执同时携带准备时的缓存对象和游标，以及事务实际提交的实例和游标，缓存对象被替换或淘汰后丢弃回执的投影更新。同一代次发生并发追加时，写事务核对活动父链并保留匹配的事件前缀。回退后保存空增量会停在原活动叶。</p>
+<p><strong>验收</strong> Windows 存储、事件、历史窗口、投影缓存和 Gateway 回执组合共 155 项通过。双连接 SQLite 夹具覆盖同游标重建、迟到确认、缓存淘汰、冷读快照、同代追加、追问答案的原事件引用、旧 blob 回填和 fork 前缀。2,000 条消息下，连续 40 次热读执行 40 条 SELECT，没有额外事务。Windows 官方发行副本加载最终候选源码，经正常 WebSocket 完成两轮回环模型对话，第二轮输入含第一轮问答。重连后查得两个完成回执。重启复用同一临时账号目录，无模型重跑，原始 HTTP 历史逐字节相同。两次进程退出均为 0，双端口均释放。</p>
+<p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>tests/test_session_store_contract.py</code>。ZCode <code>packages/ui/src/v4/conversationProjectionStore.ts:660</code>、<code>packages/ui/src/v4/conversationProjectionStore.ts:1114</code>、<code>packages/ui/src/v4/conversationProjectionStore.ts:1256</code>。</p>
+</article>
 </section>
 
 <section id="desktop">
