@@ -328,7 +328,8 @@
 <h3>F12 · 正文流片反复刷新 Composer</h3>
 <p>正文片段会更新回合记录、正文和队列提示。旧 Composer 同时订阅两个 store 的全部变化，对同一忙回合反复重写发送、停止与状态。ZCode 的编辑器过滤未变更的文本，活跃时间线仅在内容高度变化时进行追底。Ace 仍同步处理实例会话的切换、忙碌、编辑、附件、鉴权及发送就绪。队列和看板模式变动只驱动队列。纯正文、记账和其他会话的待发变化跳过 Composer 的控件更新。主对话和 Wiki 使用原附件适配器与各自的会话解析器。</p>
 <p><strong>Windows 正式包对照</strong> 以 <code>8165a51b</code> 的两份 EXE 解包树运行同一测试驱动，候选只改变 ASAR 中两份相同的 renderer bundle。实际 Gateway 同一忙回合两段各发 60 个 SSE 片段。空草稿时发送控件的同值写入从 1,080 次减至零，固定一份草稿时发送和停止控件从 870 次减至零。候选正文两段均逐字节写入历史，原有提交、排队、停止及草稿状态变化通过。</p>
-<p>候选另在原生界面把旧稿加入忙回合的队列，撤回编辑后重新排队。释放首回合后新稿自动发送。模型请求和用户历史中，首回合、撤回的旧稿、改写后的新稿分别为 1、0、1 条。实际显示了新回复，队列恢复为空。三次应用均正常退出并释放两个端口。双 Composer 和发送控制器定向回归 30 项通过。桌面全量 205 个文件、2,287 项通过、2 项跳过，TypeScript 检查通过。该组测量限定为 DOM 写入及功能，输入到下一绘制的收益还需同条件配对。</p>
+<p>候选另在原生界面把旧稿加入忙回合的队列，撤回编辑后重新排队。释放首回合后新稿自动发送。模型请求和用户历史中，首回合、撤回的旧稿、改写后的新稿分别为 1、0、1 条。实际显示了新回复，队列恢复为空。三次应用均正常退出并释放两个端口。双 Composer 和发送控制器定向回归 30 项通过。桌面全量 205 个文件、2,287 项通过、2 项跳过，TypeScript 检查通过。该组测量限定为 DOM 写入及功能。输入到下一绘制的同包配对见下。</p>
+<p><strong>同包键入配对</strong> 用相同的 2,000 轮混合历史及固定键入序列，两档各交替运行两对，每批 60 键。480 个前景可信事件均取得 Chromium Event Timing、<code>beforeinput</code> 和 <code>input</code>，八条正文在持久历史逐字节一致。每秒 20 片时，两对总时延 P95 都从 80 降到 64 毫秒，聚合 P50 从 72 降到 56 毫秒。每秒 100 片时，两对 P95 分别为 80→48 和 48→64 毫秒，聚合 P50/P95 为 48/80→48/64 毫秒，样本尚不足以确认该档持续改善。两档 <code>input</code> 从捕获到文档冒泡的 P95 分别为 6.4→6.1 和 5.9→5.5 毫秒。总时延按 8 毫秒量化。两套应用均正常退出，双端口释放。50 毫秒目标在配对的聚合数据中仍未达到。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/composer-view.ts</code>、<code>desktop/src/ui/features/conversation-panel.ts</code>、<code>desktop/src/ui/reducers/store-bus.ts</code>。ZCode <code>packages/ui/src/LexicalChatInput.tsx:853</code>、<code>packages/ui/src/v4/ConversationTimeline.tsx:1340</code>。</p>
 </article>
 </section>
