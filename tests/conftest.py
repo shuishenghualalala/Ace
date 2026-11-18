@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
@@ -146,9 +147,20 @@ async def _close_live_crew_apps():
     from crew.features.hooks import hook_registry
     from crew.tools.process_registry import process_registry
 
-    try:
-        for app in reversed(tuple(_LIVE_APPS)):
+    async def shutdown_host(app):
+        try:
             await app.shutdown()
+        finally:
+            # Propagate shutdown errors to this test, after releasing its stores
+            # and removing the failed instance from subsequent tests' ownership.
+            if app in _LIVE_APPS:
+                _LIVE_APPS.remove(app)
+                app._close_persistent_stores()
+
+    try:
+        async with AsyncExitStack() as hosts:
+            for app in tuple(_LIVE_APPS):
+                hosts.push_async_callback(shutdown_host, app)
     finally:
         process_registry.configure_task_runtime(None)
         hook_registry.clear()

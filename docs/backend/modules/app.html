@@ -70,7 +70,7 @@
       <tr><td>上下文贡献</td><td>Request 阶段由 Host 执行；Prompt 阶段由 Agent Scope 执行。Wiki、Cron、Gateway、Browser 与后台结果通知保持各自 Handler 所有权。</td><td>已落地</td></tr>
       <tr><td>Agent Preset 装配</td><td>按中立 preset policy 组装 prompt、工具、Skill、Context 与披露模式；完整回合持有所属 Generation Lease，缓存指纹包含代次。</td><td>已落地</td></tr>
       <tr><td>托管 Feature</td><td>需要当前事件循环的 Product Feature 由 <code>declare_managed_feature()</code> 声明，startup 按依赖图激活，shutdown 按逆序停用。</td><td>已落地</td></tr>
-      <tr><td>测试宿主回收</td><td>无 Gateway lifespan 的 ASGI、CLI 测试也通过 <code>await app.shutdown()</code> 回收宿主。Work 构建时即激活，关闭其 FeatureScope 后才释放八个 Store。Linux 三次构建的旧拆卸残留 27、49、71 个 SQLite 文件描述符；正常关停后每轮 Work 数据库句柄均归零。</td><td>测试夹具与 Work 生命周期回归</td></tr>
+      <tr><td>测试宿主回收</td><td>无 Gateway lifespan 的 ASGI、CLI 测试也通过 <code>await app.shutdown()</code> 回收宿主。Work 构建时即激活，关闭其 FeatureScope 后才释放八个 Store。Linux 三次构建的旧拆卸残留 27、49、71 个 SQLite 文件描述符；正常关停后每轮 Work 数据库句柄均归零。测试结束时恢复临时替换的 MCP manager。个别宿主的关停异常会报告给所属用例，其余宿主继续关停。</td><td>测试夹具与 Work 生命周期回归</td></tr>
       <tr><td>关闭编排</td><td>先停止 Dispatcher，再停用托管 Feature、drain 内置 Scope，最后关闭尚未迁移的业务服务、Provider、插件和 Store。</td><td>迁移中</td></tr>
     </tbody>
   </table>

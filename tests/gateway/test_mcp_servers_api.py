@@ -319,7 +319,7 @@ async def test_create_persist_failure_keeps_memory_disk_and_runtime_untouched(ap
     client, crew, config_yaml = api
     _seed_server(crew, "keep", "keep-cmd")
     spy = _SpyMcpManager()
-    crew.mcp_manager = spy
+    monkeypatch.setattr(crew, "mcp_manager", spy)
     _break_safe_dump(monkeypatch)
 
     resp = await client.post(
@@ -349,7 +349,7 @@ async def test_update_persist_failure_keeps_memory_disk_and_runtime_untouched(
     client, crew, config_yaml = api
     _seed_server(crew, "echo", "old-cmd")
     spy = _SpyMcpManager()
-    crew.mcp_manager = spy
+    monkeypatch.setattr(crew, "mcp_manager", spy)
     if inject == "safe_dump":
         _break_safe_dump(monkeypatch)
     else:
@@ -374,7 +374,7 @@ async def test_delete_persist_failure_keeps_memory_disk_and_runtime_untouched(ap
     client, crew, config_yaml = api
     _seed_server(crew, "echo", "old-cmd")
     spy = _SpyMcpManager()
-    crew.mcp_manager = spy
+    monkeypatch.setattr(crew, "mcp_manager", spy)
     _break_safe_dump(monkeypatch)
 
     resp = await client.delete("/api/mcp/servers/echo", headers=LOCAL_HEADERS)
@@ -393,7 +393,7 @@ async def test_update_failure_then_retry_applies_change_without_losing_updates(a
     _seed_server(crew, "echo", "v1")
     _seed_server(crew, "other", "stable")
     spy = _SpyMcpManager()
-    crew.mcp_manager = spy
+    monkeypatch.setattr(crew, "mcp_manager", spy)
 
     real_safe_dump = yaml.safe_dump
     state = {"calls": 0}
@@ -443,7 +443,7 @@ async def test_delete_saved_but_runtime_remove_failure_reports_honestly(api, mon
         raise RuntimeError("worker stop failed")
 
     spy.remove_server = _boom
-    crew.mcp_manager = spy
+    monkeypatch.setattr(crew, "mcp_manager", spy)
 
     resp = await client.delete("/api/mcp/servers/echo", headers=LOCAL_HEADERS)
 
