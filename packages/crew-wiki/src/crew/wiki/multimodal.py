@@ -17,8 +17,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import requests
-
 import crew as _crew_pkg
 from crew.state.logging import get_logger
 
@@ -151,12 +149,14 @@ def _image_timeout_seconds() -> float:
         return 120.0
 
 
-def _classify_vlm_request_error(exc: requests.RequestException) -> str:
-    if isinstance(exc, requests.Timeout):
+def _classify_vlm_request_error(exc: Exception) -> str:
+    from requests import exceptions
+
+    if isinstance(exc, exceptions.Timeout):
         return f"请求超时（>{_image_timeout_seconds():.0f}s），请检查 VLM_BASE_URL 连通性或调大 VLM_TIMEOUT_SECONDS"
-    if isinstance(exc, requests.ConnectionError):
+    if isinstance(exc, exceptions.ConnectionError):
         return "连接失败（DNS 解析失败或服务不可达），请检查 VLM_BASE_URL"
-    if isinstance(exc, requests.HTTPError):
+    if isinstance(exc, exceptions.HTTPError):
         status = exc.response.status_code if exc.response is not None else "未知"
         return f"HTTP {status}，请检查 VLM_API_KEY 与服务端状态"
     return f"{type(exc).__name__}: {exc}"
@@ -231,6 +231,8 @@ def describe_image(path: str | Path, prompt: str | None = None) -> str:
         }],
         "stream": False,
     }
+    import requests
+
     try:
         response = requests.post(endpoint, headers=headers, json=body, timeout=_image_timeout_seconds())
         response.raise_for_status()

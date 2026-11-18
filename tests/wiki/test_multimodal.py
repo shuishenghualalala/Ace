@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -58,6 +60,26 @@ def sample_video(tmp_path: Path) -> Path:
     return path
 
 
+def test_wiki_media_metadata_loads_without_vision_http_client():
+    script = """
+import sys
+
+sys.modules["requests"] = None
+from crew.wiki.multimodal import is_image_mime, is_video_mime
+
+assert is_image_mime("image/png")
+assert is_video_mime("video/mp4")
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_is_image_mime():
     assert is_image_mime("image/jpeg") is True
     assert is_image_mime("image/png") is True
@@ -87,7 +109,7 @@ def _mock_image_response(monkeypatch, text: str) -> list:
         calls.append((url, kwargs))
         return _FakeResponse({"choices": [{"message": {"content": text}}]})
 
-    monkeypatch.setattr(multimodal.requests, "post", fake_post)
+    monkeypatch.setattr(requests, "post", fake_post)
     return calls
 
 
@@ -111,7 +133,7 @@ def test_describe_image_requires_configuration(sample_image: Path, monkeypatch):
     monkeypatch.delenv("VLM_MODEL", raising=False)
     monkeypatch.delenv("CREW_ENV_FILE", raising=False)
     post = MagicMock()
-    monkeypatch.setattr(multimodal.requests, "post", post)
+    monkeypatch.setattr(requests, "post", post)
 
     with pytest.raises(MediaUnderstandingError):
         describe_image(str(sample_image))
@@ -241,7 +263,7 @@ def test_describe_image_classifies_timeout(sample_image, monkeypatch):
     def fake_post(url, **kwargs):
         raise requests.Timeout("slow")
 
-    monkeypatch.setattr(multimodal.requests, "post", fake_post)
+    monkeypatch.setattr(requests, "post", fake_post)
 
     with pytest.raises(MediaUnderstandingError, match="请求超时"):
         describe_image(str(sample_image), "描述")
@@ -253,7 +275,7 @@ def test_describe_image_classifies_connection_error(sample_image, monkeypatch):
     def fake_post(url, **kwargs):
         raise requests.ConnectionError("dns")
 
-    monkeypatch.setattr(multimodal.requests, "post", fake_post)
+    monkeypatch.setattr(requests, "post", fake_post)
 
     with pytest.raises(MediaUnderstandingError, match="连接失败"):
         describe_image(str(sample_image), "描述")
@@ -266,7 +288,7 @@ def test_describe_image_classifies_http_error(sample_image, monkeypatch):
         response = SimpleNamespace(status_code=502)
         raise requests.HTTPError("bad gateway", response=response)
 
-    monkeypatch.setattr(multimodal.requests, "post", fake_post)
+    monkeypatch.setattr(requests, "post", fake_post)
 
     with pytest.raises(MediaUnderstandingError, match="HTTP 502"):
         describe_image(str(sample_image), "描述")

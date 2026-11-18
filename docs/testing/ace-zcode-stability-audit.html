@@ -305,6 +305,14 @@
 <p>候选副本的原生 Electron 九阶段首次通过，首聊 1.014 秒，Gateway 故障恢复 11.282 秒，正常退出 1.435、2.271 秒。同步宿主与已有事件循环的嵌入式宿主在旧代码分别创建六个循环，修复后均以一个独立循环按既定顺序完成。Windows 后端分项 63 项通过。该对照使用发行内容副本，冷启动 5 秒目标仍待达到。候选副本另用维护者指定的 <code>deepseek-flash</code> 完成真实文件读取。两次上游调用后得到精确内容，重开后在聊天窗口呈现同一条历史，两次正常退出。</p>
 <p class="evidence">Ace <code>crew/app.py</code> 中的内建请求能力与 <code>crew/features/manager.py</code> 的同步桥。ZCode <code>packages/desktop/src/host/index.ts:4155</code>、<code>packages/desktop/src/host/databaseStartupCoordinator.ts:58</code>。</p>
 </article>
+<article id="wiki-vision-http-startup">
+<h3>F11 · Wiki 图片理解提前装载 HTTP 客户端</h3>
+<p>Gateway 工厂注册 Wiki 路由时会导入采集模块。旧版在首次图片处理之前即装载 <code>requests</code>，一份 Windows 导入剖析中该依赖树累计约 306 毫秒。ZCode 的飞书 Provider 将长连接专用 SDK 放到真正启动连接的分支。Ace 现在在发起图片理解请求时加载 HTTP 客户端，继续使用原 HTTP 实现及错误分类。首次图片理解承担这项导入，普通聊天无需加载它。</p>
+<p><strong>真实 Windows 包配对</strong> 使用包含 F10 的同一发行副本。逐一核对 17,399 个文件，只有已安装的 <code>multimodal.py</code> 不同。六对全新配置实际 Gateway 运行均改善，主端口就绪中位数从 10.023 秒降至 9.647 秒，逐对改善中位数 0.350 秒，范围 0.093 至 0.421 秒。十二次均核对双端口、子进程身份、会话 API 与正常退出。</p>
+<p>独立验收在真实 WebSocket 首聊后确认候选进程仍未导入 <code>requests</code> 或 <code>urllib3</code>。随后通过公开 Wiki 上传接口发送真实 PNG，回环 VLM 的解释结果写入 Wiki 来源。第二次上传的上游 HTTP 401 正确归类为 <code>MEDIA_UNDERSTANDING</code>。两版均通过首张图片与错误分类。包含后续 Wiki 编译的首次图片单样本由 0.522 秒变为 0.656 秒。候选的原生桌面九阶段通过，窗口冷启 11.043 秒，首聊 1.109 秒。Wiki 多模态、采集、工具和解析回归共 132 项通过。临时屏蔽 <code>requests</code> 时，旧版无法导入 Wiki 媒体元数据，修复版通过对应回归。</p>
+<p>Debian 12.15 普通用户从独立候选源码副本运行发行 Python 3.11.9，在内建能力和多模态两组共 29 项测试通过。另一干净进程的应用构建、Wiki 媒体类型识别均未装载 HTTP 客户端，首次图片理解才加载。回环服务逐字节核对 PNG 及指定模型，仅收到一次请求，随后宿主正常关闭。</p>
+<p class="evidence">Ace <code>packages/crew-wiki/src/crew/wiki/multimodal.py</code>、<code>tests/wiki/test_multimodal.py</code>。ZCode <code>packages/services/src/bots/providers/feishuProvider.ts:1836</code>。</p>
+</article>
 </section>
 
 <section id="handoff">
