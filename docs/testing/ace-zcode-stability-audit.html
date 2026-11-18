@@ -34,7 +34,7 @@
 <p><strong>接手目标与真实模型验收（2026-11-18）</strong> 在现有审计工作树上合入安全模块，按 Agent 基础能力、工具与提示词、桌面稳定性和性能继续核对 ZCode 源码。每项修复做定向回归、端到端验证并独立提交。真实模型测试使用维护者指定的本机配置文件 <code>D:\Codes\env</code>，以其中当前的模型和接口为准，测试数据放在隔离目录。故障、断连与重复请求用可控端点注入，分别记录两种验证的结果。</p>
 <h3>2026-11-18 接手后的实测结果</h3>
 <p>真实模型经本地 Gateway 和 WebSocket 完成了文件读取、遵守项目指令的搜索、保留 Unicode 的精确编辑及 Plan 审批执行。Windows 正式包也完成真实模型首聊和重开历史。Windows 的升级旧库、独立 Gateway 与后台任务归属、两种浏览器入口的审批重连已做过端到端核对。以下各节保留发现问题时的基线，复验使用的版本和结果在<a href="#handoff">合并后复核</a>逐项列出。</p>
-<p>Windows 万会话场景的单次首行时间从 73.26 秒降到 15.005 秒。后者对应 32 行首页，30 次 HTTP 首页请求的 P95 为 24.1 毫秒。首行可见与聊天可发送是两个测量点。Windows 另完成 180 次启动，分档的发送可用和目录挂载 P50/P95 见末章。Windows 和 Linux 另各完成 30 轮渲染及网关故障恢复。Windows 另完成单独 WebSocket 断开的 30 轮复验，缺口正文恢复可见的 P95 为 1.872 秒。Linux 同类分布及 macOS 原生故障复验仍待补齐。</p>
+<p>Windows 万会话场景的单次首行时间从 73.26 秒降到 15.005 秒。后者对应 32 行首页，30 次 HTTP 首页请求的 P95 为 24.1 毫秒。首行可见与聊天可发送是两个测量点。Windows 另完成 180 次启动，分档的发送可用和目录挂载 P50/P95 见末章。Windows 和 Linux 另各完成 30 轮渲染及网关故障恢复。Windows 另完成单独 WebSocket 断开的 30 轮复验，缺口正文恢复可见的 P95 为 1.872 秒。Linux UOS 正式包同类 30 轮复验亦全部通过，恢复正文可见的 P95 为 1.884 秒。macOS 原生故障复验仍待补齐。</p>
 <p>在日常开发场景，Ace 首先要保证一轮请求能被明确受理、在故障后恢复，并保留完整结果。当前应优先处理网关卡死后的替换流程、回放游标失效后的状态恢复和 Plan 工具契约。应用层已有会话事件日志、写入意图与恢复、工具隔离、Markdown 合帧及历史分页，可以沿用这些模块。</p>
 <div class="table"><table>
 <thead><tr><th scope="col">批次</th><th scope="col">影响和代码归属</th><th scope="col">提交验收条件</th></tr></thead>
@@ -159,11 +159,12 @@
 <p>macOS 和 Linux 启动分支会异步按同用户与进程命令行清理匹配的网关，启动新进程前没有等待该清理完成。相同账号下的另一个 profile、另一个 checkout 或外置网关可能被误停。Windows 打包分支已有避免广泛清理的处理，开发模式另有命令行匹配。ZCode 的 utility host 采用自身持有的进程句柄管理退出。</p>
 <p><strong>修复</strong> 删除开发版及打包版启动路径的进程扫描，以及 Linux 更新脚本里的按名称终止。桌面为每次受管启动持有专属管道，网关收到 EOF 后执行现有关停流程。健康探针验证应用目录证明和本次启动的证明，避免把同目录下其他托管实例当成当前网关。开发版和打包版在候选范围内检查主端口及相邻健康端口，遇到占用就继续选择。允许复用的独立网关保留原有协议和独立生命周期。</p>
 <p><strong>验收</strong> <code>856fb5cc</code> 已提交。真实 Windows Electron 双实例覆盖 API 和健康端口占用、就绪前后强退、正常退出、重启、独立 CLI 网关复用及五轮端到端回复。临时打包布局另走真实 Windows 打包分支，内嵌 Python 启动并完成一轮回复，强退后释放端口，独立网关存活。Linux 离线容器验证真实管道、Unix socketpair、父进程强退、端口回退和启动证明。Python 636 项通过、2 项跳过。桌面全量 2030 项通过、2 项跳过，仍有两项 Windows 符号链接权限失败及一项已知模型分组顺序失败。默认模型的最小请求仍返回 HTTP 400 <code>InvalidSubscription</code>，端到端使用本地协议测试模型。</p>
-<p><strong>仍待验证</strong> macOS 安装包的原生端到端，以及 POSIX 平台上冻结 Gateway 后的整树回收。Windows 的冻结与强退已实测，见下。Windows 和 Linux 安装包验证见 D8。同一 <code>CREW_HOME</code> 下多个实例曾共用后台终端恢复文件。<code>85951895</code> 已按任务保存宿主及子进程的启动身份，Windows 双 Gateway 与 Linux 并发恢复结果见<a href="#handoff">合并后复核</a>。应用显式等待关停和完成写入见 D6。</p>
+<p><strong>仍待验证</strong> macOS 安装包的原生端到端和 Linux 用户级 systemd scope 的冻结回收。Windows Job Object 及 Linux POSIX 进程组的冻结路径已分别实测。Windows 和 Linux 安装包验证见 D8。同一 <code>CREW_HOME</code> 下多个实例曾共用后台终端恢复文件。<code>85951895</code> 已按任务保存宿主及子进程的启动身份，Windows 双 Gateway 与 Linux 并发恢复结果见<a href="#handoff">合并后复核</a>。应用显式等待关停和完成写入见 D6。</p>
 <p><strong>Windows 宿主完全冻结</strong> 从 <code>56eb6de6</code> 真实 EXE 的同一内嵌 Python 启动两个 Gateway，共用一个临时 Crew Home。每端通过正常的后台终端注册表启动 PowerShell 和独立 Python 子进程。暂停第一端全部线程，以原来每 50 毫秒写一次的心跳连续 700 毫秒不变确认冻结，再用操作系统终止该 Gateway。其绑定的 Job Object 在 0.172 秒内回收 shell 与子进程，业务和健康端口可重新绑定。第二端的两个进程仍存活，HTTP 仍就绪；关闭其桌面父管道后，第二端返回 0，子进程和双端口均已释放。</p>
 <p><strong>健康端口在启动期间被占用</strong> Linux 共享回环压测的第 4 轮中，Python 后端回归与桌面共用默认健康端口。Gateway 打印了 <code>EADDRINUSE</code>，桌面仍报告可用，九阶段脚本在第二端口验签失败。改用独立回环网络后继续测量。修复后的桌面受管 Gateway 必须绑定主端口 +1。绑定失败时主端口返回可验签的 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>，业务仍受启动门控。主进程确认子进程身份，关闭父管道，等旧进程退出，再在原启动时限内选择后续端口。独立 Gateway 仍支持显式健康端口和单端口运行。</p>
 <p>定向回归在真实占用的端口上验证受管业务返回 503、核心任务未执行及独立模式仍可用。后端 106 项和桌面 45 项通过，TypeScript 通过。将候选主进程和 Python 改动应用到 <code>56eb6de6</code> Windows 发行副本，独立监听器在子进程启动后抢占 8001。两轮从 8000 换至 8002/8003，在 28.130 和 27.499 秒内恢复到可发送状态，旧子进程均返回 0，首聊落盘且占用方仍响应。另两轮分别观察到桌面提前收到退出和新 Gateway 已连接后 UI 等待超时，这两轮未计为通过。另在临时副本记录退出来源连续重跑三轮，均完成首聊和正常退出，退出阶段之前未记录到退出 IPC 或 Windows 窗口关闭消息。原先提前退出的来源仍未定位。</p>
 <p>Linux 用 UOS 发行版中的 Python 复现同一个端口竞争。旧程序的主端口验签通过，但副端口被占用时仍报 <code>ready</code>，会话接口返回 200。替换后的 Gateway 在同条件下验签通过，报告 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>，会话接口返回 503。两次分别关闭受管父管道，进程均返回 0，测试占用方继续服务。</p>
+<p><strong>Linux 冻结及下一实例回收</strong> Debian 12.15 普通用户运行 UOS <code>93631f3d</code> 的真实 Gateway，确认第一实例进入 <code>SIGSTOP</code>。关闭父管道后，实际桌面退役控制器用时 3.018 秒观察到该 Gateway 被强制结束，双端口释放，后台 shell 和 Python 子进程继续写心跳。共享隔离 Crew Home 的下一实例按宿主和子进程启动身份只接管第一实例任务，正常退出时收回整组。并行的另一实例和它的任务在上述过程中持续存活，其自身正常退出后，三对监听端口和四个子进程均已释放。该实验为 POSIX 进程组路径，回收发生在接管后的正常退出。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1396</code>、<code>:1404</code>、<code>:2012</code>，<code>crew/gateway/desktop_parent_lease.py:30</code>，<code>crew/gateway/app.py:527</code>。ZCode <code>packages/desktop/src/main/desktopHostProcess.ts:669</code>、<code>:714</code>，<code>packages/server/src/stdio-lifecycle.ts:103</code> 和 <code>packages/services/src/session/offPeakMockGateway.ts:564</code>。</p>
 </article>
 <article id="replay">
@@ -172,7 +173,9 @@
 <p><strong>修复</strong> 订阅明确携带会话事件代次和已应用水位。Gateway 返回可回放下界、当前水位及恢复模式，游标失效时以有界快照替换活跃状态。区分可丢弃的临时帧与需要重建的正文、终态和交互状态。Desktop 与 Web 共用语义，按版本原子应用快照并与后续实时流衔接。继续沿用现有持久化投影和工具意图日志，恢复时只重建状态。验收同代断网、长时间断网、网关重启、较大序号先到、回放与实时并发、审批状态、文本和工具结果无重复。</p>
 <p class="evidence">Ace <code>crew/gateway/connections.py:34</code>、<code>:440</code>、<code>:523</code>，<code>crew/gateway/ws.py:324</code>，<code>desktop/src/ui/features/gateway-sequence.ts:11</code>，<code>desktop/src/ui/api/feature-session.ts:1049</code>，<code>desktop/src/ui/features/stream-watchdog.ts:71</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:883</code>。</p>
 <p><strong>Windows 单独断开 WebSocket · <code>c3059f29</code></strong> 冻结源码后构建实际 Electron 43.1.0 开发版。每轮在真实 Gateway 进入当前回合的回放窗口后，仅以 1012 关闭桌面聊天连接。Gateway 代次、独立观察 WebSocket 与本地 SSE 模型始终存活。30 轮全部通过。每轮核对补回的各段只显示一次、原回复完整落盘、同会话后续回合正常，以及退出后本轮 Gateway 已结束。</p>
-<p>从故障注入到 renderer 收到重新打开事件的 P50/P95 为 1.557/1.770 秒，到缺口正文实际挂载可见为 1.681/1.872 秒，最大值分别为 1.790、1.907 秒。P95 取第 29 个升序样本。计时包含客户端退避和合成分段的回放等待。一次发生在发送尚不可用时的预演没有发出请求，也未注入断线，单独保留。Linux 与 macOS 的独立 WebSocket 计时尚未取得。</p>
+<p>从故障注入到 renderer 收到重新打开事件的 P50/P95 为 1.557/1.770 秒，到缺口正文实际挂载可见为 1.681/1.872 秒，最大值分别为 1.790、1.907 秒。P95 取第 29 个升序样本。计时包含客户端退避和合成分段的回放等待。一次发生在发送尚不可用时的预演没有发出请求，也未注入断线，单独保留。macOS 的独立 WebSocket 计时尚未取得。</p>
+<p><strong>Linux 单独断开 WebSocket · <code>93631f3d</code></strong> UOS 正式 DEB 在 Debian 12.15 / WSL2、普通 UID 1000、独立回环网络和原有 Chromium 沙箱中运行。保持正式包原文件，临时只读解包树只加入故障与观测夹具。先通过 1 次试跑，再通过正式 30 轮。每轮原 Gateway PID 和独立观察连接保持在线，双口证明通过，漏段及并发尾段各显示一次，完整回复已落盘，同会话继续发送，退出时原 Gateway 随之结束。</p>
+<p>从单条客户端连接故障注入到重新打开的 P50/P95 为 1.488/1.801 秒，到缺口正文实际挂载为 1.565/1.884 秒。最大值分别为 1.809、1.916 秒，P95 取第 29 个升序样本。这一组没有启动 Docker 守护进程，也没有修改宿主沙箱。</p>
 </article>
 <article id="ack">
 <h3>D4 · P1 · “已发送”缺少网关持久受理回执</h3>
@@ -238,6 +241,7 @@
 <tr><td>UOS amd64</td><td>315,445,500<br><code>9487d94e4d372b0edb8ca63f29fa1d6bb4866a9cf6583adce7d113c9ee8ffa3a</code></td><td>冷启 8.503 秒，首聊 1.046 秒，渲染恢复 1.522 秒，网关恢复 7.751 秒，正常退出 1.524、4.625 秒。</td></tr>
 <tr><td>Kylin amd64</td><td>315,441,836<br><code>bc4b60cdcc78d190538a5fc938452c2d1d1dfc886e2b4e3a43fcaab9f19bfbf5</code></td><td>冷启 9.287 秒，首聊 0.880 秒，渲染恢复 1.476 秒，网关恢复 6.854 秒，正常退出 1.516、4.132 秒。</td></tr>
 </tbody></table></div>
+<p><strong>安全运行时预构建清单 · <code>651c6322</code></strong> 原工作流未把已检出的 Rust 源码根目录传给打包工具，生成的发布清单缺少源码摘要及文件数。修复后使用本地离线构建的 Windows Release helper，执行同一 staging、校验、归档和解包流程。前后归档内二进制逐字节一致，修复后清单记录 36 个输入及与 Git 对象相同的摘要，24 项定向回归通过。现有 Apple Silicon Mach-O 自身摘要匹配原清单，源码证明仍需原生重建。另在本轮 Debian 普通用户用原发行包的 <code>bwrap</code> 实际尝试创建用户命名空间，内核仍拒绝，未调整宿主安全参数。</p>
 <p class="evidence">Ace <code>.github/workflows/ci.yml:28</code>，<code>.github/workflows/nightly-desktop.yml:49</code>、<code>:78</code>、<code>:110</code>，<code>desktop/electron-builder.yml</code>。Ace 发布脚本 <code>deb-package/pack_exe.ps1:357</code>、<code>deb-package/pack_mac.sh:344</code>。ZCode <code>packages/desktop/test/e2e/smoke.test.ts:12</code>，<code>packages/desktop/package.json:28</code>，<code>apps/zcode-cli/packages/adapters/tests/migration-crash-recovery.test.ts:10</code>。</p>
 </article>
 </section>
