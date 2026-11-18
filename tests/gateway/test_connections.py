@@ -609,6 +609,35 @@ async def test_notify_owner_removes_dead_owner_socket(conn: ConnectionManager):
 
 
 @pytest.mark.asyncio
+async def test_detached_replay_metadata_is_bounded_and_legacy_cursor_keeps_advancing(monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._REPLAY_SESSIONS", 8)
+    conn = ConnectionManager(min_interval=0)
+    online = _FakeWS()
+    conn.register("same", online, owner_account_id="B")
+    await conn.push_payload("same", {"kind": "delta", "body": {"text": "B"}}, owner_account_id="B")
+    for _ in range(12):
+        await conn.push_payload("same", {"kind": "delta", "body": {"text": "A"}}, owner_account_id="A")
+    for index in range(512):
+        await conn.push_payload(f"cold-{index}", {"kind": "final"}, owner_account_id="A")
+        assert await conn.replay(f"empty-{index}", _FakeWS(), owner_account_id="A")
+    assert len(conn._gateway_seq) <= 9
+    assert len(conn._replay_locks) <= 1
+    await conn.push_payload("same", {"kind": "final", "body": {"text": "B2"}}, owner_account_id="B")
+    assert [f["gateway_sequence"] for f in online.sent] == [1, 2]
+    final = {"kind": "final", "body": {"text": "A2"}}
+    await conn.push_payload("same", final, owner_account_id="A")
+    legacy = _FakeWS()
+    assert await conn.replay("same", legacy, owner_account_id="A", after_gateway_sequence=12)
+    assert [f["body"]["text"] for f in legacy.sent] == ["A2"]
+    assert legacy.sent[0]["gateway_sequence"] > 12
+    versioned = _FakeWS()
+    assert await conn.replay("same", versioned, owner_account_id="A",
+                             resume_cursor={"epoch": final["gateway_epoch"], "sequence": 1})
+    assert versioned.sent[0]["kind"] == "gateway_resync"
+    assert versioned.sent[0]["body"]["reason"] == "cursor_expired"
+
+
+@pytest.mark.asyncio
 async def test_clear_buffer_clears_payloads_but_keeps_sequence(conn: ConnectionManager):
     ws = _FakeWS()
     conn.register("s1", ws, owner_account_id="")

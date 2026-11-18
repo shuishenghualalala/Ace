@@ -24,6 +24,7 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from fastapi import WebSocket
 
@@ -95,8 +96,10 @@ class ConnectionManager:
         self._ws_to_owners: dict[WebSocket, set[str]] = defaultdict(set)
         # 断线回放：每个 session 的有界 payload 缓存 + 单调 gateway_sequence + 回放锁
         self._journal = ReplayJournal(_CHUNK_BUFFER_SIZE, _REPLAY_SESSION_BYTES, _REPLAY_TOTAL_BYTES, _REPLAY_SESSIONS)
-        self._gateway_seq: dict[tuple[str, str], int] = defaultdict(int)
-        self._replay_locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._gateway_seq: dict[tuple[str, str], int] = {}
+        self._cold_heads: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._retired_floors = [0] * _REPLAY_SESSIONS
+        self._replay_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
         self._gateway_epoch = uuid4().hex
         self._owner_replay_epochs: dict[str, str] = {}
         self._pending_followups: OrderedDict[tuple[str, str], dict[str, dict]] = OrderedDict()
@@ -106,6 +109,32 @@ class ConnectionManager:
         """Build the connection key from explicit owner + session."""
         return owner_account_id or "", session_id
 
+    def _lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
+        lock = self._replay_locks.get(key)
+        if lock is None:
+            self._replay_locks[key] = lock = asyncio.Lock()
+        return lock
+
+    def _head(self, key: tuple[str, str]) -> int:
+        return self._gateway_seq.get(key, self._retired_floors[hash(key) % len(self._retired_floors)])
+
+    def _track_cold_head(self, key: tuple[str, str]) -> None:
+        if key not in self._gateway_seq:
+            return
+        self._cold_heads[key] = None
+        self._cold_heads.move_to_end(key)
+        if len(self._cold_heads) <= _REPLAY_SESSIONS:
+            return
+        oldest, _ = self._cold_heads.popitem(last=False)
+        head = self._gateway_seq.pop(oldest)
+        self._journal.clear(oldest)
+        self._last_push_ts.pop(oldest, None)
+        self._consecutive_failures.pop(oldest, None)
+        # A fixed set of upper bounds lets a returning numeric cursor advance
+        # even after its exact head and all of its replay frames have expired.
+        slot = hash(oldest) % len(self._retired_floors)
+        self._retired_floors[slot] = max(self._retired_floors[slot], head)
+
     @staticmethod
     def _label(key: tuple[str, str]) -> str:
         """Human-readable key for logs."""
@@ -114,6 +143,7 @@ class ConnectionManager:
 
     def register(self, session_id: str, ws: WebSocket, *, owner_account_id: str) -> None:
         key = self._key(session_id, owner_account_id)
+        self._cold_heads.pop(key, None)
         self._conns[key].add(ws)
         self._ws_to_sessions[ws].add(key)
         # Do not reset failures until a send actually succeeds. A sequence of
@@ -165,6 +195,7 @@ class ConnectionManager:
         if not self._conns[key]:
             del self._conns[key]
             self._cleanup_session_state(key, preserve_failures=preserve_failures)
+            self._track_cold_head(key)
         if not self._ws_to_sessions.get(ws) and not self._ws_to_owners.get(ws):
             self._delivery.retire(ws)
             self._send_locks.pop(ws, None)
@@ -287,6 +318,7 @@ class ConnectionManager:
         for key in owner_keys:
             self._cleanup_session_state(key)
             self._gateway_seq.pop(key, None)
+            self._cold_heads.pop(key, None)
             self._replay_locks.pop(key, None)
             self._pending_followups.pop(key, None)
             self._active_snapshots.pop(key, None)
@@ -338,7 +370,7 @@ class ConnectionManager:
 
     async def _flush_pending(self, key: tuple[str, str]) -> None:
         """延迟推送：等 min_interval 后把缓存的帧一次性推送。"""
-        lock = self._replay_locks[key]
+        lock = self._lock_for(key)
         async with lock:
             if self._replay_locks.get(key) is lock:
                 await self._flush_pending_locked(key)
@@ -352,7 +384,7 @@ class ConnectionManager:
         self._flush_tasks.pop(key, None)
         if not payloads or not self._conns.get(key):
             return
-        lock = self._replay_locks[key]
+        lock = self._lock_for(key)
         for payload in self._merge_pending_payloads(payloads):
             await self._do_push(key, payload, skip_socket=skip_socket)
             if self._replay_locks.get(key) is not lock:
@@ -514,13 +546,13 @@ class ConnectionManager:
         供断线重连后的 subscribe/resume 回放。
         """
         key = self._key(session_id, owner_account_id)
-        lock = self._replay_locks[key]
+        lock = self._lock_for(key)
         async with lock:
             # Logout can retire this lock while a producer is waiting for it.
             if self._replay_locks.get(key) is not lock:
                 return
 
-            self._gateway_seq[key] += 1
+            self._gateway_seq[key] = self._head(key) + 1
             payload["gateway_sequence"] = self._gateway_seq[key]
             payload["gateway_epoch"] = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
             try:
@@ -531,6 +563,8 @@ class ConnectionManager:
             self._record_snapshot_frame(key, payload, encoded)
             if payload.get("kind") == "followup_question":
                 self._remember_followup(key, payload)
+            if not self._conns.get(key):
+                self._track_cold_head(key)
 
             if self._consecutive_failures.get(key, 0) >= _MAX_CONSECUTIVE_FAILURES:
                 log.debug("推送降级（连续失败过多）session=%s", self._label(key))
@@ -541,7 +575,7 @@ class ConnectionManager:
 
     async def _push_under_lock(self, key: tuple[str, str], payload: dict, size: int) -> None:
         """在 replay lock 保护下执行限流判断与推送。"""
-        lock = self._replay_locks[key]
+        lock = self._lock_for(key)
         now = time.monotonic()
         last_ts = self._last_push_ts.get(key, 0)
         elapsed = now - last_ts
@@ -621,7 +655,7 @@ class ConnectionManager:
     ) -> None:
         """Freeze the committed prefix before this request can emit generation frames."""
         key = self._key(session_id, owner)
-        lock = self._replay_locks[key]
+        lock = self._lock_for(key)
 
         def encode_history() -> bytes | None:
             history = read_history()
@@ -769,11 +803,11 @@ class ConnectionManager:
         临时交互帧，如已被回答的 followup_question）。
         """
         key = self._key(session_id, owner_account_id)
-        lock = self._replay_locks[key]
+        lock = self._lock_for(key)
         async with lock:
             if self._replay_locks.get(key) is not lock:
                 return False
-            head = self._gateway_seq.get(key, 0)
+            head = self._head(key)
             floor = head - self._journal.count(key)
             epoch = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
             reason = None
@@ -821,6 +855,8 @@ class ConnectionManager:
                 if receipt.done() and not receipt.result():
                     return False
             if register_for_live:
+                if head:
+                    self._gateway_seq.setdefault(key, head)
                 self.register(session_id, ws, owner_account_id=owner_account_id)
         # The replay reservation precedes live frames in this socket's FIFO. Other subscribers
         # and producers can advance while this connection waits for the transport.
