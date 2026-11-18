@@ -47,12 +47,6 @@ describe('buildUpdateUrl', () => {
       expected: `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_amd64.deb`,
     },
     {
-      name: 'macOS → dmg 模板（仅 Apple Silicon）',
-      version: '0.23.59',
-      platform: 'mac',
-      expected: `${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_arm64.dmg`,
-    },
-    {
       name: '支持带前缀的版本号',
       version: 'v0.23.59',
       platform: 'windows',
@@ -64,6 +58,13 @@ describe('buildUpdateUrl', () => {
 
   it('不支持的平台抛错', () => {
     expect(() => buildUpdateUrl('0.23.59', 'unsupported')).toThrow();
+  });
+
+  it.each(['x64', 'arm64'] as const)('为当前 Mac 客户端选择 %s 发布包', (arch) => {
+    expect(buildUpdateUrl('0.23.59', 'mac', arch)).toBe(`${DEFAULT_DOWNLOAD_BASE_URL}crew-desktop_0.23.59_${arch}.dmg`);
+  });
+  it('拒绝未发布的 Mac 架构', () => {
+    expect(() => buildUpdateUrl('0.23.59', 'mac', 'ia32')).toThrow('macOS');
   });
 
   it('自定义下载基址（自动补斜杠）', () => {

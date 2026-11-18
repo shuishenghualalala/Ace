@@ -26,6 +26,7 @@
   <div class="crumb">Crew / 部署与发布</div>
   <h1>三平台桌面发行包发布</h1>
   <div class="sub">macOS、Linux（UOS / Kylin）、Windows 安装包的制作内容与 GitHub Release 发布流程。</div>
+  <p>桌面更新器在仅收到版本号时，用当前 Electron 进程的架构选择 macOS 安装包。Intel 构建选择 <code>_x64.dmg</code>，Apple Silicon 原生构建选择 <code>_arm64.dmg</code>。</p>
 
   <h2>打包架构</h2>
   <p>安装包内 gateway 以<strong>源码形态</strong>携带（不再是 PyInstaller 二进制）：desktop 主进程用安装包内嵌的 Python 以 <code>python -m crew.gateway.server</code> 直接启动（<code>CREW_PACKAGED=1</code> 标记打包态）。gateway 与技能脚本共用同一个内嵌 Python，消除了原先 PyInstaller 解释器与技能运行时重复携带一套 Python 的体积浪费。</p>
