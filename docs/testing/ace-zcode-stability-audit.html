@@ -161,7 +161,7 @@
 <p><strong>仍待验证</strong> macOS 安装包的原生端到端，以及 POSIX 平台上冻结 Gateway 后的整树回收。Windows 的冻结与强退已实测，见下。Windows 和 Linux 安装包验证见 D8。同一 <code>CREW_HOME</code> 下多个实例曾共用后台终端恢复文件。<code>85951895</code> 已按任务保存宿主及子进程的启动身份，Windows 双 Gateway 与 Linux 并发恢复结果见<a href="#handoff">合并后复核</a>。应用显式等待关停和完成写入见 D6。</p>
 <p><strong>Windows 宿主完全冻结</strong> 从 <code>56eb6de6</code> 真实 EXE 的同一内嵌 Python 启动两个 Gateway，共用一个临时 Crew Home。每端通过正常的后台终端注册表启动 PowerShell 和独立 Python 子进程。暂停第一端全部线程，以原来每 50 毫秒写一次的心跳连续 700 毫秒不变确认冻结，再用操作系统终止该 Gateway。其绑定的 Job Object 在 0.172 秒内回收 shell 与子进程，业务和健康端口可重新绑定。第二端的两个进程仍存活，HTTP 仍就绪；关闭其桌面父管道后，第二端返回 0，子进程和双端口均已释放。</p>
 <p><strong>健康端口在启动期间被占用</strong> Linux 共享回环压测的第 4 轮中，Python 后端回归与桌面共用默认健康端口。Gateway 打印了 <code>EADDRINUSE</code>，桌面仍报告可用，九阶段脚本在第二端口验签失败。改用独立回环网络后继续测量。修复后的桌面受管 Gateway 必须绑定主端口 +1。绑定失败时主端口返回可验签的 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>，业务仍受启动门控。主进程确认子进程身份，关闭父管道，等旧进程退出，再在原启动时限内选择后续端口。独立 Gateway 仍支持显式健康端口和单端口运行。</p>
-<p>定向回归在真实占用的端口上验证受管业务返回 503、核心任务未执行及独立模式仍可用。后端 106 项和桌面 45 项通过，TypeScript 通过。将候选主进程和 Python 改动应用到 <code>56eb6de6</code> Windows 发行副本，独立监听器在子进程启动后抢占 8001。两轮从 8000 换至 8002/8003，在 28.130 和 27.499 秒内恢复到可发送状态，旧子进程均返回 0，首聊落盘且占用方仍响应。另两轮分别观察到桌面提前收到退出和新 Gateway 已连接后 UI 等待超时，这两轮未计为通过。</p>
+<p>定向回归在真实占用的端口上验证受管业务返回 503、核心任务未执行及独立模式仍可用。后端 106 项和桌面 45 项通过，TypeScript 通过。将候选主进程和 Python 改动应用到 <code>56eb6de6</code> Windows 发行副本，独立监听器在子进程启动后抢占 8001。两轮从 8000 换至 8002/8003，在 28.130 和 27.499 秒内恢复到可发送状态，旧子进程均返回 0，首聊落盘且占用方仍响应。另两轮分别观察到桌面提前收到退出和新 Gateway 已连接后 UI 等待超时，这两轮未计为通过。另在临时副本记录退出来源连续重跑三轮，均完成首聊和正常退出，退出阶段之前未记录到退出 IPC 或 Windows 窗口关闭消息。原先提前退出的来源仍未定位。</p>
 <p>Linux 用 UOS 发行版中的 Python 复现同一个端口竞争。旧程序的主端口验签通过，但副端口被占用时仍报 <code>ready</code>，会话接口返回 200。替换后的 Gateway 在同条件下验签通过，报告 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>，会话接口返回 503。两次分别关闭受管父管道，进程均返回 0，测试占用方继续服务。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1396</code>、<code>:1404</code>、<code>:2012</code>，<code>crew/gateway/desktop_parent_lease.py:30</code>，<code>crew/gateway/app.py:527</code>。ZCode <code>packages/desktop/src/main/desktopHostProcess.ts:669</code>、<code>:714</code>，<code>packages/server/src/stdio-lifecycle.ts:103</code> 和 <code>packages/services/src/session/offPeakMockGateway.ts:564</code>。</p>
 </article>
@@ -227,6 +227,14 @@
 </tbody></table></div>
 <p>两包由 dpkg 1.21.23 正常安装，状态均为 <code>install ok installed</code>，<code>dpkg --audit</code> 无输出。<code>postinst</code> 执行并刷新图标，<code>chrome-sandbox</code> 所有者为 root:root，模式 4755。随后在各自安装根移除和清除，入口文件与包清单均已删除。另一组默认 Docker 安全配置也完成了安装与卸载，其中 Chromium 创建命名空间收到 <code>EPERM</code>，该容器的图形冷启动计为失败。</p>
 <p>构建使用官方 Python 3.11.9 和 Electron 43.1.0 Linux x64 发行文件，核对 SHA-256，68 个 Rust 依赖核对锁文件后离线构建。Gateway 复用相同清单的依赖层后覆盖候选源码，校对七个发生变更的 Python 文件。打包阶段使用相同 Buster 构建中已有的 dpkg-deb 1.19.8 和 ImageMagick 6.9.10，以项目原 <code>Dockerfile.pack</code> 的制包步骤分别写入渠道元数据。</p>
+<h4>包含通知关闭与启动修复的 Linux 正式包</h4>
+<p>用标准 Buster 工具层固定 <code>93631f3d</code> 重编两包。实际安装后逐字节核对 8 个发生变更的 Gateway 文件，并对比包内和构建镜像中的应用 ASAR 哈希。两个独立 Debian 12.15 安装根依次完成正常 dpkg 安装、普通用户九阶段验收、卸载与清除。各轮 3 个 Gateway 使用 8000/8001 并通过实例与启动证明。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">正式包</th><th scope="col">字节数和 SHA-256</th><th scope="col">安装态验收</th></tr></thead>
+<tbody>
+<tr><td>UOS amd64</td><td>315,445,500<br><code>9487d94e4d372b0edb8ca63f29fa1d6bb4866a9cf6583adce7d113c9ee8ffa3a</code></td><td>冷启 8.503 秒，首聊 1.046 秒，渲染恢复 1.522 秒，网关恢复 7.751 秒，正常退出 1.524、4.625 秒。</td></tr>
+<tr><td>Kylin amd64</td><td>315,441,836<br><code>bc4b60cdcc78d190538a5fc938452c2d1d1dfc886e2b4e3a43fcaab9f19bfbf5</code></td><td>冷启 9.287 秒，首聊 0.880 秒，渲染恢复 1.476 秒，网关恢复 6.854 秒，正常退出 1.516、4.132 秒。</td></tr>
+</tbody></table></div>
 <p class="evidence">Ace <code>.github/workflows/ci.yml:28</code>，<code>.github/workflows/nightly-desktop.yml:49</code>、<code>:78</code>、<code>:110</code>，<code>desktop/electron-builder.yml</code>。Ace 发布脚本 <code>deb-package/pack_exe.ps1:357</code>、<code>deb-package/pack_mac.sh:344</code>。ZCode <code>packages/desktop/test/e2e/smoke.test.ts:12</code>，<code>packages/desktop/package.json:28</code>，<code>apps/zcode-cli/packages/adapters/tests/migration-crash-recovery.test.ts:10</code>。</p>
 </article>
 </section>
