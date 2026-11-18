@@ -335,8 +335,8 @@ const api = {
   resumeDownload: (): Promise<{ success: boolean }> => ipcRenderer.invoke('update:resume'),
   retryDownload: (args: { version: string; type: 'force' | 'reminder'; url?: string | undefined }): Promise<{ success: boolean; message?: string }> =>
     ipcRenderer.invoke('update:retry', args),
-  installUpdatePackage: (): Promise<VersionUpdatePackageResult> =>
-    ipcRenderer.invoke('update:install-package'),
+  installUpdatePackage: (version?: string): Promise<VersionUpdatePackageResult> =>
+    ipcRenderer.invoke('update:install-package', version),
   getUpdateState: (): Promise<UpdateStateSnapshot> => ipcRenderer.invoke('update:get-state'),
   /** 打开 GitHub Releases 中当前系统对应的安装包下载页（由主进程按平台/架构匹配）。 */
   openLatestReleaseDownload: (): Promise<{ ok: boolean; url?: string }> =>

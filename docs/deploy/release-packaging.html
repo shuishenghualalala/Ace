@@ -97,6 +97,11 @@
   <div class="note"><b>按钮指向与分支无关：</b><code>/releases/latest</code> 是仓库级接口，始终返回该仓库最新发布的<strong>正式</strong> Release（自动跳过 prerelease 与 draft），无论当前代码在 dev 还是 main 分支，按钮下载的都是仓库最新的正式版，而不是“当前分支的版本”。</div>
   <div class="note"><b>内测版发布建议：</b>若用 dev 分支发布内测版本、又不想让正式用户从「更新」按钮下载到它，给该 Release 打上 prerelease 标记即可（<code>gh release create vX.Y.Z --prerelease ...</code>）。prerelease 不会被 <code>/releases/latest</code> 返回，正式用户按钮不会指向它；main 分支发布正式版后按钮自动指向正式版。</div>
 
+  <h2>更新包校验、替换与恢复</h2>
+  <p>macOS 更新器在 DMG 文件末尾的 512 字节检查 UDIF 标记、格式版本和尾部长度。<code>pack_mac.sh</code> 生成的 UDZO 映像经过尺寸和格式检查后，再按既有签名策略校验并交给系统打开。</p>
+  <p>每次下载使用独立文件名。主进程验证尺寸、格式和配置的签名，将新回执写入同目录临时文件，刷盘后重命名。新回执生效后才删除旧包和旧签名。下载失败、签名不符或回执写入失败时，旧回执仍指向原文件。</p>
+  <p>启动时和安装交接前，主进程核对运行版本、强制更新最低版本与文件完整性。旧包低于最低版本时留在磁盘，界面只提供达到门槛的更新。安装请求携带用户确认的版本。运行版本达到门槛后，主进程清除强制更新状态。</p>
+
   <h2>发布步骤</h2>
   <h3>自动发布（推荐）</h3>
   <pre>git checkout main
@@ -120,6 +125,5 @@ git push origin v1.1.0</pre>
 
   <div class="nav">相关文件：deb-package/pack_mac.sh · deb-package/pack_deb.ps1 · deb-package/pack_exe.ps1 · deb-package/runtime-requirements.txt · Dockerfile.pack · .github/workflows/release-desktop.yml</div>
 </div>
-<p>macOS 更新器在 DMG 文件末尾的 512 字节检查 UDIF 标记、格式版本和尾部长度。<code>pack_mac.sh</code> 生成的 UDZO 映像经过尺寸和格式检查后，再按既有签名策略校验并交给系统打开。</p>
 </body>
 </html>

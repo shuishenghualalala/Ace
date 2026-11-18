@@ -15,15 +15,18 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
 import http from 'http';
 import https from 'https';
 import { app } from 'electron';
 import { buildUpdateUrl } from './update-url';
 import {
   configuredUpdatePublicKey,
+  verifyPackageIntegrity,
   verifyPackageSignature,
 } from './update-integrity';
 import { isSecureRemoteUrl } from '../request';
+import { evaluateVersionUpdate } from '../version-compare';
 import { readUpdateState, setDownloadedRecord } from './update-state';
 import type {
   DownloadedUpdateRecord,
@@ -47,6 +50,7 @@ interface Inflight {
   status: ControllerStatus;
   abort: AbortController;
   abortReason: AbortReason | null;
+  task?: Promise<void>;
   writeStream: fs.WriteStream | null;
   noProgressTimer: ReturnType<typeof setTimeout> | null;
   lastEmittedPercent: number | null;
@@ -76,9 +80,9 @@ function updatesDir(): string {
   return path.join(app.getPath('userData'), 'updates');
 }
 
-function send(payload: VersionUpdateDownloadProgressPayload): void {
+function send(version: string, payload: VersionUpdateDownloadProgressPayload): void {
   try {
-    progressSender?.(payload);
+    progressSender?.({ ...payload, version });
   } catch {
     /* webContents 可能已销毁 */
   }
@@ -150,7 +154,7 @@ function emitProgress(inf: Inflight): void {
   // 整百分比变化才推送，避免大文件每 chunk 刷 IPC
   if (percent !== null && inf.lastEmittedPercent !== null && percent === inf.lastEmittedPercent) return;
   inf.lastEmittedPercent = percent;
-  send({ phase: 'downloading', percent, receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
+  send(inf.version, { phase: 'downloading', percent, receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
 }
 
 function clearNoProgressTimer(inf: Inflight): void {
@@ -257,7 +261,7 @@ async function runDownload(inf: Inflight): Promise<void> {
 
         inf.status = 'downloading';
         inf.lastEmittedPercent = null;
-        send({ phase: 'downloading', percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
+        send(inf.version, { phase: 'downloading', percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
         resetNoProgressTimer(inf);
 
         res.on('data', (chunk: Buffer) => {
@@ -299,38 +303,49 @@ async function completeDownload(inf: Inflight, signal: AbortSignal): Promise<voi
   if (stream?.errored) throw stream.errored;
   signal.throwIfAborted();
   fs.renameSync(inf.partPath, inf.targetPath);
-  if (strictSecurityEnabled()) {
-    try {
-      await downloadAndVerifySignature(inf.url, inf.targetPath, signal);
-      signal.throwIfAborted();
-    } catch (error) {
-      if (inf.abortReason === 'quit' || inf.abortReason === 'pause') {
-        fs.renameSync(inf.targetPath, inf.partPath);
-      } else {
-        safeUnlink(inf.targetPath);
-      }
-      safeUnlink(`${inf.targetPath}.sig`);
-      safeUnlink(`${inf.targetPath}.sig.part`);
-      throw error;
-    }
-  }
   const size = fs.statSync(inf.targetPath).size;
-  const record: DownloadedUpdateRecord = {
-    filePath: inf.targetPath,
-    version: inf.version,
-    size,
-    type: inf.type,
-    ...(inf.message ? { message: inf.message } : {}),
-  };
-  setDownloadedRecord(record);
+  try {
+    const integrity = verifyPackageIntegrity(inf.targetPath, inf.totalBytes);
+    if (!integrity.ok) throw new Error(integrity.message);
+    if (strictSecurityEnabled()) await downloadAndVerifySignature(inf.url, inf.targetPath, signal);
+    signal.throwIfAborted();
+    const record: DownloadedUpdateRecord = {
+      filePath: inf.targetPath, version: inf.version, size, type: inf.type,
+      ...(inf.message ? { message: inf.message } : {}),
+    };
+    const previous = readUpdateState().downloaded;
+    setDownloadedRecord(record);
+    // Older records may use the original unprefixed filename.
+    if (previous && previous.filePath !== record.filePath && path.dirname(previous.filePath) === updatesDir()) {
+      safeUnlink(previous.filePath);
+      safeUnlink(`${previous.filePath}.sig`);
+    }
+  } catch (error) {
+    if (inf.abortReason === 'quit' || inf.abortReason === 'pause') {
+      fs.renameSync(inf.targetPath, inf.partPath);
+    } else {
+      safeUnlink(inf.targetPath);
+      inf.receivedBytes = 0;
+    }
+    safeUnlink(`${inf.targetPath}.sig`);
+    safeUnlink(`${inf.targetPath}.sig.part`);
+    throw error;
+  }
   inf.status = 'completed';
-  send({ phase: 'downloaded', percent: 100, receivedBytes: size, totalBytes: size });
+  send(inf.version, { phase: 'downloaded', percent: 100, receivedBytes: size, totalBytes: size });
 }
 
-function launchDownload(inf: Inflight): void {
-  const task = runDownload(inf).catch((error: unknown) => {
-    console.error('[update-download] unhandled:', error);
-  }).finally(() => downloading.delete(task));
+function launchDownload(inf: Inflight, resume = false): void {
+  const task: Promise<void> = (inf.task ?? Promise.resolve()).then(async () => {
+    if (inflight !== inf || inf.task !== task || inf.status !== 'downloading') return;
+    if (resume) {
+      inf.abort = new AbortController();
+      inf.abortReason = null;
+      inf.receivedBytes = fs.existsSync(inf.partPath) ? fs.statSync(inf.partPath).size : 0;
+    }
+    await runDownload(inf);
+  }).catch((error: unknown) => handleRunError(inf, error)).finally(() => downloading.delete(task));
+  inf.task = task;
   downloading.add(task);
 }
 
@@ -357,7 +372,7 @@ async function handleRunError(inf: Inflight, err: unknown): Promise<void> {
   }
   if (reason === 'timeout') {
     inf.status = 'error';
-    send({ phase: 'error', message: '下载超时，可点击图标重试续传', percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
+    send(inf.version, { phase: 'error', message: '下载超时，可点击图标重试续传', percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
     return;
   }
   // 网络错误 / 未知 abort：保留 .part 供重试
@@ -365,7 +380,7 @@ async function handleRunError(inf: Inflight, err: unknown): Promise<void> {
   const message = (err as Error)?.name === 'AbortError'
     ? '下载已中断，可点击图标重试'
     : ((err as Error)?.message || '下载失败');
-  send({ phase: 'error', message, percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
+  send(inf.version, { phase: 'error', message, percent: pct(inf), receivedBytes: inf.receivedBytes, totalBytes: inf.totalBytes });
 }
 
 interface StartArgs {
@@ -385,27 +400,6 @@ export function startDownload(args: StartArgs): { success: boolean; message?: st
     return { success: true, message: '该版本正在下载' };
   }
 
-  // 不同版本在下载 / 暂停 → 抢占：abort 旧的，丢弃其 .part
-  // （下载中的 .part 由其 catch(supersede) 在 destroy 流后删除；暂停中的流已关闭，这里直接删）
-  if (inflight) {
-    const old = inflight;
-    old.abortReason = 'supersede';
-    try {
-      old.abort.abort();
-    } catch {
-      /* ignore */
-    }
-    safeUnlink(old.partPath);
-  }
-
-  // 丢弃旧版本已完成的下载包（磁盘清理 + 避免装错版本）
-  const state = readUpdateState();
-  if (state.downloaded && state.downloaded.version !== args.version) {
-    safeUnlink(state.downloaded.filePath);
-    safeUnlink(`${state.downloaded.filePath}.sig`);
-    setDownloadedRecord(null);
-  }
-
   console.log('[Download] startDownload called with args:', args);
   let url: string;
   if (args.url && args.url.trim()) {
@@ -417,34 +411,47 @@ export function startDownload(args: StartArgs): { success: boolean; message?: st
       console.log('[Download] using built url:', url);
     } catch (err) {
       console.error('[Download] buildUpdateUrl error:', err);
-      send({ phase: 'error', message: (err as Error).message });
+      send(args.version, { phase: 'error', message: (err as Error).message });
       return { success: false, message: (err as Error).message };
     }
   }
+  let protocol: string;
+  try {
+    protocol = new URL(url).protocol;
+    if (protocol !== 'http:' && protocol !== 'https:') throw new Error();
+  } catch {
+    const message = '更新包下载地址无效';
+    send(args.version, { phase: 'error', message });
+    return { success: false, message };
+  }
   if (strictSecurityEnabled()) {
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      const message = '更新包需要有效的 HTTPS 下载地址。';
-      send({ phase: 'error', message });
-      return { success: false, message };
-    }
-    if (parsedUrl.protocol !== 'https:') {
+    if (protocol !== 'https:') {
       const message = '更新包需要通过 HTTPS 下载，请使用 HTTPS 下载地址。';
-      send({ phase: 'error', message });
+      send(args.version, { phase: 'error', message });
       return { success: false, message };
     }
     if (!configuredUpdatePublicKey()) {
       const message = '无法验证更新包签名：未配置更新签名公钥';
-      send({ phase: 'error', message });
+      send(args.version, { phase: 'error', message });
       return { success: false, message };
     }
   }
 
-  const targetPath = path.join(updatesDir(), fileNameFromUrl(url));
+  const previous = readUpdateState().downloaded;
+  if (previous && evaluateVersionUpdate(previous.version, args.version).reason === 'newer'
+    && verifyPackageIntegrity(previous.filePath, previous.size).ok) {
+    const message = '已有更新版本的安装包';
+    send(args.version, { phase: 'error', message });
+    return { success: false, message };
+  }
+  if (inflight) {
+    inflight.abortReason = 'supersede';
+    inflight.abort.abort();
+    if (inflight.status !== 'downloading') safeUnlink(inflight.partPath);
+  }
+  // Separate each attempt from active writers and the package named by the saved receipt.
+  const targetPath = path.join(updatesDir(), `${randomUUID()}-${fileNameFromUrl(url)}`);
   const partPath = `${targetPath}.part`;
-  safeUnlink(partPath); // 全新下载：清掉同目标的残留 .part
 
   inflight = {
     version: args.version,
@@ -475,16 +482,14 @@ export function pauseDownload(): { success: boolean } {
   } catch {
     /* ignore */
   }
-  send({ phase: 'paused', percent: pct(inflight), receivedBytes: inflight.receivedBytes, totalBytes: inflight.totalBytes });
+  send(inflight.version, { phase: 'paused', percent: pct(inflight), receivedBytes: inflight.receivedBytes, totalBytes: inflight.totalBytes });
   return { success: true };
 }
 
 export function resumeDownload(): { success: boolean } {
   if (!inflight || (inflight.status !== 'paused' && inflight.status !== 'error')) return { success: false };
-  inflight.abort = new AbortController();
-  inflight.abortReason = null;
   inflight.status = 'downloading';
-  launchDownload(inflight);
+  launchDownload(inflight, true);
   return { success: true };
 }
 

@@ -97,7 +97,7 @@ describe('version update UI', () => {
 
     document.getElementById('version-install-now')?.click();
     await Promise.resolve();
-    expect(installUpdatePackage).toHaveBeenCalledWith(); // 无参：主进程从 update-state 读路径
+    expect(installUpdatePackage).toHaveBeenCalledWith('0.23.59');
   });
 
   it('reminder 同版本心跳去重：下载中再次推送不重置 phase', async () => {
@@ -113,6 +113,21 @@ describe('version update UI', () => {
     // 每 5min 心跳再次推送同版本 → 不应回到 available
     updateHandler?.({ type: 'reminder', title: '提示', message: 'v2', version: '0.23.59', reportedVersion: 'x' });
     expect(button.classList.contains('is-downloading')).toBe(true);
+  });
+
+  it('restores a force minimum without offering the older downloaded package', async () => {
+    const getUpdateState = vi.mocked(window.Crew.getUpdateState);
+    getUpdateState.mockResolvedValue({
+      downloaded: null, forceLock: { requiredVersion: '0.25.0', url: 'https://example.test/update.dmg' },
+    });
+    bindVersionUpdateUi();
+    await Promise.resolve();
+    expect(document.getElementById('force-update-overlay')?.hidden).toBe(false);
+    progressHandler?.({ phase: 'downloaded', version: '0.24.0', percent: 100 });
+    expect(installUpdatePackage).not.toHaveBeenCalled();
+    document.getElementById('force-update-action')?.click();
+    expect(startDownload).toHaveBeenCalledWith({ version: '0.25.0', type: 'force', url: 'https://example.test/update.dmg' });
+    expect(installUpdatePackage).not.toHaveBeenCalled();
   });
 
   it('force: 盖阻断层，下载完成自动安装（无需用户再点）', async () => {

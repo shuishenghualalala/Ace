@@ -1,13 +1,8 @@
-/**
- * 版本更新持久化状态（update-state.json）。
- *
- * 仿 desktop-prefs.ts 的整文件读写范式，单独成文件（与 closeBehavior / JWT 等
- * prefs 隔离，避免高频写放大）。承载两份跨重启状态：
- *   downloaded —— 已完整下载、可随时安装的更新包（含 magic-byte 校验所需 size）。
- *   forceLock  —— force 策略阻断锁，更新成功并重启、本机版本达标后清除。
- */
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
+import { evaluateVersionUpdate } from '../version-compare';
+import { verifyPackageIntegrity } from './update-integrity';
 import { app } from 'electron';
 import type { DownloadedUpdateRecord, ForceLockRecord, UpdateStateSnapshot } from '../../shared/types';
 
@@ -36,12 +31,39 @@ export function readUpdateState(): UpdateStateSnapshot {
 }
 
 export function writeUpdateState(next: UpdateStateSnapshot): void {
+  const file = updateStatePath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, 'wx', 0o600);
   try {
-    fs.mkdirSync(path.dirname(updateStatePath()), { recursive: true });
-    fs.writeFileSync(updateStatePath(), JSON.stringify(next, null, 2), 'utf8');
-  } catch (err) {
-    console.warn('[update-state] write failed:', (err as Error).message);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(next, null, 2), 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(temporary, file);
+  } finally {
+    fs.rmSync(temporary, { force: true });
   }
+}
+
+/** Project a saved package against the running app and the current minimum version. */
+export function installableUpdateState(localVersion: string): UpdateStateSnapshot {
+  const saved = readUpdateState();
+  let { downloaded, forceLock } = saved;
+  if (forceLock && !evaluateVersionUpdate(forceLock.requiredVersion, localVersion).shouldProcess) {
+    forceLock = null;
+  }
+  if (downloaded && (!evaluateVersionUpdate(downloaded.version, localVersion).shouldProcess
+    || !verifyPackageIntegrity(downloaded.filePath, downloaded.size).ok)) {
+    downloaded = null;
+  }
+  if (downloaded !== saved.downloaded || forceLock !== saved.forceLock) writeUpdateState({ downloaded, forceLock });
+  if (downloaded && forceLock && evaluateVersionUpdate(forceLock.requiredVersion, downloaded.version).shouldProcess) {
+    return { downloaded: null, forceLock };
+  }
+  return { downloaded, forceLock };
 }
 
 /** 读-改-写：只更新 downloaded，保留 forceLock。传 null 清除。 */

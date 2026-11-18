@@ -97,6 +97,7 @@ export interface VersionUpdatePayload {
 }
 
 export interface VersionUpdateDownloadProgressPayload {
+  version?: string;
   phase: 'downloading' | 'paused' | 'downloaded' | 'installing' | 'completed' | 'error';
   percent?: number | null | undefined;
   receivedBytes?: number | undefined;
@@ -124,6 +125,7 @@ export interface DownloadedUpdateRecord {
 }
 
 export interface ForceLockRecord {
+  url?: string | undefined;
   requiredVersion: string;
   message?: string | undefined;
 }

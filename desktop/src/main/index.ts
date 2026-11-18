@@ -148,13 +148,13 @@ import {
   activeFilePaths,
 } from './update/download-controller';
 import {
+  installableUpdateState,
   readUpdateState,
   setDownloadedRecord,
   setForceLock,
 } from './update/update-state';
 import {
   configuredUpdatePublicKey,
-  verifyPackageIntegrity,
   verifyPackageSignature,
 } from './update/update-integrity';
 import {
@@ -163,7 +163,6 @@ import {
   resolveGithubReleaseDownloadUrl,
   resolveGithubReleaseTarget,
 } from './update/github-release';
-import { evaluateVersionUpdate } from './version-compare';
 import { launchUpdateInstaller } from './update/installer-handoff';
 import { resolveWorkspaceDirectoryInfo } from './workspace-directory';
 import { configurePptxWasmRuntime, PPTX_WASM_V8_FLAGS } from './wasm-runtime';
@@ -2625,32 +2624,26 @@ function stopUpdateCleanupMonitor(): void {
  * 安装已下载的更新包（来源：update-state.downloaded，单一可信路径）。
  * 安装前做完整性 + magic-byte 校验；失败保留包供重试，成功则清空 downloaded。
  */
-async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
-  const downloaded = readUpdateState().downloaded;
+async function installDownloadedUpdate(expectedVersion?: string): Promise<VersionUpdatePackageResult> {
+  const downloaded = installableUpdateState(currentAppVersion(app)).downloaded;
+  if (downloaded && expectedVersion !== undefined && downloaded.version !== expectedVersion) {
+    return { success: false, message: '待安装的更新版本已变更，请重新确认' };
+  }
   if (!downloaded) {
     return { success: false, message: '没有已下载的更新包' };
   }
 
-  const integrity = verifyPackageIntegrity(downloaded.filePath, downloaded.size);
-  if (!integrity.ok) {
-    sendVersionUpdateDownloadProgress({ phase: 'error', message: integrity.message });
-    // 校验失败的包不可用，清掉状态（文件留给 cleanup 兜底）
-    setDownloadedRecord(null);
-    return { success: false, message: integrity.message };
-  }
   const preparation = desktopShutdown.beginHandoff('update');
   if (!preparation) return { success: false, message: '应用正在退出或安装更新' };
   let launched = false;
   sendVersionUpdateDownloadProgress({ phase: 'installing', percent: 100 });
   try {
     await preparation;
-    const current = readUpdateState().downloaded;
+    const current = installableUpdateState(currentAppVersion(app)).downloaded;
     if (!current || current.filePath !== downloaded.filePath || current.version !== downloaded.version
       || current.size !== downloaded.size) {
       throw new Error('待安装的更新包已经变更，请重试');
     }
-    const finalIntegrity = verifyPackageIntegrity(current.filePath, current.size);
-    if (!finalIntegrity.ok) throw new Error(finalIntegrity.message);
     if (isStrictSecurityEnabled()) {
       const publicKey = configuredUpdatePublicKey();
       if (!publicKey) throw new Error('无法验证安装包签名：未配置更新签名公钥');
@@ -2661,7 +2654,13 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
       openPath: (filePath) => shell.openPath(filePath),
     });
     launched = true;
-    if (handoff.kind === 'installer-started') setDownloadedRecord(null);
+    if (handoff.kind === 'installer-started') {
+      try {
+        if (readUpdateState().downloaded?.filePath === downloaded.filePath) setDownloadedRecord(null);
+      } catch (error) {
+        console.warn('[update-install] Could not clear the launched package receipt:', error);
+      }
+    }
     sendVersionUpdateDownloadProgress({ phase: 'completed', percent: 100 });
     const message = handoff.kind === 'package-opened' ? '安装包已打开'
       : handoff.restartScheduled === false ? '安装程序已启动，安装后请手动打开应用'
@@ -2673,42 +2672,6 @@ async function installDownloadedUpdate(): Promise<VersionUpdatePackageResult> {
     return { success: false, message };
   } finally {
     desktopShutdown.finishHandoff(launched);
-  }
-}
-
-/**
- * 启动恢复：force 阻断锁仍在且本机版本未达标 → 立即推送 force 态（心跳前就盖阻断层）；
- * downloaded 仍存在 → 推送 downloaded 态供用户直接安装。已达标 / 文件丢失则清理状态。
- */
-function restoreUpdateStateOnLaunch(): void {
-  const state = readUpdateState();
-  const localVersion = currentAppVersion(app);
-
-  if (state.forceLock) {
-    const decision = evaluateVersionUpdate(state.forceLock.requiredVersion, localVersion);
-    if (decision.shouldProcess) {
-      // 仍需强制更新：立即盖阻断层
-      mainWindow?.webContents.send('version-update-available', {
-        type: 'force',
-        title: '提示',
-        message: state.forceLock.message || '当前版本过低，请更新版本后使用。',
-        version: state.forceLock.requiredVersion,
-        reportedVersion: localVersion,
-      });
-    } else {
-      // 本机版本已达标（上次更新成功）→ 解锁
-      setForceLock(null);
-    }
-  }
-
-  if (state.downloaded) {
-    if (!fs.existsSync(state.downloaded.filePath)) {
-      // 文件已不在（被清理 / 手动删除）→ 清状态
-      setDownloadedRecord(null);
-    } else {
-      // 推送 downloaded 态：渲染层恢复为「可安装」
-      sendVersionUpdateDownloadProgress({ phase: 'downloaded', percent: 100 });
-    }
   }
 }
 
@@ -3229,9 +3192,6 @@ function registerIpc() {
     if (!rendererRecovery.isReady(rendererDocumentId)) {
       rendererRecovery.ready(rendererDocumentId);
       revealMainWindowIfReady();
-      try { restoreUpdateStateOnLaunch(); } catch (error) {
-        logFatal('restore-update-state', error);
-      }
     }
     return { ok: true };
   });
@@ -3251,9 +3211,12 @@ function registerIpc() {
     return retryUpdateDownload({ version: args.version, type: args.type, url: args.url });
   });
 
-  trustedHandle('update:install-package', async () => installDownloadedUpdate());
+  trustedHandle('update:install-package', async (_event, version) => {
+    if (version !== undefined && typeof version !== 'string') throw new Error('无效的更新版本');
+    return installDownloadedUpdate(version);
+  });
 
-  trustedHandle('update:get-state', (): UpdateStateSnapshot => readUpdateState());
+  trustedHandle('update:get-state', (): UpdateStateSnapshot => installableUpdateState(currentAppVersion(app)));
 
   // 打开 GitHub Releases 当前系统对应的安装包下载页。查询失败 / 无匹配资产时回退到 releases 列表页。
   trustedHandle('release:open-latest-download', async () => {
@@ -4227,6 +4190,7 @@ function registerIpc() {
     if (payload.type === 'force' && payload.version) {
       setForceLock({
         requiredVersion: payload.version,
+        ...(payload.url ? { url: payload.url } : {}),
         ...(payload.message ? { message: payload.message } : {}),
       });
     }

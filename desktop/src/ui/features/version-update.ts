@@ -28,7 +28,7 @@ interface VersionUpdateBridge {
   pauseDownload?: () => Promise<{ success: boolean }>;
   resumeDownload?: () => Promise<{ success: boolean }>;
   retryDownload?: (args: DownloadArgs) => Promise<{ success: boolean; message?: string }>;
-  installUpdatePackage?: () => Promise<VersionUpdatePackageResult>;
+  installUpdatePackage?: (version?: string) => Promise<VersionUpdatePackageResult>;
   getUpdateState?: () => Promise<UpdateStateSnapshot>;
   appQuit?: () => Promise<void>;
   getAppVersion?: () => Promise<{ version?: string; label?: string }>;
@@ -47,6 +47,7 @@ let pendingUpdate: VersionUpdatePayload | null = null;
 let phase: VersionUpdatePhase = 'idle';
 let percent: number | null = null;
 let bound = false;
+let updateRevision = 0;
 let unsubscribeSessionStore: (() => void) | null = null;
 
 function bridge(): VersionUpdateBridge | undefined {
@@ -216,6 +217,7 @@ function triggerDownload(mode: 'start' | 'retry'): void {
     notify('更新版本信息缺失，请稍后重试');
     return;
   }
+  updateRevision++;
   const args: DownloadArgs = { version: pendingUpdate.version, type: pendingUpdate.type, url: pendingUpdate.url };
   console.log('[VersionUpdate] triggerDownload:', mode, args);
   setPhase('downloading', 0);
@@ -233,15 +235,17 @@ async function installDownloadedUpdate(): Promise<void> {
   }
   closeInstallModal();
   setPhase('installing', 100);
-  const result = await bridge()?.installUpdatePackage?.();
-  if (!result?.success) {
-    // 安装失败：保留已下载包，回到 downloaded 态供再次安装
-    setPhase('downloaded', 100);
+  const version = pendingUpdate?.version;
+  const result = await bridge()?.installUpdatePackage?.(version);
+  if (!result?.success && pendingUpdate?.version === version) {
+    setPhase('error', percent);
+    await restoreFromState();
     notify(result?.message || '启动安装失败，可重试');
   }
 }
 
 function handleVersionUpdate(payload: VersionUpdatePayload): void {
+  updateRevision++;
   console.log('[VersionUpdate] handleVersionUpdate:', payload);
   if (!payload?.version) {
     notify(payload?.message || '发现新版本，但无法确定版本号');
@@ -272,6 +276,8 @@ function handleVersionUpdate(payload: VersionUpdatePayload): void {
 }
 
 function handleDownloadProgress(payload: VersionUpdateDownloadProgressPayload): void {
+  if (payload.version && pendingUpdate?.version && payload.version !== pendingUpdate.version) return;
+  updateRevision++;
   console.log('[VersionUpdate] handleDownloadProgress:', payload);
   if (payload.phase === 'downloading') {
     setPhase('downloading', payload.percent);
@@ -296,6 +302,7 @@ function handleDownloadProgress(payload: VersionUpdateDownloadProgressPayload): 
   } else if (payload.phase === 'error') {
     setPhase('error', percent);
     if (payload.message) notify(payload.message);
+    void restoreFromState(true);
   }
 }
 
@@ -313,19 +320,24 @@ async function syncCurrentVersionLabel(): Promise<void> {
 }
 
 /** 启动恢复：若 update-state 记录了已下载待安装的包，恢复为 downloaded 态。 */
-async function restoreFromState(): Promise<void> {
+async function restoreFromState(onlyDownloaded = false): Promise<void> {
+  const revision = updateRevision;
   try {
     const state = await bridge()?.getUpdateState?.();
-    if (state?.downloaded) {
-      pendingUpdate = {
-        type: state.downloaded.type,
-        title: '提示',
-        message: state.downloaded.message || '更新包已下载完成，可立即安装。',
-        version: state.downloaded.version,
-        reportedVersion: currentVersionLabel,
-      };
-      setPhase('downloaded', 100);
-    }
+    if (revision !== updateRevision || !state) return;
+    const { forceLock, downloaded } = state;
+    if (!downloaded && (onlyDownloaded || !forceLock)) return;
+    pendingUpdate = {
+      type: forceLock ? 'force' : downloaded!.type,
+      title: '提示',
+      message: forceLock?.message || downloaded?.message || (forceLock
+        ? '当前版本过低，请更新版本后使用。' : '更新包已下载完成，可立即安装。'),
+      version: downloaded?.version ?? forceLock!.requiredVersion,
+      ...(forceLock?.url ? { url: forceLock.url } : {}),
+      reportedVersion: currentVersionLabel,
+    };
+    setPhase(downloaded ? 'downloaded' : 'available', downloaded ? 100 : 0);
+    syncForceOverlay();
   } catch {
     /* 状态读取失败不影响主流程 */
   }
@@ -399,6 +411,7 @@ export function bindVersionUpdateUi(): void {
 }
 
 export function resetVersionUpdateUiForTest(): void {
+  updateRevision++;
   unsubscribeSessionStore?.();
   unsubscribeSessionStore = null;
   pendingUpdate = null;
