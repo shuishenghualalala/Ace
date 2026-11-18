@@ -27,6 +27,7 @@ import {
 } from '../chat-render';
 import { reportRendererError, safeStringify } from '../renderer-error-report';
 import { diffRenderUnits, type RenderUnit } from '../chat-diff';
+import { firstChangedMessageIndex } from '../conversation-message-changes';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
 import { getSessionStreamRecovery } from './session-stream-recovery';
 import { getSessionAgentDisplay } from './workspaces';
@@ -35,20 +36,24 @@ import {
   resolveTeamCollaborationMember,
   resolveTeamCollaborationMentionText,
   resolveTeamCollaborationName,
+  teamTurnDisplayKey,
 } from './team-collaboration-board';
+import { disposeConversationDom, syncConversationDom } from './conversation-dom-index';
+import { interactiveOwnerKey } from './interactive-owner';
 import { applyFoldState } from '../render-utils';
 import { setToolFold, setTurnFold } from './fold-state';
 import {
   bindFollowupCard,
   isRuntimeStaffingFollowup,
   renderFollowupCardElement,
+  disposePermissionCardPosition,
   syncPermissionCardPositions,
 } from '../followup';
 import type { FollowupAnswer } from '../backend-client';
 import { attachCopyButtons } from './copy-button';
 import { renderMermaidBlocks } from './mermaid-render';
 import { inlineSurfaces } from './inline-surfaces';
-import { hydrateNativeVisuals, renderNativeVisual } from './native-visual';
+import { disposeNativeVisuals, hydrateNativeVisuals, renderNativeVisual } from './native-visual';
 import { showFileOpenMenu } from './file-open-menu';
 import { mountBlueprintSurface } from './blueprint-surface';
 import { openBrowserArtifact, openUserBrowser } from './browser-panel';
@@ -362,6 +367,7 @@ function ensureFoldDelegation(container: HTMLElement, getSessionId: () => string
             folded: state.userFoldedTurns,
           });
         }
+        if (sid) invalidateConversationFold(sid, turnId);
         return;
       }
       // 时间线工具项折叠（无 data-fold-key 的项不持久化）
@@ -385,10 +391,34 @@ function ensureFoldDelegation(container: HTMLElement, getSessionId: () => string
  * 模块级缓存：按容器 id 维护独立 ChatRenderTarget（主对话 / 工作室 / Wiki 面板多轨）。
  * 多面板共存时各自的 diff 缓存与 scroll anchor 互不干扰。
  */
+interface UnitPlan {
+  meta: RenderUnit;
+  build: () => HTMLElement | null;
+}
+
+interface ProjectedSpan {
+  start: number;
+  units: RenderUnit[];
+  hasVisibleAgent: boolean;
+  emptyTyping: boolean;
+  teamRows: boolean;
+}
+
 interface ChatRenderTarget {
   wrapper: HTMLElement | null;
   lastUnits: Map<string, HTMLElement>;
-  lastUnitMetas: RenderUnit[];
+  spans: ProjectedSpan[];
+  extras: RenderUnit[];
+  source: ChatMessage[] | null;
+  visibleLength: number;
+  displayKey: string;
+  folded: Set<string> | null;
+  unfolded: Set<string> | null;
+  invalidFrom: number;
+  teamRows: boolean;
+  teamBusy: boolean;
+  latestVisualRevisions: Map<string, number>;
+  ownerKey: string;
   lastSessionId: string | null;
   scrollAnchorNode: HTMLDivElement | null;
 }
@@ -401,13 +431,65 @@ function getChatRenderTarget(containerId: string): ChatRenderTarget {
     target = {
       wrapper: null,
       lastUnits: new Map(),
-      lastUnitMetas: [],
+      spans: [],
+      extras: [],
+      source: null,
+      visibleLength: 0,
+      displayKey: '',
+      folded: null,
+      unfolded: null,
+      invalidFrom: Infinity,
+      teamRows: false,
+      teamBusy: false,
+      latestVisualRevisions: new Map(),
+      ownerKey: '',
       lastSessionId: null,
       scrollAnchorNode: null,
     };
     renderTargets.set(containerId, target);
   }
   return target;
+}
+
+/** Fold state changes can arrive without replacing the message array. */
+export function invalidateConversationFold(sessionId: string, turnId: string): void {
+  for (const target of renderTargets.values()) {
+    if (target.lastSessionId !== sessionId || !target.source) continue;
+    const index = target.source.findIndex((message) => message.id === turnId);
+    if (index >= 0) target.invalidFrom = Math.min(target.invalidFrom, index);
+  }
+}
+
+function reusableSpanCount(spans: ProjectedSpan[], changed: number): number {
+  // The preceding span may now merge with a new assistant/error/status item.
+  let low = 0;
+  let high = spans.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (spans[middle].start < changed) low = middle + 1;
+    else high = middle;
+  }
+  return Math.max(0, low - 1);
+}
+
+function changedWidgetResults(
+  previous: ChatMessage[], previousLength: number, next: ChatMessage[], nextLength: number, start: number,
+): boolean {
+  // A new revision changes the read-only state of all older matching widgets.
+  const inputs = (messages: ChatMessage[], end: number): string[] => {
+    const results: string[] = [];
+    for (let index = start; index < end; index += 1) {
+      const tools = messages[index].toolCalls;
+      if (!Array.isArray(tools)) continue;
+      for (const tool of tools) {
+        if (tool?.name === 'Widget' && tool.result) results.push(tool.toolCallId, tool.result);
+      }
+    }
+    return results;
+  };
+  const before = inputs(previous, previousLength);
+  const after = inputs(next, nextLength);
+  return before.length !== after.length || before.some((value, index) => value !== after[index]);
 }
 
 /** 给定 build() 产物：null 或 data-empty 占位视为「缺席」（不进 DOM、不占 Map 槽位）。
@@ -417,6 +499,14 @@ function isPresent(node: HTMLElement | null): node is HTMLElement {
   if (!node) return false;
   if (node.dataset.empty === 'true') return false;
   return true;
+}
+
+function markSettledHistory(node: HTMLElement): void {
+  if (node.dataset.streaming === 'true') return;
+  if (node.matches('.msg.user, .msg--agent-turn')
+    && !node.querySelector('.interaction-card, [data-plan-session], .msg__artifact-card')) {
+    node.dataset.chatHistoryRow = node.classList.contains('user') ? 'user' : 'agent';
+  }
 }
 
 /** 稳定的 scroll-anchor 节点：sig 恒定，跨帧复用同一个 div（避免每帧新建）。 */
@@ -524,9 +614,7 @@ function sigAgentTurn(
 /**
  * 外部会话才返回展示身份；内置 Crew 会话返回 undefined，确保沿用原渲染路径。
  */
-function sessionTurnIdentity(sessionId: string | null): AgentTurnOptions['identity'] | undefined {
-  if (!sessionId) return undefined;
-  const display = getSessionAgentDisplay(sessionId);
+function sessionTurnIdentity(display: ReturnType<typeof getSessionAgentDisplay>): AgentTurnOptions['identity'] | undefined {
   const provider = String(display?.agentLabel?.provider || '').trim().toLowerCase();
   // Team 是会话容器，不是发言者。团队消息由 team_internal.agent_id 决定头像；
   // 首帧前的通用等待态沿用内置 Leader（Crew），聊天区不展示 Team Logo。
@@ -579,40 +667,73 @@ export function renderConversation(
   const busy = sessionId ? isBusySession(sessionId) : false;
   const queueHint = sessionId ? state.queueHints[sessionId] : '';
   const pendingFollowup = sessionId ? ensureSessionBook(sessionId).pendingFollowup : null;
-  const turnIdentity = sessionTurnIdentity(sessionId);
+  const display = getSessionAgentDisplay(sessionId);
+  const turnIdentity = sessionTurnIdentity(display);
+  const ownerKey = interactiveOwnerKey();
 
   // 撤回修改中：隐藏 [editFromIdx..] 的内容（不删除），只渲染前面部分
   const editFrom = sessionId ? state.editFromIdx[sessionId] : undefined;
   const editing = editFrom != null;
-  const messages = editing ? allMessages.slice(0, editFrom) : allMessages;
+  const messages = allMessages;
+  const visibleLength = editing ? Math.min(
+    allMessages.length, Math.max(0, editFrom < 0 ? allMessages.length + editFrom : editFrom),
+  ) : allMessages.length;
 
-  const target = getChatRenderTarget(containerId);
-  // 会话切换：只重置本容器的 diff 缓存（多面板共存，不能按全局会话重置其它容器）。
-  if (target.lastSessionId !== sessionId) {
-    target.lastUnits = new Map();
-    target.lastUnitMetas = [];
-    target.wrapper = null;
-    target.lastSessionId = sessionId;
+  let target = getChatRenderTarget(containerId);
+  const replacedWrapper = target.lastSessionId !== sessionId || target.ownerKey !== ownerKey || target.wrapper?.parentElement !== container
+    ? target.wrapper : null;
+  const replacedFollowup = replacedWrapper ? target.lastUnits.get('__followup') : undefined;
+  if (replacedWrapper) {
+    renderTargets.delete(containerId);
+    target = getChatRenderTarget(containerId);
   }
-  // 容器元素被重建（单测 body 重排 / 视图重挂）时，缓存的 wrapper 已脱离文档：
-  // 连同 diff 缓存一并作废，否则单元会渲染进游离节点、容器永远空白。
-  if (target.wrapper && target.wrapper.parentElement !== container) {
-    target.wrapper = null;
-    target.lastUnits = new Map();
-    target.lastUnitMetas = [];
-    target.scrollAnchorNode = null;
-  }
+  target.ownerKey = ownerKey;
+  target.lastSessionId = sessionId;
   const { lastUnits } = target;
   let { wrapper: chatWrapper } = target;
 
-  // ---- 构建本帧的 render-unit 列表（key + sig + build fn） ----
-  // 一个「构建描述」= 纯元数据 + 一个延迟到 apply 时才调用的 build（避免 reuse 时白 build）。
-  interface UnitPlan {
-    meta: RenderUnit;
-    build: () => HTMLElement | null;
+  const modelLabel = state.configModel;
+  const identitySig = turnIdentity ? JSON.stringify(turnIdentity) : 'crew';
+  const teamSessionName = String(display?.agentLabel?.name || '').trim();
+  const teamKey = teamTurnDisplayKey(sessionId);
+  const displayKey = JSON.stringify([modelLabel, identitySig, teamKey, teamSessionName]);
+  const folded = state.userFoldedTurns;
+  const unfolded = state.userUnfoldedTurns;
+  const sameDisplay = target.displayKey === displayKey && target.folded === folded && target.unfolded === unfolded;
+  const source = target.source;
+  let changed = source && sameDisplay
+    ? firstChangedMessageIndex(source, messages)
+    : undefined;
+  if (changed !== undefined && target.teamRows && target.teamBusy !== busy) changed = undefined;
+  if (changed !== undefined && source && (source !== messages || visibleLength !== target.visibleLength)
+    && changedWidgetResults(source, target.visibleLength, messages, visibleLength,
+      Math.min(changed, target.visibleLength, visibleLength))) {
+    changed = undefined;
   }
+  if (changed === undefined) {
+    target.latestVisualRevisions = new Map(sessionId
+      ? inlineSurfaces(visibleLength === messages.length ? messages : messages.slice(0, visibleLength), sessionId)
+        .visuals.map(({ spec }) => [spec.id, spec.revision])
+      : []);
+  }
+  const messageChange = Math.min(changed ?? 0, target.invalidFrom);
+  const reused = target.visibleLength === visibleLength && messageChange >= visibleLength
+    ? target.spans.length
+    : reusableSpanCount(target.spans, Math.min(messageChange, target.visibleLength, visibleLength));
+  const previousSpan = target.spans[reused - 1];
+  const start = target.spans[reused]?.start ?? target.visibleLength;
+  const spans: ProjectedSpan[] = [];
   const plans: UnitPlan[] = [];
-  const latestVisuals = sessionId ? inlineSurfaces(messages, sessionId).visuals : [];
+  let hasVisibleAgent = previousSpan?.hasVisibleAgent ?? false;
+  let trailingEmptyTyping = previousSpan?.emptyTyping ?? false;
+  let teamRows = previousSpan?.teamRows ?? false;
+  const finishSpan = (index: number, firstPlan: number, visibleAgent: boolean, emptyTyping = false): void => {
+    hasVisibleAgent ||= visibleAgent;
+    trailingEmptyTyping = emptyTyping;
+    teamRows ||= messages[index].role === 'team_internal';
+    spans.push({ start: index, units: plans.slice(firstPlan).map(({ meta }) => meta), hasVisibleAgent, emptyTyping, teamRows });
+  };
+  let extrasStart = 0;
   const pushPlan = (key: string, sig: string, build: () => HTMLElement | null): void => {
     plans.push({ meta: { key, sig }, build });
   };
@@ -638,26 +759,26 @@ export function renderConversation(
     }
   };
 
-  if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoadErrors.has(sessionId)) {
+  if (visibleLength === 0 && !busy && !editing && sessionId && state.historyLoadErrors.has(sessionId)) {
     // 历史回填失败且无消息可显示：错误卡（带重试）优先于默认空态，失败不再表现为「空会话」。
     pushPlan('__history_error', 'history-error', () => renderHistoryErrorCard());
-  } else if (messages.length === 0 && !busy && !editing && sessionId && state.historyLoading.has(sessionId)) {
+  } else if (visibleLength === 0 && !busy && !editing && sessionId && state.historyLoading.has(sessionId)) {
     // 首屏窗口在途（P1-6）：骨架占位先于空态，openSession 不再等历史返回才渲染。
     pushPlan('__history_loading', 'history-loading', () => renderQueueHintCard('正在加载会话历史…'));
-  } else if (messages.length === 0 && !busy && !editing) {
+  } else if (visibleLength === 0 && !busy && !editing) {
     pushPlan('__empty', 'empty', () => hooks.emptyState?.() ?? renderEmptyState());
-  } else if (messages.length === 0 && editing) {
+  } else if (visibleLength === 0 && editing) {
     // 编辑态 + 空流：留白（提示条已在输入框上方）—— 不 push 任何单元
   } else {
     // 把连续的 agent 消息（assistant / status / error）合并成一个 .msg 块（与 X3a 完全一致的切分逻辑）
-    let i = 0;
+    let i = start;
     // 末尾没有实际内容的 streaming assistant turn（Dynamic Kanban 里由首个 status/workflow 帧
     // 开出的空 anchor）本质上等同于「正在生成」的 typing 指示器。如果把它留在原位置，
     // 后续 workflow_progress / agent 角色卡片会追加在它下面，导致「转圈等待」被旧输出压在上方。
     // 这里把它识别出来、跳过原位置渲染，改为在所有消息之后以 __typing 单元渲染，确保它始终
     // 紧跟最新消息。
-    let trailingEmptyTypingBatch: ChatMessage[] | null = null;
-    while (i < messages.length) {
+    while (i < visibleLength) {
+      const firstPlan = plans.length;
       const msg = messages[i];
       const isAgent = (msg.role === 'assistant' && !msg.agentName) || msg.role === 'error' || (msg.role === 'status' && !msg.agentName && !msg.workflowProgress);
       if (!isAgent) {
@@ -672,8 +793,7 @@ export function renderConversation(
           const member = resolveTeamCollaborationMember(sessionId, msg);
           const displayText = resolveTeamCollaborationMentionText(sessionId, msg.content);
           const isPlanning = msg.eventType === 'team_planning_progress';
-          const sessionTeamName = String(getSessionAgentDisplay(sessionId)?.agentLabel?.name || '').trim();
-          const teamName = resolveTeamCollaborationName(sessionId) || sessionTeamName || '团队';
+          const teamName = resolveTeamCollaborationName(sessionId) || teamSessionName || '团队';
           const displayed = isPlanning
             ? {
                 ...msg,
@@ -709,22 +829,23 @@ export function renderConversation(
             canRetry: !busy,
             canCancel: busy,
           }));
+          finishSpan(i, firstPlan, true);
           i += 1;
           continue;
         } else if (msg.role === 'status' && msg.workflowProgress) {
-          sig = safeSig(msg.id, () => sigWorkflowProgress(msg, state.configModel), msg);
+          sig = safeSig(msg.id, () => sigWorkflowProgress(msg, modelLabel), msg);
         } else if (msg.agentName) {
-          sig = safeSig(msg.id, () => sigAgentRoleCard(msg, state.configModel), msg);
+          sig = safeSig(msg.id, () => sigAgentRoleCard(msg, modelLabel), msg);
         } else {
-          sig = safeSig(msg.id, () => sigUserMessage(msg, state.configModel), msg);
+          sig = safeSig(msg.id, () => sigUserMessage(msg, modelLabel), msg);
         }
-        const captured = msg;
-        pushPlan(msg.id, sig, () => renderMessageHtml(captured, state.configModel));
+        pushPlan(msg.id, sig, () => renderMessageHtml(msg, modelLabel));
+        finishSpan(i, firstPlan, msg.role === 'assistant' || msg.role === 'status');
         i += 1;
         continue;
       }
       let j = i + 1;
-      while (j < messages.length) {
+      while (j < visibleLength) {
         const r = messages[j].role;
         const hasAgent = messages[j].agentName;
         const hasWorkflowProgress = messages[j].workflowProgress;
@@ -732,7 +853,7 @@ export function renderConversation(
         else break;
       }
       const batch = messages.slice(i, j);
-      const isLastBatch = j >= messages.length;
+      const isLastBatch = j >= visibleLength;
       const isEmptyTyping =
         isLastBatch &&
         batch.length === 1 &&
@@ -745,7 +866,7 @@ export function renderConversation(
         !batch[0].todoSnapshot &&
         !batch[0].wikiCards?.length;
       if (isEmptyTyping) {
-        trailingEmptyTypingBatch = batch;
+        finishSpan(i, firstPlan, false, true);
         i = j;
         continue;
       }
@@ -754,8 +875,7 @@ export function renderConversation(
       // 帧常排在 assistant anchor 之后）。per-turn 自有信号，不引用 session 全局 busy——否则新回合让
       // session 重新 busy 时会复活所有已封口回合（停任务1再启任务2，两个回合都显示执行中）。
       const isStreaming = batch.some((m) => m.streaming === true);
-      const isLastTurn = j >= messages.length;
-      const isLiveTurn = isLastTurn && isStreaming;
+      const isLiveTurn = isLastBatch && isStreaming;
       const turnDurationMs = resolveTurnDurationMs(batch, { isLive: isLiveTurn });
       // 正式正文硬确认后：清掉推理阶段的临时展开（不碰正文后的持久化展开）
       if (hasVisibleAnswerText(batch) && ephemeralUnfoldedTurns.has(turnId)) {
@@ -766,9 +886,6 @@ export function renderConversation(
       if (state.userUnfoldedTurns.has(turnId)) userPinnedOpen = true;
       else if (state.userFoldedTurns.has(turnId)) userPinnedOpen = false;
       // 无偏好时：有正式正文 → 折；尚无正文（推理/旁白）→ 展。见 renderAgentTurn。
-      const identitySig = turnIdentity
-        ? `${turnIdentity.kind}|${turnIdentity.name}|${turnIdentity.badge}`
-        : 'crew';
       const sig = safeSig(
         turnId,
         () => `${sigAgentTurn(batch, isStreaming, userPinnedOpen)}|${identitySig}`,
@@ -777,7 +894,7 @@ export function renderConversation(
       const capturedBatch = batch;
       const surfaces = sessionId ? inlineSurfaces(batch, sessionId) : null;
       for (const visual of surfaces?.visuals ?? []) {
-        const readOnly = latestVisuals.some(latest => latest.spec.id === visual.spec.id && latest.spec.revision > visual.spec.revision);
+        const readOnly = (target.latestVisualRevisions.get(visual.spec.id) ?? visual.spec.revision) > visual.spec.revision;
         pushPlan(visual.key, JSON.stringify([visual.spec, readOnly]), () => renderNativeVisual({ ...visual, readOnly }));
       }
       pushPlan(turnId, sig, () =>
@@ -788,21 +905,16 @@ export function renderConversation(
           ...(turnIdentity ? { identity: turnIdentity } : {}),
         }),
       );
+      finishSpan(i, firstPlan, true);
       i = j;
     }
+    extrasStart = plans.length;
     // 带 agentName 的 status（Dynamic Kanban 角色卡片）和 workflowProgress 面板走上面的 !isAgent 分支，
     // 分别由 sigAgentRoleCard / sigWorkflowProgress 提供 sig，避免 stale。
     if (queueHint && !(state.pendingQueues[sessionId ?? '']?.length)) {
       pushPlan('__queue', `q|${queueHint}`, () => renderQueueHintCard(queueHint));
     }
-    const emptyTypingId = trailingEmptyTypingBatch?.[0]?.id;
-    const hasVisibleAgentMessage = messages.some(
-      (m) => m.id !== emptyTypingId && (m.role === 'assistant' || m.role === 'status' || m.role === 'error' || m.role === 'team_internal'),
-    );
-    if (busy && (trailingEmptyTypingBatch || !hasVisibleAgentMessage)) {
-      const identitySig = turnIdentity
-        ? `${turnIdentity.kind}|${turnIdentity.name}|${turnIdentity.badge}`
-        : 'crew';
+    if (busy && (trailingEmptyTyping || !hasVisibleAgent)) {
       pushPlan('__typing', `typing|${identitySig}`, () => renderTypingIndicator(turnIdentity));
     }
   }
@@ -821,15 +933,33 @@ export function renderConversation(
 
   // ---- diff + apply ----
   const nextMetas = plans.map((p) => p.meta);
-  const ops = diffRenderUnits(target.lastUnitMetas, nextMetas);
+  const previousTail = target.spans.slice(reused).flatMap(({ units }) => units).concat(target.extras);
+  const ops = diffRenderUnits(previousTail, nextMetas);
 
   // 持久 wrapper：首次 / 会话切换时新建，之后跨帧复用
+  const resetDom = !chatWrapper;
   if (!chatWrapper) {
     chatWrapper = document.createElement('div');
     chatWrapper.className = 'messages__inner';
     container.replaceChildren(chatWrapper);
   }
   const wrapper = chatWrapper;
+  wrapper.classList.toggle('messages__inner--long', visibleLength >= 200);
+  const added: HTMLElement[] = [];
+  const removed: HTMLElement[] = replacedWrapper ? [replacedWrapper] : [];
+
+  // The preserved prefix is already ordered and mounted. Start after its last
+  // present unit, including when the last logical span is a typing placeholder.
+  let prefixEnd: Node | undefined;
+  for (let index = reused - 1; index >= 0 && !prefixEnd; index -= 1) {
+    const prefixUnits = target.spans[index].units;
+    for (let item = prefixUnits.length - 1; item >= 0; item -= 1) {
+      const node = lastUnits.get(prefixUnits[item].key);
+      if (node?.parentNode !== wrapper) continue;
+      prefixEnd = node;
+      break;
+    }
+  }
 
   const buildByPlan = new Map<string, () => HTMLElement | null>();
   for (const p of plans) buildByPlan.set(p.meta.key, p.build);
@@ -841,6 +971,7 @@ export function renderConversation(
     if (node) {
       if (op.key !== '__anchor') node.remove();
       lastUnits.delete(op.key);
+      removed.push(node);
     }
   }
 
@@ -851,18 +982,22 @@ export function renderConversation(
     const fresh = buildUnitSafely(op.key, build);
     const old = lastUnits.get(op.key);
     if (isPresent(fresh)) {
+      markSettledHistory(fresh);
       if (old && old.parentNode === wrapper) {
         const oldSpinner = old.querySelector('.msg__fold-spinner');
         const freshSpinner = fresh.querySelector('.msg__fold-spinner');
         if (oldSpinner && freshSpinner) freshSpinner.replaceWith(oldSpinner);
         wrapper.replaceChild(fresh, old);
       }
+      if (old) removed.push(old);
+      added.push(fresh);
       lastUnits.set(op.key, fresh);
     } else {
       // build 产出 null/data-empty → 该单元缺席：移除旧节点并清出 Map
       if (old) {
         if (op.key !== '__anchor') old.remove();
         lastUnits.delete(op.key);
+        removed.push(old);
       }
     }
   }
@@ -874,7 +1009,9 @@ export function renderConversation(
     const build = buildByPlan.get(op.key)!;
     const fresh = buildUnitSafely(op.key, build);
     if (isPresent(fresh)) {
+      markSettledHistory(fresh);
       lastUnits.set(op.key, fresh);
+      added.push(fresh);
     } else {
       absentKeys.add(op.key);
     }
@@ -882,12 +1019,16 @@ export function renderConversation(
 
   // 只移动位置确实变化的节点，保留历史消息的浏览器滚动锚点与选区。
   // 每帧把全部节点 append 到末尾会暂时拆散整个列表，即使最终顺序相同。
-  let cursor = wrapper.firstChild;
+  let cursor = prefixEnd ? prefixEnd.nextSibling : wrapper.firstChild;
+  let reordered = false;
   for (const meta of nextMetas) {
     if (absentKeys.has(meta.key)) continue;
     const node = lastUnits.get(meta.key);
     if (!node) continue;
-    if (node !== cursor) wrapper.insertBefore(node, cursor);
+    if (node !== cursor) {
+      reordered ||= node.parentNode === wrapper;
+      wrapper.insertBefore(node, cursor);
+    }
     cursor = node.nextSibling;
   }
 
@@ -896,27 +1037,49 @@ export function renderConversation(
   ensureFileChangesDelegation(container);
   ensureHistoryRetryDelegation(container, getSessionId);
   ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
-  // 代码块复制按钮：patch/append 后新节点需重新绑定（幂等，旧节点跳过）。
-  attachCopyButtons(container);
-  // Mermaid 图表：懒加载 mermaid.js 渲染 [data-mermaid] 占位。幂等，已渲染的跳过。
-  // 不 await：渲染是异步的，不阻塞 DOM 布局；失败时保留源码占位，下次 patch 重试。
-  void renderMermaidBlocks(container);
-  hydrateNativeVisuals(container);
-  syncPermissionCardPositions(container);
-  bindFollowupCard(container, hooks.followupHandlers ?? noopFollowupHandlers);
+  syncConversationDom(container, sessionId, { added, removed, reset: resetDom, reordered });
+  if (replacedFollowup) disposePermissionCardPosition(replacedFollowup);
+  for (const root of removed) {
+    if (root === replacedWrapper || root.classList.contains('native-visual')) disposeNativeVisuals(root);
+    if (root.classList.contains('followup-card-wrap--permission')) disposePermissionCardPosition(root);
+  }
+  for (const root of resetDom ? [wrapper] : added) {
+    attachCopyButtons(root);
+    void renderMermaidBlocks(root);
+    if (resetDom || root.classList.contains('native-visual')) hydrateNativeVisuals(root);
+  }
+  const followup = lastUnits.get('__followup');
+  if (followup) {
+    syncPermissionCardPositions(followup);
+    bindFollowupCard(followup, hooks.followupHandlers ?? noopFollowupHandlers);
+  }
+
+  target.wrapper = wrapper;
+  target.source = messages;
+  target.visibleLength = visibleLength;
+  target.displayKey = displayKey;
+  target.folded = folded;
+  target.unfolded = unfolded;
+  target.invalidFrom = Infinity;
+  target.teamRows = teamRows;
+  target.teamBusy = busy;
+  target.spans.length = reused;
+  for (const span of spans) target.spans.push(span);
+  target.extras = nextMetas.slice(extrasStart);
   hooks.afterRender?.(sessionId);
-  // 软钉底：用户停在底部时才追底（与主对话 scrollChatToBottom 同一 rAF 节奏）。
   requestAnimationFrame(() => {
     getConversationScrollAnchor(containerId).pinToBottomIfSticky();
   });
-
-  // 5) 记账：本帧的元数据成为下一帧的 prev
-  target.lastUnitMetas = nextMetas;
-  target.wrapper = chatWrapper;
 }
 
 /** 面板卸载：释放滚动锚定监听 + diff 缓存（主对话容器随应用存活，无需调用）。 */
 export function disposeConversationRenderer(containerId: string): void {
+  const target = renderTargets.get(containerId);
+  const wrapper = target?.wrapper;
+  if (wrapper) disposeNativeVisuals(wrapper);
+  if (wrapper?.parentElement) disposeConversationDom(wrapper.parentElement);
+  const followup = target?.lastUnits.get('__followup');
+  if (followup) disposePermissionCardPosition(followup);
   conversationScrollAnchors.get(containerId)?.anchor.dispose();
   conversationScrollAnchors.delete(containerId);
   renderTargets.delete(containerId);

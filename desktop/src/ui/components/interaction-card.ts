@@ -308,27 +308,109 @@ export function markInteractionSubmitted(interactionId: string): void {
   if (interactionId) submittedInteractions.add(interactionId);
 }
 
-/** Keep only the latest unanswered interaction card interactive after history reloads. */
+interface ActivityControls {
+  id: string;
+  card: HTMLElement;
+  controls: NodeListOf<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>;
+}
+
+interface InteractionUnit {
+  activities: ActivityControls[];
+  completions: string[];
+}
+
+const ACTIVITY_SELECTOR = '.interaction-card[data-interaction-id]';
+const COMPLETION_SELECTOR = '[data-interaction-completion]';
+const CONTROL_SELECTOR = '[data-interaction-option], [data-interaction-answer], [data-interaction-submit]';
+
+function unitElements(unit: HTMLElement, selector: string): HTMLElement[] {
+  const children = Array.from(unit.querySelectorAll<HTMLElement>(selector));
+  if (unit.matches(selector)) children.unshift(unit);
+  return children;
+}
+
+function setActivityDisabled(activity: ActivityControls, disabled: boolean): void {
+  activity.card.classList.toggle('interaction-card--disabled', disabled);
+  for (const control of activity.controls) control.disabled = disabled;
+}
+
+/** Index only interaction cards/completions in the added transcript units. */
+export class InteractionCardIndex {
+  private readonly units = new Map<HTMLElement, InteractionUnit>();
+  private readonly activities = new Set<ActivityControls>();
+  private readonly completions = new Map<string, number>();
+  private active: ActivityControls | undefined;
+
+  constructor(private readonly submitted: Set<string>) {}
+
+  update(added: readonly HTMLElement[], removed: readonly HTMLElement[], reordered = false): void {
+    let touched = reordered && this.activities.size > 1;
+    for (const unit of removed) {
+      const previous = this.units.get(unit);
+      if (!previous) continue;
+      this.units.delete(unit);
+      for (const activity of previous.activities) this.activities.delete(activity);
+      for (const id of previous.completions) {
+        const count = this.completions.get(id) ?? 0;
+        if (count > 1) this.completions.set(id, count - 1);
+        else this.completions.delete(id);
+      }
+      touched = true;
+    }
+    for (const unit of added) {
+      if (this.units.has(unit)) continue;
+      const activities = unitElements(unit, ACTIVITY_SELECTOR).map((card): ActivityControls => ({
+        card,
+        id: card.dataset.interactionId ?? '',
+        controls: card.querySelectorAll(CONTROL_SELECTOR),
+      }));
+      const completions = unitElements(unit, COMPLETION_SELECTOR)
+        .map((card) => card.dataset.interactionCompletion ?? '')
+        .filter(Boolean);
+      if (!activities.length && !completions.length) continue;
+      this.units.set(unit, { activities, completions });
+      for (const id of completions) this.completions.set(id, (this.completions.get(id) ?? 0) + 1);
+      for (const activity of activities) {
+        this.activities.add(activity);
+        setActivityDisabled(activity, true);
+      }
+      touched = true;
+    }
+    if (touched || (this.active && this.submitted.has(this.active.id))) this.refreshActive();
+  }
+
+  submit(interactionId: string, origin: Element): boolean {
+    if (this.active?.id !== interactionId || !this.active.card.contains(origin)) return false;
+    if (this.submitted.has(interactionId)) {
+      this.refreshActive();
+      return false;
+    }
+    this.submitted.add(interactionId);
+    this.refreshActive();
+    return true;
+  }
+
+  deactivate(): void {
+    if (this.active) setActivityDisabled(this.active, true);
+    this.active = undefined;
+  }
+
+  private refreshActive(): void {
+    let next: ActivityControls | undefined;
+    for (const activity of this.activities) {
+      if (!activity.id || this.completions.has(activity.id) || this.submitted.has(activity.id)) continue;
+      if (!next || (next.card.compareDocumentPosition(activity.card) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+        next = activity;
+      }
+    }
+    if (this.active === next) return;
+    if (this.active) setActivityDisabled(this.active, true);
+    if (next) setActivityDisabled(next, false);
+    this.active = next;
+  }
+}
+
+/** Standalone callers can initialize the same policy from a complete container. */
 export function syncInteractionCards(container: HTMLElement): void {
-  const completed = new Set(
-    Array.from(container.querySelectorAll<HTMLElement>('[data-interaction-completion]'))
-      .map((item) => item.dataset.interactionCompletion || '')
-      .filter(Boolean),
-  );
-  const cards = Array.from(container.querySelectorAll<HTMLElement>('[data-interaction-id]'))
-    .filter((item) => item.classList.contains('interaction-card'));
-  const active = [...cards].reverse().find((card) => {
-    const id = card.dataset.interactionId || '';
-    return id && !completed.has(id) && !submittedInteractions.has(id);
-  });
-  cards.forEach((card) => {
-    const id = card.dataset.interactionId || '';
-    const disabled = card !== active || completed.has(id) || submittedInteractions.has(id);
-    card.classList.toggle('interaction-card--disabled', disabled);
-    card.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>(
-      '[data-interaction-option], [data-interaction-answer], [data-interaction-submit]',
-    ).forEach((control) => {
-      control.disabled = disabled;
-    });
-  });
+  new InteractionCardIndex(submittedInteractions).update([container], []);
 }

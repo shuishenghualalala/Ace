@@ -1,4 +1,16 @@
 /* Transcript owner: message layout, rich text and message actions. */
+
+/* Keep settled text mounted for selection and jumps. Chromium skips layout and
+   paint away from the viewport and remembers each row's actual measured height. */
+.messages__inner--long > [data-chat-history-row] {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 120px;
+}
+
+.messages__inner--long > [data-chat-history-row="user"] {
+  contain-intrinsic-block-size: auto 64px;
+}
+
 .chat-messages.web-flow .mw-transcript {
   box-sizing: border-box;
   display: flex;

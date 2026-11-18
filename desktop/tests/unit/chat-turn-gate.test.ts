@@ -207,6 +207,7 @@ describe('applyChunk turn identity gate', () => {
 
     const liveTurns = document.querySelectorAll('.msg[data-streaming="true"]');
     const currentBubble = document.querySelector<HTMLElement>('[data-message-id="turn-current"]');
+    const scanContainer = vi.spyOn(document.getElementById('chat-messages')!, 'querySelectorAll');
     expect(liveTurns).toHaveLength(2);
     expect(currentBubble).not.toBeNull();
 
@@ -216,6 +217,35 @@ describe('applyChunk turn identity gate', () => {
     expect(document.querySelector('[data-message-id="turn-current"]')).toBe(currentBubble);
     expect(currentBubble?.querySelector('[data-text-for="turn-current"]')?.textContent).toContain('开头继续');
     expect(document.querySelector('[data-message-id="wiki-ingest-background"]')?.textContent).not.toContain('继续');
+    expect(scanContainer).not.toHaveBeenCalled();
+    scanContainer.mockRestore();
+  });
+
+  it('hydrates new live code locally and emits one message signal per streaming frame', async () => {
+    vi.useFakeTimers();
+    openTurn('req-live-code');
+    patchBook('sid-1', { assistantId: 'turn-live-code' });
+    appendSessionMessage('sid-1', {
+      id: 'turn-live-code', role: 'assistant', content: '第一段',
+      thinking: '固定思考内容', segmentRole: 'answer', timestamp: Date.now(), streaming: true,
+    });
+    renderChat();
+    const signal = vi.fn();
+    window.addEventListener('messages:changed', signal);
+    try {
+      applyChunk(chunk('delta', 'req-live-code', { text: '\n\n```ts\nconsole.log(7);' }));
+      applyChunk(chunk('delta', 'req-live-code', { text: '\n```' }));
+      await vi.advanceTimersByTimeAsync(20);
+      expect(signal).toHaveBeenCalledOnce();
+      const button = document.querySelector<HTMLButtonElement>('[data-text-for="turn-live-code"] button[data-copy]');
+      expect(button?.dataset.copyBound).toBe('1');
+      const thinkingParagraph = document.querySelector('.process-timeline__thinking p');
+      applyChunk(chunk('delta', 'req-live-code', { text: '\n\n最后一段' }));
+      await vi.advanceTimersByTimeAsync(20);
+      expect(document.querySelector('.process-timeline__thinking p')).toBe(thinkingParagraph);
+    } finally {
+      window.removeEventListener('messages:changed', signal);
+    }
   });
 
   it('流式 thinking 在内部滚动区位于底部时继续跟随新增内容', async () => {

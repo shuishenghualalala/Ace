@@ -20,6 +20,7 @@ import type {
   Workspace,
 } from './backend-client';
 import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus } from './chat-render';
+import { recordMessageChange } from './conversation-message-changes';
 import {
   sessionStore,
   messageStore,
@@ -529,7 +530,9 @@ export function replaceSessionMessages(sessionId: string, list: ChatMessage[]): 
 /** 向某 session 的消息数组追加一条（Phase 2 T2：历史失败回填 error 消息）。 */
 export function appendSessionMessage(sessionId: string, msg: ChatMessage): void {
   const cur = messageStore.get().messages[sessionId] ?? [];
-  messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: [...cur, msg] } });
+  const next = [...cur, msg];
+  recordMessageChange(cur, next, cur.length);
+  replaceSessionMessages(sessionId, next);
 }
 
 /** 从下标 idx 起截断某 session 的消息数组（替代 `state.messages[sid].splice(idx)`）。
@@ -539,7 +542,9 @@ export function truncateMessagesFrom(sessionId: string, idx: number): ChatMessag
   const cur = messageStore.get().messages[sessionId] ?? [];
   if (idx >= cur.length) return [];
   const removed = cur.slice(idx);
-  messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: cur.slice(0, idx) } });
+  const next = cur.slice(0, idx);
+  recordMessageChange(cur, next, next.length);
+  replaceSessionMessages(sessionId, next);
   return removed;
 }
 

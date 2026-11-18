@@ -39,10 +39,7 @@ import {
   type ConversationRenderHooks,
 } from './conversation-renderer';
 import { getToolFold, setToolFold } from './fold-state';
-import {
-  markInteractionSubmitted,
-  syncInteractionCards,
-} from '../components/interaction-card';
+import { submitConversationInteraction } from './conversation-dom-index';
 
 /** Composer 动作组：submit/stop/edit/queue（app.ts 主对话原接线逻辑的参数化形态）。 */
 export interface ConversationPanelActions {
@@ -169,9 +166,11 @@ export function mountConversationPanel(
     const interactionId = typeof detail?.interactionId === 'string' ? detail.interactionId.trim() : '';
     const text = typeof detail?.text === 'string' ? detail.text.trim() : '';
     if (!interactionId || !text || text.length > 2_000) return;
-    markInteractionSubmitted(interactionId);
     const target = opts.resolveMessages?.()?.container ?? messagesEl;
-    if (target) syncInteractionCards(target);
+    const sessionId = opts.getSessionId();
+    const origin = event.target;
+    if (!target || !sessionId || !(origin instanceof Element)
+      || !submitConversationInteraction(target, sessionId, interactionId, origin)) return;
     void opts.actions.submit(text);
   };
   host.addEventListener('crew:interaction-submit', handleInteractionSubmit);
@@ -190,6 +189,7 @@ export function mountConversationPanel(
   renderPreview();
 
   // ── todo 槽位（todoFoldKey 提供时启用；主对话仍走 chat-controller.renderTodoSlot 链路） ──
+  let renderedTodos: { todos: ReturnType<typeof ensureSessionBook>['todos']; foldKey: string; open: boolean } | undefined;
   const renderPanelTodo = (sessionId: string | null): void => {
     if (!opts.todoFoldKey) return;
     const slot = composerRoot.querySelector<HTMLElement>('.chat-todo-slot');
@@ -197,11 +197,14 @@ export function mountConversationPanel(
     const todos = sessionId ? ensureSessionBook(sessionId).todos : [];
     slot.hidden = !shouldShowTodoPanel(todos);
     if (slot.hidden) {
-      slot.innerHTML = '';
+      if (slot.childNodes.length) slot.replaceChildren();
+      renderedTodos = undefined;
       return;
     }
     const foldKey = opts.todoFoldKey(sessionId!);
     const open = getToolFold(foldKey) ?? false;
+    if (renderedTodos?.todos === todos && renderedTodos.foldKey === foldKey && renderedTodos.open === open) return;
+    renderedTodos = { todos, foldKey, open };
     slot.innerHTML = renderTodoProgressPanelHtml(todos, open, foldKey);
     const toggle = slot.querySelector<HTMLElement>('[data-todo-panel-toggle]');
     if (toggle) {
@@ -226,7 +229,6 @@ export function mountConversationPanel(
       ...(opts.emptyState ? { emptyState: opts.emptyState } : {}),
       ...(opts.followupHandlers ? { followupHandlers: opts.followupHandlers } : {}),
       afterRender: (sessionId) => {
-        syncInteractionCards(target.container);
         renderPanelTodo(sessionId);
         opts.afterRender?.(sessionId);
       },

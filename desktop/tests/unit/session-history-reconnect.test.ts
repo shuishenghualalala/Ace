@@ -6,7 +6,8 @@ import { backendApi } from '../../src/ui/backend-client';
 import { bootstrapBackend, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
 import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
-import { appendMessage, consumePending, stopGeneration } from '../../src/ui/features/chat-controller';
+import { appendMessage, consumePending, renderChat, stopGeneration } from '../../src/ui/features/chat-controller';
+import { disposeConversationRenderer, getConversationScrollAnchor } from '../../src/ui/features/conversation-renderer';
 import { getGatewayCursors, resetGatewaySequence } from '../../src/ui/features/gateway-sequence';
 import { cancelSessionStreamRecovery, getSessionStreamRecovery } from '../../src/ui/features/session-stream-recovery';
 import { stopStreamWatchdog } from '../../src/ui/features/stream-watchdog';
@@ -455,6 +456,68 @@ describe('conversation recovery after a socket outage', () => {
     expect(sessionStore.get().books[sid]?.turnSealed).toBe(true);
     expect(sessionStore.get().busySessions[sid]).toBeFalsy();
     expect(messageStore.get().messages[sid][0].interrupted).toBe(true);
+  });
+});
+
+describe('older history page viewport', () => {
+  const sid = 'sid-1';
+  let container: HTMLElement;
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="welcome-panel"></div><div id="chat-panel"><div id="chat-messages"></div></div>';
+    container = document.getElementById('chat-messages')!;
+    appendMessage(sid, 'user', 'First current row');
+    appendMessage(sid, 'user', 'Reading row');
+    setHistoryPaging(sid, { hasMore: true, nextBefore: 'previous-page' });
+    Object.defineProperties(container, {
+      scrollHeight: { get: () => (state.messages[sid].length === 2 ? 1000 : 2800) },
+      clientHeight: { value: 300 },
+    });
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 70, 500, 300));
+    renderChat();
+  });
+
+  afterEach(() => {
+    disposeConversationRenderer('chat-messages');
+    vi.restoreAllMocks();
+  });
+
+  it('retains the visible message after an in-flight scroll and unrelated total-height changes', async () => {
+    const history = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.historyWindow>>>();
+    vi.spyOn(backendApi, 'historyWindow').mockReturnValue(history.promise);
+    const [first, reading] = container.querySelectorAll<HTMLElement>('.msg[data-message-id]');
+    vi.spyOn(first, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 70 - container.scrollTop, 500, 100));
+    vi.spyOn(reading, 'getBoundingClientRect').mockImplementation(() => {
+      const actualPrependHeight = state.messages[sid].length === 2 ? 0 : 180;
+      return new DOMRect(0, 70 + 155 + actualPrependHeight - container.scrollTop, 500, 120);
+    });
+    container.scrollTop = 30;
+    getConversationScrollAnchor(container.id).disarm();
+    const loading = loadOlderHistoryPage(sid);
+    container.scrollTop = 130;
+    const offset = reading.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    // Chromium can apply part of the prepend shift before our geometry read.
+    window.addEventListener('messages:changed', () => { container.scrollTop += 75; }, { once: true });
+    history.resolve({ items: [{ role: 'user', content: 'Older page' }], has_more: false, next_before: null });
+
+    await expect(loading).resolves.toBe(true);
+    expect(container.contains(reading)).toBe(true);
+    expect(reading.getBoundingClientRect().top - container.getBoundingClientRect().top).toBe(offset);
+    expect(container.scrollTop).toBe(310);
+    expect(container.scrollHeight).toBe(2800);
+  });
+
+  it('keeps sticky-bottom policy in charge of the scroll position', async () => {
+    vi.spyOn(backendApi, 'historyWindow').mockResolvedValue({
+      items: [{ role: 'user', content: 'Older page' }], has_more: false, next_before: null,
+    });
+    const anchor = getConversationScrollAnchor(container.id);
+    container.scrollTop = 700;
+
+    await expect(loadOlderHistoryPage(sid)).resolves.toBe(true);
+    expect(anchor.isStickyBottom()).toBe(true);
+    // The renderer will pin to bottom on its usual next frame.
+    expect(container.scrollTop).toBe(700);
   });
 });
 

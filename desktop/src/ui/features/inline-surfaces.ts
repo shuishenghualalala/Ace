@@ -7,8 +7,8 @@ export interface InlineSurfaces {
 
 export function inlineSurfaces(messages: ChatMessage[], sessionId: string): InlineSurfaces {
   const visuals = new Map<string, NativeVisual>();
-  for (const message of messages) for (const tool of message.toolCalls ?? []) {
-    if (tool.name !== 'Widget' || !tool.result) continue;
+  for (const message of messages) for (const tool of Array.isArray(message.toolCalls) ? message.toolCalls : []) {
+    if (tool?.name !== 'Widget' || !tool.result) continue;
     try {
       const payload = JSON.parse(tool.result);
       const surface = payload.surface;

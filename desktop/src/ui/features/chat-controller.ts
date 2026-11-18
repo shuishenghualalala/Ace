@@ -28,12 +28,17 @@ import {
   shouldShowTodoPanel,
 } from '../chat-render';
 import { patchTranscriptMarkdown } from '../components/transcript';
+import { recordMessageChange } from '../conversation-message-changes';
 import { recordTurn } from './usage-tracker';
 import { onAfterFinal } from './cron-page';
 import {
   getConversationScrollAnchor,
+  invalidateConversationFold,
   renderConversation,
 } from './conversation-renderer';
+import { getLiveConversationTurn, getLiveTeamLabel, type LiveConversationTurn } from './conversation-dom-index';
+import { attachCopyButtons } from './copy-button';
+import { renderMermaidBlocks } from './mermaid-render';
 import { queryPrimaryComposer } from './composer-scope';
 import {
   commitDraftSession,
@@ -351,6 +356,7 @@ function collapseLatestAgentProcess(sessionId: string): void {
     unfolded: state.userUnfoldedTurns,
     folded: state.userFoldedTurns,
   });
+  invalidateConversationFold(sessionId, turnId);
 }
 
 /** 流式渲染合并：同一帧内多次 schedule 只触发一次 renderChat，
@@ -365,15 +371,45 @@ const streamingPatchCoalescer = createStreamingPatchCoalescer(
   (cb) => requestAnimationFrame(cb),
 );
 
+const pendingMessageSignals = new Set<string>();
+const flushMessageSignals = createChatRenderCoalescer(() => {
+  const pending = [...pendingMessageSignals];
+  pendingMessageSignals.clear();
+  for (const sid of pending) notifyMessagesChanged(sid);
+}, (cb) => requestAnimationFrame(cb));
+
+function notifyMessagesChanged(sessionId: string | null): void {
+  if (sessionId) pendingMessageSignals.delete(sessionId);
+  window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId } }));
+}
+
 /** 执行中回合：每秒刷新一次「已等待」标签（不依赖 WS 分片到达频率）。 */
 let turnDurationTicker: number | null = null;
+
+type LiveRole = 'assistant' | 'team_internal';
+const latestStreaming = new WeakMap<ChatMessage[], Partial<Record<LiveRole, ChatMessage | null>>>();
+
+function latestStreamingMessage(messages: ChatMessage[], role: LiveRole): ChatMessage | null {
+  const cached = latestStreaming.get(messages) ?? {};
+  if (cached[role] !== undefined) return cached[role];
+  let latest: ChatMessage | null = null;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role === role && message.streaming) {
+      latest = message;
+      break;
+    }
+  }
+  cached[role] = latest;
+  latestStreaming.set(messages, cached);
+  return latest;
+}
 
 function sessionNeedsLiveTurnTimer(sessionId: string): boolean {
   if (!sessionId) return false;
   if (isBusy(sessionId)) return true;
-  return getMessages(sessionId).some(
-    (message) => (message.role === 'assistant' || message.role === 'team_internal') && message.streaming,
-  );
+  const messages = getMessages(sessionId);
+  return Boolean(latestStreamingMessage(messages, 'assistant') || latestStreamingMessage(messages, 'team_internal'));
 }
 
 function stopTurnDurationTicker(): void {
@@ -413,17 +449,23 @@ export function _resetQueueEditDraftForTests(): void {
   queueEditDraft = null;
 }
 
+const renderedComposerTodos = new WeakMap<HTMLElement, { todos: Bookkeeping['todos']; open: boolean }>();
+
 export function renderTodoSlot(): void {
   const slot = queryPrimaryComposer('.chat-todo-slot');
   if (!slot) return;
   const sessionId = state.activeSessionId;
   const todos = sessionId ? bookFor(sessionId).todos : [];
   if (!shouldShowTodoPanel(todos)) {
-    slot.innerHTML = '';
+    if (slot.childNodes.length) slot.replaceChildren();
+    renderedComposerTodos.delete(slot);
     return;
   }
   // 默认折叠：输入框上方只露出当前步骤 + x/x，点开再看全表。
   const open = getToolFold('todo:current') ?? false;
+  const previous = renderedComposerTodos.get(slot);
+  if (previous?.todos === todos && previous.open === open) return;
+  renderedComposerTodos.set(slot, { todos, open });
   slot.innerHTML = renderTodoProgressPanelHtml(todos, open, 'todo:current');
   const btn = slot.querySelector<HTMLElement>('[data-todo-panel-toggle]');
   if (btn) {
@@ -446,35 +488,34 @@ export function renderTodoSlot(): void {
  *  2. 每帧重建会销毁用户正在交互的 <details>，导致手动展开/折叠状态丢失。
  * 找不到目标（首片未渲染 / 切换会话 / 结构变化）→ 返回 null，调用方回退全量 render。
  */
-function resolveStreamingTurnTarget(sid: string, assistantId: string): {
-  turnEl: HTMLElement;
+interface StreamingTurnTarget {
+  dom: LiveConversationTurn;
   messages: ChatMessage[];
+  index: number;
   msg: ChatMessage;
-} | null {
+}
+
+const streamingMessagePositions = new WeakMap<LiveConversationTurn, number>();
+
+function resolveStreamingTurnTarget(sid: string, assistantId: string): StreamingTurnTarget | null {
   if (sid !== state.activeSessionId) return null;
   const containerId = resolveChatRenderTargetId(isStudioView());
   const root = document.getElementById(containerId);
+  if (!root) return null;
+  const dom = getLiveConversationTurn(root, sid, assistantId);
+  if (!dom) return null;
   const messages = getMessages(sid);
-  const msg = messages.find((m) => m.id === assistantId);
-  if (!msg) return null;
-
-  // 同一会话可以同时存在多个 live 回合（例如 Wiki 后台整理 + 当前问答）。
-  // 不能取页面里的第一条 [data-streaming=true]：那会把当前正文 patch 到旧后台卡片，
-  // 快路径又误报成功，导致真正位于底部的回答直到下次全量 render 才突然更新。
-  // 每条 assistant 段渲染时都会留下 data-text-for 空壳；有 thinking 时还会留下
-  // data-thinking-for。按 assistantId 找到标记后再向上取所属回合，才能覆盖多段回合。
-  const markers = root?.querySelectorAll<HTMLElement>('[data-text-for], [data-thinking-for]') ?? [];
-  let turnEl: HTMLElement | null = null;
-  for (const marker of markers) {
-    if (marker.dataset.textFor !== assistantId && marker.dataset.thinkingFor !== assistantId) continue;
-    const owner = marker.closest<HTMLElement>('.msg[data-streaming="true"]');
-    if (owner) {
-      turnEl = owner;
-      break;
+  let index = streamingMessagePositions.get(dom) ?? -1;
+  if (messages[index]?.id !== assistantId) {
+    // Immutable content-only updates keep the verified slot. A new unit or a
+    // history splice needs one backward lookup, usually close to the tail.
+    for (index = messages.length - 1; index >= 0; index--) {
+      if (messages[index]?.id === assistantId) break;
     }
+    if (index < 0) return null;
+    streamingMessagePositions.set(dom, index);
   }
-  if (!turnEl) return null;
-  return { turnEl, messages, msg };
+  return { dom, messages, index, msg: messages[index]! };
 }
 
 function scheduleStreamingTurnPatch(sid: string, assistantId: string): boolean {
@@ -485,21 +526,14 @@ function scheduleStreamingTurnPatch(sid: string, assistantId: string): boolean {
 
 function scheduleThinkingTurnPatch(sid: string, assistantId: string): boolean {
   const target = resolveStreamingTurnTarget(sid, assistantId);
-  if (!target?.msg.thinking) return false;
-  const hasThinkingMarker = Array.from(
-    target.turnEl.querySelectorAll<HTMLElement>('[data-thinking-for]'),
-  ).some((marker) => marker.dataset.thinkingFor === assistantId);
-  if (!hasThinkingMarker) return false;
+  if (!target?.msg.thinking || !target.dom.thinking) return false;
   streamingPatchCoalescer.schedule({ sid, assistantId });
   return true;
 }
 
-function patchStreamingTurnLabel(sid: string, assistantId: string): boolean {
-  const target = resolveStreamingTurnTarget(sid, assistantId);
-  if (!target) return false;
-  const { turnEl, messages } = target;
-  const idx = messages.findIndex((m) => m.id === assistantId);
-  if (idx < 0) return false;
+function patchStreamingTurnLabel({ dom, messages, index: idx }: StreamingTurnTarget): boolean {
+  const labelEl = dom.label;
+  if (!labelEl) return false;
 
   let i = idx;
   while (i > 0) {
@@ -516,8 +550,6 @@ function patchStreamingTurnLabel(sid: string, assistantId: string): boolean {
   const batch = messages.slice(i, j);
   if (!batch.some((m) => m.streaming === true)) return false;
 
-  const labelEl = turnEl.querySelector<HTMLElement>('.msg__fold-label');
-  if (!labelEl) return false;
   const durationMs = resolveTurnDurationMs(batch, { isLive: true });
   // 顶部计时头统一「已工作 X 分 X 秒」；Liveness 由 spinner + --live 样式表达。
   labelEl.textContent = resolveTurnHeaderLabel(durationMs);
@@ -525,24 +557,19 @@ function patchStreamingTurnLabel(sid: string, assistantId: string): boolean {
 }
 
 function patchActiveStreamingTurnLabel(sid: string): boolean {
-  const assistant = [...getMessages(sid)].reverse().find(
-    (message) => message.role === 'assistant' && message.streaming,
-  );
-  return assistant ? patchStreamingTurnLabel(sid, assistant.id) : false;
+  const assistant = latestStreamingMessage(getMessages(sid), 'assistant');
+  const target = assistant ? resolveStreamingTurnTarget(sid, assistant.id) : null;
+  return target ? patchStreamingTurnLabel(target) : false;
 }
 
 /** Team Turn 对现有计时器的薄适配；不参与普通 assistant 回合。 */
 function patchActiveTeamTurnLabel(sid: string): boolean {
   if (sid !== state.activeSessionId || !isExternalTeamSession(sid)) return false;
-  const message = [...getMessages(sid)].reverse().find(
-    (item) => item.role === 'team_internal' && item.streaming,
-  );
+  const message = latestStreamingMessage(getMessages(sid), 'team_internal');
   if (!message) return false;
   const containerId = resolveChatRenderTargetId(isStudioView());
   const root = document.getElementById(containerId);
-  const turn = Array.from(root?.querySelectorAll<HTMLElement>('.team-internal[data-message-id]') || [])
-    .find((element) => element.dataset.messageId === message.id);
-  const label = turn?.querySelector<HTMLElement>('.msg__fold-label');
+  const label = root ? getLiveTeamLabel(root, sid, message.id) : undefined;
   if (!label) return false;
   const renderMessage: ChatMessage = { ...message, role: 'assistant' };
   const durationMs = resolveTurnDurationMs([renderMessage], { isLive: true });
@@ -550,10 +577,20 @@ function patchActiveTeamTurnLabel(sid: string): boolean {
   return true;
 }
 
+const patchedStreamingMarkdown = new WeakMap<HTMLElement, string>();
+
+function patchLiveMarkdown(element: HTMLElement, content: string): void {
+  if (patchedStreamingMarkdown.get(element) === content) return;
+  patchTranscriptMarkdown(element, content, true);
+  attachCopyButtons(element);
+  void renderMermaidBlocks(element);
+  patchedStreamingMarkdown.set(element, content);
+}
+
 function patchStreamingTurn(sid: string, assistantId: string): boolean {
   const target = resolveStreamingTurnTarget(sid, assistantId);
   if (!target) return false;
-  const { turnEl, msg } = target;
+  const { dom, msg } = target;
   const book = bookFor(sid);
   const requestId = book.activeRequestId;
   if (requestId && msg.content && !ttftRenderLoggedRequests.has(requestId)) {
@@ -566,24 +603,20 @@ function patchStreamingTurn(sid: string, assistantId: string): boolean {
       elapsedMs: msg.turnStartedAt != null ? Math.max(0, Date.now() - msg.turnStartedAt) : undefined,
     });
   }
-  const textEl = Array.from(turnEl.querySelectorAll<HTMLElement>('[data-text-for]'))
-    .find((marker) => marker.dataset.textFor === assistantId) ?? null;
+  const { text: textEl, thinking: thinkingEl } = dom;
   if (textEl) {
     textEl.classList.remove('typing-inline');
-    patchTranscriptMarkdown(textEl, msg.content, true);
+    patchLiveMarkdown(textEl, msg.content);
   }
-  const thinkingMarker = Array.from(turnEl.querySelectorAll<HTMLElement>('[data-thinking-for]'))
-    .find((marker) => marker.dataset.thinkingFor === assistantId) ?? null;
-  const thinkingEl = thinkingMarker?.querySelector<HTMLElement>('.process-timeline__thinking') ?? null;
-  if (thinkingEl && msg.thinking != null) {
+  if (thinkingEl && msg.thinking != null && patchedStreamingMarkdown.get(thinkingEl) !== msg.thinking) {
     const followThinkingOutput = (
       thinkingEl.scrollHeight - thinkingEl.scrollTop - thinkingEl.clientHeight
     ) <= 24;
-    patchTranscriptMarkdown(thinkingEl, msg.thinking, true);
+    patchLiveMarkdown(thinkingEl, msg.thinking);
     if (followThinkingOutput) thinkingEl.scrollTop = thinkingEl.scrollHeight;
   }
   // 实时计时：以整回合 batch 为准（工具阶段可能无正文 data-text-for，但仍需刷新 label）。
-  patchStreamingTurnLabel(sid, assistantId);
+  patchStreamingTurnLabel(target);
   scrollChatToBottom();
   return true;
 }
@@ -704,7 +737,7 @@ export function renderChat(): void {
       syncRunningIntroSlot();
       // 流式每帧只刷 tab 角标，不重建 inspector body（否则计划 MD / 文件 diff 滚动会被 innerHTML 冲回顶部）。
       if (isInspectorOpen()) refreshInspectorChrome();
-      window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId: renderedSessionId } }));
+      notifyMessagesChanged(renderedSessionId);
       syncTurnDurationTicker();
     },
   });
@@ -767,7 +800,9 @@ export function patchMessage(sessionId: string, messageId: string, patch: Partia
   const messages = getMessages(sessionId);
   const index = messages.findIndex((m) => m.id === messageId);
   if (index < 0) return;
-  const updated = messages.map((m, i) => (i === index ? { ...m, ...patch } : m));
+  const updated = messages.slice();
+  updated[index] = { ...updated[index]!, ...patch };
+  recordMessageChange(messages, updated, index);
   messageStore.set({ messages: { ...messageStore.get().messages, [sessionId]: updated } });
 }
 
@@ -1243,7 +1278,12 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
   const hasMessageChanges = nextMessages !== beforeMessages;
   if (hasMessageChanges) {
     replaceSessionMessages(sid, nextMessages);
-    window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId: sid } }));
+    if (parsed.kind === 'delta' || parsed.kind === 'thinking') {
+      pendingMessageSignals.add(sid);
+      flushMessageSignals();
+    } else {
+      notifyMessagesChanged(sid);
+    }
   }
   if (parsed.kind === 'task' && parsed.body.task_kind === 'wiki_ingest') {
     const taskId = typeof parsed.body.task_id === 'string' ? parsed.body.task_id : '';

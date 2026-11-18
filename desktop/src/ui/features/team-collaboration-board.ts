@@ -191,6 +191,16 @@ let refreshInFlightSeq = 0;
 let refreshTimer: number | null = null;
 let pollingSessionId = '';
 
+/** Small shared display inputs for historical Team rows, independent of turn count. */
+export function teamTurnDisplayKey(sessionId: string | null): string {
+  const snapshot = sessionId ? snapshots.get(sessionId) : undefined;
+  if (!snapshot) return '';
+  return JSON.stringify([
+    snapshot.teamName,
+    snapshot.members.map(({ agentId, name, role, tone, isLeader }) => [agentId, name, role, tone, isLeader]),
+  ]);
+}
+
 /** 与 Web TeamAgentTurnBubble 一致：逻辑 leader/member id 解析为团队配置中的真实成员。 */
 export function resolveTeamCollaborationMember(
   sessionId: string | null | undefined,

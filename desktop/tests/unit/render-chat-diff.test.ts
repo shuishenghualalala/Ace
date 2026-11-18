@@ -20,16 +20,22 @@ import { formatMessageTime, formatDuration, renderQueuePanelHtml, sessionStatusC
 import {
   disposeConversationRenderer,
   getConversationScrollAnchor,
+  invalidateConversationFold,
   renderConversation,
 } from '../../src/ui/features/conversation-renderer';
 import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
 import {
   appendSessionMessage,
   clearHistoryLoadError,
+  ensureSessionMessages,
   markHistoryLoadError,
   replaceSessionMessages,
+  setEditFrom,
   setHistoryLoading,
+  state,
 } from '../../src/ui/state';
+import { applyMessageUpserts, type MessageUpsert } from '../../src/ui/reducers/chat-reducer';
+import { emptyFeatureReducerResult } from '../../src/ui/features/event-reducer-registry';
 import nativeFixture from '../../../tests/fixtures/native-visual.json';
 import { reportRendererError } from '../../src/ui/renderer-error-report';
 
@@ -398,6 +404,198 @@ describe('conversation-renderer 双实例隔离', () => {
     expect(panelA.textContent).toContain('面板B消息');
     expect(panelA.textContent).not.toContain('面板A第二条');
     expect(panelB.querySelector('.msg')).toBe(bFirst);
+  });
+});
+
+describe('conversation-renderer tracked history and live changes', () => {
+  const sessionId = 'tracked-history';
+  const containerId = 'tracked-panel';
+  let panel: HTMLElement;
+
+  function row(id: string, role: ChatMessage['role'], content = id): ChatMessage {
+    return { id, role, content, timestamp: 1 };
+  }
+
+  function render(): void {
+    renderConversation(panel, containerId, sessionId);
+  }
+
+  function upsert(...messageUpserts: MessageUpsert[]): void {
+    const previous = ensureSessionMessages(sessionId);
+    replaceSessionMessages(sessionId, applyMessageUpserts(previous, {
+      ...emptyFeatureReducerResult(), messageUpserts,
+    }));
+  }
+
+  beforeEach(() => {
+    __resetAllStoresForTest();
+    panel = document.createElement('div');
+    panel.id = containerId;
+    document.body.replaceChildren(panel);
+  });
+
+  afterEach(() => {
+    document.getSelection()?.removeAllRanges();
+    disposeConversationRenderer(containerId);
+  });
+
+  it('coalesces tracked live updates without revisiting historical attachments or tool calls', () => {
+    let historyAttachmentReads = 0;
+    let historyToolReads = 0;
+    replaceSessionMessages(sessionId, [
+      {
+        ...row('hist-user', 'user'),
+        get attachments() { historyAttachmentReads += 1; return []; },
+      },
+      {
+        ...row('hist-answer', 'assistant'),
+        get toolCalls() { historyToolReads += 1; return []; },
+      },
+      row('new-user', 'user'),
+      { ...row('live-answer', 'assistant', 'First live words'), streaming: true },
+    ]);
+    render();
+    const historyNode = panel.querySelector('.msg[data-message-id="hist-answer"]')!;
+    expect(historyNode.isConnected).toBe(true);
+    expect(historyAttachmentReads).toBeGreaterThan(0);
+    expect(historyToolReads).toBeGreaterThan(0);
+    historyAttachmentReads = 0;
+    historyToolReads = 0;
+
+    upsert({ op: 'patch', messageId: 'live-answer', patch: { content: 'Updated live words' } });
+    upsert({ op: 'patch', messageId: 'live-answer', patch: { content: 'Latest coalesced live words' } });
+    render();
+
+    expect(panel.querySelector('[data-text-for="live-answer"]')?.textContent).toContain('Latest coalesced live words');
+    expect(panel.querySelector('.msg[data-message-id="hist-answer"]')).toBe(historyNode);
+    expect(historyAttachmentReads).toBe(0);
+    expect(historyToolReads).toBe(0);
+  });
+
+  it('merges a replayed earlier row across its old standalone boundary', () => {
+    replaceSessionMessages(sessionId, [
+      row('first-user', 'user'), row('first-answer', 'assistant'),
+      row('old-boundary', 'user'), row('replayed-answer', 'assistant'),
+      row('later-user', 'user'), row('later-answer', 'assistant'),
+    ]);
+    render();
+    expect(panel.querySelector('.msg[data-message-id="replayed-answer"]')).not.toBeNull();
+
+    upsert({ op: 'patch', messageId: 'old-boundary', patch: { role: 'status', content: 'Recovered tool status' } });
+    render();
+
+    const merged = panel.querySelector('.msg[data-message-id="first-answer"]')!;
+    expect(merged.querySelector('[data-text-for="replayed-answer"]')?.textContent).toBe('replayed-answer');
+    expect(merged.querySelector('[data-message-id="old-boundary"]')?.textContent).toContain('Recovered tool status');
+    expect(panel.querySelector('.msg[data-message-id="replayed-answer"]')).toBeNull();
+    expect(panel.querySelector('.msg[data-message-id="later-answer"]')).not.toBeNull();
+  });
+
+  it('prepends an older page without detaching the previous reading row or selection', () => {
+    const visibleHistory = [row('selected', 'user', 'Select this historical message'), row('reply', 'assistant')];
+    replaceSessionMessages(sessionId, visibleHistory);
+    render();
+    const wrapper = panel.querySelector('.messages__inner')!;
+    const readingRow = panel.querySelector<HTMLElement>('.msg[data-message-id="selected"]')!;
+    const walker = document.createTreeWalker(readingRow, NodeFilter.SHOW_TEXT);
+    let textNode = walker.nextNode();
+    while (textNode && !textNode.textContent?.includes('Select this historical message')) textNode = walker.nextNode();
+    expect(textNode).not.toBeNull();
+    const range = document.createRange();
+    range.setStart(textNode!, 0);
+    range.setEnd(textNode!, 6);
+    const selection = document.getSelection()!;
+    selection.addRange(range);
+    const mutations = new MutationObserver(() => {});
+    mutations.observe(wrapper, { childList: true });
+
+    replaceSessionMessages(sessionId, [row('older-user', 'user'), row('older-reply', 'assistant'), ...visibleHistory]);
+    render();
+
+    expect(wrapper.querySelector('.msg')?.getAttribute('data-message-id')).toBe('older-user');
+    expect(wrapper.querySelector('.msg[data-message-id="selected"]')).toBe(readingRow);
+    expect(mutations.takeRecords().some(({ removedNodes }) => Array.from(removedNodes).includes(readingRow))).toBe(false);
+    expect(selection.getRangeAt(0).startContainer).toBe(textNode);
+    expect(selection.toString()).toBe('Select');
+    mutations.disconnect();
+  });
+
+  it('invalidates an earlier Widget visual when a tracked later turn supersedes its revision', () => {
+    function widget(id: string, revision: number): ChatMessage {
+      return {
+        ...row(id, 'assistant', `Widget response ${revision}`),
+        toolCalls: [{
+          toolCallId: `call-${id}`, name: 'Widget', status: 'done', startedAt: 1,
+          result: JSON.stringify({ ok: true, surface: {
+            version: 3, mode: 'native', display: 'inline', status: 'ready', sessionId,
+            spec: { ...nativeFixture, revision },
+          } }),
+        }],
+      };
+    }
+    replaceSessionMessages(sessionId, [row('first-user', 'user'), widget('first-widget', 1), row('later-user', 'user')]);
+    render();
+    const oldVisual = panel.querySelector('.native-visual[data-revision="1"]')!;
+    expect(oldVisual.textContent).not.toContain('历史快照');
+
+    appendSessionMessage(sessionId, widget('current-widget', 2));
+    render();
+
+    expect(panel.querySelector('.native-visual[data-revision="1"]')?.textContent).toContain('历史快照 · 修订 1');
+    const currentVisual = panel.querySelector('.native-visual[data-revision="2"]')!;
+    expect(currentVisual).not.toBeNull();
+    expect(currentVisual.textContent).not.toContain('历史快照');
+  });
+
+  it('reconciles same-length authoritative history and handles edit and fold changes without message updates', () => {
+    const user = row('first-user', 'user');
+    const answer = { ...row('first-answer', 'assistant'), thinking: 'Previously completed thought' };
+    replaceSessionMessages(sessionId, [user, answer, row('later-user', 'user')]);
+    render();
+    const wrapper = panel.querySelector('.messages__inner')!;
+    const userNode = wrapper.querySelector('.msg[data-message-id="first-user"]');
+
+    replaceSessionMessages(sessionId, [user, { ...answer, content: 'Authoritative correction' }, row('later-user', 'user')]);
+    render();
+    expect(panel.textContent).toContain('Authoritative correction');
+    expect(panel.querySelector('.msg[data-message-id="first-user"]')).toBe(userNode);
+
+    const firstAnswerDetails = () => panel.querySelector<HTMLDetailsElement>('.msg[data-message-id="first-answer"] details.msg__foldable');
+    expect(firstAnswerDetails()?.open).toBe(false);
+    state.userUnfoldedTurns.add('first-answer');
+    invalidateConversationFold(sessionId, 'first-answer');
+    render();
+    expect(firstAnswerDetails()?.open).toBe(true);
+
+    setEditFrom(sessionId, 2);
+    render();
+    expect(panel.querySelector('.msg[data-message-id="later-user"]')).toBeNull();
+    expect(firstAnswerDetails()?.open).toBe(true);
+
+    setEditFrom(sessionId, null);
+    render();
+    expect(panel.querySelector('.msg[data-message-id="later-user"]')).not.toBeNull();
+  });
+
+  it('enables offscreen layout skipping for long settled history without replacing its nodes', () => {
+    const history = Array.from({ length: 199 }, (_, index) => row(
+      `history-${index}`, index % 2 === 0 ? 'user' : 'assistant',
+    ));
+    replaceSessionMessages(sessionId, history);
+    render();
+    const oldest = panel.querySelector<HTMLElement>('[data-message-id="history-0"]');
+    expect(oldest?.dataset.chatHistoryRow).toBe('user');
+    expect(panel.querySelector('.messages__inner--long')).toBeNull();
+
+    appendSessionMessage(sessionId, { ...row('live', 'assistant'), streaming: true });
+    render();
+
+    const longHistory = panel.querySelector('.messages__inner--long');
+    expect(longHistory?.querySelector('[data-message-id="history-0"]')).toBe(oldest);
+    expect(longHistory?.querySelector<HTMLElement>('[data-message-id="history-1"]')?.dataset.chatHistoryRow).toBe('agent');
+    const live = longHistory?.querySelector<HTMLElement>('[data-message-id="live"]');
+    expect(live?.dataset.streaming).toBe('true');
+    expect(live?.dataset.chatHistoryRow).toBeUndefined();
   });
 });
 

@@ -12,6 +12,7 @@
  */
 
 import type { ChatMessage, PlanReviewStatus, SessionStatus, ToolCallInfo, TurnFileChangeSummary } from '../chat-render';
+import { recordMessageChange } from '../conversation-message-changes';
 import type { Bookkeeping, FileChange, TodoItem } from '../state';
 import { isPlanDocumentPath } from '../plan-document-path';
 import { parseDeltaRange, type DeltaRange } from '../stream-reassembly';
@@ -396,15 +397,27 @@ export function applyMessageUpserts(
   { messageUpserts, replaceMessages }: ReducerResult,
 ): ChatMessage[] {
   let next = replaceMessages ?? messages;
+  let firstChanged = messages.length;
   for (const upsert of messageUpserts) {
     if (upsert.op === 'append' && upsert.message) {
+      firstChanged = Math.min(firstChanged, next.length);
       next = [...next, upsert.message];
     } else if (upsert.op === 'patch' && upsert.messageId && upsert.patch) {
-      next = next.map((message) => message.id === upsert.messageId ? { ...message, ...upsert.patch } : message);
+      const patch = upsert.patch;
+      next = next.map((message, index) => {
+        if (message.id !== upsert.messageId) return message;
+        firstChanged = Math.min(firstChanged, index);
+        return { ...message, ...patch };
+      });
     } else if (upsert.op === 'remove' && upsert.messageId) {
-      next = next.filter((message) => message.id !== upsert.messageId);
+      next = next.filter((message, index) => {
+        if (message.id !== upsert.messageId) return true;
+        firstChanged = Math.min(firstChanged, index);
+        return false;
+      });
     }
   }
+  if (!replaceMessages && next !== messages) recordMessageChange(messages, next, firstChanged);
   return next;
 }
 

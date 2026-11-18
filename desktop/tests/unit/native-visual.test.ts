@@ -4,7 +4,7 @@ import fixture from '../../../tests/fixtures/native-visual.json';
 import invalidFixtures from '../../../tests/fixtures/native-visual-invalid.json';
 import { bindNativeVisuals, parseVisual, renderNativeVisual, type NativeVisual } from '../../src/ui/features/native-visual';
 import { calculateDataset, evaluate } from '../../src/ui/features/rich-reply/data';
-import { chartOption, hydrateCharts, renderChart } from '../../src/ui/features/rich-reply/charts';
+import { chartOption, disposeCharts, hydrateCharts, renderChart } from '../../src/ui/features/rich-reply/charts';
 import { replyState } from '../../src/ui/features/rich-reply/state';
 import type { ChartNode, ReplySpec } from '../../src/ui/features/rich-reply/types';
 import { inlineSurfaces } from '../../src/ui/features/inline-surfaces';
@@ -135,24 +135,30 @@ describe('v3 rich replies', () => {
             expect(JSON.stringify(dateOption.aria)).not.toContain('NaN');
         }
     });
-    it('does not redraw mounted charts on unrelated streaming hydration and disposes detached charts', () => {
-        hydrateCharts();
+    it('hydrates and disposes only charts in the changed visual root', () => {
         const d = spec.datasets![0];
         const n: ChartNode = { id: 'c', type: 'chart', dataset: d.id, chartType: 'area', x: 'month', series: [{ column: 'net' }] };
         const rendered = renderChart(n, d, [], () => {});
+        const other = renderChart(n, d, [], () => {});
         rendered.update([[1, 2000]]);
-        document.body.append(rendered.node);
-        hydrateCharts();
+        other.update([[1, 3000]]);
+        document.body.append(rendered.node, other.node);
         const draws = chart.setOption.mock.calls.length;
-        hydrateCharts();
-        hydrateCharts();
-        expect(chart.setOption.mock.calls.length).toBe(draws);
-        rendered.update([[1, 5000]]);
+        hydrateCharts(rendered.node);
+        hydrateCharts(rendered.node);
         expect(chart.setOption.mock.calls.length).toBe(draws + 1);
+        hydrateCharts(other.node);
+        expect(chart.setOption.mock.calls.length).toBe(draws + 2);
+        rendered.update([[1, 5000]]);
+        expect(chart.setOption.mock.calls.length).toBe(draws + 3);
         const disposals = chart.dispose.mock.calls.length;
         rendered.node.remove();
-        hydrateCharts();
+        disposeCharts(rendered.node);
+        disposeCharts(rendered.node);
         expect(chart.dispose.mock.calls.length).toBe(disposals + 1);
+        other.update([[1, 6000]]);
+        expect(chart.setOption.mock.calls.length).toBe(draws + 4);
+        disposeCharts(other.node);
     });
     it('stores valid IDs that coincide with Object prototype property names', () => {
         const saved = replyState(visual);

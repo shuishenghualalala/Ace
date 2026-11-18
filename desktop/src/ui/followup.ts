@@ -74,8 +74,7 @@ function schedulePermissionCardSync(): void {
     permissionCardSyncScheduled = false;
     for (const root of permissionCardRoots) {
       if (!root.isConnected) {
-        permissionCardObservers.get(root)?.disconnect();
-        permissionCardRoots.delete(root);
+        disposePermissionCardPosition(root);
         continue;
       }
       positionPermissionCard(root);
@@ -99,8 +98,18 @@ function observePermissionCardLayout(root: HTMLElement): void {
   positionPermissionCard(root);
 }
 
+export function disposePermissionCardPosition(root: HTMLElement): void {
+  permissionCardObservers.get(root)?.disconnect();
+  permissionCardObservers.delete(root);
+  permissionCardRoots.delete(root);
+}
+
 /** 将权限卡锚定到所属对话的 Composer 上方；普通追问和 staffing 弹窗不参与。 */
 export function syncPermissionCardPositions(container: ParentNode = document): void {
+  if (container instanceof HTMLElement && container.matches('.followup-card-wrap--permission')) {
+    observePermissionCardLayout(container);
+    return;
+  }
   container.querySelectorAll<HTMLElement>('.followup-card-wrap--permission').forEach(observePermissionCardLayout);
 }
 

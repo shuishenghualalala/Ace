@@ -57,6 +57,7 @@ import {
   subscribeSessions,
   updateGatewayDot,
 } from './chat-controller';
+import { getConversationScrollAnchor } from './conversation-renderer';
 import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
 import { mergeBackendHistory, prependHistoryWindow } from './history-merge';
 import { resolveChatRenderTargetId, isStudioView } from './studio-chrome-state';
@@ -403,11 +404,51 @@ export async function loadBackendHistory(
 // ---------- P1-6：触顶翻页（更早历史按游标前缀补页） ----------
 
 const olderPageInFlight = new Map<string, object>();
+const historyRowSelector = ':scope > .messages__inner > .msg[data-message-id]';
+
+interface HistoryViewport {
+  height: number;
+  top: number;
+  anchor: { element: HTMLElement; id: string; offset: number } | undefined;
+}
+
+function captureHistoryViewport(container: HTMLElement): HistoryViewport {
+  const viewportTop = container.getBoundingClientRect().top + container.clientTop;
+  const viewportBottom = viewportTop + container.clientHeight;
+  const rows = container.querySelectorAll<HTMLElement>(historyRowSelector);
+  // Paging can resolve after the reader scrolled elsewhere. Locate the first visible row
+  // without measuring every offscreen message.
+  let start = 0;
+  let end = rows.length;
+  while (start < end) {
+    const middle = (start + end) >>> 1;
+    if (rows[middle].getBoundingClientRect().bottom <= viewportTop) start = middle + 1;
+    else end = middle;
+  }
+  const element = rows[start];
+  const id = element?.dataset.messageId;
+  const top = element?.getBoundingClientRect().top;
+  const anchor = id && top !== undefined && top < viewportBottom ? { element, id, offset: top - viewportTop } : undefined;
+  return { height: container.scrollHeight, top: container.scrollTop, anchor };
+}
+
+function restoreHistoryViewport(container: HTMLElement, { height, top, anchor }: HistoryViewport): void {
+  const element = anchor && (container.contains(anchor.element) && anchor.element.dataset.messageId === anchor.id
+    ? anchor.element
+    : Array.from(container.querySelectorAll<HTMLElement>(historyRowSelector)).find((row) => row.dataset.messageId === anchor.id));
+  if (anchor && element) {
+    const viewportTop = container.getBoundingClientRect().top + container.clientTop;
+    const offset = element.getBoundingClientRect().top - viewportTop;
+    container.scrollTop += offset - anchor.offset;
+  } else {
+    container.scrollTop = top + (container.scrollHeight - height);
+  }
+}
 
 /**
  * 加载更早一页历史并前缀拼接。滚动距顶 < 2 视口时由滚动预取触发；
  * 互斥游标保证不重叠，prependHistoryWindow 只做重写场景的兜底去重。
- * prepend 锚定：渲染前记录 scrollHeight/scrollTop，渲染后补偿增量，视口不跳。
+ * 锚定翻页提交前仍在视口中的消息，保留它到视口顶部的距离。
  */
 export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> {
   const paging = state.historyPaging[sessionId];
@@ -429,17 +470,20 @@ export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> 
       return false;
     }
     const older = mergeTeamInternalMessages(mapBackendHistoryItems(res.items, sessionId));
+    const containerId = resolveChatRenderTargetId(isStudioView());
+    const container = state.activeSessionId === sessionId ? document.getElementById(containerId) : null;
+    const scrollAnchor = container ? getConversationScrollAnchor(containerId) : null;
+    const viewport = container?.clientHeight && !scrollAnchor?.isStickyBottom()
+      ? captureHistoryViewport(container) : undefined;
     setHistoryPaging(sessionId, { hasMore: res.has_more, nextBefore: res.next_before });
     replaceSessionMessages(sessionId, prependHistoryWindow(current, older));
     window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId } }));
     if (state.activeSessionId === sessionId) {
-      const container = document.getElementById(resolveChatRenderTargetId(isStudioView()));
-      const prevHeight = container?.scrollHeight ?? 0;
-      const prevTop = container?.scrollTop ?? 0;
       renderChat();
-      if (container) {
-        // 前缀插入使内容增高：补偿 scrollTop 保持视口停在原消息上
-        container.scrollTop = prevTop + (container.scrollHeight - prevHeight);
+      if (container && viewport && !scrollAnchor?.isStickyBottom()
+        && state.activeSessionId === sessionId && containerId === resolveChatRenderTargetId(isStudioView())
+        && document.getElementById(containerId) === container) {
+        restoreHistoryViewport(container, viewport);
       }
     }
     logStream('history', 'load-older-applied', {

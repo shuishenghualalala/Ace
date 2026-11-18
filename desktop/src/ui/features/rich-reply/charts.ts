@@ -26,35 +26,48 @@ export function chartOption(n: ChartNode, d: Dataset, rows: Dataset['rows'], hid
     return { animation: false, color: colors, aria: { enabled: true, label: { description } }, textStyle: { color: textColor }, tooltip: { trigger: pie || n.chartType === 'scatter' ? 'item' : 'axis', renderMode: 'richText', confine: true }, ...(!pie ? { grid: { left: 60, right: 24, top: 35, bottom: 50, outerBoundsMode: 'same', outerBoundsContain: 'axisLabel' }, xAxis: { type: d.columns[xi].type === 'number' ? 'value' : d.columns[xi].type === 'date' ? 'time' : 'category', name: n.xLabel ?? d.columns[xi].label, nameLocation: 'middle', nameGap: 30, axisLabel: { color: textColor }, axisLine: { lineStyle: { color: gridColor } } }, yAxis: { type: 'value', name: n.yLabel ?? '', axisLabel: { color: textColor }, splitLine: { lineStyle: { color: gridColor } } } } : {}), series };
 }
 interface ChartMount {
-    node: HTMLElement;
-    mounted?: boolean;
     draw: () => void;
     dispose: () => void;
 }
-const mounts = new Set<ChartMount>();
+const mounts = new WeakMap<HTMLElement, ChartMount>();
+const activeMounts = new Set<ChartMount>();
 let resize: ResizeObserver | undefined, theme: MutationObserver | undefined;
-export function hydrateCharts(): void {
-    for (const mount of mounts)
-        if (!mount.node.isConnected) {
-            resize?.unobserve(mount.node);
-            mount.dispose();
-            mounts.delete(mount);
+
+function chartsUnder(root: HTMLElement): Iterable<HTMLElement> {
+    if (root.classList.contains('rich-reply__chart')) return [root];
+    return root.querySelectorAll<HTMLElement>('.rich-reply__chart');
+}
+
+export function hydrateCharts(root: HTMLElement): void {
+    const charts = Array.from(chartsUnder(root));
+    if (charts.length === 0) return;
+    resize ??= typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(entries => {
+        for (const { target } of entries) {
+            const mount = mounts.get(target as HTMLElement);
+            if (mount && activeMounts.has(mount)) mount.draw();
         }
-    resize ??= typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(entries => { for (const entry of entries)
-        for (const m of mounts)
-            if (m.node === entry.target)
-                m.draw(); });
+    });
     if (!theme && typeof MutationObserver !== 'undefined') {
-        theme = new MutationObserver(() => { for (const m of mounts)
-            m.draw(); });
+        theme = new MutationObserver(() => { for (const mount of activeMounts) mount.draw(); });
         theme.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class', 'style'] });
     }
-    for (const mount of mounts)
-        if (!mount.mounted) {
-            mount.mounted = true;
-            resize?.observe(mount.node);
-            mount.draw();
-        }
+    for (const chart of charts) {
+        const mount = mounts.get(chart);
+        if (!mount || activeMounts.has(mount) || !chart.isConnected) continue;
+        activeMounts.add(mount);
+        resize?.observe(chart);
+        mount.draw();
+    }
+}
+
+export function disposeCharts(root: HTMLElement): void {
+    for (const chart of chartsUnder(root)) {
+        const mount = mounts.get(chart);
+        if (!mount || !activeMounts.delete(mount)) continue;
+        resize?.unobserve(chart);
+        mount.dispose();
+        mounts.delete(chart);
+    }
 }
 export function renderChart(n: ChartNode, d: Dataset, hidden: string[], save: () => void): {
     node: HTMLElement;
@@ -108,7 +121,7 @@ export function renderChart(n: ChartNode, d: Dataset, hidden: string[], save: ()
         inspect();
     } });
     node.append(legend, plot, detail);
-    mounts.add({ node, draw, dispose: () => chart?.dispose() });
+    mounts.set(node, { draw, dispose: () => chart?.dispose() });
     return { node, update: data => { rows = data; index = Math.min(index, Math.max(0, rows.length - 1)); if (!rows.length)
             chart?.clear(); draw(); inspect(); } };
 }

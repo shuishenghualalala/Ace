@@ -3,14 +3,15 @@ import { state } from '../../state';
 import { interactiveOwnerKey } from '../interactive-owner';
 import { el, display, evaluate, calculateDataset } from './data';
 import { renderField } from './fields';
-import { renderChart, hydrateCharts } from './charts';
+import { disposeCharts, renderChart, hydrateCharts } from './charts';
 import { renderTable } from './table';
 import { validValue } from './protocol';
 import { replyState } from './state';
 import type { NativeVisual, ReplyNode, Dataset, Action } from './types';
 let submit: (sessionId: string, text: string) => Promise<boolean> = async () => false;
 export function bindNativeVisuals(handler: typeof submit): void { submit = handler; }
-export function hydrateNativeVisuals(_container: HTMLElement): void { hydrateCharts(); }
+export function hydrateNativeVisuals(container: HTMLElement): void { hydrateCharts(container); }
+export function disposeNativeVisuals(container: HTMLElement): void { disposeCharts(container); }
 export function renderNativeVisual(visual: NativeVisual): HTMLElement {
     const { spec } = visual, { data, save, owner } = replyState(visual), params = spec.parameters ?? [];
     const root = el('section', 'native-visual rich-reply');
