@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.audit_runtime_npm import package_lock_directories
 from scripts.write_security_runtime_evidence import _source_hash, write_evidence
@@ -36,6 +37,9 @@ def test_cross_platform_prebuilt_workflow_attests_native_artifacts() -> None:
     )
     for platform in ("darwin-arm64", "darwin-x64", "linux-x64", "win32-x64"):
         assert f"platform: {platform}" in source
+    steps = yaml.safe_load(source)["jobs"]["build"]["steps"]
+    stage = next(step["run"] for step in steps if step.get("name") == "Stage runtime")
+    assert "--source-root security-runtime" in stage
     assert "macos-15-intel" in source
     assert "actions/attest@v4" in source
     assert "SHA256SUMS" in source

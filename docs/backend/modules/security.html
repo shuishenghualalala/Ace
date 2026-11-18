@@ -695,6 +695,7 @@ helper 响应
     </table>
 
     <div class="callout"><strong>预编译产物。</strong>修改原生运行组件、Rust 测试、Cargo.toml 或 Cargo.lock 后，重新构建相应平台产物及 manifest。发布工作流记录平台、架构、二进制 SHA-256 和构建来源。有签名证书时，工作流对 Windows 或 macOS 的原生组件签名。</div>
+    <p><code>security-prebuilt.yml</code> 在原生测试及可选签名后，将同一次检出的 <code>security-runtime</code> 目录作为 <code>--source-root</code> 传给打包脚本。清单的 <code>source_hash</code> 与 <code>source_files</code> 来自该目录的 Rust 源码、Rust 测试及两个 Cargo 文件。<code>binary_sha256</code> 则取自最终归档的可执行文件。将预构建归档用于开发态时，可以据此检查源码漂移。</p>
     <p>随包的 Python 和 Node 作为可信只读资源提供。新增宿主进程入口时，同步更新执行面清单，由相关测试校验。</p>
   <h2>7. 变更记录</h2>
   <table>

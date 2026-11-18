@@ -105,6 +105,7 @@ jobs:
           fi
           node desktop/scripts/prepare-security-runtime.mjs \
             --runtime "security-runtime/target/${{ matrix.target }}/release/${{ matrix.executable }}" \
+            --source-root security-runtime \
             --output "security-runtime/prebuilt/${{ matrix.platform }}" "${extra[@]}"
       - run: node desktop/scripts/verify-security-runtime.mjs security-runtime/prebuilt/${{ matrix.platform }}
       - name: Package prebuilt
