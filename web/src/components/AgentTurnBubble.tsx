@@ -1,3 +1,4 @@
+import type { PlanDecisionHandler } from "../types";
 import { useState, type ReactNode } from "react";
 import type { AgentTurnState } from "../lib/agentTurnState";
 import { processSummaryLabel } from "../lib/processDisplay";
@@ -29,9 +30,7 @@ interface Props {
   collapsibleTitle?: string;
   afterContent?: ReactNode;
   nameSuffix?: ReactNode;
-  onApprovePlan?: () => void;
-  onRejectPlan?: () => void;
-  onRejectAndExitPlan?: () => void;
+  onPlanDecision?: PlanDecisionHandler;
 }
 
 export default function AgentTurnBubble({
@@ -45,9 +44,7 @@ export default function AgentTurnBubble({
   collapsibleTitle,
   afterContent,
   nameSuffix,
-  onApprovePlan,
-  onRejectPlan,
-  onRejectAndExitPlan,
+  onPlanDecision,
 }: Props) {
   const [pinnedOpen, setPinnedOpen] = useState<boolean | null>(null);
   const timing = useProcessTiming(state, isStreaming);
@@ -75,9 +72,7 @@ export default function AgentTurnBubble({
         <PlanReviewCard
           key={item.id}
           review={item.review}
-          onApprove={() => onApprovePlan?.()}
-          onReject={() => onRejectPlan?.()}
-          onRejectAndExit={() => onRejectAndExitPlan?.()}
+          onDecision={onPlanDecision}
         />
       ))}
       {state.responses.map((response) => (

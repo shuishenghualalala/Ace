@@ -60,6 +60,9 @@ export type ChunkKind =
   | "error"
   | "thinking"
   | "plan_review"
+  | "send_receipt_capability"
+  | "interaction_receipt"
+  | "send_receipt"
   | "followup_question"
   | "todo_updated"
   | "todo_reminder"
@@ -73,10 +76,16 @@ export interface TodoItem {
   status: "pending" | "in_progress" | "completed" | "cancelled" | string;
 }
 
+export type PlanDecision = "plan_approve" | "plan_reject" | "plan_reject_and_exit" | "check";
+export type PlanDecisionHandler = (action: PlanDecision, review: PlanReview) => void;
+export type PlanDecisionNotice = "confirming" | "uncertain" | "unavailable" | "expired" | "rejected" | "unknown";
+
 /** Plan 模式：模型调了 exit_plan_mode 后推送的待审/空计划内容。
  *  - empty=false（status pending/editing/readonly）：计划已落盘，弹审批卡。
  *  - empty=true（status "empty"）：计划文件为空，弹提示卡（无审批按钮），倒逼模型先写文件。 */
 export interface PlanReview {
+  version?: string;
+  decisionNotice?: PlanDecisionNotice;
   plan: string;
   planFile: string;
   status?: "pending" | "editing" | "readonly" | "empty" | "approved" | "revising" | "rejected" | "cancelled";

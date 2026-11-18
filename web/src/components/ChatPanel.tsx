@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage, UserAgentMention } from "../types";
+import type { PlanDecisionHandler, AppConfig, Attachment, ExternalAgent, FollowupQuestion, PendingMessage, Session, Skill, TeamExecutionTier, TeamMemberView, TodoItem, UiMessage, UserAgentMention } from "../types";
 import { api } from "../api";
 import MessageList from "./MessageList";
 import Composer from "./Composer";
@@ -42,9 +42,7 @@ export interface Props {
   planActive?: boolean;
   onEnterPlan?: () => void;
   onExitPlan?: () => void;
-  onApprovePlan?: () => void;
-  onRejectPlan?: () => void;
-  onRejectAndExitPlan?: () => void;
+  onPlanDecision?: PlanDecisionHandler;
   onAsk?: (text: string) => void;
   followupQuestion?: FollowupQuestion | null;
   onAnswerFollowup?: (
@@ -101,9 +99,7 @@ export default function ChatPanel({
   planActive,
   onEnterPlan,
   onExitPlan,
-  onApprovePlan,
-  onRejectPlan,
-  onRejectAndExitPlan,
+  onPlanDecision,
   onAsk,
   followupQuestion,
   onAnswerFollowup,
@@ -310,9 +306,7 @@ export default function ChatPanel({
           <MessageList
             messages={messages}
             busy={busy}
-            onApprovePlan={onApprovePlan}
-            onRejectPlan={onRejectPlan}
-            onRejectAndExitPlan={onRejectAndExitPlan}
+            onPlanDecision={onPlanDecision}
             onAsk={onAsk}
             followupQuestion={followupQuestion}
             onAnswerFollowup={onAnswerFollowup}

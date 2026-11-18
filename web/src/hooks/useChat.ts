@@ -5,6 +5,7 @@ import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges
 import { backendSecondsToMs } from "../lib/backendTime";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
+import { reviewFromSnapshot, samePlan } from "../lib/planDecisions";
 import { ChatSocket, GatewaySequenceTracker } from "../ws";
 import {
   parseFeatureEventBody,
@@ -14,7 +15,7 @@ import {
   type FeatureEventEffect,
   type FeatureEventRegistry,
 } from "../lib/feature-event-dispatcher";
-import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage, SessionStatus } from "../types";
+import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanDecision, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage, SessionStatus } from "../types";
 
 let _seq = 0;
 const newId = () => `m${Date.now()}_${_seq++}`;
@@ -658,6 +659,7 @@ export function useChat(
   const bookRef = useRef<Map<string, Bookkeeping>>(new Map());
   const busyRef = useRef<Record<string, boolean>>({});
   const pendingQueueRef = useRef<Record<string, PendingMessage[]>>({});
+  const currentReviews = useRef(new Map<string, { review: PlanReview; active: boolean }>());
   const planMapRef = useRef<Record<string, PlanState>>({});
   const followupMapRef = useRef<Record<string, FollowupQuestion | null>>({});
   // wikiProgressMap 的 ref 镜像，key 同样是 source_id。
@@ -748,19 +750,20 @@ export function useChat(
     return book.assistantId;
   };
 
-  const patchPlanReviewMessages = (
-    sid: string,
-    status: NonNullable<PlanReview["status"]>,
-  ) => {
+  const showPlanSnapshot = (sid: string, review: PlanReview, active: boolean, forTurn = false) => {
+    currentReviews.current.set(sid, { review, active });
+    setPlan(sid, { active, review: null });
+    if (forTurn) {
+      ensureAssistantMessage(sid, { planReview: review });
+      return;
+    }
     setMessagesMap((prev) => {
-      const list = prev[sid];
-      if (!list) return prev;
-      return {
-        ...prev,
-        [sid]: list.map((m) =>
-          m.planReview ? { ...m, planReview: { ...m.planReview, status } } : m,
-        ),
-      };
+      const list = [...(prev[sid] ?? [])];
+      let idx = list.length - 1;
+      while (idx >= 0 && list[idx].planReview?.planFile !== review.planFile) idx--;
+      if (idx >= 0) list[idx] = { ...list[idx], planReview: review };
+      else list.push({ id: newId(), role: "assistant", text: "", planReview: review });
+      return { ...prev, [sid]: list };
     });
   };
 
@@ -906,21 +909,11 @@ export function useChat(
     };
 
     const applyPlanReview = (c: Chunk, sid: string): void => {
-      // 模型调了 exit_plan_mode → 写入当前回合的消息流（plan 轮），位置与工具调用卡片一致。
-      // empty=true 表示计划文件为空，前端弹提示卡（无审批按钮）；否则弹正常审批卡。
-      const isEmpty = !!c.body.empty;
-      const review: PlanReview = {
-        plan: c.body.plan ?? "",
-        planFile: c.body.plan_file ?? "",
-        status: isEmpty ? "empty" : (c.body.status ?? "pending"),
-        empty: isEmpty,
-        phase: typeof c.body.phase === "string" ? c.body.phase : undefined,
-      };
-      ensureAssistantMessage(sid, { planReview: review });
-      setPlan(sid, {
-        active: true,
-        review: null,
-      });
+      const review = reviewFromSnapshot(c.body);
+      const active = c.body.active ?? !["readonly", "approved", "rejected", "cancelled"].includes(review.status ?? "");
+      const shown = sockRef.current?.plans.overlay(sid, review) ?? review;
+      // Decisions broadcast current state independently of the turn which generated the original card.
+      showPlanSnapshot(sid, shown, active, Boolean(c.request_id) || !currentReviews.current.has(sid));
     };
 
     const beginRecovery = (c: Chunk): void => {
@@ -1002,6 +995,12 @@ export function useChat(
           : "") || "",
       ).trim();
       if (isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
+      const terminal = c.kind === "final" || c.kind === "error";
+      const executingPlan = sockRef.current?.plans.observeExecution(sid, chunkRequestId, terminal);
+      if (executingPlan && !terminal && !busyRef.current[sid]) {
+        bookRef.current.delete(sid);
+        setBusy(sid, true);
+      }
       const recovery = recoveries.current.get(sid);
       if (recovery) {
         // There is no complete active-turn projection. Keep the visible prefix and
@@ -1182,12 +1181,14 @@ export function useChat(
         book.prevTurnFileSignature = { ...book.fileChangeSignatures };
         // 轮次结束才重置聚合（忙时连发时第一轮的尾部 delta 不会误起新消息）
         finishLocalTurn(sid, "idle");
+        if (executingPlan) void loadHistory(sid);
         afterFinalRef.current();
         // 自动消费前端本地队列
         consumePendingRef.current(sid);
       } else if (c.kind === "error") {
         append(sid, "error", c.body.message ?? "未知错误", localTurnTiming(sid));
         finishLocalTurn(sid, "error");
+        if (executingPlan) void loadHistory(sid);
         // 自动消费前端本地队列（stop 导致的 error 会在 stop 回调中清空队列）
         consumePendingRef.current(sid);
       } else if (c.kind === "plan_review") {
@@ -1425,46 +1426,21 @@ export function useChat(
     }
   }, []);
 
-  /** 批准计划：退出只读，后端自动起一轮执行。 */
-  const approvePlan = useCallback((sessionId: string, mode: Mode, workspaceId: string) => {
-    if (!sockRef.current?.planApprove(sessionId, mode, workspaceId)) return;
-    setPlan(sessionId, { active: false, review: null });
-    patchPlanReviewMessages(sessionId, "readonly");
-    appendRef.current(sessionId, "user", "✅ 已批准计划，开始执行");
-      const book = bookFor(sessionId);
-      book.assistantId = null;
-      book.toolMap.clear();
-      book.turnStartedAt = null;
-      book.awaitingAssistantAfterTool = false;
-      resetDeltaBook(book);
-      book.hadTeamInternal = false;
-      startLocalTurn(sessionId);
-      setBusy(sessionId, true);
-      setStatus(sessionId, "running");
-  }, []);
-
-  /** 拒绝计划：保留 Plan 模式继续完善。 */
-  const rejectPlan = useCallback((sessionId: string) => {
-    sockRef.current?.planReject(sessionId);
-    patchPlanReviewMessages(sessionId, "editing");
-    updatePlanMap((prev) => {
-      const cur = prev[sessionId] ?? { active: true, review: null };
-      return {
-        ...prev,
-        [sessionId]: {
-          active: true,
-          review: cur.review ? { ...cur.review, status: "editing" } : null,
-        },
-      };
+  const decidePlan = useCallback((action: PlanDecision, review: PlanReview, sid: string, mode: Mode, workspaceId: string) => {
+    const sock = sockRef.current;
+    if (!sock) return;
+    sock.plans.submit(action, review, sid, mode, workspaceId, ({ notice, snapshot }) => {
+      const current = currentReviews.current.get(sid)?.review;
+      const authoritative = snapshot && reviewFromSnapshot(snapshot);
+      if (snapshot && authoritative && (!current || samePlan(current, review) || samePlan(current, authoritative))) {
+        showPlanSnapshot(sid, { ...authoritative, decisionNotice: notice }, snapshot.active);
+      } else {
+        setMessagesMap((prev) => ({
+          ...prev, [sid]: (prev[sid] ?? []).map((m) => m.planReview && samePlan(m.planReview, review)
+            ? { ...m, planReview: { ...m.planReview, ...(notice === "expired" ? { status: "readonly" as const } : {}), decisionNotice: notice } } : m),
+        }));
+      }
     });
-  }, []);
-
-  /** 拒绝计划并退出：不执行，卡片变为只读拒绝态。 */
-  const rejectAndExitPlan = useCallback((sessionId: string) => {
-    if (!sockRef.current?.planRejectAndExit(sessionId)) return;
-    patchPlanReviewMessages(sessionId, "rejected");
-    setPlan(sessionId, { active: false, review: null });
-    appendRef.current(sessionId, "user", "已拒绝计划并退出 Plan 模式");
   }, []);
 
   /** 提交追问答案。 */
@@ -1573,6 +1549,7 @@ export function useChat(
     }
     try {
       // 并行取历史消息 + 当前运行态 + plan 状态。
+      const beforePlan = currentReviews.current.get(sessionId);
       const plan = api.sessionPlan(sessionId);
       const todos = api.sessionTodos(sessionId);
       const [items, st, planState, todoState] = await Promise.all([
@@ -1589,20 +1566,15 @@ export function useChat(
       // 重建 planReview 卡片：定位 plan 轮——最后一条 toolCalls 含 exit_plan_mode 的
       // assistant 消息（后端历史把 exit_plan_mode 作为 tool_call 落在该轮）。把卡片挂到
       // plan 轮而非会话末尾，满足「在哪轮写就留在哪轮」；awaiting 时 plan 轮即最新轮。
-      if (planState?.has_plan && planState.plan) {
-        const status: PlanReview["status"] = planState.status
-          ? (planState.status as PlanReview["status"])
-          : planState.awaiting_approval
-            ? "pending"
-            : planState.active
-              ? "editing"
-              : "readonly";
-        const review = {
-          plan: planState.plan,
-          planFile: planState.plan_file,
-          status,
-          phase: planState.phase,
-        };
+      const latest = currentReviews.current.get(sessionId);
+      const fromLive = latest && latest !== beforePlan;
+      const restored = planState?.has_plan && planState.plan ? reviewFromSnapshot(planState) : undefined;
+      const fetchedReview = restored && (sockRef.current?.plans.overlay(sessionId, restored) ?? restored);
+      const review = fromLive ? latest.review : fetchedReview;
+      const active = fromLive ? latest.active : Boolean(planState?.active);
+      if (planState && !fromLive) sockRef.current?.plans.resumeExecution(sessionId, planState);
+      if (review) {
+        currentReviews.current.set(sessionId, { review, active });
         if (!list.some((m) => m.planReview?.planFile === review.planFile && m.planReview?.plan === review.plan)) {
           let planIdx = -1;
           for (let i = list.length - 1; i >= 0; i--) {
@@ -1664,14 +1636,7 @@ export function useChat(
         else setStatus(sessionId, "idle");
       }
 
-      if (planState?.has_plan) {
-        setPlan(sessionId, {
-          active: planState.active,
-          review: null,
-        });
-      } else {
-        setPlan(sessionId, { active: Boolean(planState?.active), review: null });
-      }
+      setPlan(sessionId, { active, review: null });
       setTodos(sessionId, normalizeTodos(todoState?.todos));
       if (resume) {
         recoveries.current.delete(sessionId);
@@ -1721,6 +1686,8 @@ export function useChat(
 
   /** 删除/清理某会话的本地缓存（删除会话时调用）。 */
   const clearSession = useCallback((sessionId: string) => {
+    currentReviews.current.delete(sessionId);
+    sockRef.current?.plans.forget(sessionId);
     const compactionTimer = compactionTimersRef.current[sessionId];
     if (compactionTimer) clearTimeout(compactionTimer);
     delete compactionTimersRef.current[sessionId];
@@ -1793,9 +1760,7 @@ export function useChat(
     steer,
     enterPlan,
     exitPlan,
-    approvePlan,
-    rejectPlan,
-    rejectAndExitPlan,
+    decidePlan,
     answerFollowup,
     dismissFollowup,
     loadHistory,

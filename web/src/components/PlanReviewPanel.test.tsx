@@ -13,7 +13,7 @@ describe("PlanReviewCard", () => {
       status: "pending",
     };
     const html = renderToStaticMarkup(
-      <PlanReviewCard review={review} onApprove={noop} onReject={noop} />,
+      <PlanReviewCard review={review} onDecision={noop} />,
     );
     expect(html).toContain('aria-expanded="true"');
     expect(html).toContain("plan-review--open");
@@ -33,7 +33,7 @@ describe("PlanReviewCard", () => {
       empty: true,
     };
     const html = renderToStaticMarkup(
-      <PlanReviewCard review={review} onApprove={noop} onReject={noop} defaultOpen />,
+      <PlanReviewCard review={review} onDecision={noop} defaultOpen />,
     );
     // 无审批按钮
     expect(html).not.toContain("批准并执行");
@@ -52,7 +52,7 @@ describe("PlanReviewCard", () => {
       empty: true,
     };
     const html = renderToStaticMarkup(
-      <PlanReviewCard review={review} onApprove={noop} onReject={noop} defaultOpen />,
+      <PlanReviewCard review={review} onDecision={noop} defaultOpen />,
     );
     expect(html).not.toContain("批准并执行");
     expect(html).toContain("计划为空");
@@ -65,7 +65,7 @@ describe("PlanReviewCard", () => {
       status: "readonly",
     };
     const html = renderToStaticMarkup(
-      <PlanReviewCard review={review} onApprove={noop} onReject={noop} defaultOpen />,
+      <PlanReviewCard review={review} onDecision={noop} defaultOpen />,
     );
     expect(html).not.toContain("批准并执行");
     expect(html).toContain("历史计划");

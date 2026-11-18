@@ -562,9 +562,7 @@ export default function App() {
     planActive: chat.planActive,
     onEnterPlan: () => chat.enterPlan(currentSessionId),
     onExitPlan: () => chat.exitPlan(currentSessionId),
-    onApprovePlan: () => chat.approvePlan(currentSessionId, mode, currentWorkspaceId),
-    onRejectPlan: () => chat.rejectPlan(currentSessionId),
-    onRejectAndExitPlan: () => chat.rejectAndExitPlan(currentSessionId),
+    onPlanDecision: (action, review) => chat.decidePlan(action, review, currentSessionId, mode, currentWorkspaceId),
     followupQuestion: chat.followupQuestion,
     onAnswerFollowup: (questionId, answers) => chat.answerFollowup(currentSessionId, questionId, answers),
     onDismissFollowup: () => chat.dismissFollowup(currentSessionId),
@@ -744,9 +742,7 @@ export default function App() {
               planActive={chat.planActive}
               onEnterPlan={() => chat.enterPlan(currentSessionId)}
               onExitPlan={() => chat.exitPlan(currentSessionId)}
-              onApprovePlan={() => chat.approvePlan(currentSessionId, mode, currentWorkspaceId)}
-              onRejectPlan={() => chat.rejectPlan(currentSessionId)}
-              onRejectAndExitPlan={() => chat.rejectAndExitPlan(currentSessionId)}
+              onPlanDecision={(action, review) => chat.decidePlan(action, review, currentSessionId, mode, currentWorkspaceId)}
               followupQuestion={chat.followupQuestion}
               onAnswerFollowup={(questionId, answers) => chat.answerFollowup(currentSessionId, questionId, answers)}
               onDismissFollowup={() => chat.dismissFollowup(currentSessionId)}

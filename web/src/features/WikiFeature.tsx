@@ -152,9 +152,7 @@ export default function WikiFeature({
     onSendQueueItemNow: (id) => chat.sendQueueItemNow(sessionId, id),
     onEnterPlan: () => chat.enterPlan(sessionId),
     onExitPlan: () => chat.exitPlan(sessionId),
-    onApprovePlan: () => chat.approvePlan(sessionId, mode, workspaceId),
-    onRejectPlan: () => chat.rejectPlan(sessionId),
-    onRejectAndExitPlan: () => chat.rejectAndExitPlan(sessionId),
+    onPlanDecision: (action, review) => chat.decidePlan(action, review, sessionId, mode, workspaceId),
     onAnswerFollowup: (questionId, answers) => chat.answerFollowup(sessionId, questionId, answers),
     onDismissFollowup: () => chat.dismissFollowup(sessionId),
   }), [baseChatProps, chat, currentAgentLabel, kbId, mode, sessionId, workspaceId]);

@@ -233,9 +233,9 @@ export const api = {
   // 会话
   sessions: () => getJSON<Session[]>("/api/sessions"),
   sessionsStatus: () => getJSON<Record<string, string>>("/api/sessions/status"),
-  sessionStatus: (id: string) =>
-    getJSON<{ session_id: string; live: string; queue_depth: number; last_status: string; last_error: string }>(
-      `/api/session/${id}/status`,
+  sessionStatus: (id: string, signal?: AbortSignal) =>
+    getJSON<{ session_id: string; active_request_id?: string; live: string; queue_depth: number; last_status: string; last_error: string }>(
+      `/api/session/${id}/status`, { signal },
     ),
   runtimeConcurrency: () => getJSON<RuntimeConcurrency>("/api/runtime/concurrency"),
   history: (id: string) =>
@@ -251,18 +251,25 @@ export const api = {
     }[] }[]>(
       `/api/session/${id}`,
     ),
-  sessionPlan: (id: string) =>
+  historyTail: (id: string, signal?: AbortSignal) =>
+    getJSON<{ items: { role: string; request_id?: string }[] }>(
+      `/api/session/${encodeURIComponent(id)}/history?limit=40`, { signal },
+    ),
+  sessionPlan: (id: string, signal?: AbortSignal) =>
     getJSON<{
       session_id: string;
       active: boolean;
       awaiting_approval: boolean;
+      version?: string;
+      execution_request_id?: string;
+      execution_status?: string;
       phase?: string;
       status?: string;
       has_plan: boolean;
       plan: string;
       plan_file: string;
       options?: { label: string; description: string }[];
-    }>(`/api/session/${id}/plan`),
+    }>(`/api/session/${id}/plan`, { signal }),
   sessionTodos: (id: string) =>
     getJSON<{ todos: TodoItem[] }>(`/api/session/${id}/todos`),
   renameSession: (id: string, title: string) =>

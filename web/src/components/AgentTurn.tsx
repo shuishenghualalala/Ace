@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { UiMessage, WikiPage } from "../types";
+import type { PlanDecisionHandler, UiMessage, WikiPage } from "../types";
 import { formatDuration } from "../lib/formatDuration";
 import AgentAvatarLogo from "./AgentAvatarLogo";
 import MarkdownContent from "./MarkdownContent";
@@ -13,9 +13,7 @@ interface Props {
   messages: UiMessage[];
   /** 该回合是否仍在接收流式分片 */
   isStreaming: boolean;
-  onApprovePlan?: () => void;
-  onRejectPlan?: () => void;
-  onRejectAndExitPlan?: () => void;
+  onPlanDecision?: PlanDecisionHandler;
   onAsk?: (text: string) => void;
   /** 传入后回答正文中的 [[Wiki 页面名]] 引用渲染为可点击链接（Wiki 问答场景）。 */
   onWikiLink?: (title: string) => void;
@@ -67,9 +65,7 @@ function StreamingDuration({
 export default function AgentTurn({
   messages,
   isStreaming,
-  onApprovePlan,
-  onRejectPlan,
-  onRejectAndExitPlan,
+  onPlanDecision,
   onWikiLink,
 }: Props) {
   const [pinnedOpen, setPinnedOpen] = useState<boolean | null>(null);
@@ -159,9 +155,7 @@ export default function AgentTurn({
           <PlanReviewCard
             key={`${m.id}-plan`}
             review={m.planReview}
-            onApprove={() => onApprovePlan?.()}
-            onReject={() => onRejectPlan?.()}
-            onRejectAndExit={() => onRejectAndExitPlan?.()}
+            onDecision={onPlanDecision}
           />,
         );
       }
@@ -223,7 +217,7 @@ export default function AgentTurn({
     });
 
     return { processItems, textParts, fileChanges };
-  }, [messages, isStreaming, onApprovePlan, onRejectPlan, onRejectAndExitPlan, onWikiLink]);
+  }, [messages, isStreaming, onPlanDecision, onWikiLink]);
 
   const defaultOpen = isStreaming;
   const open = pinnedOpen ?? defaultOpen;

@@ -1,3 +1,4 @@
+import { WebPlanDecisions } from "./lib/planDecisions";
 import type { Chunk, GatewayResumeCursor } from "./types";
 
 type CursorState = {
@@ -77,6 +78,7 @@ export class GatewaySequenceTracker {
 
 /** 自动重连的对话 WebSocket。沿用后端 /ws 协议：发 {query,session_id,mode}，收 Chunk。 */
 export class ChatSocket {
+  readonly plans = new WebPlanDecisions((frame) => this.send(frame));
   private ws: WebSocket | null = null;
   private closed = false;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
@@ -93,7 +95,7 @@ export class ChatSocket {
     this.connectCount += 1;
     const n = this.connectCount;
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = this.ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = this.ws = new WebSocket(`${proto}://${location.host}/ws?send_receipts=1`);
     ws.onopen = () => {
       if (this.closed || this.ws !== ws) return;
       this.onStatus(true);
@@ -103,6 +105,7 @@ export class ChatSocket {
     ws.onclose = (e) => {
       if (this.closed || this.ws !== ws) return;
       this.ws = null;
+      this.plans.disconnect();
       this.onStatus(false);
       // 临时诊断：close code/reason/wasClean 用来判断是哪层心跳触发的断连
       console.warn("[ws] closed", {
@@ -124,7 +127,7 @@ export class ChatSocket {
         queueMicrotask(() => this.send({ kind: "pong" }));
         return;
       }
-      this.onChunk(payload as Chunk);
+      if (!this.plans.receive(payload as Chunk)) this.onChunk(payload as Chunk);
     };
   }
 
@@ -173,26 +176,6 @@ export class ChatSocket {
     return this.send({ action: "plan_enter", session_id: sessionId });
   }
 
-  /** 批准计划：退出只读并自动起一轮执行。 */
-  planApprove(sessionId: string, mode: string, workspaceId: string): boolean {
-    return this.send({
-      action: "plan_approve",
-      session_id: sessionId,
-      mode,
-      workspace_id: workspaceId,
-    });
-  }
-
-  /** 拒绝计划：保留 Plan 模式继续完善。 */
-  planReject(sessionId: string): boolean {
-    return this.send({ action: "plan_reject", session_id: sessionId });
-  }
-
-  /** 拒绝计划并退出 Plan 模式。 */
-  planRejectAndExit(sessionId: string): boolean {
-    return this.send({ action: "plan_reject_and_exit", session_id: sessionId });
-  }
-
   /** 退出 Plan 模式，切回普通 Craft。 */
   planExit(sessionId: string): boolean {
     return this.send({ action: "plan_exit", session_id: sessionId });
@@ -219,6 +202,7 @@ export class ChatSocket {
 
   dispose() {
     this.closed = true;
+    this.plans.dispose();
     clearTimeout(this.reconnectTimer);
     this.ws?.close();
   }

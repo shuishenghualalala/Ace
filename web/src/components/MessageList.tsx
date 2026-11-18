@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { FollowupQuestion, Session, TeamMemberView, UiMessage } from "../types";
+import type { PlanDecisionHandler, FollowupQuestion, Session, TeamMemberView, UiMessage } from "../types";
 import { groupMessagesIntoTurns } from "../lib/chatTurns";
 import { buildAgentTurnState } from "../lib/agentTurnState";
 import AgentTurn from "./AgentTurn";
@@ -12,9 +12,7 @@ import { externalAgentInitial, externalAgentTone } from "./ExternalAgentAvatar";
 interface Props {
   messages: UiMessage[];
   busy: boolean;
-  onApprovePlan?: () => void;
-  onRejectPlan?: () => void;
-  onRejectAndExitPlan?: () => void;
+  onPlanDecision?: PlanDecisionHandler;
   onAsk?: (text: string) => void;
   followupQuestion?: FollowupQuestion | null;
   onAnswerFollowup?: (
@@ -35,9 +33,7 @@ interface Props {
 export default function MessageList({
   messages,
   busy,
-  onApprovePlan,
-  onRejectPlan,
-  onRejectAndExitPlan,
+  onPlanDecision,
   onAsk,
   followupQuestion,
   onAnswerFollowup,
@@ -152,18 +148,14 @@ export default function MessageList({
               }}
               state={buildAgentTurnState(turn.messages, busy && idx === activeAgentTurnIdx)}
               isStreaming={busy && idx === activeAgentTurnIdx}
-              onApprovePlan={onApprovePlan}
-              onRejectPlan={onRejectPlan}
-              onRejectAndExitPlan={onRejectAndExitPlan}
+              onPlanDecision={onPlanDecision}
             />
           ) : (
             <AgentTurn
               key={turn.turnId}
               messages={turn.messages}
               isStreaming={busy && idx === activeAgentTurnIdx}
-              onApprovePlan={onApprovePlan}
-              onRejectPlan={onRejectPlan}
-              onRejectAndExitPlan={onRejectAndExitPlan}
+              onPlanDecision={onPlanDecision}
               onAsk={onAsk}
               onWikiLink={onWikiLink}
             />
