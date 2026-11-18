@@ -29,6 +29,7 @@ import { patchTranscriptMarkdown } from './components/transcript';
 import { getLocale, t } from './lib/i18n';
 import { spriteSymbolRef } from './lib/sprite-symbol';
 import { revealPendingWikiConfirmation } from './features/wiki-confirmation-state';
+import { isOutcomeOnlyMessage, startsAnotherOutcomeTurn, userTurnOutcomeMarker, type TurnOutcome } from './turn-outcome';
 
 export type MessageRole = 'user' | 'assistant' | 'status' | 'error' | 'team_internal';
 
@@ -162,6 +163,7 @@ export interface ChatMessage {
   } | undefined;
   /** 被停止/断连截断的半截回复：不再显示执行中，但仍按流式 Markdown 容错渲染。 */
   interrupted?: boolean | undefined;
+  turnOutcome?: TurnOutcome | undefined;
   /** Wiki Agent 回合引用的 Wiki 页面卡片（wiki.cards 事件 → wikiCardsReducer patch 进来）；
    *  chat-render 据此在正文下方渲染「Wiki 结果」卡片网格。 */
   wikiCards?: WikiPage[] | undefined;
@@ -525,8 +527,8 @@ function subagentTaskMeta(result: SubagentResultItem | undefined, isActive: bool
 }
 
 /** subagent 专用卡片：头部（标题+耗时+折叠箭头）+ 展开体（任务描述 + 执行摘要）。 */
-function renderSubagentCard(tool: ToolCallInfo, messageId: string): HTMLElement {
-  const isActive = tool.status === 'running' || tool.status === 'generating';
+function renderSubagentCard(tool: ToolCallInfo, messageId: string, isLive: boolean): HTMLElement {
+  const isActive = isLive && (tool.status === 'running' || tool.status === 'generating');
   const iconClass =
     tool.status === 'error' ? 'process-timeline__icon--error' : isActive ? 'process-timeline__icon--running' : '';
 
@@ -686,8 +688,8 @@ function appendToolProgressLines(
 }
 
 function renderToolCard(tool: ToolCallInfo, messageId: string, isLive: boolean): HTMLElement {
-  if (SUBAGENT_CARD_TOOLS.has(tool.name)) return renderSubagentCard(tool, messageId);
-  const isActive = tool.status === 'running' || tool.status === 'generating';
+  if (SUBAGENT_CARD_TOOLS.has(tool.name)) return renderSubagentCard(tool, messageId, isLive);
+  const isActive = isLive && (tool.status === 'running' || tool.status === 'generating');
   const iconClass =
     tool.status === 'error' ? 'process-timeline__icon--error' : isActive ? 'process-timeline__icon--running' : '';
   const terminalProgress = isLive && isActive ? tool.terminalProgress : undefined;
@@ -1213,9 +1215,52 @@ export function hasVisibleAnswerText(messages: ChatMessage[]): boolean {
   return false;
 }
 
+const outcomeDescriptionKeys = new Set([
+  'output_limit', 'stream_interrupted', 'max_iterations', 'tool_guardrail', 'empty_response', 'policy_blocked',
+  'security_boundary_failed', 'tool_arguments_incomplete', 'interrupted', 'deadline', 'approval_rejected',
+  'auth', 'config', 'usage_limit', 'quota_exceeded', 'server_overloaded', 'timeout', 'context_window_exceeded',
+]);
+
+function renderTurnOutcome(outcome: TurnOutcome): HTMLElement | undefined {
+  if (outcome.status === 'completed') return undefined;
+  const box = document.createElement('div');
+  box.className = 'msg__turn-outcome';
+  box.dataset.turnOutcome = outcome.status;
+  if (outcome.reason) box.dataset.turnOutcomeReason = outcome.reason;
+  if (outcome.code) box.dataset.turnOutcomeCode = outcome.code;
+  const title = document.createElement('strong');
+  title.textContent = outcome.status === 'awaiting_input' && outcome.reason === 'plan_approval'
+    ? t('chat.outcome.plan_approval')
+    : t('chat.outcome.' + outcome.status);
+  box.appendChild(title);
+
+  const key = [outcome.reason, outcome.code].find((value) => value && outcomeDescriptionKeys.has(value));
+  const description = key ? t('chat.outcome.reason.' + key) : outcome.message;
+  if (description) {
+    const detail = document.createElement('p');
+    detail.textContent = description;
+    box.appendChild(detail);
+  }
+  if (outcome.retryable && outcome.retry_delay !== undefined && outcome.retry_delay > 0
+    && (outcome.status === 'failed' || outcome.status === 'partial')) {
+    const delay = document.createElement('p');
+    delay.textContent = t('chat.outcome.retry_delay', { seconds: Math.ceil(outcome.retry_delay) });
+    box.appendChild(delay);
+  }
+  if (outcome.status === 'failed' && (outcome.code === 'auth' || outcome.code === 'config' || outcome.category === 'auth')) {
+    const settings = document.createElement('button');
+    settings.type = 'button';
+    settings.className = 'mw-button mw-button--secondary mw-button--small';
+    settings.dataset.turnOutcomeAction = 'model-settings';
+    settings.textContent = t('chat.outcome.model_settings');
+    box.appendChild(settings);
+  }
+  return box;
+}
+
 export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptions): HTMLElement {
   const frag = document.createDocumentFragment();
-  if (messages.length === 0) {
+  if (messages.length === 0 || messages.every((message) => isOutcomeOnlyMessage(message) && message.turnOutcome?.status === 'completed')) {
     // 返回一个空占位 div 以维持「返回 HTMLElement」契约（原字符串实现此处返回 ''，调用方不会 append）。
     // 调用方 renderChat 仍会 append 它，但它是空 div、无 class，不影响视觉。
     // 为与原行为一致（'' → 不产生节点），这里返回一个携带 data-empty 标记的占位，
@@ -1412,6 +1457,9 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   }
 
   for (const t of textParts) frag.appendChild(t);
+  const outcome = messages.findLast((message) => message.turnOutcome)?.turnOutcome;
+  const outcomeNode = outcome && renderTurnOutcome(outcome);
+  if (outcomeNode) frag.appendChild(outcomeNode);
 
   // HTML 成果直接以网站卡打开右侧 Browser workbench；这是确定性 UI 动作，
   // 不需要把 browser 工具暴露给模型。
@@ -1433,12 +1481,13 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
 
   // 时间取回合「完成时间」：final 只 patch 末段 assistant 的 timestamp（历史回放同理，
   // 全段统一为 turn_finished_at），多段回合用批次首条会停在回合开始时刻。
-  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant') ?? firstMsg;
+  const lastAssistant = messages.findLast((m) => m.role === 'assistant' && !isOutcomeOnlyMessage(m)) ?? firstMsg;
 
   // 组装最终 .msg
   const msg = document.createElement('div');
   msg.className = 'msg msg--agent-turn';
   if (isLive) msg.dataset.streaming = 'true';
+  if (outcome) msg.dataset.turnOutcomeStatus = outcome.status;
   msg.dataset.messageId = firstId;
 
   const avatar = createAgentTurnAvatar(options.identity);
@@ -2370,28 +2419,38 @@ export function renderConversationSurface(
       msg.role === 'assistant' || msg.role === 'error' || (msg.role === 'status' && !msg.agentName && !msg.workflowProgress);
     if (!isAgent) {
       frag.appendChild(renderMessageHtml(msg, modelLabel, { preview: true }));
+      const marker = userTurnOutcomeMarker(msg);
+      if (marker) {
+        frag.appendChild(renderAgentTurn([marker], {
+          isStreaming: false,
+          userPinnedOpen: null,
+          turnDurationMs: 0,
+          showAssistantName: options.showAssistantName ?? true,
+        }));
+      }
       i += 1;
       continue;
     }
     let j = i + 1;
+    let requestId = msg.requestId;
     while (j < messages.length) {
-      const r = messages[j].role;
-      const hasAgent = messages[j].agentName;
-      const hasWorkflowProgress = messages[j].workflowProgress;
-      if (r === 'assistant' || r === 'error' || (r === 'status' && !hasAgent && !hasWorkflowProgress)) j += 1;
-      else break;
+      const next = messages[j];
+      if (startsAnotherOutcomeTurn(requestId, next, messages[j - 1])) break;
+      const { role, agentName, workflowProgress } = next;
+      if (role !== 'assistant' && role !== 'error' && !(role === 'status' && !agentName && !workflowProgress)) break;
+      requestId ??= next.requestId;
+      j += 1;
     }
     const batch = messages.slice(i, j);
     const isLive = batch.some((item) => Boolean(item.streaming));
     const turnDurationMs = resolveTurnDurationMs(batch, { isLive });
-    frag.appendChild(
-      renderAgentTurn(batch, {
+    const turn = renderAgentTurn(batch, {
         isStreaming: isLive,
         userPinnedOpen: null,
         turnDurationMs,
         showAssistantName: options.showAssistantName ?? true,
-      }),
-    );
+    });
+    if (turn.dataset.empty !== 'true') frag.appendChild(turn);
     i = j;
   }
   const inner = document.createElement('div');

@@ -11,12 +11,13 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from crew.core.envelope import ResponseChunk
+from crew.core.envelope import ResponseChunk, TurnOutcome
 from crew.gateway.connections import ConnectionManager
 from crew.gateway.dispatcher import SessionDispatcher
 from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey
 from crew.gateway.ws import create_ws_router
 from crew.state.session_store import SQLiteSessionStore
+from crew.tasks.runtime import TaskRuntime
 
 
 def _new_inbox(store):
@@ -41,8 +42,8 @@ def _receive(socket, kind, rid):
     pytest.fail(f"Gateway did not send {kind} for {rid}")
 
 
-def _app(store, inbox, inner):
-    dispatcher = SessionDispatcher(inner, store)
+def _app(store, inbox, inner, runtime=None):
+    dispatcher = SessionDispatcher(inner, store, task_runtime=runtime)
     crew = SimpleNamespace(
         active_owner=SimpleNamespace(claim=lambda _owner: None),
         session_store=store,
@@ -267,6 +268,98 @@ def test_websocket_acceptance_precedes_execution_and_stop_tombstones_busy_queue(
             _receive(socket, "final", "first")
             assert invoked == ["first"]
     finally:
+        store.close()
+
+
+@pytest.mark.parametrize(("outcome", "wire_status", "kind"), [
+    (TurnOutcome("completed"), "completed", "final"),
+    (TurnOutcome("partial", reason="iteration_limit"), "failed", "final"),
+    (TurnOutcome("awaiting_input", reason="plan_review"), "completed", "final"),
+    (TurnOutcome("failed", reason="empty_response"), "failed", "error"),
+    (TurnOutcome("stopped", reason="user_stop"), "cancelled", "error"),
+])
+def test_turn_outcome_matches_durable_history_and_v1_receipt(tmp_path, outcome, wire_status, kind):
+    path = tmp_path / "send.db"
+    store = SQLiteSessionStore(path)
+    request_id = "turn"
+    key = SendKey("local", "chat", request_id)
+
+    async def execute(envelope):
+        if kind == "error":
+            yield ResponseChunk.error(envelope.request_id, "Turn closed", outcome=outcome)
+        else:
+            text = "" if outcome.status == "awaiting_input" else "Durable result"
+            yield ResponseChunk.final(envelope.request_id, text, outcome=outcome)
+
+    try:
+        client = TestClient(_app(store, _new_inbox(store), execute))
+        with client.websocket_connect("/ws?send_receipts=1") as socket:
+            assert socket.receive_json()["body"]["version"] == 1
+            socket.send_json(_payload(request_id))
+            assert _receive(socket, "send_receipt", request_id)["body"]["status"] == "accepted"
+            terminal = _receive(socket, kind, request_id)["body"]["outcome"]
+            assert terminal["status"] == outcome.status
+            assert terminal.get("reason") == outcome.reason
+            socket.send_json(_command("send_receipt_query", request_id))
+            receipt = _receive(socket, "send_receipt", request_id)["body"]
+            assert receipt["status"] == wire_status
+            assert receipt["outcome"] == terminal
+    finally:
+        store.close()
+
+    reopened = SQLiteSessionStore(path)
+    try:
+        receipt = asyncio.run(_new_inbox(reopened).query(key))
+        assert receipt.frame()["body"]["outcome"] == terminal
+        status, _, latest = reopened.get_status_details("chat", "local")
+        assert status == outcome.status
+        assert latest == {**terminal, "request_id": request_id, "timestamp": latest["timestamp"]}
+        page = reopened.read_history_page("chat", owner_account_id="local", limit=10)
+        assert page.rows[-1][2].turn_outcome == latest
+        assert reopened.load("chat", owner_account_id="local") == []
+    finally:
+        reopened.close()
+
+
+def test_failed_atomic_settlement_leaves_receipt_uncertain_and_no_false_history(tmp_path, monkeypatch):
+    store = SQLiteSessionStore(tmp_path / "send.db")
+    runtime = TaskRuntime(str(tmp_path / "tasks.db"))
+    notifications = []
+    runtime.set_callbacks(on_completion=notifications.append)
+    inbox = _new_inbox(store)
+    finish = inbox._finish_in_transaction
+
+    def fail_after_receipt_write(conn, key, status, code, started, outcome):
+        updated = finish(conn, key, status, code, started, outcome)
+        if outcome is not None:
+            raise RuntimeError("injected settlement failure")
+        return updated
+
+    monkeypatch.setattr(inbox, "_finish_in_transaction", fail_after_receipt_write)
+
+    async def execute(envelope):
+        yield ResponseChunk.final(envelope.request_id, "Produced but unconfirmed")
+
+    try:
+        client = TestClient(_app(store, inbox, execute, runtime))
+        with client.websocket_connect("/ws?send_receipts=1") as socket:
+            socket.receive_json()
+            socket.send_json(_payload("unconfirmed"))
+            _receive(socket, "send_receipt", "unconfirmed")
+            final = _receive(socket, "final", "unconfirmed")["body"]["outcome"]
+            assert final["status"] == "failed"
+            assert final["reason"] == "history_commit_unverified"
+            socket.send_json(_command("send_receipt_query", "unconfirmed"))
+            receipt = _receive(socket, "send_receipt", "unconfirmed")["body"]
+            assert receipt == {"status": "uncertain", "code": "history_commit_unverified"}
+        assert store.get_status_details("chat", "local")[2] is None
+        history = store.read_history_page("chat", owner_account_id="local", limit=10)
+        assert all(row[2].turn_outcome is None for row in history.rows)
+        assert len(notifications) == 1
+        assert notifications[0]["progress"]["turn_outcome"]["reason"] == "history_commit_unverified"
+        assert notifications[0]["status"] == "failed"
+    finally:
+        runtime.close()
         store.close()
 
 

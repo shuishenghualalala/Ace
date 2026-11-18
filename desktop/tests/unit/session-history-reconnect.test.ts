@@ -543,6 +543,43 @@ describe('conversation recovery after a socket outage', () => {
     expect(sessionStore.get().books[sid]?.turnSealed).toBe(false);
   });
 
+  it('shows only the matching terminal stopped outcome without reopening the locally stopped stream', async () => {
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
+    vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult());
+    emitSocket({ type: 'open' });
+    emitFrame('delta', 1, { text: 'Keep stopped partial text' });
+    const original = messageStore.get().messages[sid][0];
+    stopGeneration(sid);
+
+    const stopped = (request: string, sequence: number, isFinal: boolean, outcome: object) => emitSocket({
+      type: 'message',
+      data: JSON.stringify({
+        kind: 'error', session_id: sid, request_id: request, gateway_epoch: 'epoch-1',
+        gateway_sequence: sequence, sequence, is_final: isFinal,
+        body: { text: 'Must not replace the frozen renderer text', outcome },
+      }),
+    });
+    stopped('unrelated', 2, true, { status: 'stopped', reason: 'user_stop' });
+    stopped(oldRequest, 3, false, { status: 'stopped', reason: 'user_stop' });
+    stopped(oldRequest, 4, true, { status: 'failed', reason: 'provider_error' });
+    emitFrame('delta', 5, { text: 'Late model text must stay suppressed' });
+    expect(messageStore.get().messages[sid][0]?.turnOutcome).toBeUndefined();
+
+    stopped(oldRequest, 6, true, { status: 'stopped', reason: 'user_stop' });
+    stopped(oldRequest, 7, true, { status: 'stopped', reason: 'duplicate' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(messageStore.get().messages[sid]).toEqual([expect.objectContaining({
+      id: original.id, content: 'Keep stopped partial text', streaming: false, interrupted: true,
+      requestId: oldRequest, turnOutcome: { status: 'stopped', reason: 'user_stop' },
+    })]);
+    expect(sessionStore.get().books[sid]?.pendingStopOutcome).toBeUndefined();
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBeNull();
+    expect(sessionStore.get().books[sid]?.turnSealed).toBe(true);
+    expect(sessionStore.get().busySessions[sid]).toBeFalsy();
+    expect(state.suppressChunks.has(sid)).toBe(true);
+  });
+
   it('keeps a user-stopped request closed when a reconnect status response arrives', async () => {
     const delayed = Promise.withResolvers<typeof settledStatus>();
     vi.spyOn(backendApi, 'sessionStatus').mockReturnValue(delayed.promise);

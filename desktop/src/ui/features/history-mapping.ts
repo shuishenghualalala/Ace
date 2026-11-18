@@ -11,6 +11,7 @@ import {
   type BackendHistoryItem,
 } from '../backend-client';
 import type { ChatMessage, MessageRole, ToolCallInfo, TurnFileChangeSummary } from '../chat-render';
+import { isInterruptedOutcome, readSettledTurnOutcome, readTurnOutcome, startsAnotherOutcomeTurn } from '../turn-outcome';
 import { isPlanDocumentPath } from '../plan-document-path';
 import { newMessageId, state } from '../state';
 import { sessionDisplayModelLabel, sessionMessageModelLabel } from './session-model';
@@ -225,6 +226,8 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     item.role === 'assistant' || item.role === 'user' || item.role === 'team_internal'
       ? item.role
       : item.role === 'error' ? 'error' : 'status';
+  const acceptsOutcome = role === 'assistant' || role === 'error' || (role === 'user' && typeof item.request_id === 'string' && !!item.request_id.trim());
+  const outcome = acceptsOutcome ? readTurnOutcome(item.outcome) : undefined;
   const base: ChatMessage = {
     id: item.history_id ? `history-${encodeURIComponent(item.history_id)}` : newMessageId(role),
     role,
@@ -251,6 +254,8 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     communicationKind: item.communication_kind,
     communicationStatus: item.communication_status,
     requestId: item.request_id,
+    ...(outcome ? { turnOutcome: outcome } : {}),
+    ...(role === 'assistant' && isInterruptedOutcome(outcome) ? { interrupted: true } : {}),
     replyTo: item.reply_to,
     communicationRequestText: item.communication_request_text,
     displayMode: item.display_mode,
@@ -319,16 +324,67 @@ export function mapBackendHistoryItems(
     }
   };
   let runStart = -1;
+  let requestId: string | undefined;
   messages.forEach((m, i) => {
     if (m.role === 'assistant') {
-      if (runStart < 0) runStart = i;
+      if (runStart < 0 || startsAnotherOutcomeTurn(requestId, m, messages[i - 1])) {
+        settleRun(runStart, i);
+        runStart = i;
+        requestId = m.requestId;
+      } else {
+        requestId ??= m.requestId;
+      }
       return;
     }
     settleRun(runStart, i);
     runStart = -1;
+    requestId = undefined;
   });
   settleRun(runStart, messages.length);
   return out;
+}
+
+export function applySettledHistoryOutcome(
+  history: ChatMessage[],
+  rawOutcome: unknown,
+  live: string | undefined,
+  legacyError?: string,
+): ChatMessage[] {
+  const settled = readSettledTurnOutcome(rawOutcome, legacyError);
+  if (!settled) return history;
+  const { request_id: requestId, timestamp, ...outcome } = settled;
+  if (history.some((message) => message.requestId === requestId && message.turnOutcome)) return history;
+
+  const matchingAssistant = history.findLastIndex((message) =>
+    message.role === 'assistant' && message.requestId === requestId);
+  if (matchingAssistant >= 0) {
+    const next = history.slice();
+    const assistant = next[matchingAssistant]!;
+    next[matchingAssistant] = {
+      ...assistant,
+      turnOutcome: outcome,
+      ...(isInterruptedOutcome(outcome) ? { interrupted: true } : {}),
+    };
+    return next;
+  }
+
+  // A snapshot from an older executor may not expose request identities on
+  // its content rows. Keep the tagged outcome separate rather than claiming
+  // that an unrelated assistant answer had this terminal state.
+  if (outcome.status === 'completed' || live !== 'idle' || timestamp === undefined) return history;
+  const timeMs = timestamp * 1000;
+  if (history.length && timeMs < history[0]!.timestamp) return history;
+  const bound = history.findLastIndex((message) => message.requestId === requestId);
+  const preceding = bound >= 0 ? bound : history.findLastIndex((message) => message.timestamp <= timeMs);
+  const marker: ChatMessage = {
+    id: 'outcome-' + encodeURIComponent(requestId),
+    role: 'assistant',
+    content: '',
+    timestamp: timeMs,
+    requestId,
+    turnOutcome: outcome,
+  };
+  return [...history.slice(0, preceding + 1), marker, ...history.slice(preceding + 1)];
 }
 
 function mergeStreamingText(existing?: string, incoming?: string, append = false): string | undefined {

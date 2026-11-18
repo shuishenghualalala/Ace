@@ -1077,10 +1077,11 @@ async def test_plan_mode_stops_after_exit_plan_mode_approval_request(tmp_path, m
         finals = []
         async for ch in agent.run(Envelope.of("帮我做一个需要计划的任务", session_id=sid, user_id=owner)):
             if ch.kind == "final":
-                finals.append(ch.body["text"])
+                finals.append(ch.body)
 
         assert len(provider.calls) == 1
-        assert finals == [""]
+        assert len(finals) == 1 and finals[0]["text"] == ""
+        assert finals[0]["outcome"] == {"status": "awaiting_input", "reason": "plan_approval"}
         assert mgr.is_awaiting_approval(sid, owner_account_id=owner)
         assert read_plan(sid, owner_account_id=owner) == "# Context\n\n测试计划"
         assert not (tmp_path / "should-not-write.txt").exists()

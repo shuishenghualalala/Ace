@@ -14,6 +14,7 @@ vi.mock('../../src/ui/features/session-model', () => ({
 }));
 
 import {
+  applySettledHistoryOutcome,
   backendDurationToMs,
   filterExistingTurnFileChanges,
   inferTurnFileChangesFromToolCalls,
@@ -597,5 +598,57 @@ describe('filterExistingTurnFileChanges', () => {
     const out = await filterExistingTurnFileChanges(files);
     expect(out.map((f) => f.path)).toEqual(['keep.html', 'removed.py']);
     expect(pathExists).toHaveBeenCalled();
+  });
+});
+
+
+describe('projecting settled history outcomes', () => {
+  it('maps a dedicated outcome marker or a retained assistant with metadata without mutating its content', () => {
+    const projected = mapBackendHistoryItems([
+      { role: 'assistant', content: 'Prior result', request_id: 'req-a', history_id: 'a', timestamp: 50 },
+      { role: 'assistant', content: 'Retained partial', request_id: 'req-b', history_id: 'b', timestamp: 60,
+        outcome: { status: 'partial', reason: 'output_limit' } },
+      { role: 'assistant', content: '', request_id: 'req-b', history_id: 'c', timestamp: 65,
+        outcome: { status: 'partial', reason: 'output_limit' } },
+    ], 's');
+    expect(projected.map((message) => message.segmentRole)).toEqual(['answer', 'answer', 'answer']);
+    expect(projected[1]).toMatchObject({ content: 'Retained partial', interrupted: true });
+    expect(projected[2]).toMatchObject({ historyId: 'c', requestId: 'req-b', turnOutcome: { status: 'partial' } });
+    expect(applySettledHistoryOutcome(projected, { status: 'partial', request_id: 'req-b' }, 'idle')).toBe(projected);
+  });
+
+  it('keeps rewritten user-carried outcomes on the durable row without synthesizing per-page history', () => {
+    const projected = mapBackendHistoryItems([
+      { role: 'user', content: 'Original prompt', timestamp: 50, history_id: 'durable-user', request_id: 'req-a',
+        outcome: { status: 'failed', reason: 'provider_error', code: 'auth' } },
+      { role: 'user', content: 'Unbound prompt', timestamp: 60, history_id: 'old-user',
+        outcome: { status: 'stopped', reason: 'interrupted' } },
+    ], 's');
+    expect(projected).toHaveLength(2);
+    expect(projected[0]).toMatchObject({
+      role: 'user', historyId: 'durable-user', requestId: 'req-a', turnOutcome: { status: 'failed', code: 'auth' },
+    });
+    expect(projected[1]?.turnOutcome).toBeUndefined();
+    expect(applySettledHistoryOutcome(projected, { status: 'failed', request_id: 'req-a', timestamp: 51 }, 'idle')).toBe(projected);
+  });
+
+  it('only updates an exact historical request or adds a separate isolated note in scope', () => {
+    const projected = mapBackendHistoryItems([
+      { role: 'assistant', content: 'Known result', request_id: 'known', history_id: '1', timestamp: 10 },
+      { role: 'assistant', content: 'Unaffiliated result', history_id: '2', timestamp: 20 },
+      { role: 'assistant', content: 'Newer result', request_id: 'newer', history_id: '3', timestamp: 40 },
+    ], 's');
+    const matching = applySettledHistoryOutcome(projected, { status: 'failed', request_id: 'known', timestamp: 11 }, 'idle');
+    expect(matching[0]).toMatchObject({ requestId: 'known', content: 'Known result', turnOutcome: { status: 'failed' } });
+    expect(matching[2]).toBe(projected[2]);
+
+    const unbound = applySettledHistoryOutcome(projected, { status: 'stopped', request_id: 'unknown', timestamp: 28 }, 'idle');
+    expect(unbound).toHaveLength(4);
+    expect(unbound[1]).toBe(projected[1]);
+    expect(unbound[2]).toMatchObject({ requestId: 'unknown', content: '', turnOutcome: { status: 'stopped' } });
+    expect(unbound[3]).toBe(projected[2]);
+
+    expect(applySettledHistoryOutcome(projected, { status: 'failed', timestamp: 29 }, 'idle')).toBe(projected);
+    expect(applySettledHistoryOutcome(projected, { status: 'failed', request_id: 'unknown', timestamp: 29 }, 'running')).toBe(projected);
   });
 });

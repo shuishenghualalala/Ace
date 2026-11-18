@@ -1094,9 +1094,10 @@ async def test_title_generation_does_not_block_final():
     minimax 非流式标题请求挂起时 final 帧被暂存但发不出去，前端卡运行中 ~2 分钟。
     """
     store = InMemorySessionStore()
+    plugins, terminal_calls = _outcome_recorder()
     agent = _agent(
         FakeProvider(script=[ChatResponse(text="完成")]),
-        session_store=store, enable_title=True,
+        session_store=store, enable_title=True, plugins=plugins,
     )
     release = asyncio.Event()
     import crew.agent.runtime as _rt
@@ -1116,6 +1117,7 @@ async def test_title_generation_does_not_block_final():
                 break  # final 到达即退出，此时后台标题 task 仍挂起
         assert final_kind == "final"  # 标题挂起未阻塞 final
         await stream.aclose()
+        assert terminal_calls == [{"session_id": "tf", "outcome": "completed", "error_summary": ""}]
         assert len(agent._title_tasks) == 1
         await asyncio.sleep(0)  # 让后台 task 进入 monkeypatch 的挂起标题函数
     finally:

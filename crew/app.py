@@ -46,7 +46,7 @@ from crew.agent.subagent.policy import (
     delegation_blocked_toolsets,
     resolve_subagent_tool_filter,
 )
-from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
 from crew.core.observability import bind_observation, capture_payload, event, install_sink, remove_sink, span
 from crew.core.interfaces import (
     Agent,
@@ -468,7 +468,13 @@ _TASK_NOTIFICATION_TITLES = {
     "completed": "任务已完成",
     "failed": "任务失败",
     "timed_out": "任务已超时",
+    "partial": "任务部分完成",
 }
+
+
+def _task_turn_outcome(task: dict[str, Any]) -> TurnOutcome | None:
+    progress = task.get("progress")
+    return TurnOutcome.from_body(progress.get("turn_outcome")) if isinstance(progress, dict) else None
 
 
 class CrewApp:
@@ -990,28 +996,33 @@ class CrewApp:
         对话只应有回合结束这一条通知；选择卡片挂起期间回合保持 running，不会走到
         这里。cancelled 由用户主动触发，无需提醒。
         """
+        outcome = _task_turn_outcome(task)
         return (
             str(task.get("kind") or "") == "agent_turn"
             and str(task.get("status") or "") in _NOTIFYWORTHY_TASK_STATUSES
+            and (outcome is None or outcome.status not in {"awaiting_input", "stopped"})
         )
 
     def _publish_task_notification(self, task: dict[str, Any]) -> None:
         """发布一条回合终态通知；是否发布由 _should_notify_task 决定。"""
         status = str(task.get("status") or "")
+        outcome = _task_turn_outcome(task)
         from crew.core.interfaces import Notification
 
-        summary = str(task.get("result") or task.get("error") or "")[:200]
+        title_status = "partial" if outcome is not None and outcome.status == "partial" else status
+        summary = str((outcome.message if outcome is not None else None) or task.get("result") or task.get("error") or "")[:200]
         self.notifications.publish(
             Notification(
                 owner_account_id=str(task.get("owner_account_id") or ""),
                 source="tasks",
                 kind=f"task_{status}",
-                title=_TASK_NOTIFICATION_TITLES.get(status, "任务已结束"),
+                title=_TASK_NOTIFICATION_TITLES.get(title_status, "任务已结束"),
                 body=summary,
                 payload={
                     "task_id": str(task.get("task_id") or ""),
                     "session_id": str(task.get("session_id") or ""),
                     "task_kind": str(task.get("kind") or ""),
+                    **({"outcome": outcome.to_body()} if outcome is not None else {}),
                 },
             )
         )

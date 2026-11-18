@@ -61,7 +61,8 @@ import {
 import {
   getConversationScrollAnchor, preserveConversationHistoryViewport, restoreConversationViewport,
 } from './conversation-renderer';
-import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
+import { applySettledHistoryOutcome, mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
+import { readTurnOutcome } from '../turn-outcome';
 import {
   mergeBackendHistory, prependDurableHistoryPage, prependHistoryWindow, reconcileHistoryWindow,
 } from './history-merge';
@@ -91,7 +92,7 @@ import { logStream } from '../stream-debug';
 import { authStore, messageStore, sessionStore, uiStore } from '../stores/stores';
 import { hydrateTurnFoldFromStorage } from './fold-state';
 import { canSendToBackend, setBackendTransportState } from './backend-status-guard';
-import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge } from './chat-outbox';
+import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge, isSettledTurnReceipt } from './chat-outbox';
 import { restoreRendererCheckpointNavigation } from './renderer-checkpoint';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
@@ -310,8 +311,9 @@ export async function loadBackendHistory(
       projection = project(snapshot);
       if (!projection) return false;
     }
-    const history = projection.messages;
-    if (st?.last_status === 'failed' && st.last_error) {
+    const history = applySettledHistoryOutcome(projection.messages, st?.last_outcome, st?.live, st?.last_error);
+    if (st?.last_status === 'failed' && st.last_error && !readTurnOutcome(st.last_outcome)
+      && !history.some((message) => (message.turnOutcome?.message ?? (message.role === 'error' ? message.content : '')) === st.last_error)) {
       history.push({
         id: newMessageId('error'),
         role: 'error',
@@ -988,9 +990,9 @@ export function bindBackendAuth(): () => void {
         const owner = authStore.get().userInfo?.staffCode;
         void chatOutbox.bind(bridge, {
           onRestored: chatOutboxObserver.onRestored,
-          onReceipt(entry, status, code, restored) {
-            chatOutboxObserver.onReceipt(entry, status, code, restored);
-            if (!restored || (status !== 'completed' && status !== 'failed' && status !== 'cancelled')) return;
+          onReceipt(entry, status, code, restored, outcome) {
+            chatOutboxObserver.onReceipt(entry, status, code, restored, outcome);
+            if (!restored || !isSettledTurnReceipt(status)) return;
             const socket = state.socket;
             const currentConnection = recoveryConnection;
             if (!socket || !currentConnection) return;

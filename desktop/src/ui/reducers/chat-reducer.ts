@@ -13,6 +13,7 @@
 
 import type { ChatMessage, PlanReviewStatus, SessionStatus, ToolCallInfo, TurnFileChangeSummary } from '../chat-render';
 import { recordMessageChange } from '../conversation-message-changes';
+import { isInterruptedOutcome, readTurnOutcome, type TurnOutcome } from '../turn-outcome';
 import type { Bookkeeping, FileChange, TodoItem } from '../state';
 import { isPlanDocumentPath } from '../plan-document-path';
 import { parseDeltaRange, type DeltaRange } from '../stream-reassembly';
@@ -122,13 +123,13 @@ export interface UsagePayload {
 }
 export interface FinalChunk {
   kind: 'final';
-  body: { text?: string; replace_content?: boolean; usage?: UsagePayload };
+  body: { text?: string; replace_content?: boolean; usage?: UsagePayload; outcome?: TurnOutcome };
   sequence: number;
   session_id?: string;
 }
 export interface ErrorChunk {
   kind: 'error';
-  body: { message?: string };
+  body: { message?: string; text?: string; outcome?: TurnOutcome };
   sequence: number;
   session_id?: string;
 }
@@ -247,6 +248,7 @@ export interface ReducerSnapshot {
   sequence: number;
   /** The Gateway fragment buffer will fill the content before publishing upserts. */
   externallyOrderedDelta?: boolean;
+  requestId?: string;
 }
 
 /**
@@ -1106,18 +1108,39 @@ export function statusReducer(chunk: StatusChunk, snapshot: ReducerSnapshot): Re
   };
 }
 
+function turnOutcomeFields(outcome: TurnOutcome, snapshot: ReducerSnapshot): Partial<ChatMessage> {
+  const requestId = snapshot.requestId ?? snapshot.book.activeRequestId;
+  return {
+    turnOutcome: outcome,
+    ...(requestId ? { requestId } : {}),
+    ...(isInterruptedOutcome(outcome) ? { interrupted: true } : {}),
+  };
+}
+
+// Usage records keep the existing numeric status display while distinguishing
+// terminal cancellation and partial output from a full successful response.
+function turnUsageStatus(outcome: TurnOutcome | undefined, fallback: number): number {
+  if (outcome?.status === 'partial') return 206;
+  if (outcome?.status === 'stopped') return 499;
+  if (outcome?.status === 'failed') return 500;
+  return fallback;
+}
+
 export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): ReducerResult {
+  const outcome = readTurnOutcome(chunk.body.outcome);
   const book = { ...snapshot.book };
   const text = textOf(chunk.body);
   const upserts: MessageUpsert[] = [];
   let assistantId = book.assistantId;
+  const currentAssistant = assistantId ? snapshot.messages.findLast((message) => message.id === assistantId) : undefined;
+  if (outcome && !currentAssistant) assistantId = null;
   let turnDurationMs = 0;
   let firstTokenMs: number | undefined;
   if (book.hadTeamInternal) {
     // 与 Web hadTeamInternal 语义一致：Team Runtime 的最终答案已经通过
     // team_internal/team_summary 展示；根 final 只负责结束回合，不能再产生团队自身气泡。
     if (assistantId) {
-      const startedAt = snapshot.messages.find((m) => m.id === assistantId)?.turnStartedAt;
+      const startedAt = currentAssistant?.turnStartedAt;
       turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
       if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
       upserts.push({ op: 'remove', messageId: assistantId });
@@ -1126,7 +1149,7 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
     book.assistantId = null;
   } else if (assistantId) {
     const currentId = assistantId;
-    const current = snapshot.messages.find((m) => m.id === currentId);
+    const current = currentAssistant;
     const startedAt = current?.turnStartedAt;
     turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
     if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
@@ -1150,7 +1173,7 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
         if (tool.status === 'running' || tool.status === 'generating') {
           settledToolMap.set(id, {
             ...tool,
-            status: 'done',
+            status: !outcome || outcome.status === 'completed' ? 'done' : tool.status,
             duration: snapshot.now - tool.startedAt,
             terminalProgress: undefined,
           });
@@ -1240,6 +1263,18 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
       },
     });
   }
+  if (outcome) {
+    const fields = turnOutcomeFields(outcome, snapshot);
+    if (assistantId) {
+      upserts.push({ op: 'patch', messageId: assistantId, patch: fields });
+    } else if (outcome.status !== 'completed') {
+      assistantId = uniqueMessageId(snapshot, 'outcome');
+      upserts.push({
+        op: 'append',
+        message: { id: assistantId, role: 'assistant', content: '', timestamp: snapshot.now, ...fields },
+      });
+    }
+  }
   // 「仅本轮」文件改动差集：与上一轮结束签名比对，patch 到本回合 assistant 消息，
   // 供 chat-render 在正文下方渲染「已编辑 N 个文件」卡。基准无条件前进到当前快照。
   const turnFiles = computeTurnFileDelta(book.fileChanges ?? [], book.prevTurnFileSignature);
@@ -1252,25 +1287,34 @@ export function finalReducer(chunk: FinalChunk, snapshot: ReducerSnapshot): Redu
     messageUpserts: upserts,
     toolUpserts: [],
     replaceBook: book,
-    statusHint: 'idle',
+    statusHint: outcome?.status === 'failed' ? 'error' : 'idle',
     queueHint: '',
     finalize: true,
-    turn: { status: 200, turnDurationMs, firstTokenMs, assistantId, ...(chunk.body.usage ? { usage: chunk.body.usage } : {}) },
+    turn: { status: turnUsageStatus(outcome, 200), turnDurationMs, firstTokenMs, assistantId, ...(chunk.body.usage ? { usage: chunk.body.usage } : {}) },
   };
 }
 
 export function errorReducer(chunk: ErrorChunk, snapshot: ReducerSnapshot): ReducerResult {
   const book = { ...snapshot.book };
   const message = typeof chunk.body.message === 'string' ? chunk.body.message : '未知错误';
+  const outcome = readTurnOutcome(chunk.body.outcome, chunk.body.message);
+  const terminalText = outcome ? textOf(chunk.body) : '';
   const upserts: MessageUpsert[] = [];
   let turnDurationMs = 0;
   let firstTokenMs: number | undefined;
-  if (book.assistantId) {
-    const existingMsg = snapshot.messages.find((m) => m.id === book.assistantId);
+  const existingMsg = book.assistantId ? snapshot.messages.findLast((message) => message.id === book.assistantId) : undefined;
+  if (book.assistantId && (existingMsg || !outcome)) {
     const startedAt = existingMsg?.turnStartedAt;
     turnDurationMs = snapshot.now - (startedAt ?? snapshot.now);
     if (book.firstChunkAt != null && startedAt != null) firstTokenMs = book.firstChunkAt - startedAt;
-    const patch: Partial<ChatMessage> = { streaming: false, turnDurationMs, timestamp: snapshot.now };
+    const patch: Partial<ChatMessage> = {
+      streaming: false, turnDurationMs, timestamp: snapshot.now,
+      ...(outcome ? turnOutcomeFields(outcome, snapshot) : {}),
+    };
+    if (terminalText) {
+      patch.content = resolveFinalContent(existingMsg?.content ?? '', terminalText);
+      if (!existingMsg?.content?.trim()) patch.segmentRole = 'answer';
+    }
     // 出错封口同样结算思考耗时，思考块能给出最终时长而不是停留在「持续了几秒」。
     if (
       existingMsg?.thinking?.trim()
@@ -1285,24 +1329,27 @@ export function errorReducer(chunk: ErrorChunk, snapshot: ReducerSnapshot): Redu
       patch,
     });
   }
-  upserts.push({
-    op: 'append',
-    message: {
-      id: uniqueMessageId(snapshot, 'error'),
-      role: 'error',
-      content: message,
-      timestamp: snapshot.now,
-    },
-  });
+  if (!outcome || !existingMsg) {
+    upserts.push({
+      op: 'append',
+      message: {
+        id: uniqueMessageId(snapshot, outcome ? 'outcome' : 'error'),
+        role: outcome ? 'assistant' : 'error',
+        content: outcome ? terminalText : message,
+        timestamp: snapshot.now,
+        ...(outcome ? { segmentRole: 'answer', ...turnOutcomeFields(outcome, snapshot) } : {}),
+      },
+    });
+  }
 
   return {
     messageUpserts: upserts,
     toolUpserts: [],
     replaceBook: book,
-    statusHint: 'error',
+    statusHint: !outcome || outcome.status === 'failed' ? 'error' : 'idle',
     queueHint: '',
     finalize: true,
-    turn: { status: 500, turnDurationMs, firstTokenMs, assistantId: book.assistantId },
+    turn: { status: turnUsageStatus(outcome, 500), turnDurationMs, firstTokenMs, assistantId: book.assistantId },
   };
 }
 

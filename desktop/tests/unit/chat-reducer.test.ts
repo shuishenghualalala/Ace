@@ -1453,3 +1453,65 @@ describe('finalReducer per-turn file changes', () => {
     ]);
   });
 });
+
+describe('structured turn outcomes', () => {
+  it('keeps a partial assistant response and its tools without an extra legacy error row', () => {
+    const assistant: ChatMessage = {
+      id: 'assistant-partial', role: 'assistant', content: 'Already visible', timestamp: 1, streaming: true,
+      toolCalls: [{ toolCallId: 'read-file', name: 'file_read', status: 'done', startedAt: 1, result: 'Read output' }],
+    };
+    const snapshot = makeSnapshot({
+      messages: [assistant],
+      requestId: 'request-partial',
+      book: { ...emptyBook(), assistantId: assistant.id },
+    });
+    const result = errorReducer({
+      kind: 'error', sequence: 4,
+      body: {
+        message: 'Provider connection closed',
+        text: 'Already visible and a recovered suffix',
+        outcome: { status: 'partial', reason: 'stream_interrupted', code: 'stream', retryable: true },
+      },
+    }, snapshot);
+    expect(result.messageUpserts).toEqual([expect.objectContaining({
+      op: 'patch', messageId: assistant.id,
+      patch: expect.objectContaining({
+        requestId: 'request-partial', streaming: false, interrupted: true,
+        content: 'Already visible and a recovered suffix',
+        turnOutcome: { status: 'partial', reason: 'stream_interrupted', code: 'stream', retryable: true, message: 'Provider connection closed' },
+      }),
+    })]);
+    expect(result.messageUpserts[0]).toMatchObject({ patch: { content: 'Already visible and a recovered suffix' } });
+    expect(result.statusHint).toBe('idle');
+    expect(result.finalize).toBe(true);
+  });
+
+  it('shows a structured failure before the first model chunk without inserting the failure as assistant prose', () => {
+    const result = errorReducer({
+      kind: 'error', sequence: 2,
+      body: { message: 'Denied', outcome: { status: 'failed', reason: 'provider_error', code: 'auth' } },
+    }, makeSnapshot({ book: { ...emptyBook(), assistantId: 'absent-optimistic-id' }, requestId: 'request-auth' }));
+    expect(result.messageUpserts).toEqual([{
+      op: 'append',
+      message: expect.objectContaining({
+        role: 'assistant', content: '', requestId: 'request-auth',
+        turnOutcome: { status: 'failed', reason: 'provider_error', code: 'auth', message: 'Denied' },
+      }),
+    }]);
+    expect(result.statusHint).toBe('error');
+  });
+
+  it('seals an awaiting-plan final without removing the active plan approval', () => {
+    const book = { ...emptyBook(), planActive: true, pendingPlan: { status: 'pending' as const, plan: 'Outline', planFile: 'plan.md' } };
+    const result = finalReducer({
+      kind: 'final', sequence: 5, body: { text: '', outcome: { status: 'awaiting_input', reason: 'plan_approval' } },
+    }, makeSnapshot({ book, requestId: 'plan-request' }));
+    expect(result.replaceBook?.planActive).toBe(true);
+    expect(result.replaceBook?.pendingPlan).toEqual(book.pendingPlan);
+    expect(result.messageUpserts[0]).toMatchObject({
+      op: 'append', message: { content: '', requestId: 'plan-request', turnOutcome: { status: 'awaiting_input', reason: 'plan_approval' } },
+    });
+    expect(result.finalize).toBe(true);
+    expect(result.statusHint).toBe('idle');
+  });
+});

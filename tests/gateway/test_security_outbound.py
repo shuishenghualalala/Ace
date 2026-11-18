@@ -1,5 +1,8 @@
 """Gateway 安全基线：密钥过滤与静默回复检测。"""
 
+import pytest
+
+from crew.core.envelope import ResponseChunk, TurnOutcome
 from crew.core.errors import CrewErrorKind, ProviderError, ToolError
 from crew.features.outbound import (
     enrich_error_chunk,
@@ -8,7 +11,6 @@ from crew.features.outbound import (
 )
 from crew.gateway.helpers import status_frame
 from crew.features.response_filters import is_silent_reply, redact_secrets
-from crew.core.envelope import ResponseChunk
 
 
 def test_redact_secrets_sk_prefix():
@@ -28,6 +30,17 @@ def test_is_silent_reply_empty_and_no_reply():
 def test_format_outbound_skips_silent_final():
     chunk = ResponseChunk.final("req1", "NO_REPLY")
     assert format_outbound_payload(chunk, session_id="s1") is None
+
+
+@pytest.mark.parametrize("text", ["", "NO_REPLY"])
+def test_typed_plan_wait_preserves_silent_terminal(text):
+    wait = TurnOutcome("awaiting_input", reason="plan_review")
+    chunk = ResponseChunk.final("req1", text, outcome=wait)
+    frame = format_outbound_payload(chunk, session_id="s1")
+    assert frame["body"] == {"text": "", "outcome": wait.to_body()}
+    assert format_outbound_payload(
+        ResponseChunk.final("req1", text, outcome=TurnOutcome("completed")), session_id="s1",
+    ) is None
 
 
 def test_format_outbound_redacts_secrets():

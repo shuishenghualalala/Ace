@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
 from crew.core.runctx import (
     current_active_skill_packages,
     current_agent_workdir,
@@ -1049,13 +1049,16 @@ class SingleAgent(Agent):
         interrupted = False
         terminal_outcome: TerminalOutcome = "failed"
         terminal_error_summary = "Executor ended without a terminal response"
+        delivered_terminal = False
         last_prompt_tokens: int | None = None
         last_prompt_tokens_source: str | None = None
         # 拦截 final 帧：进化 visible 模式下需在 final 之前 yield evolution_footer，
         # 因此先把 final 暂存，等进化流程跑完再投递。
         _held_final = None
+        executor_stream = None
         try:
-            async for chunk in self.executor.execute(ctx):
+            executor_stream = self.executor.execute(ctx)
+            async for chunk in executor_stream:
                 usage = chunk.body.get("usage") if isinstance(chunk.body, dict) else None
                 if isinstance(usage, dict):
                     raw_prompt_tokens = usage.get("prompt_tokens")
@@ -1066,7 +1069,13 @@ class SingleAgent(Agent):
                             if usage.get("prompt_tokens_source") == "request_view"
                             else "provider"
                         )
-                if chunk.kind == "error" or chunk.status == "failed":
+                outcome = TurnOutcome.from_body(chunk.body.get("outcome")) if chunk.is_final else None
+                if outcome is not None and outcome.status != "completed":
+                    terminal_outcome = "interrupted" if outcome.status == "stopped" else outcome.status
+                    terminal_error_summary = (
+                        outcome.message or str(chunk.body.get("message") or outcome.reason or "")
+                    )
+                elif chunk.kind == "error" or chunk.status == "failed":
                     terminal_outcome = "failed"
                     terminal_error_summary = str(
                         chunk.body.get("message") or chunk.body.get("text") or "Agent execution failed"
@@ -1077,23 +1086,37 @@ class SingleAgent(Agent):
                     if self.evolution_visible and self.evolution_manager:
                         _held_final = chunk
                         continue
+                delivered_terminal = delivered_terminal or chunk.is_final or chunk.kind in {"final", "error"}
                 yield chunk
             if self.control.interrupted:
                 interrupted = True
                 terminal_outcome = "interrupted"
                 terminal_error_summary = ""
-        except (asyncio.CancelledError, GeneratorExit):
+        except (asyncio.CancelledError, GeneratorExit) as exc:
             # 硬停（dispatcher.stop → task.cancel）：标记中断，仍在 finally 里落库后再抛出，
             # 否则这一轮的 user 消息与工具调用永不持久化——刷新即丢、下一轮无上下文。
-            interrupted = True
-            terminal_outcome = "interrupted"
-            terminal_error_summary = ""
+            # 消费者收到终态帧后关闭迭代器时，沿用已交付的结局。
+            if isinstance(exc, GeneratorExit) and delivered_terminal:
+                interrupted = terminal_outcome == "interrupted"
+            else:
+                interrupted = True
+                terminal_outcome = "interrupted"
+                terminal_error_summary = ""
             raise
         except Exception as exc:
             terminal_outcome = "failed"
             terminal_error_summary = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            # Cancellation can arrive while the caller is still processing a
+            # yielded delta. Close the suspended executor so it can turn that
+            # in-flight output into a canonical message before we persist it.
+            close = getattr(executor_stream, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    log.exception("关闭执行器流失败 session=%s", sid)
             log.info("[PERF] executor_total     %.3fs", time.perf_counter() - t_exec)
             # 本轮新增消息回灌 canonical 历史（含尾部悬空 tool_call 清洗）+ 持久化。
             # 无论正常结束、硬停（CancelledError）还是异常，都先把历史落库。

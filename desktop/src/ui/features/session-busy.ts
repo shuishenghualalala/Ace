@@ -68,6 +68,7 @@ export function openTurnForRequest(sessionId: string, requestId: string): void {
     turnSealed: false,
     activeRequestId: requestId,
     acceptingNewRequest: false,
+    pendingStopOutcome: undefined,
     assistantId,
     firstChunkAt: null,
     hadTeamInternal: false,

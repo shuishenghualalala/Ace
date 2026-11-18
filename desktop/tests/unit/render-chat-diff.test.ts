@@ -550,6 +550,28 @@ describe('conversation-renderer tracked history and live changes', () => {
     expect(currentVisual.textContent).not.toContain('历史快照');
   });
 
+  it('keeps the rewritten user outcome separate, keyed and attached to its original prompt', () => {
+    const original = {
+      ...row('user-original', 'user'), requestId: 'req-a', historyId: 'durable-original',
+      turnOutcome: { status: 'failed' as const, code: 'auth' },
+    };
+    const later = row('user-later', 'user');
+    replaceSessionMessages(sessionId, [original, later]);
+    render();
+
+    const first = panel.querySelector('[data-message-id="user-original"]')!;
+    const marker = first.nextElementSibling!;
+    expect(first.querySelector('[data-turn-outcome]')).toBeNull();
+    expect(marker.getAttribute('data-message-id')).toBe('user-outcome-durable-original');
+    expect(marker.querySelector('[data-turn-outcome="failed"]')).not.toBeNull();
+    expect(marker.nextElementSibling?.getAttribute('data-message-id')).toBe('user-later');
+
+    replaceSessionMessages(sessionId, [{ ...original }, later]);
+    render();
+    expect(panel.querySelector('[data-message-id="user-outcome-durable-original"]')).toBe(marker);
+    expect(panel.querySelectorAll('[data-turn-outcome="failed"]')).toHaveLength(1);
+  });
+
   it('reconciles same-length authoritative history and handles edit and fold changes without message updates', () => {
     const user = row('first-user', 'user');
     const answer = { ...row('first-answer', 'assistant'), thinking: 'Previously completed thought' };

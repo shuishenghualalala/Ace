@@ -16,7 +16,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
@@ -112,6 +112,7 @@ class SessionEventType(str, Enum):
     METER_CHECKPOINT = "meter_checkpoint"
     TURN_START = "turn_start"  # 回合边界（D4 断点扫描）
     TURN_END = "turn_end"
+    TURN_OUTCOME = "turn_outcome"
     ASSISTANT_TOOL_CALLS = "assistant_tool_calls"
     TOOL_EXECUTION_INTENT = "tool_execution_intent"
     TOOL_RESULT_COMMIT = "tool_result_commit"
@@ -421,6 +422,7 @@ class SQLiteSessionStore(SessionStore):
                 last_prompt_tokens_source TEXT,
                 last_status   TEXT NOT NULL DEFAULT '',
                 last_error    TEXT NOT NULL DEFAULT '',
+                last_outcome_json TEXT NOT NULL DEFAULT '',
                 archived      INTEGER NOT NULL DEFAULT 0,
                 pinned        INTEGER NOT NULL DEFAULT 0
             )
@@ -504,6 +506,7 @@ class SQLiteSessionStore(SessionStore):
             "last_prompt_tokens_source": "ALTER TABLE sessions ADD COLUMN last_prompt_tokens_source TEXT",
             "last_status": "ALTER TABLE sessions ADD COLUMN last_status TEXT NOT NULL DEFAULT ''",
             "last_error": "ALTER TABLE sessions ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
+            "last_outcome_json": "ALTER TABLE sessions ADD COLUMN last_outcome_json TEXT NOT NULL DEFAULT ''",
             "archived": "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "pinned": "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
             "leaf_seq": "ALTER TABLE sessions ADD COLUMN leaf_seq INTEGER NOT NULL DEFAULT 0",
@@ -572,6 +575,7 @@ class SQLiteSessionStore(SessionStore):
                     last_prompt_tokens_source TEXT,
                     last_status   TEXT NOT NULL DEFAULT '',
                     last_error    TEXT NOT NULL DEFAULT '',
+                    last_outcome_json TEXT NOT NULL DEFAULT '',
                     archived      INTEGER NOT NULL DEFAULT 0,
                     pinned        INTEGER NOT NULL DEFAULT 0,
                     leaf_seq      INTEGER NOT NULL DEFAULT 0,
@@ -588,13 +592,14 @@ class SQLiteSessionStore(SessionStore):
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
                     archived, pinned, leaf_seq, events_generation, source_session_id, source_parent_seq,
-                    history_incarnation, history_rewinds
+                    history_incarnation, history_rewinds, last_outcome_json
                 )
                 SELECT
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
                     COALESCE(archived, 0), COALESCE(pinned, 0), COALESCE(leaf_seq, 0), COALESCE(events_generation, 0),
-                    COALESCE(source_session_id, ''), source_parent_seq, history_incarnation, history_rewinds
+                    COALESCE(source_session_id, ''), source_parent_seq, history_incarnation, history_rewinds,
+                    last_outcome_json
                 FROM sessions
             """,
         )
@@ -706,29 +711,36 @@ class SQLiteSessionStore(SessionStore):
                     "会话 %s 的 blob 迁移跳过（解析失败）: %s", session_id, exc
                 )
                 continue
-            seq = 1
-            for message in messages:
-                encoded = self._event_row_for_message(message)
-                if encoded is None:
-                    continue
-                conn.execute(
-                    "INSERT OR IGNORE INTO session_events "
-                    "(owner_account_id, session_id, seq, parent_seq, type, payload, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (owner, session_id, seq, seq - 1 if seq > 1 else None, encoded[0], encoded[1], now),
-                )
-                seq += 1
+            leaf = self._insert_legacy_events(conn, owner, session_id, messages, now)
             conn.execute(
                 "UPDATE sessions SET leaf_seq = ? WHERE owner_account_id = ? AND session_id = ?",
-                (seq - 1, owner, session_id),
+                (leaf, owner, session_id),
             )
             imported += 1
         return imported
 
+    def _insert_legacy_events(self, conn, owner: str, sid: str, messages: list[Message], now: float) -> int:
+        seq = 1
+        for message in messages:
+            encoded = self._event_row_for_message(message)
+            if encoded is None:
+                continue
+            conn.execute(
+                "INSERT INTO session_events "
+                "(owner_account_id, session_id, seq, parent_seq, type, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (owner, sid, seq, seq - 1 if seq > 1 else None, encoded[0], encoded[1], now),
+            )
+            seq += 1
+        return seq - 1
+
     # ---- 序列化 ----
     @staticmethod
     def _message_to_dict(m: Message) -> dict:
-        return asdict(m)
+        data = asdict(m)
+        if m.turn_outcome is None:
+            del data["turn_outcome"]
+        return data
 
     @classmethod
     def _dump(cls, messages: list[Message]) -> str:
@@ -781,6 +793,7 @@ class SQLiteSessionStore(SessionStore):
             request_id=d.get("request_id"),
             reply_to=d.get("reply_to"),
             communication_request_text=d.get("communication_request_text"),
+            turn_outcome=d.get("turn_outcome"),
         )
 
     @classmethod
@@ -912,6 +925,18 @@ class SQLiteSessionStore(SessionStore):
                 raise SessionEventLogError(f"未知事件类型 {etype!r}（seq={seq}），拒绝加载") from exc
             if event_type in _ROLE_EVENT_TYPES.values():
                 proj.messages.append(SQLiteSessionStore._message_from_dict(json.loads(payload)))
+            elif event_type is SessionEventType.TURN_OUTCOME:
+                outcome = json.loads(payload)
+                rid = outcome.get("request_id")
+                if not isinstance(rid, str) or not rid:
+                    continue
+                for index in range(len(proj.messages) - 1, -1, -1):
+                    message = proj.messages[index]
+                    if message.role in {"assistant", "user"} and not message.is_meta and message.request_id == rid:
+                        proj.messages[index] = replace(message, turn_outcome=outcome)
+                        break
+                    if message.role == "user" and not message.is_meta and message.request_id != rid:
+                        break
 
     # ---- 窗口读取（P1-1：首屏尾部窗口 + 游标翻页） ----
 
@@ -984,6 +1009,7 @@ class SQLiteSessionStore(SessionStore):
         exclusive_below: int | None,
         *,
         stop_before: Callable[[str, int], bool] | None = None,
+        include_outcomes: bool = False,
     ):
         """沿活链从 head_seq 向旧走，产出角色事件 (sid, seq, Message)，从新到旧。
 
@@ -1029,6 +1055,14 @@ class SQLiteSessionStore(SessionStore):
                 continue
             if etype in _ROLE_EVENT_TYPES_SET and (skip_above is None or cur < skip_above):
                 yield cur_sid, cur, SQLiteSessionStore._message_from_dict(json.loads(payload))
+            elif include_outcomes and etype == SessionEventType.TURN_OUTCOME.value and (
+                skip_above is None or cur < skip_above
+            ):
+                outcome = json.loads(payload)
+                yield cur_sid, cur, Message(
+                    role="assistant", request_id=outcome.get("request_id"), timestamp=outcome.get("timestamp"),
+                    turn_outcome=outcome, source_kind="turn_outcome",
+                )
             if parent is not None and parent >= cur:
                 raise SessionEventLogError(f"事件父链无效：{cur_sid}#{cur}")
             cur = parent if parent is not None else (cur - 1 if cur > 1 else None)
@@ -1199,7 +1233,7 @@ class SQLiteSessionStore(SessionStore):
 
         rows = []
         visible = 0
-        for row in self._walk_chain_window(owner, sid, leaf, None, stop_before=stop):
+        for row in self._walk_chain_window(owner, sid, leaf, None, stop_before=stop, include_outcomes=True):
             rows.append(row)
             visible += self._visible_history_role(row[2])
             if visible > limit:
@@ -1214,7 +1248,10 @@ class SQLiteSessionStore(SessionStore):
             ):
                 return None
             rows.reverse()
-            first = next((message for _, _, message in rows if self._visible_history_role(message)), None)
+            first = next((
+                message for _, _, message in rows
+                if message.source_kind != "turn_outcome" and self._visible_history_role(message)
+            ), None)
             if checkpoint > 0 and first is not None and first.role == "assistant":
                 # Adjacent assistant content may change the process/answer role
                 # of a previously visible segment. Reproject that join together.
@@ -1252,7 +1289,7 @@ class SQLiteSessionStore(SessionStore):
             last = (source, seq)
             return False
 
-        walker = self._walk_chain_window(owner, sid, leaf, before, stop_before=stop)
+        walker = self._walk_chain_window(owner, sid, leaf, before, stop_before=stop, include_outcomes=True)
         rows = []
         visible = 0
         aligned_limit = limit + min(limit, 32)
@@ -1453,6 +1490,9 @@ class SQLiteSessionStore(SessionStore):
         prefix = len(proj.messages)
         is_append = not proj.from_blob and messages[:prefix] == proj.messages
         tail = messages[prefix:] if is_append else messages
+        retained_outcome = None if is_append else next(
+            (message.turn_outcome for message in reversed(messages) if message.turn_outcome), None,
+        )
         event_rows: list[tuple[str, str]] = []
         for message in tail:
             encoded = self._event_row_for_message(message)
@@ -1523,8 +1563,8 @@ class SQLiteSessionStore(SessionStore):
             # 读路径优先事件投影，仅无事件行的 legacy 会话回退读 blob（见 _build_projection）。
             conn.execute(
                 "INSERT INTO sessions "
-                "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, leaf_seq, events_generation) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, leaf_seq, events_generation, last_outcome_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(owner_account_id, session_id) DO UPDATE SET "
                 "  updated_at = excluded.updated_at, "
                 # workspace_id 刻意不在 UPDATE 里回写：会话归属在首次创建（INSERT 或
@@ -1536,6 +1576,16 @@ class SQLiteSessionStore(SessionStore):
                 "  last_prompt_tokens_source = CASE WHEN excluded.last_prompt_tokens IS NOT NULL "
                 "THEN excluded.last_prompt_tokens_source ELSE sessions.last_prompt_tokens_source END, "
                 "  leaf_seq = excluded.leaf_seq, "
+                "  last_error = CASE WHEN sessions.events_generation != excluded.events_generation "
+                "AND sessions.last_outcome_json != '' AND sessions.last_status != 'running' "
+                "THEN COALESCE(json_extract(NULLIF(excluded.last_outcome_json, ''), '$.message'), '') "
+                "ELSE sessions.last_error END, "
+                "  last_status = CASE WHEN sessions.events_generation != excluded.events_generation "
+                "AND sessions.last_outcome_json != '' AND sessions.last_status != 'running' "
+                "THEN COALESCE(json_extract(NULLIF(excluded.last_outcome_json, ''), '$.status'), '') "
+                "ELSE sessions.last_status END, "
+                "  last_outcome_json = CASE WHEN sessions.events_generation != excluded.events_generation "
+                "THEN excluded.last_outcome_json ELSE sessions.last_outcome_json END, "
                 "  events_generation = excluded.events_generation, "
                 "  title = CASE "
                 "WHEN sessions.title IS NULL OR TRIM(sessions.title) = '' "
@@ -1557,6 +1607,7 @@ class SQLiteSessionStore(SessionStore):
                     last_prompt_tokens_source,
                     new_leaf,
                     new_generation,
+                    json.dumps(retained_outcome, ensure_ascii=False) if retained_outcome is not None else "",
                 ),
             )
             return new_leaf, len(event_rows), new_generation
@@ -1807,17 +1858,23 @@ class SQLiteSessionStore(SessionStore):
         self._writer.execute(_write)
 
     # ---- 会话树：rewind / fork / 分支枚举（ADR-0042 W5，D2/D3） ----
-    def _chain_messages_upto(
+    def _chain_at_cut(
         self, owner: str, session_id: str, upto_seq: int
-    ) -> list[Message]:
-        """解析链上 seq <= upto_seq 的消息（正序），供切口校验与 blob 回写。"""
+    ) -> tuple[list[Message], dict[str, Any] | None]:
+        """Read the role messages and latest settled outcome at the requested branch point."""
         resolved = self._resolve_chain(owner, session_id, upto_seq)
         role_types = {e.value for e in _ROLE_EVENT_TYPES.values()}
-        return [
-            self._message_from_dict(json.loads(payload))
-            for _sid, _seq, etype, payload in resolved
-            if etype in role_types
-        ]
+        messages: list[Message] = []
+        outcome = None
+        for _sid, _seq, etype, payload in resolved:
+            if etype == SessionEventType.TURN_OUTCOME.value:
+                outcome = json.loads(payload)
+            elif etype in role_types:
+                message = self._message_from_dict(json.loads(payload))
+                messages.append(message)
+                if message.turn_outcome:
+                    outcome = message.turn_outcome
+        return messages, outcome
 
     def _validate_cut(self, owner: str, session_id: str, target_seq: int) -> None:
         """校验 rewind/fork 切口合法：行存在、不在开放回合中、工具配对平衡。"""
@@ -1862,25 +1919,32 @@ class SQLiteSessionStore(SessionStore):
             raise ValueError(f"会话不存在: {session_id}")
         expected_leaf, cursor_before_generation = cursor
         self._validate_cut(owner_account_id, session_id, target_seq)
-        messages = self._chain_messages_upto(owner_account_id, session_id, target_seq)
+        messages, outcome = self._chain_at_cut(owner_account_id, session_id, target_seq)
+        outcome_json = json.dumps(outcome, ensure_ascii=False) if outcome is not None else ""
 
         def _write(conn) -> None:
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             cursor = conn.execute(
-                "UPDATE sessions SET leaf_seq = ?, message_count = ?, "
-                "token_count = ?, updated_at = ?, history_rewinds = history_rewinds + (leaf_seq != ?) "
-                "WHERE owner_account_id = ? AND session_id = ? AND leaf_seq = ? AND events_generation = ?",
-                (
-                    target_seq,
-                    len(messages),
-                    self._estimate_tokens(messages),
-                    now,
-                    target_seq,
-                    owner_account_id,
-                    session_id,
-                    expected_leaf,
-                    cursor_before_generation,
-                ),
+                "UPDATE sessions SET leaf_seq = :target, message_count = :message_count, "
+                "token_count = :token_count, updated_at = :now, history_rewinds = history_rewinds + (leaf_seq != :target), "
+                "last_status = CASE WHEN last_outcome_json != '' OR :outcome != '' THEN :status ELSE last_status END, "
+                "last_error = CASE WHEN last_outcome_json != '' OR :outcome != '' THEN :error ELSE last_error END, "
+                "last_outcome_json = :outcome "
+                "WHERE owner_account_id = :owner AND session_id = :session_id "
+                "AND leaf_seq = :expected_leaf AND events_generation = :expected_generation",
+                {
+                    "target": target_seq,
+                    "message_count": len(messages),
+                    "token_count": self._estimate_tokens(messages),
+                    "now": now,
+                    "status": str((outcome or {}).get("status") or ""),
+                    "error": str((outcome or {}).get("message") or ""),
+                    "outcome": outcome_json,
+                    "owner": owner_account_id,
+                    "session_id": session_id,
+                    "expected_leaf": expected_leaf,
+                    "expected_generation": cursor_before_generation,
+                },
             )
             if cursor.rowcount != 1:
                 raise SessionWriteConflict(
@@ -1905,7 +1969,7 @@ class SQLiteSessionStore(SessionStore):
         key = (owner_account_id, new_id)
         now = time.time()
         self._validate_cut(owner_account_id, session_id, boundary_seq)
-        prefix = self._chain_messages_upto(owner_account_id, session_id, boundary_seq)
+        prefix, _ = self._chain_at_cut(owner_account_id, session_id, boundary_seq)
 
         def _write(conn) -> str:
             self._ensure_writer_lease(conn, owner_account_id, new_id, now)
@@ -2411,7 +2475,7 @@ class SQLiteSessionStore(SessionStore):
                 )
             else:
                 conn.execute(
-                    "UPDATE sessions SET last_status = ?, last_error = ? "
+                    "UPDATE sessions SET last_status = ?, last_error = ?, last_outcome_json = '' "
                     "WHERE session_id = ? AND owner_account_id = ?",
                     (status, error, session_id, owner_account_id),
                 )
@@ -2429,12 +2493,77 @@ class SQLiteSessionStore(SessionStore):
         self._writer.execute(_write)
 
     def get_status(self, session_id: str, owner_account_id: str) -> tuple[str, str]:
+        status, error, _ = self.get_status_details(session_id, owner_account_id)
+        return status, error
+
+    def get_status_details(
+        self, session_id: str, owner_account_id: str,
+    ) -> tuple[str, str, dict[str, Any] | None]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT last_status, last_error FROM sessions WHERE session_id = ? AND owner_account_id = ?",
+                "SELECT last_status, last_error, last_outcome_json "
+                "FROM sessions WHERE session_id = ? AND owner_account_id = ?",
                 (session_id, owner_account_id),
             ).fetchone()
-        return (row[0], row[1]) if row else ("", "")
+        if row is None:
+            return "", "", None
+        outcome = json.loads(row[2]) if row[2] else None
+        return row[0], row[1], outcome if isinstance(outcome, dict) else None
+
+    def record_turn_outcome(
+        self,
+        session_id: str,
+        request_id: str,
+        outcome: dict[str, Any],
+        *,
+        owner_account_id: str,
+        last_status: str,
+        error: str = "",
+        settle_receipt: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Commit the transcript marker and last-turn summary in the same write."""
+        now = time.time()
+        encoded = json.dumps({**outcome, "request_id": request_id, "timestamp": now}, ensure_ascii=False)
+
+        def write(conn) -> None:
+            self._ensure_writer_lease(conn, owner_account_id, session_id, now)
+            session = conn.execute(
+                "SELECT leaf_seq, last_outcome_json FROM sessions WHERE owner_account_id=? AND session_id=?",
+                (owner_account_id, session_id),
+            ).fetchone()
+            if session is None:
+                raise SessionWriteConflict(f"会话已删除：{session_id}")
+            prior = json.loads(session[1]) if session[1] else None
+            if isinstance(prior, dict) and prior.get("request_id") == request_id:
+                return
+            base = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM session_events WHERE owner_account_id=? AND session_id=?",
+                (owner_account_id, session_id),
+            ).fetchone()[0]
+            leaf = session[0]
+            if not base and not leaf:
+                raw = conn.execute(
+                    "SELECT messages FROM sessions WHERE owner_account_id=? AND session_id=?",
+                    (owner_account_id, session_id),
+                ).fetchone()[0]
+                if raw != "[]":
+                    leaf = base = self._insert_legacy_events(conn, owner_account_id, session_id, self._load(raw), now)
+            seq = base + 1
+            conn.execute(
+                "INSERT INTO session_events "
+                "(owner_account_id, session_id, seq, parent_seq, type, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (owner_account_id, session_id, seq, leaf or None, SessionEventType.TURN_OUTCOME.value, encoded, now),
+            )
+            conn.execute(
+                "UPDATE sessions SET leaf_seq=?, last_status=?, last_error=?, last_outcome_json=? "
+                "WHERE owner_account_id=? AND session_id=?",
+                (seq, last_status, error, encoded, owner_account_id, session_id),
+            )
+            if settle_receipt is not None:
+                settle_receipt(conn)
+
+        self._writer.execute(write)
 
     def get_workspace_id(self, session_id: str, owner_account_id: str) -> str | None:
         """读取会话所属 workspace_id，不存在时返回 None。"""
@@ -2560,7 +2689,7 @@ class SQLiteSessionStore(SessionStore):
         """删除超过空闲阈值的会话。
 
         用于 SessionStore._is_session_expired（idle 模式）。
-        正在运行中的会话（last_status 为空或 'completed'/'failed'/'stopped' 以外的）不会被删除。
+        运行中或等待输入的会话不会被删除。
         另外可通过 exclude_session_ids 显式排除当前 dispatcher 内存中 running/queued 的会话。
 
         Returns:
@@ -2570,7 +2699,7 @@ class SQLiteSessionStore(SessionStore):
             return 0
         exclude_session_ids = set(exclude_session_ids or ())
         # 把 exclude 集合也当作“不可删除”保护，即使 last_status 尚未写入 running
-        safe_statuses = ("", "completed", "failed", "stopped")
+        safe_statuses = ("", "completed", "failed", "partial", "stopped")
         status_placeholders = ",".join("?" for _ in safe_statuses)
         params: list = [time.time() - idle_seconds, *safe_statuses]
         exclude_clause = ""

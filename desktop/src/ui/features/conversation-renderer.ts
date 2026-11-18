@@ -27,6 +27,7 @@ import {
 } from '../chat-render';
 import { reportRendererError, safeStringify } from '../renderer-error-report';
 import { diffRenderUnits } from '../chat-diff';
+import { startsAnotherOutcomeTurn, userTurnOutcomeMarker } from '../turn-outcome';
 import { setRuntimeStyle } from '../components/runtime-style';
 import { ConversationViewport, type ConversationViewportAnchor, type ConversationViewportRow } from './conversation-viewport';
 import { firstChangedMessageIndex } from '../conversation-message-changes';
@@ -348,11 +349,15 @@ function ensureFoldDelegation(container: HTMLElement, getSessionId: () => string
         let batchStart = msgs.findIndex((m) => m.id === turnId);
         if (batchStart < 0) batchStart = 0;
         let batchEnd = batchStart + 1;
+        let requestId = msgs[batchStart]?.requestId;
         while (batchEnd < msgs.length) {
-          const r = msgs[batchEnd].role;
-          const hasAgent = msgs[batchEnd].agentName;
-          if ((r === 'assistant' || r === 'error' || (r === 'status' && !hasAgent))) batchEnd += 1;
-          else break;
+          const next = msgs[batchEnd];
+          if (startsAnotherOutcomeTurn(requestId, next, msgs[batchEnd - 1])) break;
+          const { role, agentName, workflowProgress } = next;
+          if ((role === 'assistant' && !agentName) || role === 'error' || (role === 'status' && !agentName && !workflowProgress)) {
+            requestId ??= next.requestId;
+            batchEnd += 1;
+          } else break;
         }
         const batch = msgs.slice(batchStart, batchEnd);
         const answerConfirmed = hasVisibleAnswerText(batch);
@@ -646,7 +651,7 @@ function sigAgentTurn(
     const wc = m.wikiCards
       ? m.wikiCards.map((p) => `${p.id}|${p.title}`).join(US)
       : '';
-    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.thinkingStartedAt ?? ''}|${m.thinkingDurationMs ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}`;
+    return `${m.id}|${m.role}|${m.content}|${m.thinking ?? ''}|${m.thinkingStartedAt ?? ''}|${m.thinkingDurationMs ?? ''}|${m.segmentRole ?? ''}|${tc}|${pr}|${ts}|${tfc}|${wc}|${m.streaming ? '1' : '0'}|${m.agentName ?? ''}|${m.model ?? ''}|${m.timestamp}|${m.requestId ?? ''}|${m.turnOutcome ? JSON.stringify(m.turnOutcome) : ''}`;
   });
   return `t|${isStreaming ? '1' : '0'}|${userPinnedOpen === null ? '_' : userPinnedOpen ? '1' : '0'}|${parts.join('||')}`;
 }
@@ -1189,17 +1194,25 @@ export function renderConversation(
         }
         pushPlan(msg.id, sig, () => renderMessageHtml(msg, modelLabel),
           msg.role === 'user' ? 72 : 132, msg.streaming === true);
+        const marker = userTurnOutcomeMarker(msg);
+        if (marker) {
+          pushPlan(marker.id, JSON.stringify([marker.timestamp, marker.turnOutcome]), () =>
+            renderAgentTurn([marker], { isStreaming: false, userPinnedOpen: null, turnDurationMs: 0 }));
+        }
         finishSpan(i, firstPlan, msg.role === 'assistant' || msg.role === 'status');
         i += 1;
         continue;
       }
       let j = i + 1;
+      let requestId = msg.requestId;
       while (j < visibleLength) {
-        const r = messages[j].role;
-        const hasAgent = messages[j].agentName;
-        const hasWorkflowProgress = messages[j].workflowProgress;
-        if (((r === 'assistant' && !hasAgent) || r === 'error' || (r === 'status' && !hasAgent && !hasWorkflowProgress))) j += 1;
-        else break;
+        const next = messages[j];
+        if (startsAnotherOutcomeTurn(requestId, next, messages[j - 1])) break;
+        const { role, agentName, workflowProgress } = next;
+        if (!((role === 'assistant' && !agentName) || role === 'error'
+          || (role === 'status' && !agentName && !workflowProgress))) break;
+        requestId ??= next.requestId;
+        j += 1;
       }
       const batch = messages.slice(i, j);
       const isLastBatch = j >= visibleLength;

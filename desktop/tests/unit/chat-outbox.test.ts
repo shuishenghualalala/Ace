@@ -69,6 +69,29 @@ describe('native chat send journal', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ['failed', 'partial', 'output_limit'],
+    ['completed', 'awaiting_input', 'plan_approval'],
+  ] as const)('settles legacy %s carrying typed %s without replay or requeue', async (coarse, status, reason) => {
+    const bridge = journal([saved('submitted')]);
+    await outbox.bind(bridge, observer);
+    outbox.connect(send);
+    outbox.handle(capability());
+    await vi.advanceTimersByTimeAsync(0);
+    const outcome = { status, reason };
+    const frame = receipt(coarse);
+    frame.body.outcome = outcome;
+    outbox.handle(frame);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bridge.chatOutboxPut).toHaveBeenCalledWith(scope, saved('accepted'));
+    expect(observer.onReceipt).toHaveBeenCalledExactlyOnceWith(saved('submitted'), status, undefined, true, outcome);
+    expect(send.mock.calls.map(([frame]) => frame)).toEqual([
+      { action: 'send_receipt_query', session_id: turn.payload.session_id, request_id: turn.payload.request_id },
+    ]);
+    expect(bridge.records.size).toBe(0);
+  });
+
   it('requires a valid handshake and persists acceptance before settling the live composer', async () => {
     const bridge = journal();
     await outbox.bind(bridge, observer);

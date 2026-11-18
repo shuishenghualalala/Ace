@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import aclosing, closing
 from typing import AsyncIterator
 
 import pytest
@@ -38,6 +39,7 @@ from crew.agent.loop.tool_dispatch_helpers import (
     should_parallelize_tool_batch,
 )
 from crew.agent.loop.tool_runner import ToolRunner
+from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
 from crew.core.errors import ProviderError, ToolError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import FakeProvider
@@ -105,6 +107,27 @@ async def _collect(executor, ctx):
     async for ch in executor.execute(ctx):
         chunks.append(ch)
     return chunks
+
+
+def test_turn_outcome_optional_factory_keeps_legacy_wire_and_round_trips():
+    old_final = ResponseChunk.final("r", "text")
+    old_error = ResponseChunk.error("r", "error", code="timeout", retryable=False)
+    assert (old_final.status, old_final.body) == ("succeeded", {"text": "text"})
+    assert (old_error.status, old_error.body) == (
+        "failed", {"message": "error", "code": "timeout", "retryable": False},
+    )
+
+    outcome = TurnOutcome(
+        "partial", reason="provider_error", code="timeout", category="timeout", message="Timed out",
+        retryable=False, retry_delay=0,
+    )
+    error = ResponseChunk.error("r", "Timed out", outcome=outcome, text="prefix", usage={"output_tokens": 4})
+    assert error.is_final and error.body["text"] == "prefix"
+    assert error.body["usage"] == {"output_tokens": 4}
+    assert TurnOutcome.from_body(error.body["outcome"]) == outcome
+    assert TurnOutcome.from_body({"status": "in_progress"}) is None
+    assert TurnOutcome.from_body({"status": "stopped", "retry_delay": True, "retryable": "false"}) == TurnOutcome("stopped")
+    assert TurnOutcome.from_body({"status": "failed", "retry_delay": float("inf")}) == TurnOutcome("failed")
 
 
 class RecordingProvider(LLMProvider):
@@ -656,6 +679,7 @@ async def test_loop_interrupt_before_run_stops_without_calling_model():
     ex = _executor(provider)
     chunks = await _collect(ex, _ctx(control=control))
     assert chunks[-1].kind == "final" and chunks[-1].body["text"] == ""
+    assert chunks[-1].body["outcome"] == {"status": "stopped", "reason": "interrupted"}
     assert provider.stream_calls == []
 
 
@@ -677,6 +701,82 @@ async def test_loop_interrupt_midstream_keeps_partial():
     assert final.kind == "final" and final.body["text"] == "前半后半"
     deltas = "".join(c.body["text"] for c in chunks if c.kind == "delta")
     assert deltas == "前半后半"
+
+
+@pytest.mark.parametrize("stop_during", ["provider_wait", "consumer_wait"])
+async def test_runtime_hard_stop_commits_streamed_text_without_pending_tool(tmp_path, stop_during):
+    from crew.agent.runtime import SingleAgent
+    from crew.core.mocks import NullMemory
+    from crew.state.session_store import SQLiteSessionStore
+
+    stop_ready = asyncio.Event()
+    provider_closed = asyncio.Event()
+    read_started = asyncio.Event()
+    read_closed = asyncio.Event()
+
+    async def pending_read(_args):
+        read_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            read_closed.set()
+
+    registry = Registry()
+    registry.register(
+        name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+        handler=pending_read, is_async=True,
+    )
+
+    class InterruptedProvider(FakeProvider):
+        model = "hard-stop-fixture"
+
+        async def stream_chat(self, messages, tools=None):
+            try:
+                yield StreamChunk(delta_text="first ")
+                yield StreamChunk(ready_tool_call=ToolCall("preview", "file_read", {"path": "fixture.txt"}))
+                await read_started.wait()
+                yield StreamChunk(delta_text="second")
+                if stop_during == "provider_wait":
+                    stop_ready.set()
+                await asyncio.Future()
+            finally:
+                provider_closed.set()
+
+    provider = InterruptedProvider()
+    envelope = Envelope.of("Read fixture", session_id="stop", user_id="A:stop-fixture")
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        agent = SingleAgent(provider, registry, store, NullMemory(), PluginManager())
+        visible_text = []
+
+        async def consume():
+            async with aclosing(agent.run(envelope)) as stream:
+                async for chunk in stream:
+                    if chunk.kind == "delta":
+                        visible_text.append(chunk.body["text"])
+                        if stop_during == "consumer_wait" and chunk.body["text"] == "second":
+                            stop_ready.set()
+                            await asyncio.Future()
+
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(stop_ready.wait(), timeout=5)
+            agent.interrupt("User stopped the turn")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        saved = store.load(envelope.session_id, owner_account_id=envelope.user_id)
+        assert [(message.role, message.content) for message in saved] == [
+            ("user", "Read fixture"), ("assistant", "".join(visible_text)),
+        ]
+        assert visible_text == ["first ", "second"]
+        assert saved[-1].request_id == envelope.request_id
+        assert saved[-1].model == provider.model and not saved[-1].tool_calls
+        assert provider_closed.is_set() and read_closed.is_set()
 
 
 # --------------------------------------------------------------------------- #
@@ -709,6 +809,17 @@ async def test_loop_empty_response_then_retry():
     chunks = await _collect(ex, _ctx())
     final = chunks[-1]
     assert final.kind == "final" and final.body["text"] == "真正的回答"
+    assert final.body["outcome"] == {"status": "completed"}
+
+
+async def test_loop_empty_response_exhaustion_is_failed_and_retryable():
+    provider = ScriptStreamProvider(script=[ChatResponse(text="", finish_reason="stop")] * 3)
+    chunks = await _collect(_executor(provider), _ctx())
+    assert len(provider.calls) == 3
+    assert chunks[-1].kind == "final" and chunks[-1].status == "succeeded"
+    assert chunks[-1].body["outcome"] == {
+        "status": "failed", "reason": "empty_response", "retryable": True,
+    }
 
 
 async def test_loop_continuation_on_length_truncation():
@@ -721,6 +832,16 @@ async def test_loop_continuation_on_length_truncation():
     # Downstream consumers receive final, not the earlier streamed deltas.
     # Losing the prefix breaks structured deliverables such as review JSON.
     assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "前半段后半段"
+    assert chunks[-1].body["outcome"] == {"status": "completed"}
+
+
+async def test_loop_output_limit_exhaustion_keeps_partial_answer():
+    provider = ScriptStreamProvider(script=[ChatResponse(text="已生成部分", finish_reason="length")])
+    chunks = await _collect(_executor(provider, continuation_max=0), _ctx())
+    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "已生成部分"
+    assert chunks[-1].body["outcome"] == {
+        "status": "partial", "reason": "output_limit", "code": "length", "retryable": True,
+    }
 
 
 @pytest.mark.parametrize("finish_reason", ["length", "max_tokens", "model_context_window_exceeded"])
@@ -1191,7 +1312,7 @@ class StreamInterruptProvider(LLMProvider):
         if self.fail_times > 0:
             self.fail_times -= 1
             yield StreamChunk(delta_text=self.texts.pop(0))
-            raise ProviderError("ReadTimeout", retryable=True, category="timeout")
+            raise ProviderError("ReadTimeout", retryable=True, category="timeout", retry_delay=1.25)
         text = self.texts.pop(0)
         if text:
             yield StreamChunk(delta_text=text)
@@ -1202,12 +1323,15 @@ async def test_loop_stream_interrupt_continues():
     """流式中途 ReadTimeout：保留已 emit 文本，注入续写提示后重试，最终文本拼接完整。"""
     provider = StreamInterruptProvider(fail_times=1, texts=["前半段", "后半段"])
     ex = _executor(provider, stream_continuation_max=2)
-    chunks = await _collect(ex, _ctx())
+    ctx = _ctx()
+    chunks = await _collect(ex, ctx)
 
     final = chunks[-1]
     assert final.kind == "final"
     assert "前半段" in final.body["text"]
     assert "后半段" in final.body["text"]
+    assert final.body["outcome"] == {"status": "completed"}
+    assert [message.content for message in ctx.messages if message.role == "assistant"] == ["前半段", "后半段"]
     assert not any(c.kind == "error" for c in chunks)
 
     assert len(provider.stream_calls) == 2
@@ -1216,7 +1340,20 @@ async def test_loop_stream_interrupt_continues():
     assert any("正在第 1/2 次续写" in msg for msg in status_messages)
 
 
-async def test_user_interrupt_during_stream_failure_does_not_continue():
+async def test_loop_stream_interrupt_followed_by_empty_retries_retains_partial():
+    provider = StreamInterruptProvider(fail_times=1, texts=["前半段", "", "", ""])
+    ctx = _ctx()
+    chunks = await _collect(_executor(provider), ctx)
+    assert len(provider.stream_calls) == 4
+    assert chunks[-1].kind == "final" and chunks[-1].body["text"] == "前半段"
+    assert chunks[-1].body["outcome"] == {
+        "status": "partial", "reason": "empty_response", "retryable": True,
+    }
+    assert [message.content for message in ctx.messages if message.role == "assistant" and message.content] == ["前半段"]
+
+
+@pytest.mark.parametrize("prefix", ["", "前半段"])
+async def test_user_interrupt_during_stream_failure_does_not_continue(prefix):
     """用户中断后 provider 抛出的流式异常不应触发续写，否则 stop/steer 会卡住当前 turn。"""
     control = TurnControl()
 
@@ -1229,7 +1366,8 @@ async def test_user_interrupt_during_stream_failure_does_not_continue():
 
         async def stream_chat(self, messages, tools=None) -> AsyncIterator[StreamChunk]:
             self.stream_calls += 1
-            yield StreamChunk(delta_text="前半段")
+            if prefix:
+                yield StreamChunk(delta_text=prefix)
             control.interrupt("用户引导新消息")
             raise ProviderError("ReadTimeout", retryable=True, category="timeout")
 
@@ -1239,7 +1377,8 @@ async def test_user_interrupt_during_stream_failure_does_not_continue():
 
     final = chunks[-1]
     assert final.kind == "final"
-    assert final.body["text"] == "前半段"
+    assert final.body["text"] == prefix
+    assert final.body["outcome"] == {"status": "stopped", "reason": "interrupted"}
     assert provider.stream_calls == 1
     assert not any("续写" in (m.body.get("message") or "") for m in chunks if m.kind == "status")
 
@@ -1254,6 +1393,10 @@ async def test_loop_stream_interrupt_max_reached():
     assert final.kind == "final"
     assert "部分" in final.body["text"]
     assert "多次中断" in final.body["text"]
+    assert final.body["outcome"] == {
+        "status": "partial", "reason": "stream_interrupted", "code": "timeout", "category": "timeout",
+        "retryable": True, "retry_delay": 1.25,
+    }
     assert not any(c.kind == "error" for c in chunks)
     status_messages = [c.body["message"] for c in chunks if c.kind == "status"]
     assert any("正在第 1/1 次续写" in msg for msg in status_messages)
@@ -1271,11 +1414,30 @@ async def test_loop_stream_interrupt_non_retryable_yields_error():
             raise ProviderError("Unauthorized", retryable=False, category="auth")
 
     ex = _executor(AuthFailMidStream())
-    chunks = await _collect(ex, _ctx())
+    ctx = _ctx()
+    chunks = await _collect(ex, ctx)
 
     error_chunks = [c for c in chunks if c.kind == "error"]
     assert len(error_chunks) == 1
     assert "已保留" in error_chunks[0].body["message"]
+    assert error_chunks[0].body["text"] == "部分"
+    assert error_chunks[0].body["outcome"] == {
+        "status": "partial", "reason": "provider_error", "code": "auth", "category": "auth",
+        "retryable": False,
+    }
+    assert [(message.role, message.content) for message in ctx.messages] == [("user", "hi"), ("assistant", "部分")]
+
+
+async def test_terminal_provider_failure_preserves_retry_hints():
+    failure = ProviderError("busy", category="rate_limit", retryable=True, retry_delay=2.5)
+    provider = RaiseThenScript(failure, fail_times=1, script=[])
+    chunks = await _collect(_executor(provider, max_retries=0), _ctx())
+    assert len(chunks) == 1
+    assert chunks[-1].kind == "error" and chunks[-1].status == "failed"
+    assert chunks[-1].body["outcome"] == {
+        "status": "failed", "reason": "provider_error", "code": "usage_limit", "category": "rate_limit",
+        "retryable": True, "retry_delay": 2.5,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2446,6 +2608,9 @@ async def test_max_iterations_cap_still_triggers_with_reason():
     chunks = await _collect(ex, _ctx())
     finals = [c for c in chunks if c.kind == "final"]
     assert finals and finals[-1].body.get("reason") == "max_iterations"
+    assert finals[-1].body["outcome"] == {
+        "status": "partial", "reason": "max_iterations", "retryable": True,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2483,6 +2648,7 @@ async def test_turn_deadline_closes_gracefully_with_marker():
     assert len(finals) == 1
     assert finals[0].body.get("reason") == "deadline"
     assert finals[0].body.get("text") == "慢悠悠的结果"
+    assert finals[0].body["outcome"] == {"status": "stopped", "reason": "deadline"}
     # 历史标记：is_meta=False，落 canonical 且下回合进入 LLM 视图
     markers = [m for m in ctx.messages if "deadline exceeded" in (m.content or "")]
     assert len(markers) == 1 and not markers[0].is_meta

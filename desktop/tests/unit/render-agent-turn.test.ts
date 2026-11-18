@@ -1576,3 +1576,45 @@ describe('renderAgentTurn 思考区 markdown 渲染', () => {
     expect(thinking?.querySelector('strong')?.textContent).toBe('推理');
   });
 });
+
+describe('typed agent turn outcomes', () => {
+  it('keeps the partial answer and terminal notice visible when process details are closed', () => {
+    const root = renderAgentTurn(makeMessages({
+      content: 'Visible retained answer',
+      segmentRole: 'answer',
+      interrupted: true,
+      turnOutcome: { status: 'partial', reason: 'stream_interrupted', code: 'timeout', retryable: true, retry_delay: 2.2 },
+    }), { isStreaming: false, userPinnedOpen: false, turnDurationMs: 3000 });
+    expect(root.dataset.turnOutcomeStatus).toBe('partial');
+    expect(root.querySelector('.msg__text')?.textContent).toMatch(/Visible retained answer/);
+    const outcome = root.querySelector('[data-turn-outcome="partial"]')!;
+    expect(outcome.closest('details')).toBeNull();
+    expect(outcome.textContent).toMatch(/已保留收到的内容/);
+    expect(outcome.textContent).toMatch(/3 秒/);
+    expect(outcome.querySelector('button')).toBeNull();
+  });
+
+  it('offers only the known model settings action for authentication failure and preserves plan review', () => {
+    const failed = renderAgentTurn(makeMessages({
+      content: '', turnOutcome: { status: 'failed', code: 'auth' },
+    }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 0 });
+    expect(failed.querySelector('[data-turn-outcome="failed"] button')?.getAttribute('data-turn-outcome-action')).toBe('model-settings');
+
+    const plan = renderAgentTurn(makeMessages({
+      content: '',
+      planReview: { status: 'pending', sessionId: 'session-plan', plan: 'Outline', planFile: 'plan.md' },
+      turnOutcome: { status: 'awaiting_input', reason: 'plan_approval' },
+    }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 0 });
+    expect(plan.querySelector('[data-turn-outcome="awaiting_input"]')?.textContent).toMatch(/等待审阅计划/);
+    expect(plan.querySelector('[data-plan-action="open_board"]')).not.toBeNull();
+  });
+
+  it('renders unrecognized reason text without interpreting it as markup', () => {
+    const root = renderAgentTurn(makeMessages({
+      content: '', turnOutcome: { status: 'stopped', reason: 'new_reason', message: '<span>Literal diagnostic</span>' },
+    }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 0 });
+    const outcome = root.querySelector('[data-turn-outcome="stopped"]')!;
+    expect(outcome.textContent).toContain('<span>Literal diagnostic</span>');
+    expect(outcome.querySelector('span')).toBeNull();
+  });
+});

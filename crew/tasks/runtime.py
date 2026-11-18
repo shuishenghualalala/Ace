@@ -352,6 +352,7 @@ class TaskRuntime:
         result: str = "",
         error: str = "",
         progress: dict[str, Any] | None = None,
+        defer_completion_notification: bool = False,
     ) -> dict[str, Any]:
         """Atomically set one terminal state and run completion side effects once."""
 
@@ -403,7 +404,8 @@ class TaskRuntime:
         self._workers.pop(task_id, None)
         self._cancel_callbacks.pop(task_id, None)
         self._emit(task, normalized)
-        self._notify_completion(task)
+        if not defer_completion_notification:
+            self.notify_completion(task)
         return task
 
     def _owner_for_task(self, task_id: str) -> str:
@@ -801,7 +803,7 @@ class TaskRuntime:
                 )
         for task in self.list_tasks(limit=10000, _all_owners=True, owner_account_id="local"):
             if task["status"] in TERMINAL_STATUSES and task["notified_at"] is None:
-                self._notify_completion(task)
+                self.notify_completion(task)
 
     def prune_finished(self) -> int:
         if self.finished_retention_days <= 0:
@@ -895,7 +897,7 @@ class TaskRuntime:
         payload = {**task, "phase": phase}
         self._call_callback(callback, payload)
 
-    def _notify_completion(self, task: dict[str, Any]) -> None:
+    def notify_completion(self, task: dict[str, Any]) -> None:
         callback = self._completion_callback
         if callback is None or task.get("notified_at") is not None:
             return

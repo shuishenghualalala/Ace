@@ -247,3 +247,29 @@
     max-width: 88%;
   }
 }
+
+.msg__turn-outcome {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--mw-space-1);
+  margin-block: var(--mw-space-3);
+  padding: var(--mw-space-2) var(--mw-space-3);
+  border-inline-start: 2px solid var(--mw-border-default);
+  color: var(--mw-text-secondary);
+  font-size: var(--mw-type-compact-size);
+}
+
+.msg__turn-outcome p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.msg__turn-outcome[data-turn-outcome='failed'] {
+  border-color: var(--mw-status-danger);
+}
+
+.msg__turn-outcome[data-turn-outcome='partial'],
+.msg__turn-outcome[data-turn-outcome='awaiting_input'] {
+  border-color: var(--mw-status-warning);
+}

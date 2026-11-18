@@ -337,6 +337,11 @@ function bindGlobalEvents(): () => void {
       );
       return;
     }
+    const outcomeAction = eventTarget.closest<HTMLButtonElement>('[data-turn-outcome-action="model-settings"]');
+    if (outcomeAction) {
+      openSettingsPane('model');
+      return;
+    }
     const copyBtn = eventTarget.closest('.chat-copy-btn') as HTMLElement | null;
     if (copyBtn) {
       void navigator.clipboard.writeText(copyBtn.getAttribute('data-copy') ?? '').then(() => notify('已复制'));

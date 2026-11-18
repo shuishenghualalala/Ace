@@ -190,6 +190,7 @@ export interface Bookkeeping {
   activeRequestId: string | null;
   /** 新一轮刚打开但首帧尚未到达时为 true，首个生成帧会绑定 activeRequestId。 */
   acceptingNewRequest: boolean;
+  pendingStopOutcome?: { requestId: string; assistantId: string | null; owner: string } | undefined;
 }
 
 export interface FeedbackImage {

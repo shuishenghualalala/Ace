@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, fields, replace
 from functools import wraps
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Literal, TypeVar
+from typing import Any, Callable, Literal, TypeVar, get_args
 
 import yaml
 
@@ -78,7 +78,7 @@ TOOL_REQUEST_MIDDLEWARE = "tool_request"
 TOOL_EXECUTION_MIDDLEWARE = "tool_execution"
 LLM_REQUEST_MIDDLEWARE = "llm_request"
 LLM_EXECUTION_MIDDLEWARE = "llm_execution"
-TerminalOutcome = Literal["completed", "failed", "interrupted"]
+TerminalOutcome = Literal["completed", "partial", "failed", "interrupted", "awaiting_input"]
 _TERMINAL_ERROR_SUMMARY_LIMIT = 512
 # 同步回调已在线程中执行时，取消方愿意等待其收尾的最长时间；
 # 超时后放弃等待（线程无法强杀），记 warning 并让 CancelledError 传播。
@@ -2038,10 +2038,10 @@ class PluginManager:
         migration cycle. Failed maps to ``False/False`` because it is neither completion
         nor interruption; the new ``outcome`` value remains the only source of truth.
         """
-        if outcome not in {"completed", "failed", "interrupted"}:
+        if outcome not in get_args(TerminalOutcome):
             raise ValueError(f"未知 Plugin terminal outcome: {outcome}")
         safe_summary = ""
-        if outcome == "failed" and error_summary:
+        if outcome in {"failed", "partial"} and error_summary:
             safe_summary = redact_sensitive_text(str(error_summary), force=True)[
                 :_TERMINAL_ERROR_SUMMARY_LIMIT
             ]

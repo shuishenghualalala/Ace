@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast, get_args
 
 from crew.core.types import tool_arguments_for_ui
 
@@ -24,7 +25,46 @@ ChunkKind = Literal[
     "feature_event",
 ]
 Status = Literal["in_progress", "succeeded", "failed"]
+TurnOutcomeStatus = Literal["completed", "partial", "failed", "stopped", "awaiting_input"]
 Mode = str
+
+
+@dataclass(frozen=True)
+class TurnOutcome:
+    """Semantic result independent of the legacy transport kind and status."""
+
+    status: TurnOutcomeStatus
+    reason: str | None = None
+    code: str | None = None
+    category: str | None = None
+    message: str | None = None
+    retryable: bool | None = None
+    retry_delay: float | None = None
+
+    def to_body(self) -> dict[str, Any]:
+        body: dict[str, Any] = {"status": self.status}
+        for field_name in ("reason", "code", "category", "message", "retryable", "retry_delay"):
+            value = getattr(self, field_name)
+            if value is not None:
+                body[field_name] = value
+        return body
+
+    @classmethod
+    def from_body(cls, value: object) -> TurnOutcome | None:
+        if not isinstance(value, dict) or value.get("status") not in get_args(TurnOutcomeStatus):
+            return None
+        text = {
+            name: item for name in ("reason", "code", "category", "message")
+            if isinstance(item := value.get(name), str) and item
+        }
+        retryable = value.get("retryable")
+        delay = value.get("retry_delay")
+        return cls(
+            cast(TurnOutcomeStatus, value["status"]),
+            **text,
+            retryable=retryable if isinstance(retryable, bool) else None,
+            retry_delay=delay if type(delay) in (int, float) and 0 <= delay < math.inf else None,
+        )
 
 
 def _new_id(prefix: str) -> str:
@@ -148,6 +188,7 @@ class ResponseChunk:
         status: Status = "succeeded",
         usage: dict[str, int] | None = None,
         structured: Any | None = None,
+        outcome: TurnOutcome | None = None,
     ) -> "ResponseChunk":
         body: dict[str, Any] = {"text": text}
         if replace_content:
@@ -158,6 +199,8 @@ class ResponseChunk:
             body["usage"] = usage
         if structured is not None:
             body["structured"] = structured
+        if outcome is not None:
+            body["outcome"] = outcome.to_body()
         return ResponseChunk(
             request_id,
             kind="final",
@@ -176,16 +219,25 @@ class ResponseChunk:
         code: str | None = None,
         retryable: bool | None = None,
         retry_delay: float | None = None,
+        outcome: TurnOutcome | None = None,
+        text: str | None = None,
+        usage: dict[str, int] | None = None,
     ) -> "ResponseChunk":
         """错误帧。code 传 CrewErrorKind 值（如 "timeout"）；retryable/retry_delay
         为类型化错误的结构化重试提示，有则附加，纯增量不改既有帧结构。"""
-        body = {"message": message}
+        body: dict[str, Any] = {"message": message}
         if code:
             body["code"] = code
         if retryable is not None:
             body["retryable"] = retryable
         if retry_delay:
             body["retry_delay"] = retry_delay
+        if outcome is not None:
+            body["outcome"] = outcome.to_body()
+        if text is not None:
+            body["text"] = text
+        if usage:
+            body["usage"] = usage
         return ResponseChunk(
             request_id,
             kind="error",
@@ -196,9 +248,14 @@ class ResponseChunk:
         )
 
     @staticmethod
-    def status_event(request_id: str, message: str, sequence: int = 0) -> "ResponseChunk":
+    def status_event(
+        request_id: str, message: str, sequence: int = 0, *, outcome: TurnOutcome | None = None,
+    ) -> "ResponseChunk":
         """中间状态提示（如 Team 派发进度），非最终帧。"""
-        return ResponseChunk(request_id, kind="status", body={"message": message}, sequence=sequence)
+        body: dict[str, Any] = {"message": message}
+        if outcome is not None:
+            body["outcome"] = outcome.to_body()
+        return ResponseChunk(request_id, kind="status", body=body, sequence=sequence)
 
     @staticmethod
     def compaction_event(request_id: str, active: bool, sequence: int = 0) -> "ResponseChunk":

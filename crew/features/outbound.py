@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from crew.core.envelope import ResponseChunk
+from crew.core.envelope import ResponseChunk, TurnOutcome
 from crew.core.errors import CrewError, CrewErrorKind, ProviderError, category_for_kind
 from crew.features.response_filters import apply_text_filters, is_silent_reply
 
@@ -29,7 +29,8 @@ def _error_category_from_exception(exc: Exception) -> str:
 def should_skip_chunk(chunk: ResponseChunk) -> bool:
     """静默回复检测：空 body / NO_REPLY 不推帧。"""
     if chunk.kind == "final":
-        return is_silent_reply(chunk.body.get("text"))
+        outcome = TurnOutcome.from_body(chunk.body.get("outcome"))
+        return is_silent_reply(chunk.body.get("text")) and (outcome is None or outcome.status == "completed")
     if chunk.kind == "delta":
         text = chunk.body.get("text", "")
         # 仅跳过「纯空 delta」；流式中间空帧少见，final 才是主判断点
@@ -56,14 +57,21 @@ def format_outbound_payload(
         if chunk.kind == "delta" and chunk.sequence > 0:
             body.setdefault("delta_start", chunk.sequence)
             body.setdefault("delta_end", chunk.sequence)
-    elif chunk.kind == "error" and isinstance(body.get("message"), str):
-        body["message"] = apply_text_filters(body["message"], ctx)
+    elif chunk.kind == "error":
+        for field in ("message", "text"):
+            if isinstance(body.get(field), str):
+                body[field] = apply_text_filters(body[field], ctx)
         body.setdefault("category", body.get("category", "unknown"))
     elif chunk.kind == "status" and isinstance(body.get("message"), str):
         body["message"] = apply_text_filters(body["message"], ctx)
 
+    outcome = TurnOutcome.from_body(body.get("outcome"))
     if chunk.kind == "final" and is_silent_reply(body.get("text")):
-        return None
+        if outcome is None or outcome.status == "completed":
+            return None
+        body["text"] = ""
+    if outcome is not None and outcome.message:
+        body["outcome"] = {**outcome.to_body(), "message": apply_text_filters(outcome.message, ctx)}
 
     return {
         "kind": chunk.kind,

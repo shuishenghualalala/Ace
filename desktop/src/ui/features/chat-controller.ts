@@ -84,6 +84,8 @@ import {
 import { cancelSessionStreamRecovery, getSessionStreamRecovery } from './session-stream-recovery';
 import { clearScenarioChip, getArmedSubScenario } from './scenario-arm';
 import { requireRendererLogin } from './auth-gate';
+import { interactiveOwnerKey } from './interactive-owner';
+import { readTurnOutcome } from '../turn-outcome';
 import {
   formatFollowupAnswerMessage,
   isRuntimeStaffingFollowup,
@@ -1043,6 +1045,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   const featureEvent = featureEventFrameOf(chunk);
   // 撤回/中断后忽略该会话的迟到分片，避免重建已被删除的幽灵助手消息。
   if (state.suppressChunks.has(sid)) {
+    applyConfirmedLocalStop(sid, chunk);
     logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });
     return;
   }
@@ -1261,6 +1264,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
     currentStatus: state.sessionStatuses[sid] ?? 'idle',
     now: Date.now(),
     sequence: typeof chunk.sequence === 'number' ? chunk.sequence : 0,
+    ...(reqId ? { requestId: reqId } : {}),
     externallyOrderedDelta: parsed.kind === 'delta' && hasGatewayDeltaSequence(gatewaySequence),
   };
   const result = reduceChunk(parsed, snapshot);
@@ -1432,7 +1436,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
       }
     }
     finalizeTurn(sid);
-    if (parsed.kind === 'error') setStatusWithUi(sid, 'error');
+    if (result.statusHint === 'error') setStatusWithUi(sid, 'error');
     renderWorkspaceHistory(openSessionFn);
     renderChat();
     const presentedMessages = getMessages(sid);
@@ -2007,10 +2011,35 @@ export function finalizeStreamingTurn(sessionId: string): void {
   }
 }
 
+function applyConfirmedLocalStop(sessionId: string, chunk: ChatChunk): void {
+  const book = bookFor(sessionId);
+  const pending = book.pendingStopOutcome;
+  if (!pending || pending.owner !== interactiveOwnerKey() || chunk.request_id !== pending.requestId
+    || book.activeRequestId || chunk.is_final !== true || (chunk.kind !== 'error' && chunk.kind !== 'final')) return;
+  const outcome = readTurnOutcome(chunk.body.outcome, chunk.body.message);
+  if (outcome?.status !== 'stopped') return;
+
+  patchBook(sessionId, { pendingStopOutcome: undefined });
+  noteGatewaySequence(sessionId, chunk);
+  const messages = getMessages(sessionId);
+  const assistant = pending.assistantId
+    ? messages.findLast((message) => message.id === pending.assistantId && message.role === 'assistant')
+    : undefined;
+  if (assistant && (!assistant.requestId || assistant.requestId === pending.requestId)) {
+    patchMessage(sessionId, assistant.id, { turnOutcome: outcome, requestId: pending.requestId });
+  } else if (!assistant && messages.at(-1)?.role === 'user' && messages.at(-1)?.requestId === pending.requestId) {
+    appendMessage(sessionId, 'assistant', '', { turnOutcome: outcome, requestId: pending.requestId });
+  } else {
+    return;
+  }
+  notifyMessagesChanged(sessionId);
+  if (sessionId === state.activeSessionId) renderChat();
+}
+
 export function stopGeneration(sessionIdOverride?: string | Event): void {
   const sessionId = typeof sessionIdOverride === 'string' ? sessionIdOverride : state.activeSessionId;
   if (!sessionId) return;
-  withOutboxWithdrawal(sessionId, () => stopGenerationNow(sessionId));
+  withOutboxWithdrawal(sessionId, () => stopGenerationNow(sessionId, true));
 }
 
 function withOutboxWithdrawal(sessionId: string, apply: () => void, requestId?: string): void {
@@ -2027,23 +2056,28 @@ function withOutboxWithdrawal(sessionId: string, apply: () => void, requestId?: 
   });
 }
 
-function stopGenerationNow(sessionId: string): void {
+function stopGenerationNow(sessionId: string, trackOutcome = false): void {
+  const book = bookFor(sessionId);
+  const pendingStop = trackOutcome && book.activeRequestId && !book.turnSealed
+    ? { requestId: book.activeRequestId, assistantId: book.assistantId, owner: interactiveOwnerKey() }
+    : undefined;
   cancelSessionStreamRecovery(sessionId);
   // 修法3：用户主动停止是终态（每会话仅一个活跃回合）→ 清该会话 delta 重组缓冲，防泄漏。
   // withdrawMessage 走 stopGeneration，故撤回编辑也由此覆盖。
   resetSession(sessionId);
   replacePendingQueue(sessionId, []);
   setQueueHintWithUi(sessionId, '');
-  const stopSent = state.socket?.stop(sessionId) ?? Promise.resolve(false);
   // 用户主动停止：立即以停止时刻结算当前 streaming 回合的耗时显示。
   // 同时屏蔽迟到分片，直到下一次 dispatchWs 解除，避免取消竞态重建旧回复。
   finalizeStreamingTurn(sessionId);
   resetBook(sessionId);
+  if (pendingStop) patchBook(sessionId, { pendingStopOutcome: pendingStop });
   addSuppressedSession(sessionId);
   setBusyWithUi(sessionId, false);
   setStatusWithUi(sessionId, 'idle');
+  const stopSent = state.socket?.stop(sessionId) ?? Promise.resolve(false);
   void stopSent.then((ok) => {
-    if (!ok) {
+    if (!ok && (!pendingStop || bookFor(sessionId).pendingStopOutcome === pendingStop)) {
       setStatusWithUi(sessionId, 'error');
       appendMessage(sessionId, 'error', '服务未连接，已在本地停止等待');
       renderChat();

@@ -1,3 +1,4 @@
+import type { SettledTurnOutcome, TurnOutcome } from '../turn-outcome';
 /**
  * 会话/Agent 客户端：会话生命周期、Agent 配置、外部 Agent/Team、运行时、
  * 浏览器、Cron、Task、Dynamic Kanban、追问，以及 BackendChatSocket。
@@ -71,6 +72,7 @@ export interface BackendHistoryItem {
   content: string;
   /** Stable identity from the durable event projection. */
   history_id?: string;
+  outcome?: TurnOutcome;
   timestamp?: number;
   turn_started_at?: number;
   turn_duration?: number;
@@ -1328,6 +1330,7 @@ export const sessionApi = {
       queue_depth: number;
       last_status: string;
       last_error: string;
+      last_outcome?: SettledTurnOutcome;
     }>(
       `/api/session/${encodeURIComponent(id)}/status`,
     ),

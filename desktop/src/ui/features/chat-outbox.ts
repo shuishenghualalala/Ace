@@ -3,10 +3,17 @@ import type { ComposerCheckpointRef } from '../../shared/renderer-checkpoint';
 import { CrewBridge, type ChatChunk, type ReceiptedSendPayload, type SendReceiptAction } from '../api/transport';
 import type { PendingMessage } from '../chat-render';
 import { uiStore } from '../stores/ui-store';
+import { readTurnOutcome, type TurnOutcome } from '../turn-outcome';
 
-type ReceiptStatus = 'accepted' | 'running' | 'completed' | 'failed' | 'uncertain' | 'unknown' | 'rejected' | 'unavailable' | 'cancelled';
+type SettledTurnReceipt = 'completed' | 'partial' | 'failed' | 'awaiting_input' | 'cancelled';
+type ReceiptStatus = SettledTurnReceipt | 'accepted' | 'running' | 'uncertain' | 'unknown' | 'rejected' | 'unavailable';
 type Delivery = 'accepted' | 'rejected' | 'cancelled';
 type OutboxFrame = ReceiptedSendPayload | SendReceiptAction;
+
+export function isSettledTurnReceipt(status: unknown): status is SettledTurnReceipt {
+  return status === 'completed' || status === 'partial' || status === 'failed'
+    || status === 'awaiting_input' || status === 'cancelled';
+}
 
 interface OutboxBridge {
   chatOutboxList(): Promise<DesktopChatOutboxSnapshot>;
@@ -46,7 +53,7 @@ interface Binding {
 
 export interface OutboxObserver {
   onRestored(entry: DesktopChatOutboxEntry): void;
-  onReceipt(entry: DesktopChatOutboxEntry, status: ReceiptStatus, code: string | undefined, restored: boolean): void;
+  onReceipt(entry: DesktopChatOutboxEntry, status: ReceiptStatus, code: string | undefined, restored: boolean, outcome?: TurnOutcome): void;
 }
 
 export function desktopOutboxBridge(): OutboxBridge | null {
@@ -306,12 +313,12 @@ export class ChatOutbox {
     const binding = this.binding;
     if (binding && tracked && tracked.entry.sessionId === chunk.session_id
       && this.storeId && outboxTurn(tracked.entry)?.storeId === this.storeId) {
-      void this.reconcile(tracked, binding, chunk.body.status, chunk.body.code).catch(() => {});
+      void this.reconcile(tracked, binding, chunk.body.status, chunk.body.code, chunk.body.outcome).catch(() => {});
     }
     return true;
   }
 
-  private async reconcile(tracked: Tracked, binding: Binding, rawStatus: unknown, rawCode: unknown): Promise<void> {
+  private async reconcile(tracked: Tracked, binding: Binding, rawStatus: unknown, rawCode: unknown, rawOutcome?: unknown): Promise<void> {
     const { entry } = tracked;
     if (entry.phase === 'queued' || tracked.staging || tracked.removing || tracked.finishing) return;
     if (tracked.terminal) {
@@ -319,6 +326,9 @@ export class ChatOutbox {
       return;
     }
     if (rawStatus === 'unknown' && entry.phase === 'accepted') rawStatus = 'uncertain';
+    const outcome = readTurnOutcome(rawOutcome);
+    if (rawStatus === 'failed' && outcome?.status === 'partial') rawStatus = 'partial';
+    if (rawStatus === 'completed' && outcome?.status === 'awaiting_input') rawStatus = 'awaiting_input';
     const code = typeof rawCode === 'string' ? rawCode : undefined;
     if (rawStatus === 'unknown' && entry.phase === 'submitted' && !tracked.processing) {
       const turn = outboxTurn(entry);
@@ -340,8 +350,7 @@ export class ChatOutbox {
       }
       return;
     }
-    if (rawStatus !== 'completed' && rawStatus !== 'failed' && rawStatus !== 'uncertain'
-      && rawStatus !== 'rejected' && rawStatus !== 'cancelled') return;
+    if (!isSettledTurnReceipt(rawStatus) && rawStatus !== 'uncertain' && rawStatus !== 'rejected') return;
     if (rawStatus === 'rejected' && entry.phase === 'accepted') return;
     if (rawStatus === 'uncertain' || (rawStatus === 'rejected' && entry.phase === 'submitted')) {
       const turn = outboxTurn(entry);
@@ -381,7 +390,7 @@ export class ChatOutbox {
     }
     tracked.finishing = true;
     try {
-      if ((rawStatus === 'completed' || rawStatus === 'failed') && entry.phase !== 'withdrawing') {
+      if (isSettledTurnReceipt(rawStatus) && rawStatus !== 'cancelled' && entry.phase !== 'withdrawing') {
         await this.persistAcceptance(tracked, binding);
       }
     } finally {
@@ -392,7 +401,8 @@ export class ChatOutbox {
     tracked.delivery?.resolve(
       entry.phase === 'withdrawing' || rawStatus === 'cancelled' ? 'cancelled' : rawStatus === 'rejected' ? 'rejected' : 'accepted',
     );
-    this.observer?.onReceipt(entry, rawStatus, code, Boolean(tracked.restored));
+    if (outcome) this.observer?.onReceipt(entry, rawStatus, code, Boolean(tracked.restored), outcome);
+    else this.observer?.onReceipt(entry, rawStatus, code, Boolean(tracked.restored));
     await this.removeTerminal(tracked, binding);
   }
 

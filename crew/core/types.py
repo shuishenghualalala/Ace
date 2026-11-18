@@ -247,6 +247,8 @@ class Message:
     request_id: str | None = None
     reply_to: str | None = None
     communication_request_text: str | None = None
+    # Durable turn metadata for history presentation. Never part of provider messages.
+    turn_outcome: dict[str, Any] | None = None
 
     def to_openai(self) -> dict[str, Any]:
         """转换为 OpenAI Chat Completions 的 message 字典。

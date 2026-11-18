@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
 
+from crew.core.envelope import TurnOutcome
 from crew.core.types import Message, ToolCall
 from crew.state.session_store import SessionEventLogError, SQLiteSessionStore
 
@@ -338,6 +340,112 @@ def _versioned(store, sid="s1", limit=2, **options):
     return read_session_history_window(store, sid, OWNER, limit, **options)
 
 
+def _request_turn(request_id: str) -> list[Message]:
+    return [
+        replace(Message.user(f"question {request_id}"), request_id=request_id),
+        replace(Message.assistant(f"answer {request_id}"), request_id=request_id),
+    ]
+
+
+def _settle(store: SQLiteSessionStore, request_id: str, outcome: TurnOutcome) -> None:
+    store.record_turn_outcome(
+        "s1", request_id, outcome.to_body(), owner_account_id=OWNER,
+        last_status=outcome.status, error=outcome.message or "",
+    )
+
+
+def test_turn_outcome_appends_stable_marker_without_adding_model_message(tmp_path):
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        messages = [*_request_turn("r0"), *_request_turn("r1")]
+        store.save("s1", messages, owner_account_id=OWNER)
+        before = _versioned(store)
+        outcome = TurnOutcome("partial", reason="provider_error", code="timeout", retryable=True, retry_delay=1.25)
+        _settle(store, "r1", outcome)
+
+        append = _versioned(store, after=before["head"], revision=before["revision"])
+        assert append["mode"] == "append"
+        assert append["revision"] == before["revision"] and append["head"] != before["head"]
+        marker, = append["items"]
+        assert (marker["role"], marker["content"], marker["request_id"]) == ("assistant", "", "r1")
+        assert TurnOutcome.from_body(marker["outcome"]) == outcome
+        latest = _versioned(store, limit=3)
+        assert latest["items"] == [*before["items"], marker]
+        older = _versioned(store, before=before["next_before"], revision=before["revision"])
+        assert older["mode"] == "page"
+        assert [item["content"] for item in older["items"]] == ["question r0", "answer r0"]
+
+        _settle(store, "r1", outcome)
+        quiet = _versioned(store, after=append["head"], revision=append["revision"])
+        assert quiet["mode"] == "append" and quiet["head"] == append["head"] and quiet["items"] == []
+
+        raw, more, cursor = store.load_window("s1", owner_account_id=OWNER, limit=20)
+        assert not more and cursor is None
+        assert [message for _, _, message in raw] == messages
+        canonical = store.load("s1", owner_account_id=OWNER)
+        assert len(canonical) == len(messages)
+        assert TurnOutcome.from_body(canonical[-1].turn_outcome) == outcome
+        assert [message.to_openai() for message in canonical] == [message.to_openai() for message in messages]
+
+
+@pytest.mark.parametrize("has_assistant", [True, False])
+def test_turn_outcome_survives_rewrite_of_retained_turn_and_is_removed_with_turn(tmp_path, has_assistant):
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        messages = _request_turn("r1")
+        if not has_assistant:
+            messages.pop()
+        store.save("s1", messages, owner_account_id=OWNER)
+        outcome = TurnOutcome("failed", reason="provider_error", code="auth", message="Authentication failed")
+        _settle(store, "r1", outcome)
+        old = _versioned(store, limit=4)
+
+        prompt, *rest = store.load("s1", owner_account_id=OWNER)
+        edited = [replace(prompt, content="Edited question"), *rest]
+        store.save("s1", edited, owner_account_id=OWNER)
+        rewritten = _versioned(store, after=old["head"], revision=old["revision"])
+        assert rewritten["mode"] == "snapshot" and rewritten["revision"] != old["revision"]
+        assert [item["content"] for item in rewritten["items"] if item["content"]] == [message.content for message in edited]
+        [retained] = [item for item in rewritten["items"] if "outcome" in item]
+        assert retained["request_id"] == "r1" and TurnOutcome.from_body(retained["outcome"]) == outcome
+        status, error, saved = store.get_status_details("s1", OWNER)
+        assert (status, error, TurnOutcome.from_body(saved)) == ("failed", "Authentication failed", outcome)
+
+        store.save("s1", _request_turn("replacement"), owner_account_id=OWNER)
+        replaced = _versioned(store, after=rewritten["head"], revision=rewritten["revision"])
+        assert replaced["mode"] == "snapshot" and replaced["revision"] != rewritten["revision"]
+        assert all("outcome" not in item for item in replaced["items"])
+        assert store.get_status_details("s1", OWNER) == ("", "", None)
+
+
+@pytest.mark.parametrize(("settled_request", "legacy_override"), [("r1", False), ("outcome-only", False), ("r1", True)])
+def test_turn_outcome_rewind_restores_prior_marker_and_session_metadata(tmp_path, settled_request, legacy_override):
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        store.save("s1", _request_turn("r1"), owner_account_id=OWNER)
+        first = TurnOutcome("failed", reason="provider_error", code="auth", message="First turn failed")
+        _settle(store, settled_request, first)
+        settled_messages = store.load("s1", owner_account_id=OWNER)
+        cut = store.read_history_page("s1", owner_account_id=OWNER, limit=10).rows[-1][1]
+        store.save("s1", [*settled_messages, *_request_turn("r2")], owner_account_id=OWNER)
+        _settle(store, "r2", TurnOutcome("completed"))
+        if legacy_override:
+            store.set_status("s1", "stopped", "Later legacy status", owner_account_id=OWNER)
+        old = _versioned(store, limit=10)
+        old_meta, = store.list_sessions(owner_account_id=OWNER)
+
+        store.rewind("s1", cut, owner_account_id=OWNER)
+        current = _versioned(store, limit=10, after=old["head"], revision=old["revision"])
+        assert current["mode"] == "snapshot" and current["revision"] != old["revision"]
+        assert [item["request_id"] for item in current["items"]] == ["r1", "r1", settled_request]
+        assert TurnOutcome.from_body(current["items"][-1]["outcome"]) == first
+        metadata, = store.list_sessions(owner_account_id=OWNER)
+        assert metadata["message_count"] == 2 and metadata["updated_at"] >= old_meta["updated_at"]
+        assert store.total_usage(OWNER)["total_tokens"] > 0
+        status, error, saved = store.get_status_details("s1", OWNER)
+        assert (status, error, TurnOutcome.from_body(saved)) == ("failed", "First turn failed", first)
+
+        store.rewind("s1", cut, owner_account_id=OWNER)
+        assert _versioned(store, limit=10) == current
+
+
 def test_versioned_history_replays_complete_append_then_preserves_older_cursor(tmp_path):
     with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
         _save_turns(store, "s1", 4)
@@ -453,3 +561,23 @@ def test_versioned_history_reads_legacy_blob_before_backfill_and_invalidates_its
         assert modern["mode"] == "snapshot" and modern["revision"] != first["revision"]
         assert [item["content"] for item in modern["items"]] == ["latest", "reply"]
         assert {item["history_id"] for item in first["items"]}.isdisjoint(item["history_id"] for item in modern["items"])
+
+
+def test_settlement_preserves_unmigrated_blob_and_expires_its_history_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(SQLiteSessionStore, "_start_legacy_backfill", lambda _store: None)
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        legacy = [*_request_turn("r0"), *_request_turn("r1")]
+        store.transaction(lambda conn: conn.execute(
+            "INSERT INTO sessions(session_id, owner_account_id, messages, updated_at) VALUES (?, ?, ?, ?)",
+            ("s1", OWNER, store._dump(legacy), 1.0),
+        ))
+        old = _versioned(store)
+        outcome = TurnOutcome("stopped", reason="user_stop", message="Stopped")
+        _settle(store, "r1", outcome)
+
+        migrated = _versioned(store, limit=10, after=old["head"], revision=old["revision"])
+        assert migrated["mode"] == "snapshot" and migrated["revision"] != old["revision"]
+        assert [item["content"] for item in migrated["items"]] == [*(message.content for message in legacy), ""]
+        assert TurnOutcome.from_body(migrated["items"][-1]["outcome"]) == outcome
+        raw, _, _ = store.load_window("s1", owner_account_id=OWNER, limit=20)
+        assert [message for _, _, message in raw] == legacy

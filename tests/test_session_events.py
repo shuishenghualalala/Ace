@@ -1023,16 +1023,16 @@ def test_rewind_cas_conflict_on_concurrent_leaf_move(tmp_path):
         store1.load("s1", owner_account_id="")
         time.sleep(0.4)  # store1 租约过期，store2 可接管
 
-        original = store1._chain_messages_upto
+        original = store1._chain_at_cut
 
         def _race(owner, sid, upto):
             store2.rewind("s1", 1, owner_account_id="")
             return original(owner, sid, upto)
 
-        store1._chain_messages_upto = _race
+        store1._chain_at_cut = _race
         with pytest.raises(SessionWriteConflict):
             store1.rewind("s1", 2, owner_account_id="")
-        store1._chain_messages_upto = original
+        store1._chain_at_cut = original
         # store2 的移动生效未被覆盖
         assert _leaf_seq(db, "", "s1") == 1
     finally:

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from crew.core.envelope import TurnOutcome
 from crew.state.logging import get_logger
 
 _MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
@@ -47,11 +48,14 @@ class SendReceipt:
     status: str
     code: str = ""
     payload: dict[str, Any] | None = None
+    outcome: TurnOutcome | None = None
 
     def frame(self) -> dict[str, Any]:
         body = {"status": self.status}
         if self.code:
             body["code"] = self.code
+        if self.outcome is not None:
+            body["outcome"] = self.outcome.to_body()
         return {
             "kind": "send_receipt",
             "session_id": self.key.session_id,
@@ -92,7 +96,10 @@ class DesktopSendInbox:
         status, code, generation, _digest, payload = row
         if status == "running" and generation != self._generation:
             return SendReceipt(key, "uncertain", "interrupted_after_dispatch")
-        return SendReceipt(key, status, code, json.loads(payload) if status == "accepted" and payload else None)
+        if status == "accepted" and payload:
+            return SendReceipt(key, status, code, json.loads(payload))
+        outcome = TurnOutcome.from_body(json.loads(payload)) if payload and status != "running" else None
+        return SendReceipt(key, status, code, outcome=outcome)
 
     async def accept(self, key: SendKey, payload: dict[str, Any]) -> SendReceipt:
         try:
@@ -160,14 +167,23 @@ class DesktopSendInbox:
             WHERE owner_account_id=? AND session_id=? AND request_id=? AND status='running' AND generation=?
         """, (time.time(), *key.values, self._generation)))
 
-    async def finish(self, key: SendKey, status: str, code: str, *, started: bool) -> None:
-        await self._execute(lambda conn: conn.execute("""
-            UPDATE desktop_send_inbox SET status=?, code=?, payload_json=NULL, updated_at=?
+    async def finish(
+        self, key: SendKey, status: str, code: str, *, started: bool, outcome: TurnOutcome | None = None,
+    ) -> None:
+        await self._execute(lambda conn: self._finish_in_transaction(conn, key, status, code, started, outcome))
+
+    def _finish_in_transaction(
+        self, conn: Any, key: SendKey, status: str, code: str, started: bool, outcome: TurnOutcome | None,
+    ) -> bool:
+        # Once execution settles, replace the input envelope with its outcome.
+        payload = json.dumps(outcome.to_body(), ensure_ascii=False) if outcome is not None else None
+        return conn.execute("""
+            UPDATE desktop_send_inbox SET status=?, code=?, payload_json=?, updated_at=?
             WHERE owner_account_id=? AND session_id=? AND request_id=? AND status=? AND generation=?
         """, (
-            status, code, time.time(), *key.values,
+            status, code, payload, time.time(), *key.values,
             "running" if started else "accepted", self._generation if started else "",
-        )))
+        )).rowcount == 1
 
     def reserve(self, receipt: SendReceipt, run: Callable[[SendReceipt], Awaitable[None]]) -> None:
         if receipt.status != "accepted" or receipt.payload is None or receipt.key in self._scheduled:
@@ -214,9 +230,13 @@ class SendExecution:
                 raise
         return self.started
 
-    async def finish(self, status: str, code: str = "") -> None:
-        await self.inbox.finish(self.key, status, code, started=self.started)
+    async def finish(self, status: str, code: str = "", *, outcome: TurnOutcome | None = None) -> None:
+        await self.inbox.finish(self.key, status, code, started=self.started, outcome=outcome)
         self.finished = True
+
+    def finish_in_transaction(self, conn: Any, status: str, code: str, outcome: TurnOutcome) -> None:
+        if not self.inbox._finish_in_transaction(conn, self.key, status, code, self.started, outcome):
+            raise RuntimeError("Desktop send changed before turn settlement")
 
     async def defer(self) -> None:
         if self.started:

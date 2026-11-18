@@ -114,12 +114,17 @@ async def test_session_end_uses_single_outcome_and_derives_legacy_booleans(caplo
     raw_error = 'api_key="sk-test-12345678901234567890" ' + ("x" * 900)
     with caplog.at_level("WARNING"):
         await plugins.on_session_end("session-1", outcome="failed", error_summary=raw_error)
+        await plugins.on_session_end("session-2", outcome="partial", error_summary=raw_error)
+        await plugins.on_session_end("session-3", outcome="awaiting_input")
 
     assert modern_calls[0]["outcome"] == "failed"
     assert len(modern_calls[0]["error_summary"]) <= 512
     assert "sk-test-12345678901234567890" not in modern_calls[0]["error_summary"]
+    assert modern_calls[1] == {**modern_calls[0], "session_id": "session-2", "outcome": "partial"}
+    assert modern_calls[2] == {"session_id": "session-3", "outcome": "awaiting_input", "error_summary": ""}
     assert legacy_calls == [
-        {"session_id": "session-1", "completed": False, "interrupted": False}
+        {"session_id": session, "completed": False, "interrupted": False}
+        for session in ("session-1", "session-2", "session-3")
     ]
     assert "completed/interrupted 参数已废弃" in caplog.text
 

@@ -17,7 +17,8 @@ import asyncio
 import inspect
 import random
 import time
-from dataclasses import replace
+from contextlib import aclosing
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, AsyncIterator
 
@@ -46,7 +47,7 @@ from crew.agent.loop import (
     should_continue,
 )
 from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
-from crew.core.envelope import ResponseChunk
+from crew.core.envelope import ResponseChunk, TurnOutcome
 from crew.core.errors import CrewError, CrewErrorKind, ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
 from contextvars import copy_context
@@ -250,25 +251,59 @@ def _without_image_inputs(messages: list[Message]) -> list[Message]:
 _RETRY_DELAY_CAP_SECONDS = 60.0
 
 
+def _provider_failure_outcome(exc: BaseException, *, partial: bool, reason: str = "provider_error") -> TurnOutcome:
+    typed = exc if isinstance(exc, CrewError) else None
+    retryable = typed.is_retryable() if typed else (True if reason == "stream_interrupted" else None)
+    return TurnOutcome(
+        "partial" if partial else "failed",
+        reason=reason,
+        code=typed.kind.value if typed else None,
+        category=exc.category if isinstance(exc, ProviderError) else None,
+        retryable=retryable,
+        retry_delay=typed.retry_delay if typed else None,
+    )
+
+
 def _llm_error_chunk(
     rid: str,
     exc: BaseException,
     sequence: int,
     message: str | None = None,
+    *,
+    partial_text: str = "",
+    usage: dict[str, int] | None = None,
 ) -> ResponseChunk:
-    """LLM 路径的 error 帧：CrewError 带结构化 kind(code)/retryable/retry_delay，
-    非类型化异常保持纯 message 帧。message 覆盖默认的 str(exc)（友好文案场景）。"""
+    """Preserve provider hints and text already delivered to the user."""
     text = str(exc) if message is None else message
-    if isinstance(exc, CrewError):
-        return ResponseChunk.error(
-            rid,
-            text,
-            sequence,
-            code=exc.kind.value,
-            retryable=exc.is_retryable(),
-            retry_delay=exc.retry_delay,
-        )
-    return ResponseChunk.error(rid, text, sequence)
+    outcome = _provider_failure_outcome(exc, partial=bool(partial_text))
+    return ResponseChunk.error(
+        rid,
+        text,
+        sequence,
+        code=outcome.code,
+        retryable=outcome.retryable,
+        retry_delay=outcome.retry_delay,
+        outcome=outcome,
+        text=partial_text or None,
+        usage=usage,
+    )
+
+
+def _interrupted_outcome(deadline: bool) -> TurnOutcome:
+    return TurnOutcome("stopped", reason="deadline" if deadline else "interrupted")
+
+
+@dataclass(slots=True)
+class _UncommittedModelText:
+    """Text emitted by the current model step before a canonical message exists."""
+
+    parts: list[str] = field(default_factory=list)
+    model: str | None = None
+
+    def preserve(self, messages: list[Message]) -> None:
+        if self.parts:
+            messages.append(Message.assistant("".join(self.parts), model=self.model))
+            self.parts.clear()
 
 
 def _dump_prompt(ctx: ExecutionContext, view: list, tools: list | None, iteration: int) -> None:
@@ -517,6 +552,7 @@ class BuiltinExecutor(AgentExecutor):
         replace_content: bool = False,
         reason: str | None = None,
         usage: dict[str, int] | None = None,
+        outcome: TurnOutcome = TurnOutcome("completed"),
     ) -> AsyncIterator[ResponseChunk]:
         """对账文件改动后再发 final，保证前端差集与落库摘要一致。"""
         for chunk in self._pre_final_chunks(rid, next_seq, session_id, owner_account_id):
@@ -528,6 +564,7 @@ class BuiltinExecutor(AgentExecutor):
             replace_content=replace_content,
             reason=reason,
             usage=usage,
+            outcome=outcome,
         )
 
     async def _interrupt_notice_chunks(
@@ -554,6 +591,18 @@ class BuiltinExecutor(AgentExecutor):
 
     # ------------------------------------------------------------------ #
     async def execute(self, ctx: ExecutionContext) -> AsyncIterator[ResponseChunk]:
+        pending = _UncommittedModelText()
+        async with aclosing(self._execute(ctx, pending)) as stream:
+            try:
+                async for chunk in stream:
+                    yield chunk
+            except (asyncio.CancelledError, GeneratorExit):
+                pending.preserve(ctx.messages)
+                raise
+
+    async def _execute(
+        self, ctx: ExecutionContext, pending: _UncommittedModelText,
+    ) -> AsyncIterator[ResponseChunk]:
         rid = ctx.request_id
         seq = 0
 
@@ -735,6 +784,7 @@ class BuiltinExecutor(AgentExecutor):
                 async for _fc in self._emit_final(
                     rid, next_seq, ctx.session_id, owner_account_id, "",
                     reason="deadline" if deadline_now else None,
+                    outcome=_interrupted_outcome(deadline_now),
                 ):
                     yield _fc
                 return
@@ -848,7 +898,10 @@ class BuiltinExecutor(AgentExecutor):
                     log.info("压缩期间被 interrupt，放弃本次压缩并收尾 session=%s", ctx.session_id)
                     async for _nc in self._interrupt_notice_chunks(control, rid, next_seq, ctx):
                         yield _nc
-                    async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+                    async for _fc in self._emit_final(
+                        rid, next_seq, ctx.session_id, owner_account_id, "",
+                        outcome=_interrupted_outcome(False),
+                    ):
                         yield _fc
                     return
                 overflow_after = (
@@ -865,9 +918,15 @@ class BuiltinExecutor(AgentExecutor):
                         ctx.session_id,
                     )
                     if local_overflow is not None:
-                        yield _llm_error_chunk(rid, local_overflow, next_seq())
+                        yield _llm_error_chunk(
+                            rid, local_overflow, next_seq(), partial_text=continuation_prefix + streamed_text,
+                        )
                     else:
-                        yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
+                        yield _llm_error_chunk(
+                            rid, ProviderError("上下文超长且无法进一步压缩",
+                                               kind=CrewErrorKind.CONTEXT_WINDOW_EXCEEDED),
+                            next_seq(), partial_text=continuation_prefix + streamed_text,
+                        )
                     return
                 if local_overflow is None:
                     overflow_mode = True
@@ -938,7 +997,10 @@ class BuiltinExecutor(AgentExecutor):
                 #yield ResponseChunk.status_event(rid, "安全策略检查中…", next_seq())
                 assistant_msg = Message.assistant(block_text)
                 ctx.messages.append(assistant_msg)
-                async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, block_text):
+                async for _fc in self._emit_final(
+                    rid, next_seq, ctx.session_id, owner_account_id, block_text,
+                    outcome=TurnOutcome("failed", reason="policy_blocked", retryable=False),
+                ):
                     yield _fc
                 return
 
@@ -948,7 +1010,7 @@ class BuiltinExecutor(AgentExecutor):
 
             # ---- 调模型（流式重试 + 溢出压缩 + provider 故障转移 + 流式中途中断）----
             result: dict[str, Any] = {}
-            async for ev in self._call_model(
+            model_stream = self._call_model(
                 request_view,
                 rid,
                 next_seq,
@@ -956,8 +1018,14 @@ class BuiltinExecutor(AgentExecutor):
                 control,
                 runner,
                 ctx.session_id,
-            ):
-                yield ev
+                prior_text=continuation_prefix + streamed_text,
+            )
+            async with aclosing(model_stream):
+                async for ev in model_stream:
+                    if ev.kind == "delta":
+                        pending.parts.append(ev.body["text"])
+                        pending.model = result.get("model") or None
+                    yield ev
             usage = result.get("usage")
             if not isinstance(usage, dict):
                 usage = {}
@@ -986,10 +1054,16 @@ class BuiltinExecutor(AgentExecutor):
                         next_seq(),
                     )
                     continue
-                yield ResponseChunk.error(
+                yield _llm_error_chunk(
                     rid,
-                    str(result.get("provider_error") or "当前模型不支持所需能力"),
+                    ProviderError(
+                        str(result.get("provider_error") or "当前模型不支持所需能力"),
+                        kind=CrewErrorKind.UNSUPPORTED_CAPABILITY,
+                        retryable=False,
+                    ),
                     next_seq(),
+                    partial_text=continuation_prefix + streamed_text,
+                    usage=usage,
                 )
                 return
             preflight_failure = result.get("preflight_budget_error")
@@ -1003,7 +1077,9 @@ class BuiltinExecutor(AgentExecutor):
                     retry_todo_reminder = todo_reminder
                     budget.refund()
                     continue
-                yield _llm_error_chunk(rid, preflight_failure, next_seq())
+                yield _llm_error_chunk(
+                    rid, preflight_failure, next_seq(), partial_text=continuation_prefix + streamed_text,
+                )
                 return
             if result.get("overflow"):
                 max_overflow_retries = (
@@ -1023,15 +1099,24 @@ class BuiltinExecutor(AgentExecutor):
                         ctx.session_id,
                     )
                     continue
-                yield ResponseChunk.error(rid, "上下文超长且无法进一步压缩", next_seq())
+                yield _llm_error_chunk(
+                    rid, ProviderError("上下文超长且无法进一步压缩", kind=CrewErrorKind.CONTEXT_WINDOW_EXCEEDED),
+                    next_seq(), partial_text=continuation_prefix + streamed_text, usage=usage,
+                )
                 return
             if result.get("error"):
-                return  # 已 emit error 帧，结束
+                if result.get("text"):
+                    partial_message = Message.assistant(result["text"], model=result.get("model") or None)
+                    partial_message.thinking = result.get("reasoning") or None
+                    ctx.messages.append(partial_message)
+                pending.parts.clear()
+                return
 
             # ---- 流式中断续写（Crew partial stream stub + continuation）----
             #   _call_model 已 emit 过 delta 后遭遇可恢复异常，保留已生成文本，
             #   追加为 assistant message，再注入续写提示后重试。
-            if result.get("stream_interrupt"):
+            stream_failure = result.get("stream_failure")
+            if isinstance(stream_failure, TurnOutcome):
                 text = result.get("text", "")
                 reasoning = result.get("reasoning", "")
                 streamed_text += text
@@ -1039,11 +1124,14 @@ class BuiltinExecutor(AgentExecutor):
                 if reasoning:
                     assistant_msg.thinking = reasoning
                 ctx.messages.append(assistant_msg)
+                pending.parts.clear()
                 view_messages.append(assistant_msg)
                 if stream_continuation_count >= self.stream_continuation_max:
                     final_text = continuation_prefix + streamed_text + "\n\n（模型响应多次中断，已保留已生成内容）"
                     async for _fc in self._emit_final(
                         rid, next_seq, ctx.session_id, owner_account_id, final_text,
+                        usage=result.get("usage"),
+                        outcome=stream_failure,
                     ):
                         yield _fc
                     return
@@ -1067,10 +1155,7 @@ class BuiltinExecutor(AgentExecutor):
                 )
                 continue
 
-            text = result.get("text", "")
-            if streamed_text:
-                text = streamed_text + text
-                streamed_text = ""
+            text = streamed_text + result.get("text", "")
             tool_calls = result.get("tool_calls", [])
             reasoning = result.get("reasoning", "")
             finish_reason = result.get("finish_reason")
@@ -1089,6 +1174,7 @@ class BuiltinExecutor(AgentExecutor):
                         or configured_max_tokens < ESCALATED_MAX_OUTPUT_TOKENS
                     )
                 ):
+                    pending.parts.clear()
                     max_output_tokens_escalated = True
                     max_output_tokens_override = ESCALATED_MAX_OUTPUT_TOKENS
                     budget.refund()
@@ -1100,6 +1186,7 @@ class BuiltinExecutor(AgentExecutor):
                     continue
                 max_output_tokens_override = None
                 if tool_args_recovery_count < TOOL_ARGUMENTS_RECOVERY_LIMIT:
+                    pending.parts.clear()
                     tool_args_recovery_count += 1
                     budget.refund()
                     recovery_message = Message.user(
@@ -1115,10 +1202,21 @@ class BuiltinExecutor(AgentExecutor):
                         ctx.session_id,
                     )
                     continue
+                current_segment = text.removeprefix(streamed_text)
+                if current_segment:
+                    ctx.messages.append(Message.assistant(current_segment, model=result.get("model") or None))
+                pending.parts.clear()
+                partial_text = continuation_prefix + text
                 yield ResponseChunk.error(
                     rid,
                     "TOOL_ARGUMENTS_INCOMPLETE: 模型输出的工具参数不完整，未执行任何工具。",
                     next_seq(),
+                    text=partial_text or None,
+                    usage=result.get("usage"),
+                    outcome=TurnOutcome(
+                        "partial" if partial_text else "failed",
+                        reason="tool_arguments_incomplete", code="tool_arguments_incomplete", retryable=True,
+                    ),
                 )
                 return
             if tool_calls and is_max_tokens_finish(finish_reason):
@@ -1147,11 +1245,15 @@ class BuiltinExecutor(AgentExecutor):
                 finish_reason=finish_reason,
             )
             content_replaced = text != pre_transform_text
-            assistant_msg = Message.assistant(text, tool_calls, model=result.get("model") or None)
+            # Earlier streamed segments already belong to canonical history.
+            # Keep the assembled prefix only in the final user-facing artifact.
+            current_segment = text.removeprefix(streamed_text)
+            assistant_msg = Message.assistant(current_segment, tool_calls, model=result.get("model") or None)
             # 保存 thinking 内容到 assistant 消息，用于历史回放
             if reasoning:
                 assistant_msg.thinking = reasoning
             ctx.messages.append(assistant_msg)
+            pending.parts.clear()
             view_messages.append(assistant_msg)
 
             if tool_calls and ctx.durable_event_sink is not None:
@@ -1197,12 +1299,13 @@ class BuiltinExecutor(AgentExecutor):
                     rid, next_seq, ctx.session_id, owner_account_id, continuation_prefix + text,
                     replace_content=content_replaced, usage=result.get("usage"),
                     reason="deadline" if deadline_now else None,
+                    outcome=_interrupted_outcome(deadline_now),
                 ):
                     yield _fc
                 return
 
             # ---- 空响应重试：既无文本也无工具调用 ----
-            if is_empty_response(text, tool_calls, reasoning):
+            if is_empty_response(current_segment, tool_calls, reasoning):
                 if empty_retries < self.empty_retry_max:
                     empty_retries += 1
                     budget.refund()  # 空轮不计入预算
@@ -1210,12 +1313,18 @@ class BuiltinExecutor(AgentExecutor):
                     view_messages.append(Message.user(EMPTY_RETRY_NUDGE))
                     log.info("空响应，第 %d 次重试 session=%s", empty_retries, ctx.session_id)
                     continue
+                retained_text = continuation_prefix + streamed_text
                 async for _fc in self._emit_final(
                     rid, next_seq, ctx.session_id, owner_account_id,
-                    "（模型多次未产出有效内容，请重试或调整提问）",
+                    retained_text or "（模型多次未产出有效内容，请重试或调整提问）",
+                    usage=result.get("usage"),
+                    outcome=TurnOutcome(
+                        "partial" if retained_text else "failed", reason="empty_response", retryable=True,
+                    ),
                 ):
                     yield _fc
                 return
+            streamed_text = ""
 
             # ---- late steer：模型调用期间到达的补充指令 ----
             # 当前这次 LLM 请求已经发出，无法在请求中途修改 prompt；若模型本轮没有
@@ -1232,7 +1341,8 @@ class BuiltinExecutor(AgentExecutor):
 
             # ---- 无工具调用：可能是截断续写，否则 final ----
             if not tool_calls:
-                if should_continue(finish_reason, tool_calls) and continuation_count < self.continuation_max:
+                truncated = should_continue(finish_reason, tool_calls)
+                if truncated and continuation_count < self.continuation_max:
                     continuation_count += 1
                     # Each segment is already in history. Keep the prefix only
                     # for the final artifact; do not duplicate it in model context.
@@ -1245,6 +1355,10 @@ class BuiltinExecutor(AgentExecutor):
                 async for _fc in self._emit_final(
                     rid, next_seq, ctx.session_id, owner_account_id, continuation_prefix + text,
                     replace_content=content_replaced, usage=result.get("usage"),
+                    outcome=(
+                        TurnOutcome("partial", reason="output_limit", code=finish_reason, retryable=True)
+                        if truncated else TurnOutcome("completed")
+                    ),
                 ):
                     yield _fc
                 return
@@ -1274,6 +1388,8 @@ class BuiltinExecutor(AgentExecutor):
                     ctx.session_id,
                     owner_account_id,
                     "操作未执行：你拒绝了本轮安全审批。",
+                    usage=result.get("usage"),
+                    outcome=TurnOutcome("stopped", reason="approval_rejected", code="approval_rejected", retryable=False),
                 ):
                     yield _fc
                 return
@@ -1284,6 +1400,8 @@ class BuiltinExecutor(AgentExecutor):
                     ctx.session_id,
                     owner_account_id,
                     "操作未执行：安全运行时发生故障，请检查运行时状态后重试。",
+                    usage=result.get("usage"),
+                    outcome=TurnOutcome("failed", reason="security_boundary_failed", code="security_boundary_failed"),
                 ):
                     yield _fc
                 return
@@ -1294,7 +1412,11 @@ class BuiltinExecutor(AgentExecutor):
                 ctx.session_id,
                 owner_account_id=owner_account_id,
             ):
-                async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, ""):
+                async for _fc in self._emit_final(
+                    rid, next_seq, ctx.session_id, owner_account_id, "",
+                    usage=result.get("usage"),
+                    outcome=TurnOutcome("awaiting_input", reason="plan_approval"),
+                ):
                     yield _fc
                 return
 
@@ -1307,6 +1429,8 @@ class BuiltinExecutor(AgentExecutor):
                 async for _fc in self._emit_final(
                     rid, next_seq, ctx.session_id, owner_account_id, "",
                     reason="deadline" if deadline_now else None,
+                    usage=result.get("usage"),
+                    outcome=_interrupted_outcome(deadline_now),
                 ):
                     yield _fc
                 return
@@ -1324,7 +1448,11 @@ class BuiltinExecutor(AgentExecutor):
                     f"工具 {decision.tool_name} 已连续失败 {decision.count} 次，"
                     "已自动停止本轮调用。请尝试换一种方式继续。"
                 )
-                async for _fc in self._emit_final(rid, next_seq, ctx.session_id, owner_account_id, user_msg):
+                async for _fc in self._emit_final(
+                    rid, next_seq, ctx.session_id, owner_account_id, user_msg,
+                    usage=result.get("usage"),
+                    outcome=TurnOutcome("partial", reason="tool_guardrail", code=decision.code),
+                ):
                     yield _fc
                 return
 
@@ -1337,6 +1465,7 @@ class BuiltinExecutor(AgentExecutor):
             rid, next_seq, ctx.session_id, owner_account_id,
             "（已达到最大迭代次数，任务可能未完全完成）",
             reason="max_iterations", usage=result.get("usage"),
+            outcome=TurnOutcome("partial", reason="max_iterations", retryable=True),
         ):
             yield _fc
 
@@ -1364,6 +1493,8 @@ class BuiltinExecutor(AgentExecutor):
         control=None,
         runner=None,
         session_id: str = "",
+        *,
+        prior_text: str = "",
     ) -> AsyncIterator[ResponseChunk]:
         """调模型一轮：流式 yield delta，结果写入 result。
 
@@ -1375,7 +1506,7 @@ class BuiltinExecutor(AgentExecutor):
           - 瞬时错误（retryable）→ 同 provider 指数退避重试（可选 jitter）；
           - 重试耗尽 / 非瞬时错误 → 切到下一个 fallback provider；
           - 上下文溢出错误 → 置 result["overflow"]=True，交由主循环压缩后重试；
-          - 已 emit delta 后失败 → 保留已生成文本，标记 result["stream_interrupt"]=True，
+          - 已 emit delta 后失败 → 保留已生成文本和 result["stream_failure"]，
             由主循环注入续写提示后重试（Crew partial stream stub + continuation）。
         失败时 yield 一帧 error。
 
@@ -1401,6 +1532,7 @@ class BuiltinExecutor(AgentExecutor):
             first_event: float | None = None
             first_reasoning: float | None = None
             first_text: float | None = None
+            stream = None
             try:
                 _prov_model = getattr(provider, "model", "") or ""
                 _prov_name = type(provider).__name__
@@ -1518,6 +1650,7 @@ class BuiltinExecutor(AgentExecutor):
                             )
                         accumulated += chunk.delta_text
                         emitted = True
+                        result["model"] = _prov_model
                         yield ResponseChunk.delta(rid, chunk.delta_text, next_seq())
                         # 流式中途中断：保留已吐文本，停止消费剩余流
                         if control is not None and control.interrupted:
@@ -1619,6 +1752,10 @@ class BuiltinExecutor(AgentExecutor):
                     finish_reason=finish_reason or "",
                 )
                 return  # 成功
+            except (asyncio.CancelledError, GeneratorExit):
+                if runner is not None:
+                    await runner.cancel_prewarms()
+                raise
             except Exception as exc:  # noqa: BLE001
                 # 本 attempt 的响应将被丢弃/重试：取消已提前派发的工具，避免悬挂任务与
                 # 重复执行（reads 幂等，取消是为干净与省资源）。成功路径不会走到这里。
@@ -1640,23 +1777,23 @@ class BuiltinExecutor(AgentExecutor):
                             )
                         visible_started_tool_calls.clear()
                         started_tool_call_ids.clear()
+                if control is not None and control.interrupted:
+                    # A provider can raise when its stream is closed, even
+                    # before emitting any text. Let the turn's stop settle it.
+                    log.info(
+                        "LLM 流式在用户中断后结束（已 emit %d 字符），跳过续写 session=%s",
+                        len(accumulated),
+                        session_id,
+                    )
+                    result.update(
+                        text=accumulated,
+                        tool_calls=[],
+                        reasoning=reasoning,
+                        finish_reason="interrupt",
+                        model=str(getattr(provider, "model", "") or ""),
+                    )
+                    return
                 if emitted:
-                    if control is not None and control.interrupted:
-                        # 用户停止/引导导致底层流被关闭时，provider 可能抛 timeout/connection 类异常。
-                        # 这不是需要续写的网络故障；应保留已吐文本并让外层中断检查封口。
-                        log.info(
-                            "LLM 流式在用户中断后结束（已 emit %d 字符），跳过续写 session=%s",
-                            len(accumulated),
-                            session_id,
-                        )
-                        result.update(
-                            text=accumulated,
-                            tool_calls=[],
-                            reasoning=reasoning,
-                            finish_reason="interrupt",
-                            model=str(getattr(provider, "model", "") or ""),
-                        )
-                        return
                     # 流式中途失败：保留已生成文本，尝试续写
                     exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
                     log.warning(
@@ -1676,10 +1813,14 @@ class BuiltinExecutor(AgentExecutor):
                             exc,
                             next_seq(),
                             message=f"模型响应中断，已保留已生成内容。错误：{exc}",
+                            partial_text=prior_text + accumulated,
+                            usage=result.get("usage"),
                         )
                         result["error"] = True
                         return
-                    result["stream_interrupt"] = True
+                    result["stream_failure"] = _provider_failure_outcome(
+                        exc, partial=True, reason="stream_interrupted",
+                    )
                     return
                 if isinstance(exc, RequestBudgetExceeded):
                     current_window = exc.budget.context_window or 0
@@ -1738,8 +1879,13 @@ class BuiltinExecutor(AgentExecutor):
                     continue
                 log.exception("LLM 调用异常，无 fallback 可用")
                 result["error"] = True
-                yield _llm_error_chunk(rid, exc, next_seq())
+                yield _llm_error_chunk(
+                    rid, exc, next_seq(), partial_text=prior_text, usage=result.get("usage"),
+                )
                 return
+            finally:
+                if stream is not None:
+                    await stream.aclose()
 
     @staticmethod
     def _merge_streaming_reasoning(current: str, incoming: str) -> str:

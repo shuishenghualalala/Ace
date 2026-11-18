@@ -23,23 +23,44 @@ import enum
 import json
 import time
 from contextlib import aclosing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
 from crew.core.errors import CrewError, ProviderError, ToolError, category_for_kind
 from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
 from crew.core.interfaces import MessageHandler, SessionStore
 from crew.core.types import Message
 from crew.features.hooks import hook_registry
 from crew.features.outbound import enrich_error_chunk
-from crew.gateway.send_inbox import current_send_execution
+from crew.features.response_filters import redact_secrets
+from crew.gateway.send_inbox import SendExecution, current_send_execution
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.dispatcher")
 SessionKey = tuple[str, str]
 _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS = 1.0
 _SHUTDOWN_REASON = "已停止：Gateway 正在关闭"
+_INCOMPLETE_OUTCOMES = frozenset({"partial", "failed", "stopped"})
+
+
+def _terminal_outcome(chunk: ResponseChunk) -> TurnOutcome:
+    outcome = TurnOutcome.from_body(chunk.body.get("outcome"))
+    if outcome is None:
+        outcome = TurnOutcome.from_body({
+            **chunk.body,
+            "status": "failed" if chunk.kind == "error" or chunk.status == "failed" else "completed",
+        }) or TurnOutcome("failed", reason="invalid_terminal_outcome")
+    if outcome.status in _INCOMPLETE_OUTCOMES and not outcome.message:
+        text = chunk.body.get("message")
+        if not isinstance(text, str) and outcome.status != "partial":
+            text = chunk.body.get("text")
+        if isinstance(text, str) and text.strip():
+            outcome = replace(outcome, message=text)
+    if outcome.message:
+        outcome = replace(outcome, message=redact_secrets(outcome.message, {})[:2000])
+    return outcome
 
 
 def _schedule_runtime_activity_touch(
@@ -871,6 +892,10 @@ class SessionDispatcher:
                     failed = False
                     err = ""
                     final_text = ""
+                    outcome: TurnOutcome | None = None
+                    outcome_persisted = False
+                    backgrounded = False
+                    stream_abandoned = False
                     # Dynamic Kanban 自己管理原始 session 的历史（user/status/final 直接落库），
                     # 如果走 sidechain 隔离，收敛时会把 sidechain 上的旧 base history 覆盖回 sid，
                     # 从而把 Dynamic Kanban 刚写入的消息抹掉。因此该模式不创建 sidechain。
@@ -969,18 +994,12 @@ class SessionDispatcher:
                                     progress["tool_phase"] = chunk.body.get("phase", "")
                                 runtime_activity_touch(progress)
                             is_terminal = chunk.is_final or chunk.kind in {"final", "error"}
-                            if chunk.kind == "error" or chunk.status == "failed":
-                                failed = True
-                                reason = str(chunk.body.get("reason") or "").strip()
-                                err = str(
-                                    chunk.body.get("message")
-                                    or chunk.body.get("error")
-                                    or reason
-                                    or "本轮执行未完成"
-                                )
-                            if chunk.kind == "final":
-                                final_text = chunk.body.get("text", "")
                             if is_terminal:
+                                outcome = _terminal_outcome(chunk)
+                                if isinstance(chunk.body.get("text"), str):
+                                    final_text = chunk.body["text"]
+                                failed = outcome.status in _INCOMPLETE_OUTCOMES
+                                err = (outcome.message or outcome.reason or "本轮执行未完成") if failed else ""
                                 deferred_terminal = chunk
                                 if current_task is not None:
                                     self._settling_tasks.add(current_task)
@@ -991,8 +1010,12 @@ class SessionDispatcher:
                         intent = _runtime_termination_intent(runtime_task_id)
                         err = intent[1] if intent is not None else self._stop_reasons.get(key, "已停止当前回复")
                         log.info("会话已停止 session=%s", sid)
-                        deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
+                        stopped = TurnOutcome("stopped", reason="gateway_shutdown" if self._closed else "user_stop", message=err)
+                        if intent is not None and intent[0] == "timed_out":
+                            stopped = TurnOutcome("failed", reason="timed_out", code="timeout", message=err)
+                        deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err, outcome=stopped))
                     except GeneratorExit:
+                        stream_abandoned = True
                         failed = True
                         err = self._stop_reasons.get(key, "已停止当前回复")
                         deferred_terminal = None
@@ -1058,7 +1081,6 @@ class SessionDispatcher:
                                         ),
                                         encoding="utf-8",
                                     )
-                                backgrounded = False
                                 if runtime_task_id and self._task_runtime is not None:
                                     backgrounded = bool(
                                         (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("backgrounded")
@@ -1089,7 +1111,23 @@ class SessionDispatcher:
                                     sid,
                                     sidechain_id,
                                 )
+                        if deferred_terminal is not None:
+                            outcome = _terminal_outcome(deferred_terminal)
+                        elif not stream_abandoned:
+                            err = "Agent 退出前没有提交回合结果。"
+                            outcome = TurnOutcome("failed", reason="no_terminal_result", message=err)
+                            deferred_terminal = ResponseChunk.error(rid, err, outcome=outcome)
+                        if outcome is not None:
+                            failed = outcome.status in _INCOMPLETE_OUTCOMES
+                            if failed and not err:
+                                err = outcome.message or outcome.reason or "本轮执行未完成"
+                            if not history_settled:
+                                outcome = TurnOutcome(
+                                    "failed", reason="history_commit_unverified", message="回合记录未能确认保存。",
+                                )
+                                failed, err = True, outcome.message or ""
                         runtime_terminal_status = ""
+                        deferred_task_completion = None
                         if runtime_task_id and self._task_runtime is not None:
                             try:
                                 current = await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)
@@ -1101,30 +1139,52 @@ class SessionDispatcher:
                                     finish_error = err
                                     if err == _SHUTDOWN_REASON:
                                         finish_status = "cancelled"
+                                    if outcome is not None and outcome.status == "stopped":
+                                        finish_status = "cancelled"
                                     if intent is not None:
                                         finish_status, finish_error = intent
                                         failed = True
                                         err = finish_error
+                                        outcome = TurnOutcome(
+                                            "failed" if finish_status == "timed_out" else "stopped",
+                                            reason="timed_out" if finish_status == "timed_out" else "user_stop",
+                                            message=finish_error,
+                                        )
+                                    progress = current.get("progress")
+                                    if outcome is not None:
+                                        progress = {
+                                            **(progress if isinstance(progress, dict) else {}),
+                                            "turn_outcome": outcome.to_body(),
+                                            "request_id": rid,
+                                        }
                                     current = await self._task_runtime.finish_async(
                                         runtime_task_id,
                                         owner_account_id=owner,
                                         status=finish_status,
                                         result=final_text,
                                         error=finish_error,
+                                        defer_completion_notification=not backgrounded,
+                                        **({"progress": progress} if outcome is not None else {}),
                                     )
+                                    if not backgrounded:
+                                        deferred_task_completion = current
                                 runtime_terminal_status = str(current.get("status") or "")
                                 if runtime_terminal_status in {"cancelled", "timed_out"}:
                                     failed = True
                                     err = str(current.get("error") or err)
-                                    deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
+                                    if runtime_terminal_status == "cancelled":
+                                        if outcome is None or outcome.status != "stopped":
+                                            outcome = TurnOutcome("stopped", reason="user_stop", message=err)
+                                    else:
+                                        outcome = TurnOutcome("failed", reason="timed_out", code="timeout", message=err)
+                                    if deferred_terminal is None or _terminal_outcome(deferred_terminal).status != outcome.status:
+                                        deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err, outcome=outcome))
                                 elif runtime_terminal_status == "failed":
                                     failed = True
                                     err = str(current.get("error") or err)
-                                    if deferred_terminal is None or (
-                                        deferred_terminal.kind == "final"
-                                        and deferred_terminal.status != "failed"
-                                    ):
-                                        deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err))
+                                    if outcome is None or outcome.status not in {"partial", "failed"}:
+                                        outcome = TurnOutcome("failed", reason="task_failed", message=err)
+                                        deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err, outcome=outcome))
                                 elif runtime_terminal_status == "completed":
                                     # A completed dispatcher task can still carry a
                                     # domain-level failed final (for example, a
@@ -1143,23 +1203,61 @@ class SessionDispatcher:
                             except Exception:
                                 log.exception("完成 agent_turn 任务失败 task=%s", runtime_task_id)
                         try:
-                            if send is not None and deferred_terminal is not None:
+                            if outcome is not None and deferred_terminal is not None:
+                                if outcome.message:
+                                    outcome = replace(outcome, message=redact_secrets(outcome.message, {})[:2000])
+                                err = redact_secrets(err, {})[:2000]
+                                receipt_status = {
+                                    "awaiting_input": "completed", "partial": "failed", "stopped": "cancelled",
+                                }.get(outcome.status, outcome.status)
+                                default_code = {"failed": "turn_failed", "stopped": "turn_stopped"}.get(outcome.status, "")
+                                receipt_code = outcome.code or default_code
+                                if not backgrounded and history_settled:
+                                    try:
+                                        await self._store_turn_outcome(
+                                            sid, rid, outcome, owner=owner, error=err,
+                                            send=send, receipt_status=receipt_status, receipt_code=receipt_code,
+                                        )
+                                        outcome_persisted = True
+                                    except Exception:
+                                        history_settled = False
+                                        failed = True
+                                        log.exception("写入持久回合结局失败 session=%s request=%s", sid, rid)
+                                if not history_settled:
+                                    err = "回合记录未能确认保存。"
+                                    outcome = TurnOutcome("failed", reason="history_commit_unverified", message=err)
+                                if send is not None and not send.finished:
+                                    try:
+                                        if history_settled:
+                                            await send.finish(receipt_status, receipt_code, outcome=outcome)
+                                        else:
+                                            await send.finish("uncertain", "history_commit_unverified")
+                                    except Exception:
+                                        log.exception("写入 Desktop 发送终态失败 session=%s request=%s", sid, rid)
+                                deferred_terminal = replace(
+                                    deferred_terminal,
+                                    body={**deferred_terminal.body, "outcome": outcome.to_body()},
+                                )
+                            notify_completion = getattr(self._task_runtime, "notify_completion", None)
+                            if deferred_task_completion is not None and callable(notify_completion):
+                                if not history_settled and outcome is not None:
+                                    deferred_task_completion = {
+                                        **deferred_task_completion,
+                                        "status": "failed",
+                                        "result": "",
+                                        "error": err,
+                                        "progress": {"turn_outcome": outcome.to_body(), "request_id": rid},
+                                    }
                                 try:
-                                    if not history_settled:
-                                        await send.finish("uncertain", "history_commit_unverified")
-                                    elif runtime_terminal_status == "cancelled" or err.startswith("已停止"):
-                                        await send.finish("cancelled", "turn_stopped")
-                                    elif failed:
-                                        await send.finish("failed", "turn_failed")
-                                    else:
-                                        await send.finish("completed")
+                                    notify_completion(deferred_task_completion)
                                 except Exception:
-                                    log.exception("写入 Desktop 发送终态失败 session=%s request=%s", sid, rid)
+                                    log.exception("发布回合结束通知失败 task=%s", runtime_task_id)
                             # 终态帧必须在 running 清理 / agent:end 之前推出：监听者与状态同步
                             # 以 idle 为权威信号，若 idle 先到而 final 未达，前端会提前派出排队
                             # 消息，final 反被回合门拦丢弃（回合永不封口、流式残字）。
                             if (
                                 deferred_terminal is not None
+                                and not stream_abandoned
                                 and owner not in self._blocked_owners
                                 and self._owner_epochs.get(owner, 0) == owner_epoch
                             ):
@@ -1195,7 +1293,8 @@ class SessionDispatcher:
                                     or err.startswith("被新消息中断")
                                     else ("failed" if failed else "completed")
                                 )
-                                await self._store_set_status(sid, status, owner=owner, error=err)
+                                if not outcome_persisted and not backgrounded:
+                                    await self._store_set_status(sid, status, owner=owner, error=err)
                             except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
                                 log.exception("写入会话状态失败 session=%s", sid)
                             # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
@@ -1207,6 +1306,8 @@ class SessionDispatcher:
                                 "channel": envelope.channel,
                                 "failed": failed,
                                 "error": err,
+                                "request_id": rid,
+                                "outcome": outcome.to_body() if outcome is not None else None,
                                 "owner_account_id": owner,
                                 "queue_depth": queue_depth,
                                 "running_depth": remaining,
@@ -1296,10 +1397,35 @@ class SessionDispatcher:
             self._store.set_status, session_id, status, owner_account_id=owner, error=error
         )
 
+    async def _store_turn_outcome(
+        self, session_id: str, request_id: str, outcome: TurnOutcome, *, owner: str, error: str,
+        send: SendExecution | None, receipt_status: str, receipt_code: str,
+    ) -> None:
+        save = getattr(self._store, "record_turn_outcome", None)
+        if callable(save):
+            def settle_receipt(conn: Any) -> None:
+                assert send is not None
+                send.finish_in_transaction(conn, receipt_status, receipt_code, outcome)
+
+            await asyncio.to_thread(
+                save, session_id, request_id, outcome.to_body(),
+                owner_account_id=owner, last_status=outcome.status, error=error,
+                **({"settle_receipt": settle_receipt} if send is not None else {}),
+            )
+            if send is not None:
+                send.finished = True
+        else:
+            await self._store_set_status(session_id, outcome.status, owner=owner, error=error)
+
     def status(self, session_id: str, owner_account_id: str) -> dict:
         """返回会话当前运行态（内存）+ 上一轮 terminal 结果（落库）。"""
         key = self._resolve_key(session_id, owner_account_id)
-        last_status, last_error = self._store.get_status(session_id, owner_account_id=key[0])
+        load = getattr(self._store, "get_status_details", None)
+        if callable(load):
+            last_status, last_error, last_outcome = load(session_id, owner_account_id=key[0])
+        else:
+            last_status, last_error = self._store.get_status(session_id, owner_account_id=key[0])
+            last_outcome = None
         if key in self._running:
             live = "running"
         elif self._queued_depth(key) > 0:
@@ -1323,6 +1449,7 @@ class SessionDispatcher:
             "queue_limit": self._max_queue_depth_per_session,
             "last_status": last_status,
             "last_error": last_error,
+            **({"last_outcome": last_outcome} if last_outcome is not None else {}),
         }
 
     def runtime_status(self) -> dict:
