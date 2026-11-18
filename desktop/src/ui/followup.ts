@@ -8,6 +8,8 @@
 import type { FollowupAnswer } from './backend-client';
 import type { PendingFollowup } from './state';
 import { getPrimaryComposerRoot } from './features/composer-scope';
+import type { FollowupCardView } from './features/followup-actions';
+import { t } from './lib/i18n';
 
 const FREE_TEXT_OPTION = '__free_text__';
 
@@ -526,149 +528,170 @@ interface FollowupBindings {
   onCancel: (questionId: string) => void;
 }
 
-/** 给当前渲染出的追问卡片绑定交互。每次 renderChat 重渲染后调用一次。
- *  防重复绑定：keyed-diff 在 questionId 不变时 reuse 同一 DOM 节点，
- *  若每次 renderChat 都叠加 addEventListener 会造成「点一次提交 N 条 answer」。
- *  用 data-bound 标记保证每卡只绑一次；节点被 replaceChild 重建时标记消失，自动重绑。 */
-export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings): void {
-  const card = root.querySelector<HTMLElement>('.followup-card');
-  if (!card) return;
-  if (card.dataset.bound === '1') return; // 已绑定，跳过
-  card.dataset.bound = '1';
-  const questionId = card.getAttribute('data-followup-id') ?? '';
-  if (!questionId) return;
-  const isPermission = card.classList.contains('followup-card--permission');
+type UpdateFollowupCard = (bindings: FollowupBindings, view?: FollowupCardView) => void;
+const mountedFollowupCards = new WeakMap<HTMLElement, UpdateFollowupCard>();
 
-  if (isPermission) {
-    const buttons = Array.from(card.querySelectorAll<HTMLButtonElement>('[data-permission-value]'));
-    let resolved = false;
-    card.addEventListener('click', (event) => {
-      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-permission-value]');
-      if (!button || resolved) return;
-      const qid = button.getAttribute('data-permission-qid') ?? '';
-      const value = button.getAttribute('data-permission-value') ?? '';
-      if (qid && value) {
-        resolved = true;
-        buttons.forEach((item) => { item.disabled = true; });
-        bindings.onSubmit(questionId, [{ question_id: qid, answers: [value] }]);
-      }
-    });
-    card.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        if (resolved) return;
-        resolved = true;
-        buttons.forEach((item) => { item.disabled = true; });
-        bindings.onCancel(questionId);
-      }
-    });
-    // 这是非模态浮层：不抢占当前页面焦点，也不把 Tab 键限制在浮层内。
+export function bindFollowupCard(root: HTMLElement, bindings: FollowupBindings, view?: FollowupCardView): void {
+  const card = root.querySelector<HTMLElement>('.followup-card');
+  const questionId = card?.dataset.followupId;
+  if (!card || !questionId) return;
+  const existing = mountedFollowupCards.get(card);
+  if (existing) {
+    existing(bindings, view);
     return;
   }
 
-  // 每个子问题当前选中：answers[qid] = Set<option>
-  const selected: Record<string, Set<string>> = {};
-  const freeText: Record<string, string> = {};
-  for (const q of card.querySelectorAll<HTMLElement>('.followup-card__question')) {
-    const qid = q.getAttribute('data-qid') ?? '';
-    if (qid) {
-      const textMode = Boolean(q.querySelector('textarea.followup-card__free-input--text'));
-      selected[qid] = textMode ? new Set([FREE_TEXT_OPTION]) : new Set();
-      freeText[qid] = '';
+  let currentBindings = bindings;
+  let currentView = view;
+  let submitting = false;
+  const notice = document.createElement('div');
+  notice.className = 'followup-card__subtitle';
+  notice.setAttribute('role', 'status');
+  notice.hidden = true;
+  card.append(notice);
+
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'followup-card__dismiss';
+  dismiss.textContent = t('chat.followup.dismiss');
+  dismiss.hidden = true;
+  dismiss.addEventListener('click', () => currentView?.dismiss());
+  card.append(dismiss);
+
+  const recheck = document.createElement('button');
+  recheck.type = 'button';
+  recheck.className = 'followup-card__submit';
+  recheck.dataset.followupRecheck = '';
+  recheck.textContent = t('chat.followup.recheck');
+  recheck.hidden = true;
+  recheck.addEventListener('click', () => currentView?.recheck());
+  card.append(recheck);
+
+  const permission = card.classList.contains('followup-card--permission');
+  const inputs = Array.from(card.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-qid]'))
+    .filter((input) => input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement);
+  const choices = inputs.filter((input): input is HTMLInputElement =>
+    input instanceof HTMLInputElement && (input.type === 'checkbox' || input.type === 'radio'));
+  const texts = inputs.filter((input) => input.classList.contains('followup-card__free-input'));
+  const buttons = Array.from(card.querySelectorAll<HTMLButtonElement>('button[data-action], button[data-permission-value]'));
+  const submit = buttons.find((button) => button.dataset.action === 'submit');
+
+  const selected = new Map<string, Set<string>>();
+  const freeText = new Map<string, string>();
+  for (const input of inputs) {
+    const id = input.dataset.qid;
+    if (!id || selected.has(id)) continue;
+    const saved = view?.draft?.[id];
+    selected.set(id, new Set(saved?.selected ?? (input instanceof HTMLTextAreaElement ? [FREE_TEXT_OPTION] : [])));
+    freeText.set(id, saved?.freeText ?? '');
+  }
+  for (const input of texts) input.value = freeText.get(input.dataset.qid ?? '') ?? '';
+
+  function rememberDraft(): void {
+    currentView?.saveDraft(Object.fromEntries(Array.from(selected, ([id, values]) => [
+      id, { selected: Array.from(values), freeText: freeText.get(id) ?? '' },
+    ])));
+  }
+
+  function refresh(): void {
+    const status = currentView?.status;
+    const locked = submitting || (currentView?.locked ?? false);
+    const expired = status === 'expired';
+    for (const button of buttons) {
+      button.hidden = expired || currentView?.actionable === false;
+      button.disabled = locked;
+    }
+    if (submit) {
+      submit.disabled = locked || Array.from(selected).some(([id, values]) =>
+        !values.size || (values.has(FREE_TEXT_OPTION) && !freeText.get(id)?.trim()));
+    }
+    for (const input of choices) {
+      input.checked = Boolean(selected.get(input.dataset.qid ?? '')?.has(input.value));
+      input.disabled = locked;
+    }
+    for (const input of texts) {
+      const id = input.dataset.qid ?? '';
+      input.hidden = !selected.get(id)?.has(FREE_TEXT_OPTION);
+      input.readOnly = locked;
+    }
+    card?.setAttribute('aria-busy', String(status === 'confirming'));
+    dismiss.hidden = !expired;
+    recheck.hidden = !currentView?.canRecheck || (status !== 'unavailable' && status !== 'uncertain');
+    notice.hidden = !status;
+    if (status) {
+      notice.dataset.followupSubmissionStatus = status;
+      notice.textContent = t('chat.followup.' + status);
+    } else {
+      delete notice.dataset.followupSubmissionStatus;
+      notice.textContent = '';
     }
   }
-  // 取该问题的 multiSelect 约束
-  const multiByQid: Record<string, boolean> = {};
-  card.querySelectorAll<HTMLInputElement>('input[type="checkbox"], input[type="radio"]').forEach((input) => {
-    const qid = input.getAttribute('data-qid') ?? '';
-    if (qid) multiByQid[qid] = input.type === 'checkbox';
-  });
 
-  const submitBtn = card.querySelector<HTMLButtonElement>('.followup-card__submit');
-  const refreshSubmit = () => {
-    let can = true;
-    for (const qid of Object.keys(selected)) {
-      const cur = selected[qid];
-      if (cur.size === 0) { can = false; break; }
-      if (cur.has(FREE_TEXT_OPTION) && !freeText[qid]?.trim()) { can = false; break; }
-    }
-    if (submitBtn) submitBtn.disabled = !can;
-  };
+  mountedFollowupCards.set(card, (nextBindings, nextView) => {
+    currentBindings = nextBindings;
+    currentView = nextView;
+    submitting = false;
+    refresh();
+  });
+  refresh();
 
   card.addEventListener('change', (event) => {
-    const input = event.target as HTMLInputElement;
-    const qid = input.getAttribute('data-qid') ?? '';
-    if (!qid) return;
-    const multi = !!multiByQid[qid];
-    const cur = selected[qid] ?? (selected[qid] = new Set());
-
-    if (input.value === FREE_TEXT_OPTION) {
-      // 切换「其他」
-      if (cur.has(FREE_TEXT_OPTION)) {
-        cur.delete(FREE_TEXT_OPTION);
-      } else {
-        if (!multi) cur.clear();
-        cur.add(FREE_TEXT_OPTION);
-      }
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !choices.includes(input) || currentView?.locked) return;
+    const id = input.dataset.qid ?? '';
+    const values = selected.get(id);
+    if (!values) return;
+    if (input.checked) {
+      if (input.type === 'radio') values.clear();
+      if (input.value !== FREE_TEXT_OPTION) values.delete(FREE_TEXT_OPTION);
+      values.add(input.value);
     } else {
-      if (multi) {
-        if (cur.has(input.value)) cur.delete(input.value);
-        else { cur.delete(FREE_TEXT_OPTION); cur.add(input.value); }
-      } else {
-        cur.clear();
-        cur.add(input.value);
-      }
+      values.delete(input.value);
     }
-
-    // 同步「其他」输入框显隐
-    const freeInput = card.querySelector<HTMLInputElement>(`.followup-card__free-input[data-qid="${qid}"]`);
-    if (freeInput) freeInput.hidden = !cur.has(FREE_TEXT_OPTION);
-    refreshSubmit();
+    rememberDraft();
+    refresh();
   });
 
   card.addEventListener('input', (event) => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)
-      || !input.classList.contains('followup-card__free-input')) return;
-    const qid = input.getAttribute('data-qid') ?? '';
-    if (qid) freeText[qid] = input.value;
-    refreshSubmit();
+      || !texts.includes(input) || currentView?.locked) return;
+    freeText.set(input.dataset.qid ?? '', input.value);
+    rememberDraft();
+    refresh();
+  });
+
+  card.addEventListener('keydown', (event) => {
+    if (permission && event.key === 'Escape' && !submitting && !currentView?.locked) {
+      event.preventDefault();
+      submitting = true;
+      refresh();
+      currentBindings.onCancel(questionId);
+    }
   });
 
   card.addEventListener('click', (event) => {
-    const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-action]');
-    if (!btn) return;
-    const action = btn.getAttribute('data-action');
-    if (action === 'cancel') {
-      bindings.onCancel(questionId);
-      return;
+    const element = event.target;
+    if (!(element instanceof Element) || submitting || currentView?.locked) return;
+    const button = element.closest<HTMLButtonElement>('button');
+    if (!button || button.disabled) return;
+    const { action, permissionQid, permissionValue, staffingQid, staffingValue } = button.dataset;
+    if (button !== dismiss) {
+      submitting = true;
+      refresh();
     }
-    if (action === 'staffing-decline') {
-      const qid = btn.getAttribute('data-staffing-qid') ?? '';
-      const value = btn.getAttribute('data-staffing-value') ?? 'decline';
-      if (!qid) return;
-      btn.disabled = true;
-      if (submitBtn) submitBtn.disabled = true;
-      bindings.onSubmit(questionId, [{ question_id: qid, answers: [value] }]);
-      return;
-    }
-    if (action === 'submit') {
-      if (btn.disabled) return;
-      const result: FollowupAnswer[] = [];
-      for (const qid of Object.keys(selected)) {
-        const cur = selected[qid];
-        const texts: string[] = [];
-        cur.forEach((opt) => {
-          if (opt === FREE_TEXT_OPTION) {
-            const t = freeText[qid]?.trim();
-            if (t) texts.push(t);
-          } else {
-            texts.push(opt);
-          }
-        });
-        result.push({ question_id: qid, answers: texts });
-      }
-      bindings.onSubmit(questionId, result);
+    if (permission && permissionQid && permissionValue) {
+      currentBindings.onSubmit(questionId, [{ question_id: permissionQid, answers: [permissionValue] }]);
+    } else if (action === 'cancel') {
+      currentBindings.onCancel(questionId);
+    } else if (action === 'staffing-decline' && staffingQid) {
+      currentBindings.onSubmit(questionId, [{ question_id: staffingQid, answers: [staffingValue ?? 'decline'] }]);
+    } else if (action === 'submit') {
+      const answers = Array.from(selected, ([id, values]) => ({
+        question_id: id,
+        answers: Array.from(values, (value) => value === FREE_TEXT_OPTION ? freeText.get(id)?.trim() ?? '' : value),
+      }));
+      currentBindings.onSubmit(questionId, answers);
     }
   });
 }

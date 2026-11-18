@@ -265,37 +265,37 @@ def test_ws_subscribe_replay_defaults_invalid_sequence_to_zero():
 def test_followup_answer_waits_for_gateway_resolution_ack(monkeypatch):
     from crew.core import followup
 
-    resolved = []
-    monkeypatch.setattr(
-        followup,
-        "resolve_answer",
-        lambda session_id, question_id, answers: (
-            resolved.append((session_id, question_id, answers)) or True
-        ),
-    )
     connections = _ReplayConnections()
     client = _client(connections)
 
-    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
-        ws.send_json({
-            "action": "followup_answer",
-            "session_id": "s1",
-            "question_id": "permission-1",
-            "answers": [{"question_id": "permission", "answers": ["allow_once"]}],
-        })
-        ack = ws.receive_json()
+    async def create():
+        return followup.get_followup_waiter().create(
+            "s1", followup.validate_questions([{
+                "id": "permission", "question": "Allow?", "options": ["allow_once"],
+            }]), owner_account_id="local",
+        )
 
-    assert resolved == [(
-        "s1",
-        "permission-1",
-        [{"question_id": "permission", "answers": ["allow_once"]}],
-    )]
+    with client:
+        question_id = client.portal.call(create)
+        try:
+            with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+                ws.send_json({
+                    "action": "followup_answer",
+                    "session_id": "s1",
+                    "question_id": question_id,
+                    "answers": [{"question_id": "permission", "answers": ["allow_once"]}],
+                })
+                ack = ws.receive_json()
+        finally:
+            followup.get_followup_waiter().discard("s1", question_id, owner_account_id="local")
     assert ack["kind"] == "followup_question"
     assert ack["body"] == {
-        "question_id": "permission-1",
+        "question_id": question_id,
         "status": "resolved",
         "accepted": True,
         "note": "",
+        "answer_history_id": f"followup:{question_id}",
+        "answer_text": "已选择：allow_once",
     }
 
 

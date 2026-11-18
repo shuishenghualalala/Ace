@@ -12,6 +12,7 @@ import type { DesktopChatOutboxEntry, DesktopChatOutboxSnapshot } from '../../sh
 import type { RendererCheckpoint, RendererCheckpointSnapshot } from '../../shared/renderer-checkpoint';
 // BackendNotification 在 feature-work 中定义；此处仅用于 ChatChunk 类型引用。
 import type { BackendNotification } from './feature-work';
+import type { FollowupAnswer } from './feature-session';
 
 export type Mode = 'agent' | 'team' | 'dynamic_kanban';
 export type ChunkKind =
@@ -24,6 +25,7 @@ export type ChunkKind =
   | 'thinking'
   | 'plan_review'
   | 'followup_question'
+  | 'interaction_receipt'
   | 'todo_updated'
   | 'file_changes'
   | 'session_title'
@@ -70,6 +72,17 @@ export interface SendReceiptAction {
   session_id: string;
   request_id: string;
 }
+
+interface FollowupCommandIdentity {
+  session_id: string;
+  question_id: string;
+  request_id?: string;
+  submission_id?: string;
+}
+export type FollowupCommand =
+  | (FollowupCommandIdentity & { action: 'followup_answer'; answers: FollowupAnswer[] })
+  | (FollowupCommandIdentity & { action: 'followup_cancel' })
+  | (Required<FollowupCommandIdentity> & { action: 'followup_receipt_query' });
 
 export interface GatewayCursor {
   epoch: string;

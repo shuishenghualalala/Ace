@@ -149,6 +149,8 @@ export interface FollowupQuestionChunk {
   kind: 'followup_question';
   body: {
     question_id?: string;
+    interaction_request_id?: string;
+    interaction_source_session_id?: string;
     title?: string;
     record_history?: boolean;
     status?: string;
@@ -1454,6 +1456,8 @@ export function followupQuestionReducer(chunk: FollowupQuestionChunk, snapshot: 
   } : undefined;
   book.pendingFollowup = {
     questionId: typeof chunk.body.question_id === 'string' ? chunk.body.question_id : '',
+    ...(chunk.body.interaction_request_id ? { requestId: chunk.body.interaction_request_id } : {}),
+    ...(chunk.body.interaction_source_session_id ? { sourceSessionId: chunk.body.interaction_source_session_id } : {}),
     title: typeof chunk.body.title === 'string' ? chunk.body.title : '',
     recordHistory: chunk.body.record_history !== false,
     ...(status ? { status } : {}),

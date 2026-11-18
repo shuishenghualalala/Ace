@@ -47,12 +47,14 @@ import {
 } from '../state';
 import {
   applyChunk,
+  applyFollowupReceipt,
   chatOutboxObserver,
   consumePending,
   flushPendingChunks,
   getMessages,
   jumpChatToBottom,
   renderChat,
+  retireTerminalFollowup,
   seedStatuses,
   setHistoryLoading,
   subscribeSessions,
@@ -94,6 +96,10 @@ import { hydrateTurnFoldFromStorage } from './fold-state';
 import { canSendToBackend, setBackendTransportState } from './backend-status-guard';
 import { canSubmitDesktopChat, chatOutbox, desktopOutboxBridge, isSettledTurnReceipt } from './chat-outbox';
 import { restoreRendererCheckpointNavigation } from './renderer-checkpoint';
+import { interactiveOwnerKey } from './interactive-owner';
+import {
+  disconnectFollowupReceipts, receiveFollowupCapability, reconnectFollowupDecisions, resetFollowupDecisions,
+} from './followup-actions';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
 let setTabFn: (tab: TabKey) => void = () => {};
@@ -758,8 +764,25 @@ function applyActiveTurnSnapshot(sessionId: string, control: ChatChunk): boolean
   return true;
 }
 
+function withoutInteractionTurnGate(chunk: ChatChunk): ChatChunk {
+  const { request_id: requestId, ...interaction } = chunk;
+  if (chunk.kind === 'followup_question' && requestId) {
+    return { ...interaction, body: { ...chunk.body, interaction_request_id: requestId } };
+  }
+  return interaction;
+}
+
 function handleGatewayChunk(chunk: ChatChunk): void {
-  if (chatOutbox.handle(chunk)) return;
+  receiveFollowupCapability(chunk);
+  if (chatOutbox.handle(chunk)) {
+    if (chunk.kind === 'send_receipt_capability') reconnectFollowupDecisions();
+    return;
+  }
+  const receiptResult = applyFollowupReceipt(chunk);
+  if (receiptResult) {
+    if (typeof receiptResult === 'object') recoverStreamGap(receiptResult.repairSessionId);
+    return;
+  }
   const sessionId = chunk.session_id;
   if (chunk.kind === 'gateway_resync') {
     if (!sessionId || (!state.subscribedSessions.has(sessionId) && state.activeSessionId !== sessionId)) return;
@@ -796,7 +819,13 @@ function handleGatewayChunk(chunk: ChatChunk): void {
         if (sessionStore.get().books[sessionId]?.pendingFollowup?.questionId !== pending.body.question_id) {
           // The Gateway has verified this is still waiting. It is outside replay
           // and may refer to a request the renderer never saw over the socket.
-          applyChunk({ ...pending, request_id: undefined, gateway_epoch: undefined, gateway_sequence: undefined });
+          applyChunk({
+            ...pending,
+            body: { ...pending.body, interaction_request_id: pending.request_id },
+            request_id: undefined,
+            gateway_epoch: undefined,
+            gateway_sequence: undefined,
+          });
         }
         if (sessionStore.get().books[sessionId]?.pendingFollowup?.questionId === pending.body.question_id) {
           recovery.verifiedFollowupId = pending.body.question_id;
@@ -815,6 +844,7 @@ function handleGatewayChunk(chunk: ChatChunk): void {
       noteGatewaySequence(sessionId, chunk);
       recovery.progress += 1;
       if (chunk.kind === 'final' || (chunk.kind === 'error' && chunk.is_final)) {
+        if (retireTerminalFollowup(sessionId, sessionId, chunk.request_id)) delete recovery.verifiedFollowupId;
         void reconcileSessionAfterResync(sessionId, true);
       }
       return;
@@ -828,8 +858,7 @@ function handleGatewayChunk(chunk: ChatChunk): void {
       }
       // Post-cut controls describe an interaction even when the original
       // request was never opened locally.
-      const interaction = { ...chunk };
-      delete interaction.request_id;
+      const interaction = withoutInteractionTurnGate(chunk);
       applyChunk(interaction);
       if (chunk.kind === 'followup_question') {
         const pending = sessionStore.get().books[sessionId]?.pendingFollowup;
@@ -841,8 +870,7 @@ function handleGatewayChunk(chunk: ChatChunk): void {
   if (chunk.kind === 'followup_question' && sessionId && getGatewayResyncCut(sessionId)
     && chunk.body?.question_id && chunk.body.question_id === sessionStore.get().books[sessionId]?.pendingFollowup?.questionId) {
     // A verified waiting question can have a side-channel request id.
-    const interaction = { ...chunk };
-    delete interaction.request_id;
+    const interaction = withoutInteractionTurnGate(chunk);
     applyChunk(interaction);
     return;
   }
@@ -912,6 +940,7 @@ export function bootstrapBackend(): void {
   if (!isRendererLoggedIn()) return;
   state.socket?.dispose();
   chatOutbox.disconnect();
+  disconnectFollowupReceipts();
   setBackendTransportState('unknown');
   recoveryConnection = null;
   let transportVersion = 0;
@@ -923,6 +952,7 @@ export function bootstrapBackend(): void {
       if (!open) {
         recoveryConnection = null;
         chatOutbox.disconnect();
+        disconnectFollowupReceipts();
       }
       logStream('ws-renderer', open ? 'socket-open' : 'socket-close', {
         subscribed: Array.from(state.subscribedSessions),
@@ -944,6 +974,7 @@ export function bootstrapBackend(): void {
       const isCurrentConnection = () => state.socket === socket && transportVersion === version;
       recoveryConnection = isCurrentConnection;
       subscribeSessions(Array.from(state.subscribedSessions));
+      reconnectFollowupDecisions();
       const active = state.activeSessionId;
       const sessions = new Set(state.subscribedSessions);
       if (active) sessions.add(active);
@@ -988,16 +1019,20 @@ export function bindBackendAuth(): () => void {
       const bridge = desktopOutboxBridge();
       if (bridge) {
         const owner = authStore.get().userInfo?.staffCode;
+        const ownerIdentity = interactiveOwnerKey();
         void chatOutbox.bind(bridge, {
           onRestored: chatOutboxObserver.onRestored,
           onReceipt(entry, status, code, restored, outcome) {
+            const activeRequest = sessionStore.get().books[entry.sessionId]?.activeRequestId;
             chatOutboxObserver.onReceipt(entry, status, code, restored, outcome);
-            if (!restored || !isSettledTurnReceipt(status)) return;
+            const needsHistory = isSettledTurnReceipt(status)
+              || (status === 'uncertain' && code !== 'receipt_store_changed');
+            if (!restored || !needsHistory || (activeRequest && activeRequest !== entry.requestId)) return;
             const socket = state.socket;
             const currentConnection = recoveryConnection;
             if (!socket || !currentConnection) return;
             void reconcileSessionAfterReconnect(entry.sessionId, true, () =>
-              currentConnection() && state.socket === socket && authStore.get().userInfo?.staffCode === owner,
+              currentConnection() && state.socket === socket && interactiveOwnerKey() === ownerIdentity,
             ).then(() => {
               if (currentConnection() && state.activeSessionId === entry.sessionId) renderChat();
             });
@@ -1014,6 +1049,7 @@ export function bindBackendAuth(): () => void {
     state.socket = null;
     socket?.dispose();
     chatOutbox.reset();
+    resetFollowupDecisions();
     stopStreamWatchdog();
     setBackendTransportState('unknown');
     recoveryConnection = null;

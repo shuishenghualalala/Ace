@@ -74,7 +74,10 @@ export function projectActiveTurnSnapshot(
   const durable = mergeTeamInternalMessages(mapBackendHistoryItems(items as BackendHistoryItem[], sessionId));
   const currentUser = durable.at(-1);
   if (currentUser?.role !== 'user') return null;
-  const localUser = local.messages.find((message) => message.role === 'user' && message.requestId === requestId);
+  const localUser = local.messages.find((message) => message.role === 'user'
+    && (currentUser.historyId?.startsWith('followup:')
+      ? message.historyId === currentUser.historyId
+      : message.requestId === requestId));
   const prompt = { ...(localUser ?? currentUser), requestId, historyId: currentUser.historyId };
   const optimisticIds = new Set(local.queue.map((item) => item.optimisticUserMessageId));
   const queuedUsers = local.messages.filter((message) =>
@@ -132,6 +135,12 @@ export function projectActiveTurnSnapshot(
   if (Array.isArray(pending)) {
     for (const raw of pending as unknown[]) {
       const question = normalizeChunk(raw);
+      if (question?.kind === 'followup_question' && typeof raw === 'object' && raw !== null) {
+        const requestId = (raw as { request_id?: unknown }).request_id;
+        if (typeof requestId === 'string' && requestId) {
+          question.body = { ...question.body, interaction_request_id: requestId };
+        }
+      }
       if (question?.kind !== 'followup_question' || question.session_id !== sessionId
         || typeof question.body.question_id !== 'string' || !question.body.question_id
         || !Array.isArray(question.body.questions)) continue;

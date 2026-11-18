@@ -37,7 +37,7 @@ from crew.agent.file_changes import (
 )
 from crew.agent.skills import SkillActivation
 from crew.core.envelope import ResponseChunk
-from crew.core.followup import drain_followup_answer_messages
+from crew.core.followup import drain_followup_answer_records
 from crew.core.observability import event
 from crew.core.interfaces import (
     AcpAdapterError,
@@ -1099,8 +1099,10 @@ class ExternalExecutor(AgentExecutor):
             return seq
 
         def append_pending_followup_answers() -> None:
-            for content in drain_followup_answer_messages(display_session_id):
-                ctx.messages.append(Message.user(content))
+            for answer in drain_followup_answer_records(display_session_id):
+                message = Message.user(answer.text)
+                message.followup_history_id = answer.history_id
+                ctx.messages.append(message)
 
         runtime_failure_binding_key: dict[str, str] | None = None
         runtime_failure_session_id = ""
@@ -1170,6 +1172,7 @@ class ExternalExecutor(AgentExecutor):
                     display_session_id=display_session_id,
                     control_session_id=control_session_id,
                     origin_session_id=ctx.session_id,
+                    request_id=ctx.request_id,
                     agent_name=str(agent.get("name") or provider or "External Agent"),
                     ttl_seconds=timeout_budget.binding_ttl_seconds,
                     context_type=context_type,

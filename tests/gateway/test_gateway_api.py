@@ -776,6 +776,7 @@ async def test_internal_interaction_api_returns_followup_answer(tmp_path, monkey
             session_id,
             payload["body"]["question_id"],
             [{"question_id": "q1", "answers": ["B"]}],
+            owner_account_id=owner_account_id,
         )
 
     interaction_bridge.configure(

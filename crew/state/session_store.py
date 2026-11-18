@@ -485,6 +485,25 @@ class SQLiteSessionStore(SessionStore):
                 store_id TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS followup_receipts (
+                owner_account_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                question_id TEXT NOT NULL,
+                submission_id TEXT NOT NULL,
+                decision_hash TEXT NOT NULL,
+                generation TEXT NOT NULL,
+                status TEXT NOT NULL,
+                code TEXT NOT NULL DEFAULT '',
+                answer_history_id TEXT NOT NULL DEFAULT '',
+                answer_seq INTEGER,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(owner_account_id, session_id, request_id, question_id)
+            )
+        """)
+        if "answer_seq" not in {row[1] for row in conn.execute("PRAGMA table_info(followup_receipts)")}:
+            conn.execute("ALTER TABLE followup_receipts ADD COLUMN answer_seq INTEGER")
         conn.execute("INSERT OR IGNORE INTO desktop_send_identity VALUES (1, ?)", (uuid.uuid4().hex,))
         self.desktop_send_store_id = str(conn.execute(
             "SELECT store_id FROM desktop_send_identity WHERE singleton=1"
@@ -740,6 +759,8 @@ class SQLiteSessionStore(SessionStore):
         data = asdict(m)
         if m.turn_outcome is None:
             del data["turn_outcome"]
+        if m.followup_history_id is None:
+            del data["followup_history_id"]
         return data
 
     @classmethod
@@ -794,6 +815,7 @@ class SQLiteSessionStore(SessionStore):
             reply_to=d.get("reply_to"),
             communication_request_text=d.get("communication_request_text"),
             turn_outcome=d.get("turn_outcome"),
+            followup_history_id=d.get("followup_history_id"),
         )
 
     @classmethod
@@ -1473,6 +1495,7 @@ class SQLiteSessionStore(SessionStore):
         title_fallback: str | None,
         last_prompt_tokens: int | None,
         last_prompt_tokens_source: str | None,
+        expected_cursor: tuple[int, int] | None = None,
     ) -> Callable[[Any], tuple[int, int]]:
         now = time.time()
         # title_fallback=None 保持旧行为（首条 user 消息截断），兼容未传该参数的调用方；
@@ -1527,6 +1550,8 @@ class SQLiteSessionStore(SessionStore):
             base = int(base_row[0])
             current_generation = int(base_row[1] or 0)
             current_leaf = int(base_row[2] or 0)
+            if expected_cursor is not None and expected_cursor != (current_leaf, current_generation):
+                raise SessionWriteConflict(f"会话 {session_id} 在收敛前已变化，请重新读取")
             new_generation = current_generation + (0 if is_append else 1)
             if is_append:
                 seq = base + 1
@@ -1641,6 +1666,7 @@ class SQLiteSessionStore(SessionStore):
         title_fallback: str | None = None,
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
+        expected_cursor: tuple[int, int] | None = None,
     ) -> None:
         new_leaf, _, new_generation = self._writer.execute(
             self._save_write(
@@ -1651,6 +1677,7 @@ class SQLiteSessionStore(SessionStore):
                 title_fallback=title_fallback,
                 last_prompt_tokens=last_prompt_tokens,
                 last_prompt_tokens_source=last_prompt_tokens_source,
+                expected_cursor=expected_cursor,
             )
         )
         self._apply_saved_projection(owner_account_id, session_id, messages, new_leaf, new_generation)
@@ -2375,6 +2402,10 @@ class SQLiteSessionStore(SessionStore):
             (session_id, owner_account_id),
         )
         conn.execute(
+            "DELETE FROM followup_receipts WHERE session_id = ? AND owner_account_id = ?",
+            (session_id, owner_account_id),
+        )
+        conn.execute(
             "DELETE FROM writer_leases WHERE session_id = ? AND owner_account_id = ?",
             (session_id, owner_account_id),
         )
@@ -2565,6 +2596,75 @@ class SQLiteSessionStore(SessionStore):
 
         self._writer.execute(write)
 
+    def append_followup_answer_in_transaction(
+        self, conn, session_id: str, request_id: str, history_id: str, text: str, *, owner_account_id: str,
+    ) -> int:
+        """Persist an accepted ordinary answer in the receipt's transaction."""
+        now = time.time()
+        self._ensure_writer_lease(conn, owner_account_id, session_id, now)
+        row = conn.execute(
+            "SELECT leaf_seq, messages, message_count, token_count FROM sessions "
+            "WHERE owner_account_id=? AND session_id=?", (owner_account_id, session_id),
+        ).fetchone()
+        if row is None:
+            raise SessionWriteConflict(f"会话已删除：{session_id}")
+        leaf, raw, count, tokens = row
+        if not leaf and raw != "[]":
+            old_messages = self._load(raw)
+            leaf = self._insert_legacy_events(conn, owner_account_id, session_id, old_messages, now)
+            count, tokens = len(old_messages), self._estimate_tokens(old_messages)
+        sequence = conn.execute(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM session_events WHERE owner_account_id=? AND session_id=?",
+            (owner_account_id, session_id),
+        ).fetchone()[0]
+        message = Message.user(text)
+        message.request_id = request_id
+        message.timestamp = now
+        message.followup_history_id = history_id
+        conn.execute(
+            "INSERT INTO session_events(owner_account_id,session_id,seq,parent_seq,type,payload,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (owner_account_id, session_id, sequence, leaf or None, SessionEventType.USER_MESSAGE.value,
+             json.dumps(self._message_to_dict(message), ensure_ascii=False), now),
+        )
+        conn.execute(
+            "UPDATE sessions SET leaf_seq=?,message_count=?,token_count=?,updated_at=? "
+            "WHERE owner_account_id=? AND session_id=?",
+            (sequence, count + 1, tokens + self._estimate_tokens([message]), now, owner_account_id, session_id),
+        )
+        self._projections.pop((owner_account_id, session_id), None)
+        return sequence
+
+    def accepted_followup_answers(
+        self, session_id: str, request_id: str, *, owner_account_id: str,
+    ) -> list[Message]:
+        """Load this request's committed answers through their indexed event references."""
+        return self.accepted_followup_snapshot(
+            session_id, request_id, owner_account_id=owner_account_id,
+        )[0]
+
+    def accepted_followup_snapshot(
+        self, session_id: str, request_id: str, *, owner_account_id: str,
+    ) -> tuple[list[Message], tuple[int, int]]:
+        """Pair accepted input with the exact parent-history cut for convergence."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                cursor = self._read_event_cursor(owner_account_id, session_id)
+                if cursor is None:
+                    raise SessionWriteConflict(f"会话已删除：{session_id}")
+                rows = self._conn.execute(
+                    "SELECT e.payload FROM followup_receipts r JOIN session_events e "
+                    "ON e.owner_account_id=r.owner_account_id AND e.session_id=r.session_id AND e.seq=r.answer_seq "
+                    "WHERE r.owner_account_id=? AND r.session_id=? AND r.request_id=? "
+                    "AND r.answer_seq IS NOT NULL "
+                    "AND json_extract(e.payload,'$.followup_history_id')=r.answer_history_id ORDER BY e.seq",
+                    (owner_account_id, session_id, request_id),
+                ).fetchall()
+            finally:
+                self._conn.rollback()
+        return [self._message_from_dict(json.loads(row[0])) for row in rows], cursor
+
     def get_workspace_id(self, session_id: str, owner_account_id: str) -> str | None:
         """读取会话所属 workspace_id，不存在时返回 None。"""
         with self._lock:
@@ -2724,6 +2824,11 @@ class SQLiteSessionStore(SessionStore):
             )
             conn.execute(
                 "DELETE FROM writer_leases WHERE (owner_account_id, session_id) IN "
+                f"(SELECT owner_account_id, session_id FROM sessions WHERE {where})",
+                params,
+            )
+            conn.execute(
+                "DELETE FROM followup_receipts WHERE (owner_account_id, session_id) IN "
                 f"(SELECT owner_account_id, session_id FROM sessions WHERE {where})",
                 params,
             )

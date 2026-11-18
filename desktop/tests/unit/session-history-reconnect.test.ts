@@ -4,21 +4,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BackendHistoryItem, BackendHistoryWindow } from '../../src/ui/api/feature-session';
 import { backendApi } from '../../src/ui/backend-client';
-import { bootstrapBackend, loadBackendHistory, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
+import { bindBackendAuth, bootstrapBackend, loadBackendHistory, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
 import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
 import { firstChangedMessageIndex } from '../../src/ui/conversation-message-changes';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
-import { appendMessage, consumePending, renderChat, stopGeneration } from '../../src/ui/features/chat-controller';
+import { appendMessage, consumePending, renderChat, respondToFollowup, stopGeneration } from '../../src/ui/features/chat-controller';
 import { disposeConversationRenderer, getConversationScrollAnchor } from '../../src/ui/features/conversation-renderer';
 import { getGatewayCursors, resetGatewaySequence } from '../../src/ui/features/gateway-sequence';
 import { cancelSessionStreamRecovery, getSessionStreamRecovery } from '../../src/ui/features/session-stream-recovery';
 import { stopStreamWatchdog } from '../../src/ui/features/stream-watchdog';
 import { authStore } from '../../src/ui/stores/auth-store';
+import { chatOutbox } from '../../src/ui/features/chat-outbox';
 import {
   __resetAllStoresForTest,
   configStore,
   messageStore,
   sessionStore,
+  uiStore,
 } from '../../src/ui/stores/stores';
 import {
   addSubscribedSessions, enqueuePending, ensureSessionBook, getPendingQueue, patchBook,
@@ -125,6 +127,148 @@ describe('conversation recovery after a socket outage', () => {
       return candidate.repair_id ? [candidate as { repair_id: string }] : [];
     });
   }
+
+  it('repairs the canonical answer boundary when only the direct followup receipt survived', async () => {
+    const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+      ...settledStatus, live: 'running', active_request_id: oldRequest,
+    });
+    vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult([
+      { role: 'user', content: 'Original prompt', request_id: oldRequest, history_id: 'original-user' },
+      { role: 'assistant', content: 'Before question', request_id: oldRequest, history_id: 'before-question' },
+      { role: 'user', content: '已选择：Recovered answer', request_id: oldRequest, history_id: 'followup:q-lost' },
+      { role: 'assistant', content: 'After question', request_id: oldRequest, history_id: 'after-question' },
+    ]));
+    emitSocket({ type: 'open' });
+    emitSocket({ type: 'message', data: JSON.stringify({
+      kind: 'send_receipt_capability', sequence: 0, is_final: false,
+      body: { version: 1, followup_receipts: 1, store_id: 'a'.repeat(32) },
+    }) });
+    emitFrame('delta', 1, { text: 'Before question' });
+    emitFrame('followup_question', 2, {
+      question_id: 'q-lost', record_history: true, questions: [{
+        id: 'q', question: 'Confirm?', options: [{ label: 'Recovered answer', value: 'yes' }],
+      }],
+    });
+    respondToFollowup(sid, 'q-lost', [{ question_id: 'q', answers: ['yes'] }]);
+    const send = vi.mocked(window.Crew!.gatewayWsSend!);
+    const submitted = send.mock.calls.map(([value]) => value as Record<string, unknown>)
+      .find((value) => value.action === 'followup_answer')!;
+    expect(submitted).toMatchObject({ request_id: oldRequest, question_id: 'q-lost' });
+    // The ordered resolved frame was lost while live continuation resumed.
+    emitFrame('delta', 3, { text: 'After question' });
+    emitSocket({ type: 'message', data: JSON.stringify({
+      kind: 'interaction_receipt', session_id: sid, request_id: oldRequest, sequence: 0, is_final: false,
+      body: {
+        type: 'followup', interaction_id: 'q-lost', submission_id: submitted.submission_id,
+        status: 'applied', answer_history_id: 'followup:q-lost',
+      },
+    }) });
+    expect(snapshotRequests()).toHaveLength(1);
+    expect(getSessionStreamRecovery(sid)).toBeDefined();
+    expect(messageStore.get().messages[sid]?.filter((message) => message.role === 'user')).toEqual([]);
+    status.mockResolvedValue({ ...settledStatus, live: 'idle' });
+    emitFrame('final', 5, { text: 'After question' });
+    await vi.advanceTimersByTimeAsync(1);
+    const rows = messageStore.get().messages[sid]!;
+    expect(rows.filter((row) => row.historyId === 'followup:q-lost')).toHaveLength(1);
+    expect(rows.map((row) => row.content)).toEqual([
+      'Original prompt', 'Before question', '已选择：Recovered answer', 'After question',
+    ]);
+    expect(getSessionStreamRecovery(sid)).toBeUndefined();
+  });
+
+  it('retires a verified question when its original request ends during recovery', async () => {
+    const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+      ...settledStatus, live: 'running', active_request_id: oldRequest,
+    });
+    vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult([
+      { role: 'assistant', content: 'Request ended without answering', request_id: oldRequest },
+    ]));
+    emitSocket({ type: 'open' });
+    emitFrame('gateway_resync', 10, {
+      reason: 'cursor_expired', floor: 6,
+      pending_followups: [{
+        ...snapshotFrame('followup_question', 9, {
+          question_id: 'q-terminal', questions: [{ id: 'q', question: 'Answer?', options: [] }],
+        }),
+      }],
+    });
+    expect(sessionStore.get().books[sid]?.pendingFollowup?.questionId).toBe('q-terminal');
+    expect(getSessionStreamRecovery(sid)?.verifiedFollowupId).toBe('q-terminal');
+    status.mockResolvedValue({ ...settledStatus, live: 'idle' });
+    emitFrame('final', 11, { text: 'Request ended without answering' });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sessionStore.get().books[sid]?.pendingFollowup).toBeNull();
+    expect(getSessionStreamRecovery(sid)).toBeUndefined();
+    expect(messageStore.get().messages[sid]?.at(-1)?.content).toBe('Request ended without answering');
+  });
+
+  it.each([false, true])('reconciles restored uncertain history without replacing a newer request (newer=%s)', async (newer) => {
+    const history = vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult([
+      { role: 'user', content: 'Original prompt', request_id: oldRequest, history_id: 'original-user' },
+      { role: 'user', content: '已补充：Recovered answer', request_id: oldRequest, history_id: 'followup:durable-answer' },
+    ]));
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
+    state.socket?.dispose();
+    state.socket = null;
+    chatOutbox.reset();
+    uiStore.set({ backendReadiness: { status: 'ready', generation: 1 } });
+    Object.assign(window.Crew!, {
+      chatOutboxList: vi.fn(async () => ({
+        scope: 'owner-a',
+        entries: [{
+          requestId: oldRequest, sessionId: sid, phase: 'accepted',
+          value: {
+            storeId: 'a'.repeat(32),
+            payload: {
+              query: 'Original prompt', session_id: sid, request_id: oldRequest,
+              mode: 'agent', workspace_id: 'default', send_receipt: true,
+            },
+          },
+        }],
+      })),
+      chatOutboxPut: vi.fn(async () => undefined),
+      chatOutboxRemove: vi.fn(async () => undefined),
+    });
+    const dispose = bindBackendAuth();
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(messageStore.get().messages[sid]?.some((row) => row.content === 'Original prompt')).toBe(true);
+      emitSocket({ type: 'open', gatewayGeneration: 1 });
+      emitSocket({ type: 'message', gatewayGeneration: 1, data: JSON.stringify({
+        kind: 'send_receipt_capability', sequence: 0, is_final: false,
+        body: { version: 1, followup_receipts: 1, store_id: 'a'.repeat(32) },
+      }) });
+      await vi.advanceTimersByTimeAsync(1);
+      if (newer) {
+        openTurnForRequest(sid, 'new-request');
+        emitSocket({ type: 'message', gatewayGeneration: 1, data: JSON.stringify({
+          kind: 'delta', session_id: sid, request_id: 'new-request',
+          gateway_sequence: 3, gateway_epoch: 'epoch-1', sequence: 3, is_final: false, body: { text: 'New reply' },
+        }) });
+      }
+      emitSocket({ type: 'message', gatewayGeneration: 1, data: JSON.stringify({
+        kind: 'send_receipt', session_id: sid, request_id: oldRequest, sequence: 0, is_final: false,
+        body: { status: 'uncertain' },
+      }) });
+      await vi.advanceTimersByTimeAsync(20);
+      if (newer) {
+        expect(history).not.toHaveBeenCalled();
+        expect(sessionStore.get().books[sid]?.activeRequestId).toBe('new-request');
+        expect(sessionStore.get().books[sid]?.turnSealed).toBe(false);
+        expect(sessionStore.get().busySessions[sid]).toBe(true);
+        const assistantId = sessionStore.get().books[sid]?.assistantId;
+        expect(messageStore.get().messages[sid]?.find((row) => row.id === assistantId)?.content).toBe('New reply');
+      } else {
+        expect(history).toHaveBeenCalled();
+        expect(messageStore.get().messages[sid]?.filter((row) => row.historyId === 'followup:durable-answer'))
+          .toEqual([expect.objectContaining({ content: '已补充：Recovered answer' })]);
+      }
+    } finally {
+      dispose();
+      chatOutbox.reset();
+    }
+  });
 
   it('holds suspect text, retries one repair on a new socket, and accepts only its matching same-cut snapshot', () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: oldRequest });

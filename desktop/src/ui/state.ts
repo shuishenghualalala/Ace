@@ -108,6 +108,8 @@ export interface SessionRow {
 /** 追问选择框待答内容（ask_followup_question 推送，存于 book.pendingFollowup）。 */
 export interface PendingFollowup {
   questionId: string;
+  requestId?: string;
+  sourceSessionId?: string;
   title: string;
   /** false for permission side-channel prompts: keep the current assistant turn intact. */
   recordHistory: boolean;

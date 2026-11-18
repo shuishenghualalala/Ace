@@ -969,7 +969,7 @@ async def test_ask_followup_question_returns_user_answers():
 async def test_followup_question_uses_visible_session_for_sidechain():
     import asyncio
 
-    from crew.core.followup import resolve_answer
+    from crew.core.followup import drain_followup_answer_messages, resolve_answer
     from crew.core.runctx import (
         current_display_session_id,
         current_push_fn,
@@ -1014,6 +1014,7 @@ async def test_followup_question_uses_visible_session_for_sidechain():
         ]
         assert pushed[0][0] == visible_session_id
         assert pushed[0][1]["session_id"] == visible_session_id
+        assert drain_followup_answer_messages(visible_session_id) == ["已选择：仅本次允许"]
     finally:
         current_session_id.reset(sid_token)
         current_display_session_id.reset(display_sid_token)

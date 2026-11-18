@@ -87,6 +87,10 @@ import { requireRendererLogin } from './auth-gate';
 import { interactiveOwnerKey } from './interactive-owner';
 import { readTurnOutcome } from '../turn-outcome';
 import {
+  acceptFollowupReceipt, retireFollowupDecision, settleFollowupDecision, submitFollowupDecision, submittedFollowupAnswers,
+  type ConfirmedFollowupReceipt,
+} from './followup-actions';
+import {
   formatFollowupAnswerMessage,
   isRuntimeStaffingFollowup,
 } from '../followup';
@@ -143,6 +147,7 @@ import {
   setQueueHint,
   setSessionStatus,
   state,
+  type PendingFollowup,
   type Bookkeeping,
 } from '../state';
 import { renderAttachmentPreview } from './attachments';
@@ -682,46 +687,8 @@ export function renderChat(): void {
         : renderEmptyState();
     },
     followupHandlers: {
-      onSubmit: (questionId: string, answers: FollowupAnswer[]) => {
-        const sid = state.activeSessionId;
-        if (!sid) return;
-        const pending = bookFor(sid).pendingFollowup;
-        void state.socket?.send({ action: 'followup_answer', session_id: sid, question_id: questionId, answers });
-        if (pending?.recordHistory !== false) {
-          // Ordinary follow-ups become a new user turn.
-          patchBook(sid, {
-            pendingFollowup: null,
-            assistantId: null,
-            toolMap: new Map(),
-            deltaSpans: [],
-            legacyDeltaText: '',
-          });
-          const message = pending ? formatFollowupAnswerMessage(pending, answers) : null;
-          if (message) appendMessage(sid, 'user', message);
-        } else {
-          // Side-channel decisions preserve the current assistant turn. Runtime
-          // staffing keeps the same card long enough to show its backend-confirmed
-          // applying/applied state; permission prompts retain their old close-now behavior.
-          patchBook(sid, {
-            pendingFollowup: pending && isRuntimeStaffingFollowup(pending)
-              ? {
-                  ...pending,
-                  status: 'applying',
-                  note: '正在邀请协作助手加入……',
-                }
-              : null,
-          });
-        }
-        resumeSessionGeneration(sid);
-        renderChat();
-      },
-      onCancel: (questionId: string) => {
-        const sid = state.activeSessionId;
-        if (!sid) return;
-        void state.socket?.send({ action: 'followup_cancel', session_id: sid, question_id: questionId });
-        patchBook(sid, { pendingFollowup: null });
-        renderChat();
-      },
+      onSubmit: (questionId, answers) => { if (sessionId) respondToFollowup(sessionId, questionId, answers); },
+      onCancel: (questionId) => { if (sessionId) respondToFollowup(sessionId, questionId); },
     },
     teamCommunicationHandlers: {
       onRetry: (message) => {
@@ -973,6 +940,104 @@ function visibleFollowupSessionId(sessionId: string): string {
   return markerIndex > 0 ? sessionId.slice(0, markerIndex) : sessionId;
 }
 
+function refreshFollowupPresentation(sessionId: string): void {
+  if (sessionId === state.activeSessionId) scheduleChatRender();
+  else notifyMessagesChanged(sessionId);
+}
+
+export function respondToFollowup(sessionId: string, questionId: string, answers?: FollowupAnswer[]): void {
+  const pending = bookFor(sessionId).pendingFollowup;
+  if (pending?.questionId !== questionId) return;
+  submitFollowupDecision(sessionId, pending, answers, refreshFollowupPresentation);
+}
+
+function confirmFollowup(
+  sessionId: string,
+  question: PendingFollowup,
+  status: ConfirmedFollowupReceipt['status'],
+  body: Record<string, unknown>,
+  ordered: boolean,
+): void {
+  const book = bookFor(sessionId);
+  const pending = book.pendingFollowup;
+  const sameQuestion = pending?.questionId === question.questionId
+    && pending.requestId === question.requestId && pending.sourceSessionId === question.sourceSessionId;
+  if (sameQuestion && !state.suppressChunks.has(sessionId)) {
+    const messages = getMessages(sessionId);
+    const currentTurn = !question.requestId || !book.activeRequestId || question.requestId === book.activeRequestId;
+    patchBook(sessionId, {
+      pendingFollowup: status === 'applied' && isRuntimeStaffingFollowup(pending)
+        ? { ...pending, status: 'applying', note: '正在邀请协作助手加入……' }
+        : null,
+    });
+    if (status === 'applied' && currentTurn && (ordered || !question.recordHistory)) {
+      if (question.recordHistory) {
+        const historyId = typeof body.answer_history_id === 'string' ? body.answer_history_id : undefined;
+        const answers = submittedFollowupAnswers(sessionId, question);
+        const display = typeof body.answer_text === 'string' ? body.answer_text
+          : answers && (ordered || historyId) ? formatFollowupAnswerMessage(question, answers) : null;
+        if (display && (!historyId || !messages.some((message) => message.historyId === historyId))) {
+          patchBook(sessionId, {
+            assistantId: null,
+            toolMap: new Map(),
+            deltaSpans: [],
+            legacyDeltaText: '',
+          });
+          appendMessage(sessionId, 'user', display, {
+            ...(historyId ? { id: 'history-' + encodeURIComponent(historyId), historyId } : {}),
+            ...(question.requestId ? { requestId: question.requestId } : {}),
+          });
+        }
+      }
+      resumeSessionGeneration(sessionId, book.activeRequestId);
+    }
+  }
+  settleFollowupDecision(sessionId, question, status, refreshFollowupPresentation);
+  refreshFollowupPresentation(sessionId);
+}
+
+export function retireTerminalFollowup(sessionId: string, sourceSessionId: string, requestId: string | undefined): boolean {
+  const book = bookFor(sessionId);
+  const question = book.pendingFollowup;
+  if (!requestId || question?.requestId !== requestId
+    || (book.activeRequestId && book.activeRequestId !== requestId)
+    || (question.sourceSessionId ?? sessionId) !== sourceSessionId) return false;
+  retireFollowupDecision(sessionId, question, refreshFollowupPresentation);
+  patchBook(sessionId, { pendingFollowup: null });
+  return true;
+}
+
+export function applyFollowupReceipt(chunk: ChatChunk): boolean | { repairSessionId: string } {
+  if (chunk.kind !== 'interaction_receipt') return false;
+  const receipt = acceptFollowupReceipt(chunk);
+  if (!receipt) return true;
+  const book = bookFor(receipt.sessionId);
+  const samePending = book.pendingFollowup?.questionId === receipt.question.questionId
+    && book.pendingFollowup.requestId === receipt.question.requestId;
+  const continuingRequest = !book.pendingFollowup
+    && Boolean(receipt.question.requestId) && book.activeRequestId === receipt.question.requestId;
+  const hasAnswer = typeof chunk.body.answer_history_id === 'string'
+    && getMessages(receipt.sessionId).some((message) => message.historyId === chunk.body.answer_history_id);
+  const missingAnswer = receipt.status === 'applied' && receipt.question.recordHistory && !hasAnswer
+    && (samePending || continuingRequest)
+    && (!book.activeRequestId || !receipt.question.requestId || book.activeRequestId === receipt.question.requestId);
+  confirmFollowup(receipt.sessionId, receipt.question, receipt.status, chunk.body, false);
+  return missingAnswer ? { repairSessionId: receipt.sessionId } : true;
+}
+
+function applyFollowupResolution(sessionId: string, sourceSessionId: string, chunk: ChatChunk): boolean {
+  if (chunk.kind !== 'followup_question') return false;
+  const status = chunk.body.status;
+  if (status !== 'resolved' && status !== 'expired' && status !== 'cancelled') return false;
+  const pending = bookFor(sessionId).pendingFollowup;
+  if (!pending || pending.questionId !== chunk.body.question_id
+    || (pending.sourceSessionId ?? sessionId) !== sourceSessionId) return true;
+  const requestId = chunk.request_id || chunk.body.interaction_request_id;
+  if (requestId && pending.requestId !== requestId) return true;
+  confirmFollowup(sessionId, pending, status === 'resolved' ? 'applied' : status, chunk.body, true);
+  return true;
+}
+
 export function applyChunk(incomingChunk: ChatChunk): 'repair' | void {
   try {
     return applyChunkInner(incomingChunk);
@@ -1015,7 +1080,9 @@ function reportObservationClientEvent(payload: Record<string, unknown>): void {
 }
 
 function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
-  const sourceSid = incomingChunk.session_id || state.activeSessionId || 'default';
+  const originalSource = incomingChunk.kind === 'followup_question' && incomingChunk.body.interaction_source_session_id;
+  const sourceSid = typeof originalSource === 'string' && originalSource
+    ? originalSource : incomingChunk.session_id || state.activeSessionId || 'default';
   const sid = incomingChunk.kind === 'followup_question'
     ? visibleFollowupSessionId(sourceSid)
     : sourceSid;
@@ -1024,7 +1091,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   // 父 session 的较高水位误判为 replay 重复帧。
   const chunk: ChatChunk = sid === sourceSid
     ? incomingChunk
-    : { ...incomingChunk, session_id: sid };
+    : { ...incomingChunk, session_id: sid, body: { ...incomingChunk.body, interaction_source_session_id: sourceSid } };
   if (sid !== sourceSid) {
     delete chunk.gateway_sequence;
     delete chunk.gateway_epoch;
@@ -1150,8 +1217,17 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   }
   if (chunk.kind !== 'delta' && chunk.kind !== 'tool') noteGatewaySequence(sid, chunk);
   touchStreamActivity(sid);
+  if (applyFollowupResolution(sid, sourceSid, chunk)) return;
 
   const parsed = normalizeChunk(chunk);
+  if (parsed?.kind === 'followup_question') {
+    const original = chunk.request_id || chunk.body.interaction_request_id;
+    parsed.body = {
+      ...parsed.body,
+      ...(typeof original === 'string' && original ? { interaction_request_id: original } : {}),
+      ...(sourceSid !== sid ? { interaction_source_session_id: sourceSid } : {}),
+    };
+  }
   if (!parsed) {
     logStream('apply-chunk', 'drop-unrecognized', { sid, kind: chunk.kind });
     return;
@@ -1408,6 +1484,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
 
   // final / error：触发 finalize + usage + 全量重渲染
   if (result.finalize) {
+    retireTerminalFollowup(sid, sourceSid, reqId);
     logStream('apply-chunk', 'finalize-turn', { sid, kind: parsed.kind });
     if (reqId) {
       ttftVisibleLoggedRequests.delete(reqId);

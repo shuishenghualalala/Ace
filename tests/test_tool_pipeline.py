@@ -17,14 +17,17 @@ import time
 import pytest
 
 from crew.core.runctx import (
+    current_agent_workdir,
+    current_owner_account_id,
     current_tool_progress_fn,
+    current_workspace_guard,
+    current_workspace_id,
     emit_tool_progress,
 )
 from crew.core.types import ToolCall
 from crew.tools import pipeline
 from crew.tools.pipeline import (
     PermissionConfig,
-    PermissionRule,
     check_permission,
     extract_match_key,
     grant_session_allow,
@@ -173,9 +176,10 @@ def test_permission_deny_priority_over_ask():
 
 def test_permission_session_allow_overrides():
     cfg = load_permission_config([{"tool": "terminal", "match": "git push:*", "behavior": "ask"}])
-    assert cfg.check("terminal", "git push", session_id="s1")[0] == "ask"
-    cfg.add_session_allow("s1", PermissionRule("terminal", "git push:*", "allow"))
-    assert cfg.check("terminal", "git push", session_id="s1")[0] == "allow"
+    args = {"command": "git push"}
+    assert check_permission("terminal", args, config=cfg, session_id="s1")[0] == "ask"
+    cfg.add_session_allow("s1", "terminal", args, "one approved call")
+    assert check_permission("terminal", args, config=cfg, session_id="s1")[0] == "allow"
 
 
 def test_check_permission_default_behavior_is_forwarded_and_invalid_is_denied():
@@ -201,29 +205,40 @@ def test_grant_session_allow_persists_across_calls(monkeypatch):
         [{"tool": "terminal", "match": "git push:*", "behavior": "ask"}]
     )
     monkeypatch.setattr(pipeline, "get_permission_config", lambda: shared_cfg)
-    grant_session_allow("s9", "terminal", "git push origin")
+    grant_session_allow("s9", "terminal", {"command": "git push origin"})
     assert check_permission("terminal", {"command": "git push origin"}, session_id="s9")[0] == "allow"
     assert check_permission("terminal", {"command": "git push origin main"}, session_id="s9")[0] == "ask"
 
 
-def test_ui_session_allow_is_exact_and_rejects_prefix_scope(monkeypatch):
+def test_ui_session_allow_binds_full_args_and_host_context(monkeypatch, tmp_path):
     shared_cfg = load_permission_config(
         [{"tool": "terminal", "match": "*", "behavior": "ask"}]
     )
     monkeypatch.setattr(pipeline, "get_permission_config", lambda: shared_cfg)
 
-    grant_session_allow("s-exact", "terminal", "git push origin main")
-    grant_session_allow("s-exact", "terminal", "rm:*")
-
-    assert check_permission(
-        "terminal", {"command": "git push origin main"}, session_id="s-exact"
-    )[0] == "allow"
-    assert check_permission(
-        "terminal", {"command": "git push origin main --force"}, session_id="s-exact"
-    )[0] == "ask"
-    assert check_permission(
-        "terminal", {"command": "rm /tmp/x"}, session_id="s-exact"
-    )[0] == "ask"
+    args = {"command": "echo fixture", "background": False}
+    owner = current_owner_account_id.set("fixture-owner")
+    workspace = current_workspace_id.set("fixture-workspace")
+    cwd = current_agent_workdir.set(str(tmp_path))
+    try:
+        grant_session_allow("s-exact", "terminal", args)
+        assert check_permission("terminal", dict(reversed(list(args.items()))), session_id="s-exact")[0] == "allow"
+        assert check_permission("terminal", {**args, "background": True}, session_id="s-exact")[0] == "ask"
+        assert check_permission("terminal", args, session_id="another-session")[0] == "ask"
+        for variable, value in (
+            (current_owner_account_id, "another-owner"),
+            (current_workspace_id, "another-workspace"),
+            (current_agent_workdir, str(tmp_path / "other")),
+        ):
+            changed = variable.set(value)
+            try:
+                assert check_permission("terminal", args, session_id="s-exact")[0] == "ask"
+            finally:
+                variable.reset(changed)
+    finally:
+        current_agent_workdir.reset(cwd)
+        current_workspace_id.reset(workspace)
+        current_owner_account_id.reset(owner)
 
 
 def _unused_config() -> PermissionConfig:
@@ -401,6 +416,164 @@ async def test_tool_runner_permission_ask_denies_on_reject(monkeypatch):
     assert "用户拒绝" in block
 
 
+async def test_tool_runner_approves_frozen_effective_args_outside_execution_timeout(monkeypatch):
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.plugins.manager import PluginManager, TOOL_EXECUTION_MIDDLEWARE
+
+    cfg = load_permission_config([
+        {"tool": "terminal", "match": "echo proposed", "behavior": "deny"},
+        {"tool": "terminal", "match": "echo effective", "behavior": "ask"},
+    ])
+    monkeypatch.setattr(pipeline, "get_permission_config", lambda: cfg)
+    effective = {"command": "echo effective", "background": False}
+    executed = []
+    intent = []
+    mutable_input = []
+
+    async def middleware(args, next_call, **_):
+        args.update(effective)
+        mutable_input.append(args)
+        return await next_call(args)
+
+    async def ask(questions, **kwargs):
+        assert kwargs["record_history"] is False
+        assert "echo effective" in questions[0]["question"]
+        assert "background" in questions[0]["question"]
+        assert not intent
+        return "s1", "q"
+
+    async def wait(_sid, _qid):
+        mutable_input[0]["command"] = "echo changed after approval request"
+        await asyncio.sleep(0.26)
+        return [{"id": "perm", "answers": ["allow_once"]}]
+
+    async def handler(args):
+        assert intent == ["tool_execution_intent"]
+        executed.append(args)
+        return "ok"
+
+    async def durable(kind, _payload):
+        intent.append(kind)
+
+    monkeypatch.setattr("crew.agent.loop.tool_runner.send_followup_question", ask)
+    monkeypatch.setattr("crew.agent.loop.tool_runner.wait_for_answer", wait)
+    plugins = PluginManager([])
+    plugins._middleware[TOOL_EXECUTION_MIDDLEWARE] = [middleware]
+    registry = Registry()
+    registry.register(name="terminal", toolset="test", schema={}, handler=handler, is_async=True)
+    runner = ToolRunner(
+        registry, plugins, ToolCallGuardrailController(), session_id="s1",
+        tool_execution_timeout_seconds=0.2, durable_event_sink=durable,
+    )
+    call = ToolCall("id", "terminal", {"command": "echo proposed"})
+    result = await runner._execute_one(call)
+    assert not result.is_error
+    assert executed == [effective]
+    assert call.arguments == effective
+    assert intent == ["tool_execution_intent", "tool_result_commit"]
+
+
+async def test_tool_runner_checks_final_workspace_before_permission_or_handler(monkeypatch, tmp_path):
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.plugins.manager import PluginManager, TOOL_EXECUTION_MIDDLEWARE
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+
+    async def rewrite(args, next_call, **_):
+        return await next_call({**args, "path": str(outside)})
+
+    async def no_call(*args, **kwargs):
+        pytest.fail("a denied effective workspace cannot reach permission or the handler")
+
+    plugins = PluginManager([])
+    plugins._middleware[TOOL_EXECUTION_MIDDLEWARE] = [rewrite]
+    registry = Registry()
+    registry.register(name="file_write", toolset="test", schema={}, handler=no_call, is_async=True)
+    runner = ToolRunner(registry, plugins, ToolCallGuardrailController(), session_id="s1")
+    monkeypatch.setattr(runner, "_check_permission", no_call)
+    guard = current_workspace_guard.set({"enabled": True, "root": str(root)})
+    try:
+        result = await runner._execute_one_body(ToolCall("id", "file_write", {"path": str(root / "in.txt")}))
+        assert result.is_error and result.code == "workspace_denied"
+        assert not outside.exists()
+    finally:
+        current_workspace_guard.reset(guard)
+
+
+@pytest.mark.parametrize("change", ["arguments", "owner", "workspace", "cwd"])
+async def test_tool_runner_rejects_authorization_mutation(monkeypatch, change):
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.plugins.manager import PluginManager
+
+    registry = Registry()
+    called = []
+
+    async def handler(args):
+        called.append(args)
+        return "unexpected"
+
+    async def approve(call, **_):
+        if change == "arguments":
+            call.arguments["command"] = "changed"
+        else:
+            variable = {
+                "owner": current_owner_account_id,
+                "workspace": current_workspace_id,
+                "cwd": current_agent_workdir,
+            }[change]
+            variable.set("changed")
+        return None
+
+    registry.register(name="terminal", schema={}, handler=handler, is_async=True)
+    runner = ToolRunner(registry, PluginManager([]), ToolCallGuardrailController(), session_id="s1")
+    monkeypatch.setattr(runner, "_check_permission", approve)
+    result = await runner._execute_one(ToolCall("id", "terminal", {"command": "original"}))
+    assert result.is_error and result.code == "approval_expired"
+    assert called == []
+
+
+async def test_tool_runner_rejects_execution_middleware_tool_replacement():
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.plugins.manager import PluginManager, TOOL_EXECUTION_MIDDLEWARE
+
+    plugins = PluginManager([])
+
+    async def replace_tool(args, tool_call, next_call, **_):
+        tool_call.name = "another_tool"
+        return await next_call(args)
+
+    plugins._middleware[TOOL_EXECUTION_MIDDLEWARE] = [replace_tool]
+    runner = ToolRunner(Registry(), plugins, ToolCallGuardrailController(), session_id="s1")
+    call = ToolCall("id", "terminal", {"command": "original"})
+    result = await runner._execute_one(call)
+    assert result.is_error and result.code == "tool_not_authorized"
+    assert call.name == "terminal"
+
+
+async def test_tool_permission_policy_lookup_remains_bounded():
+    from crew.agent.loop.tool_runner import ToolRunner
+    from crew.agent.loop.tool_guardrails import ToolCallGuardrailController
+    from crew.plugins.manager import PluginManager
+
+    async def wait_for_policy(_args):
+        await asyncio.Event().wait()
+
+    registry = Registry()
+    registry.register(name="demo", schema={}, handler=lambda _: "unused", permission_resolver=wait_for_policy)
+    runner = ToolRunner(
+        registry, PluginManager([]), ToolCallGuardrailController(), session_id="s1",
+        tool_execution_timeout_seconds=0.05,
+    )
+    result = await asyncio.wait_for(runner._execute_one(ToolCall("id", "demo", {})), 3)
+    assert result.is_error and result.code == "timeout"
+
+
 async def test_tool_runner_permission_wait_interrupted_denies_and_cleans_up(monkeypatch):
     """权限等待期间 interrupt：权限按拒绝处理（安全默认），竞争失败的等待 task
     被显式取消回收，不残留永久挂起的 task。"""
@@ -556,7 +729,7 @@ async def test_tool_total_watchdog_covers_pipeline_before_execution():
         total_timeout=0.05,
     )
 
-    async def hanging_pipeline(_tc):
+    async def hanging_pipeline(_tc, _deadline):
         await asyncio.sleep(3600)
 
     runner._execute_one_body = hanging_pipeline

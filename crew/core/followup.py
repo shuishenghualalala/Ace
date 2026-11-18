@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, Callable
 
 from crew.core.errors import ToolError
 from crew.core.runctx import (
     current_display_session_id,
+    current_owner_account_id,
     current_push_fn,
     current_request_id,
     current_session_id,
@@ -39,6 +42,35 @@ _ACTIVITY_PULSE_INTERVAL_SECONDS = 30.0
 # 用回灌而非 future.cancel()，避免 CancelledError 冒泡到 agent 主任务。
 CANCELLED_MARKER = "__cancelled__"
 _CANCELLED_ANSWER = [{"id": CANCELLED_MARKER, "answers": []}]
+_MAX_RECEIPT_RELEASE_SECONDS = 3.0
+
+
+@dataclass(frozen=True)
+class FollowupAnswerMessage:
+    history_id: str
+    text: str
+
+
+def normalize_followup_answers(raw: object) -> list[dict[str, Any]] | None:
+    """Canonicalize the wire shape without requiring a live waiter."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    normalized: dict[str, list[str]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        qid = item.get("question_id", item.get("id"))
+        values = item.get("answers")
+        if (
+            not isinstance(qid, str) or not qid or qid == CANCELLED_MARKER or qid in normalized
+            or ("id" in item and "question_id" in item and item["id"] != item["question_id"])
+            or not isinstance(values, list) or not values
+            or any(not isinstance(value, str) or not value.strip() for value in values)
+            or len(set(values)) != len(values)
+        ):
+            return None
+        normalized[qid] = sorted(values)
+    return [{"question_id": qid, "answers": normalized[qid]} for qid in sorted(normalized)]
 
 # 通知中心注入钩子（由 crew/app.py 装配层注入；core 不反向依赖通知实现）：
 #   on_pending(session_id, question_id, text)  追问发出后触发（仅 record_history=True）
@@ -97,20 +129,21 @@ def _fire_resolved(session_id: str, question_id: str) -> None:
 
 
 class FollowupWaiter:
-    """按 (session_id, question_id) 管理等待中的追问。"""
+    """Manage pending prompts by authenticated owner, session and question."""
 
     def __init__(self) -> None:
-        # {(session_id, question_id): asyncio.Future}
-        self._futures: dict[tuple[str, str], asyncio.Future[list[dict[str, Any]]]] = {}
-        # {(session_id, question_id): normalized questions}
-        self._questions: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        # {(session_id, question_id): 是否把答案写进 canonical history}
-        self._record_history: dict[tuple[str, str], bool] = {}
-        # session_id -> user-visible messages waiting to be merged into canonical history
-        self._answer_messages: dict[str, list[str]] = {}
+        # Owner and display session are part of every waiter key.
+        self._futures: dict[tuple[str, str, str], asyncio.Future[list[dict[str, Any]]]] = {}
+        self._questions: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        self._record_history: dict[tuple[str, str, str], bool] = {}
+        self._request_ids: dict[tuple[str, str, str], str] = {}
+        self._receipt_releases: dict[tuple[str, str, str], asyncio.Event] = {}
+        self._receipt_commits: set[tuple[str, str, str]] = set()
+        self._answer_messages: dict[tuple[str, str, str], list[FollowupAnswerMessage]] = {}
 
-    def _key(self, session_id: str, question_id: str) -> tuple[str, str]:
-        return (session_id, question_id)
+    @staticmethod
+    def _key(session_id: str, question_id: str, owner: str | None = None) -> tuple[str, str, str]:
+        return (current_owner_account_id.get() if owner is None else owner, session_id, question_id)
 
     def create(
         self,
@@ -118,6 +151,8 @@ class FollowupWaiter:
         questions: list[dict[str, Any]] | None = None,
         *,
         record_history: bool = True,
+        owner_account_id: str | None = None,
+        request_id: str | None = None,
     ) -> str:
         """创建一个新的 question_id 和 Future，返回 question_id。
 
@@ -131,10 +166,11 @@ class FollowupWaiter:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         future: asyncio.Future[list[dict[str, Any]]] = loop.create_future()
-        key = self._key(session_id, question_id)
+        key = self._key(session_id, question_id, owner_account_id)
         self._futures[key] = future
-        self._questions[key] = list(questions or [])
+        self._questions[key] = deepcopy(questions or [])
         self._record_history[key] = bool(record_history)
+        self._request_ids[key] = current_request_id.get() if request_id is None else request_id
         return question_id
 
     async def wait(
@@ -145,6 +181,7 @@ class FollowupWaiter:
         timeout: float | None = None,
         activity_fn: Callable[[], None] | None = None,
         activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
+        owner_account_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """等待用户回答；超时返回空答案列表（让 LLM 自己处理）。
 
@@ -152,7 +189,8 @@ class FollowupWaiter:
         装配层注入的默认上限）。提供 activity_fn 时按 activity_interval 周期
         上报任务活动，防止长等待被任务运行时的不活跃超时误杀。
         """
-        future = self._futures.get(self._key(session_id, question_id))
+        key = self._key(session_id, question_id, owner_account_id)
+        future = self._futures.get(key)
         if future is None:
             raise ToolError(f"追问不存在: {question_id}")
         try:
@@ -160,17 +198,31 @@ class FollowupWaiter:
                 answers = await asyncio.wait_for(future, timeout=timeout)
             else:
                 answers = await self._wait_with_activity(future, activity_fn, activity_interval, timeout)
+            release = self._receipt_releases.get(key)
+            if release is not None:
+                try:
+                    await asyncio.wait_for(release.wait(), timeout=_MAX_RECEIPT_RELEASE_SECONDS)
+                except TimeoutError:
+                    pass
+                if key not in self._receipt_commits:
+                    answers = _CANCELLED_ANSWER
         except asyncio.TimeoutError:
             log.warning("追问超时 session=%s question=%s", session_id, question_id)
             answers = []
         finally:
-            key = self._key(session_id, question_id)
-            self._futures.pop(key, None)
-            self._questions.pop(key, None)
-            self._record_history.pop(key, None)
+            self.discard(session_id, question_id, owner_account_id=key[0])
             # 等待结束（回答/取消/超时）即解除待办：对应通知自动已读。
             _fire_resolved(session_id, question_id)
         return answers
+
+    def discard(self, session_id: str, question_id: str, *, owner_account_id: str | None = None) -> None:
+        key = self._key(session_id, question_id, owner_account_id)
+        self._futures.pop(key, None)
+        self._questions.pop(key, None)
+        self._record_history.pop(key, None)
+        self._request_ids.pop(key, None)
+        self._receipt_releases.pop(key, None)
+        self._receipt_commits.discard(key)
 
     @staticmethod
     async def _wait_with_activity(
@@ -201,47 +253,100 @@ class FollowupWaiter:
         session_id: str,
         question_id: str,
         answers: list[dict[str, Any]],
+        *,
+        owner_account_id: str | None = None,
+        request_id: str | None = None,
+        release: asyncio.Event | None = None,
     ) -> bool:
         """用户回答后调用；成功唤醒返回 True，Future 不存在返回 False。"""
-        future = self._futures.get(self._key(session_id, question_id))
-        if future is None or future.done():
+        key = self._key(session_id, question_id, owner_account_id)
+        future = self._futures.get(key)
+        if future is None or future.done() or (request_id is not None and self._request_ids[key] != request_id):
             return False
-        key = self._key(session_id, question_id)
-        if self._record_history.get(key, True):
-            display_message = self._format_answer_message(session_id, question_id, answers)
+        if release is None and self._record_history.get(key, True):
+            display_message = self._format_answer_message(self._questions[key], answers)
             if display_message:
-                self._answer_messages.setdefault(session_id, []).append(display_message)
+                self._answer_messages.setdefault((key[0], session_id, self._request_ids[key]), []).append(
+                    FollowupAnswerMessage(f"followup:{question_id}", display_message),
+                )
+        if release is not None:
+            self._receipt_releases[key] = release
         future.set_result(answers)
         # 用户已回答：对应待办通知自动已读（wait 的 finally 会再触发一次，幂等）。
         _fire_resolved(session_id, question_id)
         return True
 
-    def cancel(self, session_id: str, question_id: str) -> bool:
-        """取消等待：回灌取消标记答案，让 wait() 正常返回而非抛 CancelledError。"""
-        future = self._futures.pop(self._key(session_id, question_id), None)
-        key = self._key(session_id, question_id)
-        self._questions.pop(key, None)
-        self._record_history.pop(key, None)
-        if future is not None and not future.done():
-            future.set_result(_CANCELLED_ANSWER)
-            # 用户取消：对应待办通知自动已读。
-            _fire_resolved(session_id, question_id)
-            return True
-        return False
+    def commit_resolution(
+        self, session_id: str, question_id: str, *, owner_account_id: str, request_id: str,
+        answer: FollowupAnswerMessage | None = None,
+    ) -> bool:
+        key = self._key(session_id, question_id, owner_account_id)
+        if key not in self._receipt_releases or self._request_ids.get(key) != request_id:
+            return False
+        self._receipt_commits.add(key)
+        if answer is not None:
+            self._answer_messages.setdefault((owner_account_id, session_id, request_id), []).append(answer)
+        return True
 
-    def is_waiting(self, session_id: str, question_id: str) -> bool:
+    def cancel(
+        self, session_id: str, question_id: str, *, owner_account_id: str | None = None,
+        request_id: str | None = None, release: asyncio.Event | None = None,
+    ) -> bool:
+        """取消等待：回灌取消标记答案，让 wait() 正常返回而非抛 CancelledError。"""
+        return self.resolve(
+            session_id, question_id, _CANCELLED_ANSWER, owner_account_id=owner_account_id,
+            request_id=request_id, release=release,
+        )
+
+    def is_waiting(
+        self, session_id: str, question_id: str, *, owner_account_id: str | None = None,
+        request_id: str | None = None,
+    ) -> bool:
         """判断该追问是否仍在等待用户回答（未回答、未取消、未超时）。"""
-        future = self._futures.get(self._key(session_id, question_id))
-        return future is not None and not future.done()
+        key = self._key(session_id, question_id, owner_account_id)
+        future = self._futures.get(key)
+        return future is not None and not future.done() and (request_id is None or self._request_ids[key] == request_id)
+
+    def request_id_for(self, session_id: str, question_id: str, *, owner_account_id: str) -> str | None:
+        return self._request_ids.get(self._key(session_id, question_id, owner_account_id))
 
     def drain_answer_messages(self, session_id: str) -> list[str]:
         """取出并清空等待写入 history 的用户选择展示文本。"""
-        return self._answer_messages.pop(session_id, [])
+        return [item.text for item in self.drain_answer_records(session_id)]
 
+    def drain_answer_records(
+        self, session_id: str, *, owner_account_id: str | None = None, request_id: str | None = None,
+    ) -> list[FollowupAnswerMessage]:
+        owner = current_owner_account_id.get() if owner_account_id is None else owner_account_id
+        request = current_request_id.get() if request_id is None else request_id
+        return self._answer_messages.pop((owner, session_id, request), [])
+
+    def validated_answer(
+        self, session_id: str, question_id: str, answers: list[dict[str, Any]],
+        *, owner_account_id: str, request_id: str | None,
+    ) -> tuple[bool, FollowupAnswerMessage | None]:
+        key = self._key(session_id, question_id, owner_account_id)
+        if not self.is_waiting(session_id, question_id, owner_account_id=owner_account_id, request_id=request_id):
+            return False, None
+        questions = self._questions[key]
+        by_id = {question["id"]: question for question in questions}
+        if {item["question_id"] for item in answers} != set(by_id):
+            return False, None
+        for item in answers:
+            question = by_id.get(item["question_id"])
+            values = item["answers"]
+            if question is None or (len(values) != 1 and not question["multiSelect"]):
+                return False, None
+            if not question["allowFreeText"] and question.get("inputMode") != "text":
+                offered = {option["value"] for option in question["options"]}
+                if any(value not in offered for value in values):
+                    return False, None
+        text = self._format_answer_message(questions, answers) if self._record_history[key] else ""
+        return True, FollowupAnswerMessage(f"followup:{question_id}", text) if text else None
+
+    @staticmethod
     def _format_answer_message(
-        self,
-        session_id: str,
-        question_id: str,
+        questions: list[dict[str, Any]],
         answers: list[dict[str, Any]],
     ) -> str:
         """把结构化答案格式化成历史中展示的 user 消息。
@@ -253,7 +358,6 @@ class FollowupWaiter:
         if answers[0].get("id") == CANCELLED_MARKER:
             return ""
 
-        questions = self._questions.get(self._key(session_id, question_id), [])
         question_map = {str(q.get("id") or ""): q for q in questions if isinstance(q, dict)}
         multi = len(answers) > 1
         parts: list[str] = []
@@ -335,10 +439,14 @@ def validate_questions(questions: list[Any]) -> list[dict[str, Any]]:
     if not isinstance(questions, list):
         raise ToolError("questions 必须是数组")
     normalized: list[dict[str, Any]] = []
+    identifiers: set[str] = set()
     for idx, q in enumerate(questions):
         if not isinstance(q, dict):
             raise ToolError(f"questions[{idx}] 必须是对象")
         qid = str(q.get("id") or f"q{idx}")
+        if qid in identifiers:
+            raise ToolError(f"questions[{idx}].id 重复")
+        identifiers.add(qid)
         text = str(q.get("question") or "").strip()
         if not text:
             raise ToolError(f"questions[{idx}].question 不能为空")
@@ -365,6 +473,8 @@ def validate_questions(questions: list[Any]) -> list[dict[str, Any]]:
             # prompts opt out because an arbitrary string is not an approval.
             "allowFreeText": q.get("allowFreeText", q.get("allow_free_text", True)) is not False,
         }
+        if len({option["value"] for option in item["options"]}) != len(item["options"]):
+            raise ToolError(f"questions[{idx}].options.value 重复")
         if input_mode == "text":
             item["inputMode"] = "text"
         normalized.append(item)
@@ -402,6 +512,8 @@ async def send_followup_question_to(
     origin: dict[str, Any] | None = None,
     push_fn=None,
     record_history: bool = True,
+    owner_account_id: str | None = None,
+    request_id: str | None = None,
 ) -> tuple[str, str]:
     """向指定主会话发送追问，供跨进程 ACP/MCP 桥显式绑定 session。"""
     session_id = str(session_id or "").strip()
@@ -413,8 +525,9 @@ async def send_followup_question_to(
         raise ToolError("当前运行环境不支持追问交互（无 push 函数）")
 
     normalized = validate_questions(questions)
+    request_id = current_request_id.get() if request_id is None else request_id
     question_id = _followup_waiter.create(
-        session_id, normalized, record_history=record_history
+        session_id, normalized, record_history=record_history, owner_account_id=owner_account_id, request_id=request_id,
     )
 
     payload = {
@@ -430,7 +543,7 @@ async def send_followup_question_to(
         },
         "is_final": False,
         "sequence": 0,
-        "request_id": current_request_id.get(),
+        "request_id": request_id,
         "session_id": session_id,
     }
     normalized_note = str(note or "").strip()
@@ -438,7 +551,11 @@ async def send_followup_question_to(
         payload["body"]["note"] = normalized_note
     if origin:
         payload["body"]["origin"] = dict(origin)
-    await push_fn(session_id, payload)
+    try:
+        await push_fn(session_id, payload)
+    except BaseException:
+        _followup_waiter.discard(session_id, question_id, owner_account_id=owner_account_id)
+        raise
     log.info("已发送追问 session=%s question=%s", session_id, question_id)
     # 通知中心待办：仅 record_history=True 的普通追问发通知；
     # record_history=False 是权限确认等 side-channel UI，已由 approval 来源覆盖，不重复通知。
@@ -488,6 +605,7 @@ async def wait_for_answer(
     timeout: float | None | object = _UNSET,
     activity_fn: Callable[[], None] | None = None,
     activity_interval: float = _ACTIVITY_PULSE_INTERVAL_SECONDS,
+    owner_account_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """等待用户回答。timeout 未传时用装配层注入的默认上限（有界，可配置）。
 
@@ -504,6 +622,7 @@ async def wait_for_answer(
         timeout=effective_timeout,
         activity_fn=activity_fn,
         activity_interval=activity_interval,
+        owner_account_id=owner_account_id,
     )
 
 
@@ -511,8 +630,10 @@ def resolve_answer(
     session_id: str,
     question_id: str,
     answers: list[dict[str, Any]],
+    *,
+    owner_account_id: str | None = None,
 ) -> bool:
-    return _followup_waiter.resolve(session_id, question_id, answers)
+    return _followup_waiter.resolve(session_id, question_id, answers, owner_account_id=owner_account_id)
 
 
 def cancel_followup(session_id: str, question_id: str) -> bool:
@@ -522,3 +643,10 @@ def cancel_followup(session_id: str, question_id: str) -> bool:
 def drain_followup_answer_messages(session_id: str) -> list[str]:
     """取出当前 session 已提交的追问选择，用于写入 canonical history。"""
     return _followup_waiter.drain_answer_messages(session_id)
+
+
+def drain_followup_answer_records(
+    session_id: str, *, owner_account_id: str | None = None, request_id: str | None = None,
+) -> list[FollowupAnswerMessage]:
+    """Drain canonical answer rows from only the current owner and turn."""
+    return _followup_waiter.drain_answer_records(session_id, owner_account_id=owner_account_id, request_id=request_id)

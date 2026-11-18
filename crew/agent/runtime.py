@@ -1610,6 +1610,17 @@ class SingleAgent(Agent):
         """
         sid = envelope.session_id
         mem_sid = task_sid or sid
+        from crew.core.followup import drain_followup_answer_records
+
+        recorded = {message.followup_history_id for message in ctx.messages if message.followup_history_id}
+        for answer in drain_followup_answer_records(
+            mem_sid, owner_account_id=envelope.user_id, request_id=envelope.request_id,
+        ):
+            if answer.history_id not in recorded:
+                message = Message.user(answer.text)
+                message.followup_history_id = answer.history_id
+                ctx.messages.append(message)
+                recorded.add(answer.history_id)
         # 本轮新增的 assistant/tool 消息回灌到 canonical 全量历史
         # 跳过 reminder 等已插入的非历史消息（通过 prefix_len 偏移）
         new_from_executor = ctx.messages[prefix_len:]

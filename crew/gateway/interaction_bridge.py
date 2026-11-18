@@ -51,6 +51,7 @@ class ExternalInteractionBinding:
     interaction_timeout_seconds: float
     expires_at: float
     wiki_kb_id: str = ""
+    request_id: str = ""
 
 
 class InteractionBridge:
@@ -99,6 +100,7 @@ class InteractionBridge:
         active_skills: tuple[SkillActivation, ...] | list[SkillActivation] = (),
         interaction_timeout_seconds: float = DEFAULT_INTERACTION_TIMEOUT_SECONDS,
         wiki_kb_id: str = "",
+        request_id: str = "",
     ) -> ExternalInteractionBinding | None:
         owner = str(owner_account_id).strip()
         if not self.available or not owner:
@@ -141,6 +143,7 @@ class InteractionBridge:
             interaction_timeout_seconds=max(0.1, float(interaction_timeout_seconds or 0.0)),
             expires_at=time.time() + max(1.0, ttl_seconds),
             wiki_kb_id=wiki_kb_id,
+            request_id=request_id,
         )
         self._bindings[token] = binding
         return binding
@@ -663,11 +666,14 @@ class InteractionBridge:
             },
             push_fn=push_fn,
             record_history=record_history,
+            owner_account_id=binding.owner_account_id,
+            request_id=binding.request_id,
         )
         answers = await wait_for_answer(
             session_id,
             question_id,
             timeout=binding.interaction_timeout_seconds,
+            owner_account_id=binding.owner_account_id,
         )
         cancelled = bool(answers) and answers[0].get("id") == CANCELLED_MARKER
         if cancelled:

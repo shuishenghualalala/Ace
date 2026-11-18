@@ -13,6 +13,8 @@ import base64
 import json
 import mimetypes
 import time
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Sequence
@@ -38,7 +40,7 @@ from crew.agent.loop.tool_result_classification import file_mutation_result_land
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import (
     cancel_followup,
-    drain_followup_answer_messages,
+    drain_followup_answer_records,
     send_followup_question,
     wait_for_answer,
 )
@@ -59,6 +61,29 @@ log = get_logger("agent.tool_runner")
 _MAX_TOOL_WORKERS = 8  # Crew run_agent.py / agent.tool_executor default
 _INTERRUPT_GRACE_SECONDS = 0.1  # interrupt 后等工具自行收尾的优雅窗口
 _CLEANUP_GRACE_SECONDS = 0.25  # 取消后最多等待第三方协程自行退出的窗口
+
+
+class _ToolExecutionDeadline:
+    """Watch execution time independently of awaitable user permission."""
+
+    def __init__(self, seconds: float) -> None:
+        self._loop = asyncio.get_running_loop()
+        self.expired: asyncio.Future[None] = self._loop.create_future()
+        self._timer = self._loop.call_later(seconds, self.expired.set_result, None)
+
+    @contextmanager
+    def pause(self):
+        remaining = max(0.0, self._timer.when() - self._loop.time())
+        self._timer.cancel()
+        try:
+            yield
+        finally:
+            if not self.expired.done():
+                self._timer = self._loop.call_later(remaining, self.expired.set_result, None)
+
+    def close(self) -> None:
+        self.expired.cancel()
+        self._timer.cancel()
 
 
 def _read_media_data_url(part: MediaPart) -> str:
@@ -106,7 +131,7 @@ class ToolRunner:
         # 执行段看门狗（秒）：超时合成 timed-out 输出回灌模型，0=关闭。
         self.tool_execution_timeout_seconds = max(0.0, float(tool_execution_timeout_seconds or 0.0))
         # 总预算覆盖 request/pre/执行/结果/post 全管线。未单独配置时与执行段预算一致，
-        # 保持现有配置形态，同时避免前后置 hook 把单工具调用无限延长。
+        # 用户回答权限问题期间暂停计时，前后置 hook 仍受预算约束。
         self.tool_total_timeout_seconds = max(
             0.0,
             float(
@@ -501,8 +526,10 @@ class ToolRunner:
         """把追问选择作为 user 消息插入 tool result 之后，确保 history 可回放。"""
         if not self.session_id:
             return
-        for content in drain_followup_answer_messages(self.session_id):
-            messages.append(Message.user(content))
+        for answer in drain_followup_answer_records(self.session_id):
+            message = Message.user(answer.text)
+            message.followup_history_id = answer.history_id
+            messages.append(message)
 
     async def _resolve(self, tc) -> ToolResult:
         """取单工具结果：命中 prewarm 缓存则 await 缓存任务，否则现场执行（带并发闸门）。"""
@@ -570,7 +597,7 @@ class ToolRunner:
         return results
 
     # ------------------------------------------------------------------ #
-    async def _check_permission(self, tc) -> str | None:
+    async def _check_permission(self, tc, *, waiting_clocks: Sequence[_ToolExecutionDeadline] = ()) -> str | None:
         """权限规则匹配 + 交互确认。
 
         - 无规则 / allow → 放行（返回 None）
@@ -603,6 +630,7 @@ class ToolRunner:
                 dynamic.reason or "该动作可能产生外部副作用",
                 "",
                 allow_always=dynamic.allow_always,
+                waiting_clocks=waiting_clocks,
             )
             if blocked is not None:
                 return blocked
@@ -643,7 +671,7 @@ class ToolRunner:
                 ensure_ascii=False,
             )
         # ask
-        return await self._ask_permission(tc, reason, suggested)
+        return await self._ask_permission(tc, reason, suggested, waiting_clocks=waiting_clocks)
 
     async def _ask_permission(
         self,
@@ -652,18 +680,29 @@ class ToolRunner:
         suggested: str,
         *,
         allow_always: bool = True,
+        waiting_clocks: Sequence[_ToolExecutionDeadline] = (),
     ) -> str | None:
         """弹出权限确认框并等待用户选择。返回 None 表示放行，否则返回拒绝原因。"""
+        from crew.core.runctx import current_agent_workdir
         from crew.tools.pipeline import extract_match_key
+        from crew.tools.redact import redact_sensitive_text
 
-        key = extract_match_key(tc.name, tc.arguments)
+        tc = replace(tc, arguments=deepcopy(tc.arguments))
+        safe_args = tool_arguments_for_ui(tc.name, tc.arguments)
+        key = redact_sensitive_text(extract_match_key(tc.name, safe_args), force=True)
         # Follow-up cards render plain text. Keep this free of Markdown fences
         # so permission details are readable in every client.
         question_text = f"即将执行：{key}"
+        preview = json.dumps(safe_args, ensure_ascii=False, sort_keys=True)
+        if preview != key and len(safe_args) > 1:
+            question_text += f"\n调用参数为 {redact_sensitive_text(preview, force=True)[:1600]}"
+        cwd = current_agent_workdir.get()
+        if cwd:
+            question_text += f"\n工作目录为 {cwd}"
         if reason:
             question_text += f"\n\n原因：{reason}"
         if suggested:
-            question_text += f"\n\n本次对话复用范围：仅完整匹配 {tc.name}({suggested})"
+            question_text += "\n\n本次对话授权仅适用于此工具、完整参数及工作目录"
         options = [{"label": "允许一次", "value": "allow_once"}]
         if allow_always and suggested and suggested != "*":
             options.append({"label": "本次对话允许此完整操作", "value": "session_exact"})
@@ -685,7 +724,7 @@ class ToolRunner:
                 {"error": f"需要权限确认但当前环境无法交互：{exc}", "error_code": "approval_unavailable"},
                 ensure_ascii=False,
             )
-        answers = await self._wait_permission_answer(session_id, qid)
+        answers = await self._wait_permission_answer(session_id, qid, waiting_clocks=waiting_clocks)
         choice = ""
         if answers and isinstance(answers[0], dict):
             vals = answers[0].get("answers")
@@ -693,8 +732,8 @@ class ToolRunner:
                 choice = str(vals[0])
         if choice == "allow_once":
             return None
-        if choice in {"session_exact", "always"}:
-            grant_session_allow(self.session_id, tc.name, suggested)
+        if choice == "session_exact" and allow_always and suggested and suggested != "*":
+            grant_session_allow(self.session_id, tc.name, tc.arguments)
             return None
         # deny / 超时 / 取消
         if choice == "deny":
@@ -711,7 +750,7 @@ class ToolRunner:
         )
 
     async def _wait_permission_answer(
-        self, session_id: str, question_id: str
+        self, session_id: str, question_id: str, *, waiting_clocks: Sequence[_ToolExecutionDeadline] = (),
     ) -> list[dict[str, Any]]:
         """权限回答等待与 interrupt 竞争（FIRST_COMPLETED 决胜）。
 
@@ -731,9 +770,10 @@ class ToolRunner:
             racers = {wait_task} | (
                 {interrupt_task} if interrupt_task is not None else set()
             )
-            done, _pending = await asyncio.wait(
-                racers, return_when=asyncio.FIRST_COMPLETED
-            )
+            with ExitStack() as waiting:
+                for clock in waiting_clocks:
+                    waiting.enter_context(clock.pause())
+                done, _pending = await asyncio.wait(racers, return_when=asyncio.FIRST_COMPLETED)
             if wait_task in done:
                 return wait_task.result()
             cancel_followup(session_id, question_id)
@@ -843,14 +883,17 @@ class ToolRunner:
     async def _execute_one(self, tc, *, started_at: float | None = None) -> ToolResult:
         """单个工具的完整管线，并受总预算保护。"""
         started = started_at if started_at is not None else self._mark_tool_started(tc)
+        timeout = self.tool_total_timeout_seconds
+        total_deadline = _ToolExecutionDeadline(timeout) if timeout > 0 else None
         try:
             async def _run_pipeline() -> ToolResult:
                 async with self._ensure_sem():
-                    return await self._execute_one_body(tc)
+                    return await self._execute_one_body(tc, total_deadline)
 
             result = await self._execute_total_guarded(
                 tc,
                 _run_pipeline,
+                total_deadline,
             )
             return self._normalize_result(result)
         finally:
@@ -877,11 +920,11 @@ class ToolRunner:
             return False
         return bool(done)
 
-    async def _execute_total_guarded(self, tc, invoke) -> ToolResult:
+    async def _execute_total_guarded(self, tc, invoke, deadline: _ToolExecutionDeadline | None) -> ToolResult:
         """完整工具管线看门狗：总预算与 interrupt 竞争。"""
         timeout = self.tool_total_timeout_seconds
         wait_interrupted = getattr(self.control, "wait_interrupted", None)
-        if timeout <= 0 and not callable(wait_interrupted):
+        if deadline is None and not callable(wait_interrupted):
             return await invoke()
         started = time.perf_counter()
         pipeline_task = asyncio.create_task(invoke())
@@ -892,11 +935,9 @@ class ToolRunner:
         )
         try:
             racers = {pipeline_task} | ({interrupt_task} if interrupt_task is not None else set())
-            done, _pending = await asyncio.wait(
-                racers,
-                timeout=timeout if timeout > 0 else None,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            if deadline is not None:
+                racers.add(deadline.expired)
+            done, _pending = await asyncio.wait(racers, return_when=asyncio.FIRST_COMPLETED)
             if pipeline_task in done:
                 return pipeline_task.result()
             if interrupt_task is not None and interrupt_task in done:
@@ -924,10 +965,12 @@ class ToolRunner:
                 return result
             raise
         finally:
+            if deadline is not None:
+                deadline.close()
             if interrupt_task is not None and not interrupt_task.done():
                 await self._cancel_task_with_grace(interrupt_task, f"{tc.name}:interrupt")
 
-    async def _execute_guarded(self, tc, invoke) -> ToolResult:
+    async def _execute_guarded(self, tc, invoke, deadline: _ToolExecutionDeadline | None) -> ToolResult:
         """执行段看门狗：工具 task 与 (interrupt 事件, 超时) 竞争，FIRST_COMPLETED 决胜。
 
         只包裹真实执行段（registry.execute + execution middleware）；权限等待段不在此列。
@@ -937,7 +980,7 @@ class ToolRunner:
         """
         timeout = self.tool_execution_timeout_seconds
         wait_interrupted = getattr(self.control, "wait_interrupted", None)
-        if timeout <= 0 and not callable(wait_interrupted):
+        if deadline is None and not callable(wait_interrupted):
             return await invoke()
         started = time.perf_counter()
         exec_task = asyncio.create_task(invoke())
@@ -948,11 +991,9 @@ class ToolRunner:
         )
         try:
             racers = {exec_task} | ({interrupt_task} if interrupt_task is not None else set())
-            done, _pending = await asyncio.wait(
-                racers,
-                timeout=timeout if timeout > 0 else None,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            if deadline is not None:
+                racers.add(deadline.expired)
+            done, _pending = await asyncio.wait(racers, return_when=asyncio.FIRST_COMPLETED)
             if exec_task in done:
                 # 完成优先：取消/超时到达前工具已正常收尾，原样收取结果。
                 return exec_task.result()
@@ -962,7 +1003,6 @@ class ToolRunner:
                     return exec_task.result()
                 await self._cancel_task_with_grace(exec_task, tc.name)
                 return self._aborted_result(tc, time.perf_counter() - started)
-            # wait 空 done：超时
             await self._cancel_task_with_grace(exec_task, tc.name)
             return self._timeout_result(tc, timeout)
         except asyncio.CancelledError:
@@ -975,10 +1015,12 @@ class ToolRunner:
                 return self._aborted_result(tc, time.perf_counter() - started)
             raise
         finally:
+            if deadline is not None:
+                deadline.close()
             if interrupt_task is not None and not interrupt_task.done():
                 await self._cancel_task_with_grace(interrupt_task, f"{tc.name}:interrupt")
 
-    async def _execute_one_body(self, tc) -> ToolResult:
+    async def _execute_one_body(self, tc, total_deadline: _ToolExecutionDeadline | None = None) -> ToolResult:
         """单个工具：guardrails.before → plugins.pre → execute → transform → guardrails.after → plugins.post。"""
         from crew.core.runctx import current_tool_call_id
 
@@ -1057,6 +1099,7 @@ class ToolRunner:
                     is_error=True, code="tool_not_disclosed",
                 )
 
+            tool_identity = (tc.id, tc.name)
             # 0. plugin request middleware：参数脱敏/改写必须早于 guardrail、hook 与真实执行。
             mw = await self.plugins.apply_tool_request_middleware(
                 tc.name,
@@ -1068,7 +1111,12 @@ class ToolRunner:
             if mw.changed and isinstance(mw.payload, dict):
                 tc.arguments = mw.payload
 
-            from crew.core.runctx import current_agent_workdir, current_workspace_guard
+            from crew.core.runctx import (
+                current_agent_workdir,
+                current_owner_account_id,
+                current_workspace_guard,
+                current_workspace_id,
+            )
 
             workspace_decision = check_workspace_guard(
                 tc.name,
@@ -1097,45 +1145,72 @@ class ToolRunner:
             if block_message:
                 return ToolResult(tc.id, tc.name, block_message, is_error=True)
 
-            # 权限检查：allow/deny/ask 规则匹配，ask 走 followup 交互确认
-            perm_block = await self._check_permission(tc)
-            if perm_block is not None:
-                return ToolResult(
-                    tc.id, tc.name, perm_block, is_error=True,
-                    code=structured_tool_error_code(perm_block),
-                )
-
-            # 3. 真正执行
-            await self._record_durable_event(
-                "tool_execution_intent",
-                {
-                    "tool_call_id": tc.id,
-                    "name": tc.name,
-                    "side_effect_state": "unknown",
-                },
-            )
             t = time.perf_counter()
+            timeout = self.tool_execution_timeout_seconds
+            deadline = _ToolExecutionDeadline(timeout) if timeout > 0 else None
             # 注入进度 sink，长任务（如 terminal 前台命令）
             # 可在执行中向前端流式发射增量。无 push_fn 时 sink 内部 no-op。
             progress_token = self._install_progress_sink(tc)
+            effective_call: ToolCall | None = None
             try:
                 async def _execute_with_args(args):
-                    exec_tc = tc
-                    if args is not tc.arguments:
-                        exec_tc = ToolCall(
-                            id=tc.id,
-                            name=tc.name,
-                            arguments=args,
-                            started_at=tc.started_at,
-                            duration=tc.duration,
-                            result=tc.result,
-                            status=tc.status,
+                    nonlocal effective_call
+                    if (tc.id, tc.name) != tool_identity:
+                        return ToolResult(
+                            *tool_identity, "工具中间件只能修改参数", is_error=True, code="tool_not_authorized",
                         )
-                    # Permissions or execution middleware can await or rewrite
-                    # arguments. Recheck the call that will actually run.
-                    blocked = self._plan_mode_block(exec_tc)
+                    if not isinstance(args, dict):
+                        return ToolResult(tc.id, tc.name, "工具参数必须是对象", is_error=True, code="invalid_arguments")
+                    # Snapshot the final middleware arguments before any policy check can wait.
+                    exec_tc = replace(tc, arguments=deepcopy(args))
+                    effective_call = exec_tc
+
+                    def check_scope() -> ToolResult | None:
+                        workspace = check_workspace_guard(
+                            exec_tc.name, exec_tc.arguments, current_workspace_guard.get(), cwd=current_agent_workdir.get(),
+                        )
+                        if not workspace.allowed:
+                            return ToolResult(
+                                exec_tc.id, exec_tc.name, workspace.reason, is_error=True, code="workspace_denied",
+                            )
+                        blocked = self._plan_mode_block(exec_tc)
+                        return ToolResult(exec_tc.id, exec_tc.name, blocked, is_error=True) if blocked else None
+
+                    blocked = check_scope()
                     if blocked is not None:
-                        return ToolResult(exec_tc.id, exec_tc.name, blocked, is_error=True)
+                        return blocked
+                    scope_variables = (current_owner_account_id, current_workspace_id, current_agent_workdir)
+                    approval_scope = tuple(variable.get() for variable in scope_variables)
+                    approval_call = replace(exec_tc, arguments=deepcopy(exec_tc.arguments))
+                    perm_block = await self._check_permission(
+                        approval_call,
+                        waiting_clocks=[clock for clock in (deadline, total_deadline) if clock is not None],
+                    )
+                    if perm_block is not None:
+                        return ToolResult(
+                            exec_tc.id, exec_tc.name, perm_block, is_error=True,
+                            code=structured_tool_error_code(perm_block),
+                        )
+                    if approval_call != exec_tc or approval_scope != tuple(variable.get() for variable in scope_variables):
+                        return ToolResult(
+                            exec_tc.id, exec_tc.name, "工具或工作目录在审批期间发生变化，请重新提交",
+                            is_error=True, code="approval_expired",
+                        )
+                    if self._interrupted:
+                        return self._aborted_result(exec_tc, time.perf_counter() - t)
+                    if deadline is not None and deadline.expired.done():
+                        return self._timeout_result(exec_tc, timeout)
+                    await self._record_durable_event(
+                        "tool_execution_intent",
+                        {"tool_call_id": exec_tc.id, "name": exec_tc.name, "side_effect_state": "unknown"},
+                    )
+                    if self._interrupted:
+                        return self._aborted_result(exec_tc, time.perf_counter() - t)
+                    if deadline is not None and deadline.expired.done():
+                        return self._timeout_result(exec_tc, timeout)
+                    blocked = check_scope()
+                    if blocked is not None:
+                        return blocked
                     return await self.registry.execute(exec_tc)
 
                 with span(
@@ -1147,18 +1222,24 @@ class ToolRunner:
                     attributes={"tool": tc.name, "tool_call_id": tc.id},
                 ):
                     input_capture = capture_payload("tool.input", tc.arguments)
-                    result = await self._execute_guarded(
-                        tc,
-                        lambda: self.plugins.run_tool_execution_middleware(
-                            tc.name,
-                            tc.arguments,
-                            _execute_with_args,
-                            tool_call=tc,
-                            tool_call_id=tc.id,
-                            session_id=self.session_id,
-                            original_args=mw.original_payload,
-                        ),
-                    )
+                    try:
+                        result = await self._execute_guarded(
+                            tc,
+                            lambda: self.plugins.run_tool_execution_middleware(
+                                tc.name,
+                                tc.arguments,
+                                _execute_with_args,
+                                tool_call=tc,
+                                tool_call_id=tc.id,
+                                session_id=self.session_id,
+                                original_args=mw.original_payload,
+                            ),
+                            deadline,
+                        )
+                    finally:
+                        tc.id, tc.name = tool_identity
+                        if effective_call is not None:
+                            tc.arguments = effective_call.arguments
                     output_capture = capture_payload(
                         "tool.output.raw",
                         {"content": result.content, "is_error": result.is_error, "code": result.code},

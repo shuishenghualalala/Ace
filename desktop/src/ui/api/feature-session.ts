@@ -15,7 +15,7 @@ import {
   wsBase,
   readDynamicKanbanResumeStream,
 } from './transport';
-import type { SendPayload, SendReceiptAction, ChatChunk, BackendSocketStatusMeta, GatewayCursor } from './transport';
+import type { SendPayload, SendReceiptAction, FollowupCommand, ChatChunk, BackendSocketStatusMeta, GatewayCursor } from './transport';
 
 // ── 会话 / Agent 配置 ──
 
@@ -1086,8 +1086,7 @@ export class BackendChatSocket {
           kb_id?: string;
           web_search_enabled?: boolean;
         }
-      | { action: 'followup_answer'; session_id: string; question_id: string; answers: FollowupAnswer[] }
-      | { action: 'followup_cancel'; session_id: string; question_id: string }
+      | FollowupCommand
       | { kind: 'pong' },
     outboxScope?: string,
     outboxStoreId?: string,

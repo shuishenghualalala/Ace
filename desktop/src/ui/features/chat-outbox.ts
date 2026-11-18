@@ -128,6 +128,12 @@ export class ChatOutbox {
     this.setReady(false);
   }
 
+  transportIdentity(): { scope: string; storeId: string } | null {
+    return this.binding && this.send && this.storeId
+      ? { scope: this.binding.scope, storeId: this.storeId }
+      : null;
+  }
+
   private updateReady(): void {
     const ready = Boolean(this.storeId && this.send && this.binding);
     this.setReady(ready);

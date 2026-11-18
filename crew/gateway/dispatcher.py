@@ -1090,8 +1090,9 @@ class SessionDispatcher:
                                 if not backgrounded and (
                                     err != _SHUTDOWN_REASON or len(sidechain_history) > sidechain_base_len
                                 ):
-                                    await self._store_save(
+                                    await self._store_converged_history(
                                         sid,
+                                        rid,
                                         sidechain_history,
                                         workspace_id=envelope.workspace_id,
                                         owner=owner,
@@ -1380,6 +1381,7 @@ class SessionDispatcher:
         workspace_id: str,
         owner: str,
         title_fallback: str | None = None,
+        expected_cursor: tuple[int, int] | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._store.save,
@@ -1388,7 +1390,34 @@ class SessionDispatcher:
             workspace_id,
             owner_account_id=owner,
             title_fallback=title_fallback,
+            **({"expected_cursor": expected_cursor} if expected_cursor is not None else {}),
         )
+
+    async def _store_converged_history(
+        self, session_id: str, request_id: str, messages: list[Message], *,
+        workspace_id: str, owner: str, title_fallback: str | None,
+    ) -> None:
+        snapshot = getattr(self._store, "accepted_followup_snapshot", None)
+        if not callable(snapshot):
+            await self._store_save(
+                session_id, messages, workspace_id=workspace_id, owner=owner, title_fallback=title_fallback,
+            )
+            return
+        from crew.state.session_store import SessionWriteConflict
+
+        for attempt in range(3):
+            answers, cursor = await asyncio.to_thread(snapshot, session_id, request_id, owner_account_id=owner)
+            recorded = {message.followup_history_id for message in messages}
+            complete = [*messages, *(answer for answer in answers if answer.followup_history_id not in recorded)]
+            try:
+                await self._store_save(
+                    session_id, complete, workspace_id=workspace_id, owner=owner,
+                    title_fallback=title_fallback, expected_cursor=cursor,
+                )
+                return
+            except SessionWriteConflict:
+                if attempt == 2:
+                    raise
 
     async def _store_set_status(
         self, session_id: str, status: str, *, owner: str, error: str = ""

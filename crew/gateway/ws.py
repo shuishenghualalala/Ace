@@ -29,6 +29,9 @@ from crew.channels.channel_sessions import is_channel_session_id
 from crew.features import FeatureEventContributionFailedError
 from crew.gateway.auth import AuthenticationError, authenticate_websocket
 from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey, SendReceipt, current_send_execution
+from crew.gateway.followup_receipts import (
+    FollowupKey, FollowupReceipt, FollowupReceiptJournal, followup_decision_hash,
+)
 from crew.scenarios import resolve_binding as resolve_scenario_binding
 from crew.gateway.helpers import (
     WS_PING_INTERVAL_S,
@@ -40,7 +43,7 @@ from crew.gateway.helpers import (
 from crew.channels.broadcast import stream_and_broadcast
 from crew.features.session_context import session_context_from_envelope
 from crew.state.logging import get_logger
-from crew.core.followup import get_followup_waiter
+from crew.core.followup import FollowupAnswerMessage, get_followup_waiter, normalize_followup_answers
 
 log = get_logger("gateway.ws")
 _MAX_FORCED_SNAPSHOT_SESSIONS = 16
@@ -94,6 +97,14 @@ def create_ws_router(
     send_inbox: DesktopSendInbox | None = None,
 ) -> APIRouter:
     router = APIRouter()
+    transaction = getattr(crew.session_store, "transaction", None)
+    read_query = getattr(crew.session_store, "read_query", None)
+    followup_journal = (
+        FollowupReceiptJournal(
+            transaction, read_query, getattr(crew.session_store, "append_followup_answer_in_transaction", None),
+        )
+        if callable(transaction) and callable(read_query) else None
+    )
 
     @router.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
@@ -160,6 +171,154 @@ def create_ws_router(
                 status_frame(session_id, message),
                 owner_account_id=owner,
             )
+
+        async def _publish_followup(
+            session_id: str, question_id: str, request_id: str, status: str,
+            answer: FollowupAnswerMessage | None = None,
+        ) -> None:
+            _register_session(session_id)
+            body = {"question_id": question_id, "status": status, "accepted": status in {"resolved", "cancelled"}, "note": ""}
+            if answer is not None:
+                body.update(answer_history_id=answer.history_id, answer_text=answer.text)
+            if status == "expired":
+                body["note"] = "该交互请求已过期或不存在，请重新发起。"
+            await connections.push_payload(
+                session_id,
+                {
+                    "kind": "followup_question", "body": body, "is_final": False, "sequence": 0,
+                    "request_id": request_id, "session_id": session_id,
+                },
+                owner_account_id=owner,
+            )
+
+        async def _handle_followup(session_id: str, data: dict) -> None:
+            action = data["action"]
+            query = action == "followup_receipt_query"
+            cancel = action == "followup_cancel"
+            modern = query or "submission_id" in data
+            key = FollowupKey.from_frame(owner, session_id, data) if modern else None
+            if not _session_owned(session_id):
+                if key is not None:
+                    await connections.send_socket(socket, FollowupReceipt(key, "expired", "interaction_expired").frame())
+                elif not modern:
+                    await _reject_missing_session(session_id)
+                return
+            answers = None if query or cancel else normalize_followup_answers(data.get("answers"))
+            waiter = get_followup_waiter()
+            if not query and "submission_id" not in data:
+                question = data.get("question_id")
+                if not isinstance(question, str) or not _REPAIR_ID.fullmatch(question):
+                    return
+                request = data.get("request_id")
+                request_id = (
+                    request if isinstance(request, str) and request
+                    else waiter.request_id_for(session_id, question, owner_account_id=owner)
+                )
+                scope = {"owner_account_id": owner, "request_id": request_id}
+                release = asyncio.Event()
+                try:
+                    valid, display = (True, None) if cancel else (
+                        waiter.validated_answer(session_id, question, answers, **scope) if answers else (False, None)
+                    )
+                    resolved = valid and (
+                        waiter.cancel(session_id, question, release=release, **scope) if cancel
+                        else waiter.resolve(session_id, question, answers, release=release, **scope)
+                    )
+                    if resolved:
+                        waiter.commit_resolution(session_id, question, answer=display, **scope)
+                    await asyncio.wait_for(_publish_followup(
+                        session_id, question, request_id or "",
+                        ("cancelled" if cancel else "resolved") if resolved else "expired",
+                        display if resolved else None,
+                    ), timeout=2.0)
+                finally:
+                    release.set()
+                return
+
+            if key is None:
+                return
+            if followup_journal is None:
+                await connections.send_socket(socket, FollowupReceipt(key, "unavailable", "receipt_store_unavailable").frame())
+                return
+            if not (query or cancel) and answers is None:
+                await connections.send_socket(socket, FollowupReceipt(key, "rejected", "invalid_answers").frame())
+                return
+            digest = None if query else followup_decision_hash(action, answers)
+            release = asyncio.Event()
+            live_status = ""
+            display = None
+            claim_acquired = False
+            decision_committed = False
+            decision_abandoned = False
+            try:
+                try:
+                    receipt = await followup_journal.query(key, digest)
+                    if receipt.status == "unknown" and not query:
+                        scope = {"owner_account_id": owner, "request_id": key.request_id}
+                        pending = waiter.is_waiting(session_id, key.question_id, **scope)
+                        if not pending:
+                            receipt = FollowupReceipt(key, "expired", "interaction_expired")
+                        else:
+                            valid, display = (True, None) if cancel else waiter.validated_answer(
+                                session_id, key.question_id, answers, **scope,
+                            )
+                            if not valid:
+                                receipt = FollowupReceipt(key, "rejected", "invalid_answers")
+                            else:
+                                claimed = await followup_journal.claim(key, digest)
+                                if claimed is None:
+                                    claim_acquired = True
+                                    if cancel:
+                                        applied = waiter.cancel(session_id, key.question_id, release=release, **scope)
+                                    else:
+                                        applied = waiter.resolve(
+                                            session_id, key.question_id, answers, release=release, **scope,
+                                        )
+                                    if applied:
+                                        receipt = FollowupReceipt(
+                                            key, "cancelled" if cancel else "applied",
+                                            answer_history_id=display.history_id if display else "",
+                                        )
+                                    else:
+                                        receipt = FollowupReceipt(key, "expired", "interaction_expired")
+                                    await asyncio.wait_for(
+                                        followup_journal.finish(receipt, answer=display if applied else None), timeout=2.0,
+                                    )
+                                    if applied and waiter.commit_resolution(
+                                        session_id, key.question_id, answer=display, **scope,
+                                    ):
+                                        decision_committed = True
+                                        live_status = "cancelled" if cancel else "resolved"
+                                    elif applied:
+                                        receipt = FollowupReceipt(key, "uncertain", "interaction_interrupted")
+                                    else:
+                                        decision_committed = True
+                                else:
+                                    receipt = claimed
+                except Exception:
+                    log.exception("追问回执写入失败 request=%s question=%s", key.request_id, key.question_id)
+                    receipt = FollowupReceipt(key, "unavailable", "receipt_store_unavailable")
+                if claim_acquired and not decision_committed:
+                    try:
+                        await followup_journal.abandon(key)
+                        decision_abandoned = True
+                        receipt = FollowupReceipt(key, "uncertain", "interaction_interrupted")
+                    except Exception:
+                        receipt = FollowupReceipt(key, "unavailable", "receipt_store_unavailable")
+
+                async def publish() -> None:
+                    if live_status:
+                        await _publish_followup(session_id, key.question_id, key.request_id, live_status, display)
+                    await connections.send_socket(socket, receipt.frame())
+
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(publish(), timeout=2.0)
+            finally:
+                if claim_acquired and not decision_committed and not decision_abandoned:
+                    with suppress(Exception):
+                        await followup_journal.abandon(key)
+                release.set()
+                followup_journal.release(key)
 
         async def _heartbeat() -> None:
             with suppress(asyncio.CancelledError):
@@ -628,7 +787,7 @@ def create_ws_router(
             if receipt_capability:
                 await connections.send_socket(socket, {
                     "kind": "send_receipt_capability",
-                    "body": {"version": 1, "store_id": send_inbox.store_id},
+                    "body": {"version": 1, "store_id": send_inbox.store_id, "followup_receipts": 1},
                     "sequence": 0,
                     "is_final": False,
                 })
@@ -709,7 +868,7 @@ def create_ws_router(
                         sid = str(payload.get("session_id") or "").strip()
                         if not qid or not sid:
                             return True
-                        return get_followup_waiter().is_waiting(sid, qid)
+                        return get_followup_waiter().is_waiting(sid, qid, owner_account_id=owner)
 
                     for raw_sid in sessions:
                         sid = str(raw_sid or "").strip()
@@ -786,45 +945,8 @@ def create_ws_router(
                     await _send_status(session_id, msg)
                     continue
 
-                # ---- Followup 交互：用户回答追问 ----
-                if data.get("action") == "followup_answer":
-                    if not _session_owned(session_id):
-                        await _reject_missing_session(session_id)
-                        continue
-                    from crew.core.followup import resolve_answer
-                    qid = str(data.get("question_id") or "").strip()
-                    answers = data.get("answers")
-                    if qid and isinstance(answers, list):
-                        resolved = resolve_answer(session_id, qid, answers)
-                        note = "" if resolved else "该交互请求已过期或不存在，请重新发起。"
-                        _register_session(session_id)
-                        await connections.push_payload(
-                            session_id,
-                            {
-                                "kind": "followup_question",
-                                "body": {
-                                    "question_id": qid,
-                                    "status": "resolved" if resolved else "expired",
-                                    "accepted": resolved,
-                                    "note": note,
-                                },
-                                "is_final": False,
-                                "sequence": 0,
-                                "session_id": session_id,
-                            },
-                            owner_account_id=owner,
-                        )
-                    continue
-
-                # ---- Followup 交互：用户取消追问 ----
-                if data.get("action") == "followup_cancel":
-                    if not _session_owned(session_id):
-                        await _reject_missing_session(session_id)
-                        continue
-                    from crew.core.followup import cancel_followup
-                    qid = str(data.get("question_id") or "").strip()
-                    if qid:
-                        cancel_followup(session_id, qid)
+                if data.get("action") in {"followup_answer", "followup_cancel", "followup_receipt_query"}:
+                    await _handle_followup(session_id, data)
                     continue
 
                 # ---- Plan 模式控制 ----

@@ -627,6 +627,11 @@ class ConnectionManager:
         if snapshot is None or payload.get("request_id") != snapshot.request_id:
             return
         kind = payload.get("kind")
+        if kind == "followup_question" and (payload.get("body") or {}).get("answer_history_id"):
+            # Recorded user input changes the transcript boundary. The frozen
+            # prefix cannot represent the new input and its later live output.
+            self._active_snapshots.pop(key, None)
+            return
         if payload.get("is_final") or kind in ("final", "error"):
             self._active_snapshots.pop(key, None)
             return
@@ -654,13 +659,13 @@ class ConnectionManager:
         waiting = get_followup_waiter().is_waiting
         prompts = {
             qid: frame for qid, frame in self._pending_followups.get(key, {}).items()
-            if waiting(key[1], qid)
+            if waiting(key[1], qid, owner_account_id=key[0])
         }
         prompts.pop(question_id, None)
         if (
             body.get("questions")
             and body.get("status") in (None, "pending")
-            and waiting(key[1], question_id)
+            and waiting(key[1], question_id, owner_account_id=key[0])
             and len(json.dumps(payload)) <= _MAX_FOLLOWUP_FRAME_BYTES
         ):
             if len(prompts) >= _MAX_PENDING_FOLLOWUPS:
@@ -698,7 +703,7 @@ class ConnectionManager:
         waiting = get_followup_waiter().is_waiting
         prompts = self._pending_followups.get(key, {})
         for qid in tuple(prompts):
-            if not waiting(key[1], qid):
+            if not waiting(key[1], qid, owner_account_id=key[0]):
                 del prompts[qid]
         if not prompts:
             self._pending_followups.pop(key, None)

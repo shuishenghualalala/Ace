@@ -315,12 +315,28 @@ async def test_exhausted_snapshot_budget_does_not_publish_a_partial_turn(conn, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recorded_answer", [False, True])
+async def test_followup_history_boundary_retires_only_recorded_answer_snapshot(conn, recorded_answer):
+    history = {"items": [{"role": "user", "content": "question"}], "has_more": False}
+    await conn.capture_turn_history("owner", "s1", "req", 1.0, lambda: True, lambda: history)
+    await conn.push_payload("s1", {"kind": "delta", "request_id": "req", "body": {"text": "Before"}}, owner_account_id="owner")
+    body = {"question_id": "question", "status": "resolved"}
+    if recorded_answer:
+        body.update(answer_history_id="followup:question", answer_text="Selected")
+    await conn.push_payload("s1", {"kind": "followup_question", "request_id": "req", "body": body}, owner_account_id="owner")
+    await conn.push_payload("s1", {"kind": "delta", "request_id": "req", "body": {"text": "After"}}, owner_account_id="owner")
+    observer = _FakeWS()
+    await conn.replay("s1", observer, owner_account_id="owner", resume_cursor=None, snapshot_request_id=lambda: "req")
+    assert ("turn_snapshot" in observer.sent[0]["body"]) is (not recorded_answer)
+
+
+@pytest.mark.asyncio
 async def test_resync_restores_only_still_waiting_owner_prompts_after_ring_eviction(conn):
     waiter = get_followup_waiter()
     sid = "s1"
-    waiting = waiter.create(sid)
-    other_owner = waiter.create(sid)
-    cancelled = waiter.create(sid)
+    waiting = waiter.create(sid, owner_account_id="A")
+    other_owner = waiter.create(sid, owner_account_id="B")
+    cancelled = waiter.create(sid, owner_account_id="A")
     try:
         for owner, question_id in (("A", waiting), ("A", cancelled), ("B", other_owner)):
             await conn.push_payload(sid, {
@@ -328,7 +344,7 @@ async def test_resync_restores_only_still_waiting_owner_prompts_after_ring_evict
                 "session_id": sid,
                 "body": {"question_id": question_id, "questions": [{"question": "Continue?"}]},
             }, owner_account_id=owner)
-        waiter.cancel(sid, cancelled)
+        waiter.cancel(sid, cancelled, owner_account_id="A")
         conn.clear_buffer(sid, owner_account_id="A")
         socket = _FakeWS()
 
@@ -339,8 +355,9 @@ async def test_resync_restores_only_still_waiting_owner_prompts_after_ring_evict
         assert recovered["body"]["question_id"] == waiting
         assert reset["body"]["reason"] == "invalid_cursor"
     finally:
-        for question_id in (waiting, other_owner, cancelled):
-            waiter.cancel(sid, question_id)
+        for owner, question_id in (("A", waiting), ("B", other_owner), ("A", cancelled)):
+            waiter.cancel(sid, question_id, owner_account_id=owner)
+            waiter.discard(sid, question_id, owner_account_id=owner)
 
 
 @pytest.mark.asyncio
@@ -348,7 +365,7 @@ async def test_large_followup_is_delivered_without_retaining_an_extra_copy(conn,
     monkeypatch.setattr("crew.gateway.connections._MAX_FOLLOWUP_FRAME_BYTES", 128)
     waiter = get_followup_waiter()
     sid = "s1"
-    question_id = waiter.create(sid)
+    question_id = waiter.create(sid, owner_account_id="owner")
     socket = _FakeWS()
     conn.register(sid, socket, owner_account_id="owner")
     prompt = "x" * 256
@@ -364,7 +381,8 @@ async def test_large_followup_is_delivered_without_retaining_an_extra_copy(conn,
         assert socket.sent[0]["body"]["questions"] == [{"question": prompt}]
         assert "pending_followups" not in reset_socket.sent[0]["body"]
     finally:
-        waiter.cancel(sid, question_id)
+        waiter.cancel(sid, question_id, owner_account_id="owner")
+        waiter.discard(sid, question_id, owner_account_id="owner")
 
 
 @pytest.mark.asyncio

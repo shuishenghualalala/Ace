@@ -127,7 +127,9 @@ def _session_messages_to_history_items(
                 item["request_id"] = message.request_id
             if source_session_id:
                 item["source_session_id"] = source_session_id
-            if history_ids is not None:
+            if message.followup_history_id:
+                item["history_id"] = message.followup_history_id
+            elif history_ids is not None:
                 item["history_id"] = history_ids[index]
             if message.timestamp is not None:
                 item["timestamp"] = message.timestamp

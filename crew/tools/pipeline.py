@@ -9,18 +9,21 @@ Stage 8（消息发射）。本模块补齐 Crew 缺的三个阶段：
   - Stage 6 结果处理：``truncate_or_persist`` —— 大结果落盘 + 路径回灌
 
 三者都是纯函数（check_permission 的 ask 分支由调用方走 followup 交互），不持有可变
-全局状态，便于单测；唯一的进程内状态是“本次对话允许完整操作”规则缓存，按 session_id 隔离，
+全局状态，便于单测；唯一的进程内状态是“本次对话允许完整操作”规则缓存，按账号、工作区和会话隔离，
 对应 ``session`` 权限来源（用户在旧工具确认框里选择本次对话授权时生成）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from crew.core.runctx import current_agent_workdir, current_owner_account_id, current_workspace_id
 from crew.core.types import ToolCall
 from crew.state.home import get_crew_home
 from crew.state.logging import get_logger
@@ -217,14 +220,12 @@ class PermissionConfig:
     """
 
     rules: list[PermissionRule] = field(default_factory=list)
-    # session_id -> rules；旧工具确认框只保存完整动作的本次对话授权
-    _session_allows: dict[str, list[PermissionRule]] = field(default_factory=dict)
+    _session_allows: dict[tuple[str, str, str, str], dict[tuple[str, str], str]] = field(default_factory=dict)
 
-    def add_session_allow(self, session_id: str, rule: PermissionRule) -> None:
-        self._session_allows.setdefault(session_id, []).append(rule)
-
-    def all_rules_for(self, session_id: str) -> list[PermissionRule]:
-        return [*self._session_allows.get(session_id, []), *self.rules]
+    def add_session_allow(self, session_id: str, tool_name: str, args: dict[str, Any], reason: str) -> None:
+        digest = _permission_arguments_digest(args)
+        if session_id and digest is not None:
+            self._session_allows.setdefault(_permission_scope(session_id), {})[(tool_name, digest)] = reason
 
     def check(
         self,
@@ -233,6 +234,7 @@ class PermissionConfig:
         session_id: str = "",
         *,
         default_behavior: str = "allow",
+        arguments: dict[str, Any] | None = None,
     ) -> tuple[str, str, str]:
         """返回 (behavior, reason, suggested_rule)。
 
@@ -241,10 +243,11 @@ class PermissionConfig:
         """
         if default_behavior not in ("allow", "deny", "ask"):
             default_behavior = "deny"
-        # session allows 优先（用户本轮已授权），命中即 allow
-        for rule in self._session_allows.get(session_id, []):
-            if rule.matches(tool_name, key):
-                return ("allow", rule.reason or "本会话已授权", "")
+        scoped_allows = self._session_allows.get(_permission_scope(session_id)) if self._session_allows else None
+        if scoped_allows and arguments is not None:
+            digest = _permission_arguments_digest(arguments)
+            if digest is not None and (tool_name, digest) in scoped_allows:
+                return ("allow", scoped_allows[(tool_name, digest)], "")
         # 显式 deny 优先于 ask 优先于 allow
         matched_deny = None
         matched_ask = None
@@ -276,6 +279,19 @@ def _suggest_rule(tool_name: str, key: str) -> str:
     """Return the complete displayed action; UI-created grants never use prefixes."""
     del tool_name
     return key or ""
+
+
+def _permission_scope(session_id: str) -> tuple[str, str, str, str]:
+    cwd = os.path.normcase(os.path.realpath(current_agent_workdir.get() or "."))
+    return current_owner_account_id.get(), current_workspace_id.get(), session_id, cwd
+
+
+def _permission_arguments_digest(args: dict[str, Any]) -> str | None:
+    try:
+        payload = json.dumps(args, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
 # 按工具提取「匹配键」。
@@ -370,23 +386,19 @@ def check_permission(
         key,
         session_id=session_id,
         default_behavior=default_behavior,
+        arguments=args,
     )
 
 
 def grant_session_allow(
     session_id: str,
     tool_name: str,
-    match: str,
+    args: dict[str, Any],
     *,
     reason: str = "用户选择本次对话允许此完整操作",
 ) -> None:
-    """Store one exact session-scoped allow; empty/wildcard scopes are rejected."""
-    if not str(match or "").strip() or match == "*" or match.endswith((":*", " *")):
-        return
-    cfg = get_permission_config()
-    cfg.add_session_allow(session_id, PermissionRule(
-        tool=tool_name, match=match, behavior="allow", reason=reason,
-    ))
+    """Store approval for the complete call in the current conversation."""
+    get_permission_config().add_session_allow(session_id, tool_name, args, reason)
 
 
 def validate_input_hook(

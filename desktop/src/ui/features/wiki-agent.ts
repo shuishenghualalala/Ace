@@ -25,20 +25,17 @@
 import {
   backendApi,
   type Attachment,
-  type FollowupAnswer,
   type WikiAgentSessionSummary,
   type WikiPage,
 } from '../backend-client';
 import type { ChatMessage } from '../chat-render';
 import { clearRuntimeStyle, setRuntimeStyle } from '../components/runtime-style';
 import { createChatRenderCoalescer } from '../render-utils';
-import { formatFollowupAnswerMessage } from '../followup';
 import {
   escapeHtml,
   getBookFileChanges,
   newMessageId,
   notify,
-  patchBook,
   setBookTodos,
   setQueueHint,
   setSessionStatus,
@@ -71,11 +68,10 @@ import {
   modelContextWindow,
 } from './session-model';
 import {
-  appendMessage,
   applyChunk,
-  bookFor,
   dispatchWs,
   queueChatMessage,
+  respondToFollowup,
   editQueueItem,
   invokeWikiIngestProgressCallback,
   isBusy,
@@ -100,7 +96,6 @@ import {
   renderBrowserPanel,
   setBrowserPanelSession,
 } from './browser-panel';
-import { resumeSessionGeneration } from './session-busy';
 import { loadBackendHistory } from './session-controller';
 import { dismissWikiConfirmation, restoreWikiConfirmation } from './wiki-confirmation-state';
 import {
@@ -424,45 +419,6 @@ async function loadEmbeddedTodos(sessionId: string): Promise<void> {
   } catch {
     // 兼容旧后端或离线状态；运行中的 todo_updated 仍会更新会话 book。
   }
-}
-
-function resolveEmbeddedFollowup(
-  sessionId: string,
-  questionId: string,
-  answers: FollowupAnswer[],
-): void {
-  const pending = bookFor(sessionId).pendingFollowup;
-  void state.socket?.send({
-    action: 'followup_answer',
-    session_id: sessionId,
-    question_id: questionId,
-    answers,
-  });
-  if (pending?.recordHistory !== false) {
-    patchBook(sessionId, {
-      pendingFollowup: null,
-      assistantId: null,
-      toolMap: new Map(),
-      deltaSpans: [],
-      legacyDeltaText: '',
-    });
-    const message = pending ? formatFollowupAnswerMessage(pending, answers) : null;
-    if (message) appendMessage(sessionId, 'user', message);
-  } else {
-    patchBook(sessionId, { pendingFollowup: null });
-  }
-  resumeSessionGeneration(sessionId);
-  scheduleEmbeddedRender();
-}
-
-function cancelEmbeddedFollowup(sessionId: string, questionId: string): void {
-  void state.socket?.send({
-    action: 'followup_cancel',
-    session_id: sessionId,
-    question_id: questionId,
-  });
-  patchBook(sessionId, { pendingFollowup: null });
-  scheduleEmbeddedRender();
 }
 
 function embeddedState(kbId: string): Promise<EmbeddedWikiAgentState> {
@@ -1015,11 +971,11 @@ export function mountWikiAgentPanel(root: HTMLElement, req: WikiAgentEntryReques
     followupHandlers: {
       onSubmit: (questionId, answers) => {
         const sessionId = embeddedByKb.get(req.kbId)?.sessionId;
-        if (sessionId) resolveEmbeddedFollowup(sessionId, questionId, answers);
+        if (sessionId) respondToFollowup(sessionId, questionId, answers);
       },
       onCancel: (questionId) => {
         const sessionId = embeddedByKb.get(req.kbId)?.sessionId;
-        if (sessionId) cancelEmbeddedFollowup(sessionId, questionId);
+        if (sessionId) respondToFollowup(sessionId, questionId);
       },
     },
     todoFoldKey: (sessionId) => `todo:wiki:${sessionId}`,

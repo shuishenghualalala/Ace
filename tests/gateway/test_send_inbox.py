@@ -219,7 +219,7 @@ def test_websocket_recovers_accepted_before_start_but_never_reexecutes_running(t
         with client.websocket_connect("/ws?send_receipts=1") as socket:
             capability = socket.receive_json()
             assert capability["kind"] == "send_receipt_capability"
-            assert capability["body"] == {"version": 1, "store_id": previous.store_id}
+            assert capability["body"] == {"version": 1, "store_id": previous.store_id, "followup_receipts": 1}
             # A persisted offline withdrawal wins before any query resumes work.
             socket.send_json(_command("send_receipt_cancel", "withdrawing"))
             assert _receive(socket, "send_receipt", "withdrawing")["body"]["status"] == "cancelled"

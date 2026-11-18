@@ -739,6 +739,15 @@ describe('wiki-page 入口挂点', () => {
       question_id: 'followup-1',
       answers: [{ question_id: 'scope', answers: ['all'] }],
     });
+    expect(sessionStore.get().books[WIKI_SID]?.pendingFollowup?.questionId).toBe('followup-1');
+    expect(messageStore.get().messages[WIKI_SID]?.find((message) => message.role === 'user')).toBeUndefined();
+    applyChunk({
+      kind: 'followup_question', session_id: WIKI_SID, sequence: 1, is_final: false,
+      body: {
+        question_id: 'followup-1', status: 'resolved',
+        answer_history_id: 'followup:followup-1', answer_text: '已选择：全部内容',
+      },
+    });
     expect(sessionStore.get().books[WIKI_SID]?.pendingFollowup).toBeNull();
     expect(messageStore.get().messages[WIKI_SID]?.find((message) => message.role === 'user')?.content)
       .toBe('已选择：全部内容');

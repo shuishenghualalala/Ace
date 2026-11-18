@@ -43,6 +43,7 @@ import {
 } from './team-collaboration-board';
 import { disposeConversationDom, syncConversationDom } from './conversation-dom-index';
 import { interactiveOwnerKey } from './interactive-owner';
+import { followupCardView, type FollowupCardView } from './followup-actions';
 import { applyFoldState } from '../render-utils';
 import { setToolFold, setTurnFold } from './fold-state';
 import {
@@ -431,6 +432,7 @@ interface ChatRenderTarget {
   spacers: Map<string, HTMLElement>;
   transientDetails: Map<string, { sig: string; open: Map<number, boolean> }>;
   followupHandlers: ConversationRenderHooks['followupHandlers'];
+  followupView?: FollowupCardView | undefined;
   stopViewport: (() => void) | null;
   viewportObserver: ResizeObserver | null;
   viewportFrame: number | null;
@@ -875,7 +877,7 @@ function applyConversationWindow(
   const followup = nodes.get('__followup');
   if (followup) {
     syncPermissionCardPositions(followup);
-    bindFollowupCard(followup, target.followupHandlers ?? noopFollowupHandlers);
+    bindFollowupCard(followup, target.followupHandlers ?? noopFollowupHandlers, target.followupView);
   }
 
   target.mounted = desired;
@@ -1284,11 +1286,11 @@ export function renderConversation(
   if (streamRecovery && (!pendingFollowup || streamRecovery.historyAppliedForFollowup !== pendingFollowup.questionId)) {
     pushPlan('__stream-recovery', 'stream-recovery', () => renderQueueHintCard('正在恢复回复，完成后将同步完整内容。'));
   }
-  if (pendingFollowup && sessionId) {
-    const followupVersion = isRuntimeStaffingFollowup(pendingFollowup)
-      ? `f|${pendingFollowup.questionId}|${pendingFollowup.status ?? ''}|${pendingFollowup.note ?? ''}`
-      : `f|${pendingFollowup.questionId}`;
-    pushPlan('__followup', followupVersion, () => renderFollowupCardElement(pendingFollowup));
+  const followupView = sessionId ? followupCardView(sessionId, pendingFollowup) : undefined;
+  if (followupView) {
+    const { question, key } = followupView;
+    const version = isRuntimeStaffingFollowup(question) ? [key, question.status, question.note] : [key];
+    pushPlan('__followup', JSON.stringify(version), () => renderFollowupCardElement(question));
   }
   // __anchor：scroll-anchor 永远是最后一个单元，sig 恒定 → 跨帧复用同一节点
   pushPlan('__anchor', 'anchor', () => getScrollAnchorNode(target, containerId));
@@ -1319,6 +1321,7 @@ export function renderConversation(
   target.spans.length = reused;
   for (const span of spans) target.spans.push(span);
   target.followupHandlers = hooks.followupHandlers;
+  target.followupView = followupView;
 
   container.classList.toggle('conversation-viewport--active', target.viewport.enabled);
   target.wrapper.classList.toggle('messages__inner--long', !target.viewport.enabled && visibleLength >= 200);

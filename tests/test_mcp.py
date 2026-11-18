@@ -285,7 +285,7 @@ async def test_interaction_bridge_binds_question_to_display_session():
     async def push(sid, payload, *, owner_account_id=""):
         pushed.append((sid, payload, owner_account_id))
         question_id = payload["body"]["question_id"]
-        resolve_answer(sid, question_id, [{"question_id": "q1", "answers": ["B"]}])
+        resolve_answer(sid, question_id, [{"question_id": "q1", "answers": ["B"]}], owner_account_id=owner_account_id)
 
     bridge = InteractionBridge()
     bridge.configure(push_fn=push, gateway_url="http://127.0.0.1:8000")
@@ -328,6 +328,7 @@ async def test_interaction_bridge_permission_uses_control_plane_origin_without_h
             sid,
             payload["body"]["question_id"],
             [{"question_id": "permission", "answers": ["allow_once"]}],
+            owner_account_id=owner_account_id,
         )
 
     bridge = InteractionBridge()
@@ -369,6 +370,7 @@ async def test_interaction_bridge_serializes_three_permission_answers():
             sid,
             payload["body"]["question_id"],
             [{"question_id": "permission", "answers": ["allow_once"]}],
+            owner_account_id=owner_account_id,
         )
 
     bridge = InteractionBridge()
@@ -407,7 +409,7 @@ async def test_interaction_bridge_pushes_followup_with_owner_scope():
     async def push(sid, payload, *, owner_account_id=""):
         pushed.append((sid, payload, owner_account_id))
         question_id = payload["body"]["question_id"]
-        resolve_answer(sid, question_id, [{"question_id": "q1", "answers": ["B"]}])
+        resolve_answer(sid, question_id, [{"question_id": "q1", "answers": ["B"]}], owner_account_id=owner_account_id)
 
     bridge = InteractionBridge()
     bridge.configure(push_fn=push, gateway_url="http://127.0.0.1:8000")
