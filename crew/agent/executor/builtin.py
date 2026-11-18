@@ -1104,8 +1104,13 @@ class BuiltinExecutor(AgentExecutor):
                     next_seq(), partial_text=continuation_prefix + streamed_text, usage=usage,
                 )
                 return
+            interrupted_messages = result.get("interrupted_messages", [])
+            if interrupted_messages:
+                ctx.messages.extend(interrupted_messages)
+                view_messages.extend(interrupted_messages)
+                pending.parts.clear()
             if result.get("error"):
-                if result.get("text"):
+                if result.get("text") and not interrupted_messages:
                     partial_message = Message.assistant(result["text"], model=result.get("model") or None)
                     partial_message.thinking = result.get("reasoning") or None
                     ctx.messages.append(partial_message)
@@ -1120,12 +1125,12 @@ class BuiltinExecutor(AgentExecutor):
                 text = result.get("text", "")
                 reasoning = result.get("reasoning", "")
                 streamed_text += text
-                assistant_msg = Message.assistant(text, model=result.get("model") or None)
-                if reasoning:
-                    assistant_msg.thinking = reasoning
-                ctx.messages.append(assistant_msg)
+                if not interrupted_messages:
+                    assistant_msg = Message.assistant(text, model=result.get("model") or None)
+                    assistant_msg.thinking = reasoning or None
+                    ctx.messages.append(assistant_msg)
+                    view_messages.append(assistant_msg)
                 pending.parts.clear()
-                view_messages.append(assistant_msg)
                 if stream_continuation_count >= self.stream_continuation_max:
                     final_text = continuation_prefix + streamed_text + "\n\n（模型响应多次中断，已保留已生成内容）"
                     async for _fc in self._emit_final(
@@ -1500,7 +1505,7 @@ class BuiltinExecutor(AgentExecutor):
 
         流式提前派发（Crew StreamingToolExecutor）：流中每收到一帧 ready_tool_call
         （某工具参数已拼完），立即交给 runner.prewarm() 把 safe 工具跑起来——与流式
-        剩余部分重叠执行。响应被丢弃/重试时，先 cancel 掉本 attempt 的 prewarm。
+        剩余部分重叠执行。流中断时将已派发调用的实际结果交给下一次请求。
 
         四重保护（前两种仅在「尚未 emit 过 delta」时才可恢复）：
           - 瞬时错误（retryable）→ 同 provider 指数退避重试（可选 jitter）；
@@ -1692,6 +1697,9 @@ class BuiltinExecutor(AgentExecutor):
                         finish_reason = chunk.finish_reason
                         if chunk.usage:
                             result["usage"] = chunk.usage
+                if runner is not None and runner.has_prewarms and is_max_tokens_finish(finish_reason):
+                    # Some providers close a broken tool stream with a length frame. Settle dispatched work first.
+                    raise ProviderError("带有已派发工具的模型响应被截断", kind=CrewErrorKind.STREAM, retryable=True)
                 elapsed = time.perf_counter() - t0
                 sent_messages = list(sent_view.messages)
                 sent_tools = list(sent_view.tools) if sent_view.tools is not None else None
@@ -1757,26 +1765,29 @@ class BuiltinExecutor(AgentExecutor):
                     await runner.cancel_prewarms()
                 raise
             except Exception as exc:  # noqa: BLE001
-                # 本 attempt 的响应将被丢弃/重试：取消已提前派发的工具，避免悬挂任务与
-                # 重复执行（reads 幂等，取消是为干净与省资源）。成功路径不会走到这里。
+                recovered = []
                 if runner is not None:
-                    await runner.cancel_prewarms()
-                    if visible_started_tool_calls:
-                        for tc in visible_started_tool_calls.values():
-                            yield runner._result_event(
-                                tc,
-                                ToolResult(
-                                    tc.id,
-                                    tc.name,
-                                    "模型流中断，本次提前显示的工具调用已取消。",
-                                    is_error=True,
-                                ),
-                                rid,
-                                next_seq,
-                                status="cancelled",
-                            )
-                        visible_started_tool_calls.clear()
-                        started_tool_call_ids.clear()
+                    if control is not None and control.interrupted:
+                        await runner.cancel_prewarms()
+                    else:
+                        recovered, tool_messages = await runner.recover_prewarms()
+                        if recovered:
+                            assistant = Message.assistant(accumulated, [tc for tc, _ in recovered], model=_prov_model or None)
+                            assistant.thinking = reasoning or None
+                            result["interrupted_messages"] = [assistant, *tool_messages]
+                    observed = {call.id for call, _ in recovered}
+                    for call, outcome in recovered:
+                        yield runner._result_event(call, outcome, rid, next_seq, status="error" if outcome.is_error else "ok")
+                    for tc in visible_started_tool_calls.values():
+                        if tc.id not in observed:
+                            stopped = control is not None and control.interrupted
+                            outcome = (runner._cancelled_result(tc) if stopped else ToolResult(
+                                tc.id, tc.name, "模型流中断，此调用未派发。", is_error=True,
+                                code="not_executed", side_effect_state="none",
+                            ))
+                            yield runner._result_event(tc, outcome, rid, next_seq, status="cancelled")
+                    visible_started_tool_calls.clear()
+                    started_tool_call_ids.clear()
                 if control is not None and control.interrupted:
                     # A provider can raise when its stream is closed, even
                     # before emitting any text. Let the turn's stop settle it.
@@ -1793,7 +1804,18 @@ class BuiltinExecutor(AgentExecutor):
                         model=str(getattr(provider, "model", "") or ""),
                     )
                     return
-                if emitted:
+                if recovered and (runner.approval_rejected or runner.security_boundary_failed
+                                  or any(out.details.get("exit_confirmed") is False
+                                         or (out.is_error and out.side_effect_state == "unknown") for _, out in recovered)):
+                    result.update(error=True, text=accumulated)
+                    yield ResponseChunk.error(
+                        rid, "模型流中断，工具结果已保存。请核对权限或执行状态后继续。", next_seq(),
+                        text=prior_text + accumulated or None,
+                        outcome=TurnOutcome("partial", reason="tool_reconciliation_required",
+                                            code="tool_reconciliation_required", retryable=False),
+                    )
+                    return
+                if emitted or recovered:
                     # 流式中途失败：保留已生成文本，尝试续写
                     exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
                     log.warning(

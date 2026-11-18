@@ -157,7 +157,7 @@ class ToolRunner:
             self.direct_tool_names.update(self.discovered_tool_names)
         # 流式提前派发缓存（Crew earlyExecutions）：tc.id -> 正在执行/已完成的 asyncio.Task。
         # 流式期间 prewarm() 把 safe 工具提前跑起来，run_batch 时命中即 await，通常已就绪。
-        self._prewarm: dict[str, asyncio.Task] = {}
+        self._prewarm: dict[str, tuple[ToolCall, asyncio.Task[ToolResult]]] = {}
         self._prewarm_keys: set[tuple[str, str]] = set()  # (name, repr(args)) 去重
         self._sem: asyncio.Semaphore | None = None  # 全轮共享并发闸门，懒创建
         self._pending_media: list[tuple[str, str, MediaPart]] = []
@@ -308,6 +308,8 @@ class ToolRunner:
         if key in self._prewarm_keys:
             return False
         self._prewarm_keys.add(key)
+        tc = deepcopy(tc)
+
         async def _run() -> ToolResult:
             if self._interrupted:
                 result = self._cancelled_result(tc)
@@ -315,16 +317,51 @@ class ToolRunner:
                 return result
             return await self._execute_one(tc)
 
-        self._prewarm[tc.id] = asyncio.create_task(_run())
+        self._prewarm[tc.id] = tc, asyncio.create_task(_run())
         return True
+
+    @property
+    def has_prewarms(self) -> bool:
+        return bool(self._prewarm)
 
     async def cancel_prewarms(self) -> None:
         """取消并清空所有未消费的 prewarm 任务（重试/收尾时调用）。"""
-        tasks = [t for t in self._prewarm.values() if not t.done()]
+        tasks = [t for _, t in self._prewarm.values() if not t.done()]
         for task in tasks:
             await self._cancel_task_with_grace(task, "prewarm")
         self._prewarm.clear()
         self._prewarm_keys.clear()
+
+    async def recover_prewarms(self) -> tuple[list[tuple[ToolCall, ToolResult]], list[Message]]:
+        """Settle dispatched calls at a broken provider stream without dispatching any new work."""
+        outcomes: list[tuple[ToolCall, ToolResult]] = []
+        messages: list[Message] = []
+        media: list[Message] = []
+        for call, task in tuple(self._prewarm.values()):
+            if not task.done():
+                await self._cancel_task_with_grace(task, "interrupted provider stream")
+            if task.done() and not task.cancelled():
+                # _resolve consumes this exact task, including its recorded failure if it raised.
+                outcome = await self._resolve(call)
+            else:
+                outcome = self._unconfirmed_result(call)
+                await self._record_tool_result_commit(call, outcome)
+            call.status = "error" if outcome.is_error else "done"
+            if call.duration is None:
+                self._mark_tool_finished(call)
+            self._record_security_outcome(outcome)
+            self._append_tool_outcome(messages, call, outcome)
+            # Provider protocols require every tool reply before the first multimodal user message.
+            tool_messages = [messages[-1]]
+            self._attach_mcp_images(call, outcome, tool_messages)
+            media.extend(tool_messages[1:])
+            self._queue_media(call, outcome)
+            outcomes.append((call, outcome))
+        self._prewarm.clear()
+        self._prewarm_keys.clear()
+        messages.extend(media)
+        await self._append_pending_media(messages)
+        return outcomes, messages
 
     def _ensure_sem(self) -> asyncio.Semaphore:
         if self._sem is None:
@@ -538,10 +575,18 @@ class ToolRunner:
 
     async def _resolve(self, tc) -> ToolResult:
         """取单工具结果：命中 prewarm 缓存则 await 缓存任务，否则现场执行（带并发闸门）。"""
-        task = self._prewarm.pop(tc.id, None)
-        if task is not None:
+        warmed = self._prewarm.pop(tc.id, None)
+        if warmed is not None:
+            original, task = warmed
+            if original.name != tc.name or original.arguments != tc.arguments:
+                await self._cancel_task_with_grace(task, "changed tool arguments")
+                return ToolResult(tc.id, tc.name, "流式工具参数与最终调用不一致，请核对后重新请求。",
+                                  is_error=True, code="tool_arguments_changed", retryable=False,
+                                  side_effect_state="unknown")
             try:
-                return await task
+                result = await task
+                tc.started_at, tc.duration = original.started_at, original.duration
+                return result
             except asyncio.CancelledError:
                 result = self._cancelled_result(tc)
                 await self._record_tool_result_commit(tc, result, status="cancelled")

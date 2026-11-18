@@ -2014,6 +2014,66 @@ async def test_tool_media_path_read_is_off_event_loop_thread(tmp_path, monkeypat
     assert read_idents and all(t != main_ident for t in read_idents)
 
 
+@pytest.mark.parametrize("visible_text", [True, False])
+@pytest.mark.parametrize("length_frame", [False, True])
+async def test_interrupted_stream_recovers_only_dispatched_read_result(visible_text, length_frame):
+    read = asyncio.Event()
+    runs = []
+    observed = []
+    async def handler(args):
+        runs.append(args["path"])
+        read.set()
+        return "checkpoint-content"
+    reg = Registry()
+    reg.register(name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+                 handler=handler, is_async=True, override=True)
+
+    class DropAfterRead(FakeProvider):
+        async def stream_chat(self, messages, tools=None):
+            observed.append(list(messages))
+            if len(observed) == 1:
+                if visible_text:
+                    yield StreamChunk(delta_text="looking")
+                yield StreamChunk(ready_tool_call=ToolCall("verified", "file_read", {"path": "example"}))
+                await asyncio.wait_for(read.wait(), 1)
+                await asyncio.sleep(.05)
+                partial = ToolCall("partial", "file_write", {"_raw": "{"})
+                yield StreamChunk(tool_call_generating=partial)
+                if length_frame:
+                    yield StreamChunk(done=True, finish_reason="length", tool_calls=[partial])
+                    return
+                raise ProviderError("connection interrupted", retryable=True, category="timeout")
+            yield StreamChunk(delta_text="recovered")
+            yield StreamChunk(done=True, finish_reason="stop")
+
+    ctx = _ctx()
+    events = await _collect(_executor(DropAfterRead(), registry=reg), ctx)
+    assert runs == ["example"]
+    assert len(observed) == 2
+    for messages in (observed[1], ctx.messages):
+        assert [tc.id for msg in messages for tc in msg.tool_calls] == ["verified"]
+        assert [(msg.tool_call_id, msg.content) for msg in messages if msg.role == "tool"] == [
+            ("verified", "checkpoint-content"),
+        ]
+    assert sum(e.kind == "tool" and e.body.get("tool_call_id") == "verified"
+               and e.body.get("phase") == "result" for e in events) == 1
+
+
+async def test_prewarm_never_substitutes_a_result_for_changed_final_arguments():
+    runs = []
+    async def read(args):
+        runs.append(args["path"])
+        return args["path"]
+    reg = Registry()
+    reg.register(name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+                 handler=read, is_async=True, override=True)
+    runner = _runner(reg)
+    assert runner.prewarm(ToolCall("id", "file_read", {"path": "first"}))
+    await asyncio.sleep(.05)
+    result = await runner._resolve(ToolCall("id", "file_read", {"path": "second"}))
+    assert runs == ["first"] and result.code == "tool_arguments_changed" and result.is_error
+
+
 async def test_prewarm_ignores_unsafe_tool():
     """写工具不提前派发，留给 run_batch 顺序执行。"""
     reg = Registry()
@@ -2124,6 +2184,7 @@ async def test_safe_tool_start_skipped_by_run_batch_when_started_id_passed():
     phases = [c.body["phase"] for c in chunks if c.kind == "tool"]
     assert "start" not in phases
     assert phases == ["result"]
+    assert tc.started_at is not None and tc.duration is not None
 
 
 async def test_run_batch_emits_start_when_not_started_id():
