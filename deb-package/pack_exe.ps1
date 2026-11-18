@@ -1,5 +1,6 @@
 param (
-    [string]$Version = ""
+    [string]$Version = "",
+    [string]$IsccPath = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
 )
 
 # =============================================================================
@@ -15,7 +16,7 @@ param (
 #
 # 依赖清单唯一数据源：pyproject.toml（核心 + wiki/pdf/docx/xlsx extras）
 # + deb-package/runtime-requirements.txt（技能脚本补充依赖）。
-# 用法：pwsh ./deb-package/pack_exe.ps1 [-Version 0.29.0]
+# 用法：pwsh ./deb-package/pack_exe.ps1 [-Version 0.29.0] [-IsccPath <ISCC.exe 路径>]
 # =============================================================================
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -476,16 +477,14 @@ end;
 # -----------------------------------------------------------------------------
 # 5. 调用 Inno Setup 编译器 (ISCC) 进行最终打包
 # -----------------------------------------------------------------------------
-$isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-
-if (-not (Test-Path $isccPath)) {
+if (-not (Test-Path -LiteralPath $IsccPath -PathType Leaf)) {
     Write-Host "⚠️ 找不到 Inno Setup 编译器！请前往 https://jrsoftware.org/isinfo.php 下载安装。" -ForegroundColor Red
     Write-Host "安装后再次运行此脚本即可完成打包。" -ForegroundColor Red
     exit 1
 }
 
 Write-Host "正在编译最终的 .exe 安装包 (这可能需要几分钟)..." -ForegroundColor Yellow
-$process = Start-Process -FilePath $isccPath -ArgumentList "`"$issPath`"" -Wait -NoNewWindow -PassThru
+$process = Start-Process -FilePath $IsccPath -ArgumentList "`"$issPath`"" -Wait -NoNewWindow -PassThru
 if ($process.ExitCode -ne 0) {
     throw "Inno Setup 编译失败，退出码: $($process.ExitCode)"
 }

@@ -66,6 +66,17 @@ def test_optional_catalog_development_path_is_repository_root() -> None:
     assert skills.get_optional_skills_dir() == ROOT / "optional-skills"
 
 
+def test_windows_compiler_and_chinese_translation_share_a_release() -> None:
+    import re
+
+    workflow = (ROOT / ".github/workflows/release-desktop.yml").read_text(encoding="utf-8")
+    pinned = re.search(r"choco install innosetup --version=(\d+\.\d+\.\d+)", workflow)
+    assert pinned is not None
+    tag = "is-" + pinned.group(1).replace(".", "_")
+    assert f"/issrc/{tag}/Files/Languages/Unofficial/ChineseSimplified.isl" in workflow
+    assert re.search(r"Get-FileHash -LiteralPath \$language\).Hash -ne '[A-F0-9]{64}'", workflow)
+
+
 def test_wheel_configuration_does_not_claim_optional_catalog() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 

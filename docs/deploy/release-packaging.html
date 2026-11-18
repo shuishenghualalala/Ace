@@ -118,7 +118,7 @@ git push origin v1.1.0</pre>
   <ul>
     <li>macOS 产物会做 ad hoc 完整性签名，尚未配置 Developer ID 签名与 Apple 公证；Windows 侧未做 Authenticode 签名时 SmartScreen 可能拦截。</li>
     <li>每个构建任务都在目标原生平台 runner 上执行，不做交叉编译。</li>
-    <li>Linux 构建依赖 Docker，Windows 构建依赖 Inno Setup 6，workflow 已自动安装。</li>
+    <li>Linux 构建依赖 Docker。Windows 发布工作流固定 Inno Setup 6.7.1，使用同一标签的简体中文翻译并校验 SHA-256。本地编译器位于其他目录时可向 <code>pack_exe.ps1</code> 传入 <code>-IsccPath</code>。</li>
     <li>内嵌 Python 的办公/绘图依赖（pandas / matplotlib 及其 numpy 依赖）是技能脚本的运行时必需，<code>pack_exe.ps1</code> 的 staging 清理列表（sympy/onnxruntime/scipy）不得重新纳入 pandas/numpy——否则打包态 <code>import pandas / matplotlib</code> 直接 ImportError（2026-09-14 修复并加注释防护；Windows 打包态实际 import 实测结果待回填）。</li>
     <li>打包脚本已不依赖本机 Python 环境（无需 .venv / uv / PyInstaller），仅需 Node 22+ 与 Rust 工具链；内嵌运行时与依赖由脚本自动下载安装。</li>
     <li>本地运行 <code>pack_exe.ps1</code> 时如遇 electron-builder 下载超时，脚本已内置 npmmirror 镜像（可用 ELECTRON_MIRROR / ELECTRON_BUILDER_BINARIES_MIRROR 环境变量覆盖）。</li>

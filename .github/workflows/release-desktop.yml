@@ -166,14 +166,16 @@ jobs:
         with:
           node-version: "22"
       - name: Install Inno Setup
-        run: choco install innosetup --no-progress --yes
+        run: choco install innosetup --version=6.7.1 --no-progress --yes
       - name: Install Inno Setup Chinese language
         shell: pwsh
         run: |
-          $langs = "C:\Program Files (x86)\Inno Setup 6\Languages"
-          if (-not (Test-Path $langs)) { New-Item -ItemType Directory -Force $langs | Out-Null }
-          Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile (Join-Path $langs "ChineseSimplified.isl")
-          if (-not (Test-Path (Join-Path $langs "ChineseSimplified.isl"))) { throw "ChineseSimplified.isl was not downloaded" }
+          $language = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/Languages/ChineseSimplified.isl'
+          $uri = 'https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_1/Files/Languages/Unofficial/ChineseSimplified.isl'
+          Invoke-WebRequest -Uri $uri -OutFile $language
+          if ((Get-FileHash -LiteralPath $language).Hash -ne '7D544B9BB1D142CFA11F2E5D3CC8ABE2E55F8E066C5124E3772675AA236E1278') {
+            throw 'Unexpected Inno Setup language file'
+          }
       - name: Build Windows installer
         shell: pwsh
         run: ./deb-package/pack_exe.ps1 -Version "$env:VERSION"
