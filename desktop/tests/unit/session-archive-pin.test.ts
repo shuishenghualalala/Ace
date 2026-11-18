@@ -13,7 +13,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { __resetAllStoresForTest, authStore, sessionStore } from '../../src/ui/stores/stores';
 import type { SessionRow } from '../../src/ui/state';
-import { renderWorkspaceHistory, syncSessionsFromBackend } from '../../src/ui/features/workspaces';
+import { refreshAllSessions, renderWorkspaceHistory, syncSessionsFromBackend } from '../../src/ui/features/workspaces';
 import { backendApi } from '../../src/ui/backend-client';
 import type { BackendSession } from '../../src/ui/backend-client';
 import { mountHistoryList } from './helpers/history-list';
@@ -244,6 +244,24 @@ describe('backendApi.archiveSession / pinSession', () => {
       expect(await backendApi.sessions()).toEqual(rows);
       expect(fetchSpy).toHaveBeenCalledTimes(4);
     } finally { fetchSpy.mockRestore(); }
+  });
+
+  it('keeps a later mutation refresh when an older inventory finishes last', async () => {
+    authStore.set({ isLoggedIn: true, userInfo: { staffCode: 'owner-a' } });
+    const previous = [backendRow('pinned'), backendRow('archived'), backendRow('deleted')];
+    syncSessionsFromBackend(previous);
+    let finishOlder!: (rows: BackendSession[]) => void;
+    const delayed = new Promise<BackendSession[]>(resolve => { finishOlder = resolve; });
+    const changed = [backendRow('pinned', { pinned: true }), backendRow('archived', { archived: true }), backendRow('created')];
+    const sessions = vi.spyOn(backendApi, 'sessions').mockReturnValueOnce(delayed).mockResolvedValueOnce(changed);
+    try {
+      const older = refreshAllSessions();
+      await vi.waitFor(() => expect(sessions).toHaveBeenCalledTimes(1));
+      await refreshAllSessions();
+      finishOlder(previous);
+      await older;
+      expect(sessionStore.get().backendSessions).toEqual(changed);
+    } finally { sessions.mockRestore(); }
   });
 
   it('discards pages when an intervening login changes their owner', async () => {

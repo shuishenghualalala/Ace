@@ -182,8 +182,8 @@ export function isSessionInHiddenWorkspace(session: { workspaceId: string }): bo
 
 
 
-export function sessionsForManageList(): (typeof state.sessions) {
-  return state.sessions.filter((s) => !isSessionInHiddenWorkspace(s));
+export function sessionsForManageList(includeArchived = true): (typeof state.sessions) {
+  return state.sessions.filter((s) => (includeArchived || !s.archived) && !isSessionInHiddenWorkspace(s));
 }
 
 
@@ -1135,7 +1135,7 @@ export async function loadWorkspaces(): Promise<void> {
 
 }
 
-export function startSessionList(): { preview: Promise<void>; complete: Promise<BackendSession[]> } {
+export function startSessionList(notifyOnFailure = true): { preview: Promise<void>; complete: Promise<BackendSession[]> } {
   if (!isRendererLoggedIn()) return { preview: Promise.resolve(), complete: Promise.resolve([]) };
   sessionListRequest?.abort();
   const request = new AbortController();
@@ -1169,7 +1169,7 @@ export function startSessionList(): { preview: Promise<void>; complete: Promise<
     } catch (error) {
       if (!request.signal.aborted) {
         historyLoadError.sessions = error instanceof Error ? error.message : String(error);
-        notify(`加载会话失败：${historyLoadError.sessions}`);
+        if (notifyOnFailure) notify(`加载会话失败：${historyLoadError.sessions}`);
       }
       return [];
     } finally {
@@ -1238,21 +1238,7 @@ export function refreshSidebarAfterHydrate(openSession: OpenSessionFn): void {
 
 
 export async function refreshAllSessions(): Promise<void> {
-
-  if (!isRendererLoggedIn()) return;
-
-  try {
-
-    const rows = await backendApi.sessions(undefined, { includeArchived: true });
-
-    syncSessionsFromBackend(rows);
-
-  } catch {
-
-    /* keep local */
-
-  }
-
+  await startSessionList(false).complete;
 }
 
 

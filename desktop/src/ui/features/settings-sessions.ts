@@ -8,7 +8,7 @@ import { escapeHtml, notify, state } from '../state';
 import { deleteSession, setArchived } from './session-actions';
 import { openSessionPreviewModal } from './session-preview-modal';
 import { syncLibrarySectionCounts } from './settings-library';
-import { refreshAllSessions, syncSessionsFromBackend, loadWorkspaces } from './workspaces';
+import { refreshAllSessions, loadWorkspaces } from './workspaces';
 
 function sessionsRoot(): HTMLElement | null {
   return document.getElementById('settings-library-sessions') ?? document.getElementById('settings-sessions-root');
@@ -36,7 +36,6 @@ export async function renderSettingsSessionsPage(): Promise<void> {
   try {
     await loadWorkspaces();
     const rows = await backendApi.sessions(undefined, { includeArchived: true });
-    syncSessionsFromBackend(rows);
     const archived = rows.filter((r) => r.archived === true);
 
     if (!archived.length) {

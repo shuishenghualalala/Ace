@@ -171,7 +171,7 @@ function bindManageListEvents(list: HTMLElement): void {
 }
 
 function sessionsInSection(sectionId: string): (typeof state.sessions)[0][] {
-  const sessions = sessionsForManageList();
+  const sessions = sessionsForManageList(showArchived);
   if (sectionId === 'default') {
     return sessions.filter((s) => s.workspaceId === 'default');
   }
@@ -190,16 +190,8 @@ function toggleSectionSelection(sectionId: string, selected: boolean): void {
   updateManageUI();
 }
 
-/** 重新拉取列表（按 showArchived 决定是否含归档会话）并重渲染。 */
 async function reloadManageList(): Promise<void> {
-  try {
-    const rows = await backendApi.sessions(undefined, { includeArchived: showArchived });
-    state.backendSessions = rows;
-    const { syncSessionsFromBackend } = await import('./workspaces');
-    syncSessionsFromBackend(rows);
-  } catch {
-    /* keep local */
-  }
+  await refreshAllSessions();
   renderManageList();
 }
 
@@ -207,7 +199,7 @@ function renderManageList(): void {
   const list = getManageList();
   if (!list) return;
 
-  const sessions = sessionsForManageList();
+  const sessions = sessionsForManageList(showArchived);
   if (sessions.length === 0) {
     list.innerHTML = '<div class="manage-history-empty">暂无历史对话</div>';
     updateManageUI();
@@ -239,7 +231,7 @@ function updateManageUI(): void {
   const countEl = document.getElementById('manage-selected-count');
   const selectAllCheckbox = document.getElementById('manage-select-all') as HTMLInputElement | null;
 
-  const total = sessionsForManageList().length;
+  const total = sessionsForManageList(showArchived).length;
   const selectedCount = Object.values(state.selectedSessions).filter(Boolean).length;
 
   if (countEl) countEl.textContent = String(selectedCount);
@@ -277,14 +269,14 @@ export function toggleSelection(sessionId: string): void {
 }
 
 export function toggleSelectAll(): void {
-  const total = sessionsForManageList().length;
+  const total = sessionsForManageList(showArchived).length;
   const selectedCount = Object.values(state.selectedSessions).filter(Boolean).length;
   if (total === 0) return;
   if (selectedCount === total) {
     setSelectedSessions({});
   } else {
     const all: Record<string, boolean> = {};
-    sessionsForManageList().forEach((s) => {
+    sessionsForManageList(showArchived).forEach((s) => {
       all[s.id] = true;
     });
     setSelectedSessions(all);
