@@ -14,7 +14,7 @@
     2. 发需求 → 模型只读探索玩具项目、把计划写入 plans/<owner>/<sid>/plan_<timestamp>.md、调 exit_plan_mode
     3. 断言：规划轮只用只读工具 + file_write 仅写计划文件 + 触发 awaiting_approval
     4. approve → 发执行 kickoff → 观察模型解锁写工具、在临时目录里改 cli.py
-脚本打印逐帧转录，便于人工核验。
+脚本处理测试计划文件的一次性文件审批，并打印逐帧转录，便于人工核验。
 """
 
 from __future__ import annotations
@@ -24,7 +24,10 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -38,7 +41,7 @@ pytestmark = pytest.mark.e2e
 TASK = (
     "当前目录有一个玩具 CLI 项目 cli.py，里面已有 /help、/quit 两个 slash 命令。"
     "请给它增加一个 /version 命令，打印常量 VERSION。先探索 cli.py 现有写法，再给出实现计划。"
-    "注意：只在当前临时目录内操作，不要执行任何 git 命令。"
+    "注意：只在当前临时目录内操作。测试脚本会运行 /version，请不要调用终端。"
 )
 
 TOY_CLI = '''"""玩具 CLI（仅供 e2e 测试用）。"""
@@ -85,6 +88,79 @@ async def _run_turn(app, envelope, label: str) -> list[tuple[str, str]]:
     return tool_events
 
 
+def _bind_plan_file_approval(
+    app, *, session_id: str, workspace_id: str, profile: Path, plan_file: Path,
+) -> asyncio.Future[Exception]:
+    """Answer the app's real file-approval push for this test's Plan artifact."""
+    from crew.security.approvals import ApprovalDecision
+    from crew.security.context import build_gateway_security_context
+
+    owner = "local"
+    plan_dir = (profile / "plans" / owner / session_id).resolve()
+    expected = plan_file.resolve()
+    assert expected.parent == plan_dir
+    context = build_gateway_security_context(
+        app.workspace_store, owner_account_id=owner, workspace_id=workspace_id, session_id=session_id,
+    )
+    failure: asyncio.Future[Exception] = asyncio.get_running_loop().create_future()
+    decided: set[str] = set()
+
+    async def on_push(sid: str, payload: dict, *, owner_account_id: str) -> None:
+        if payload.get("kind") != "security_approval" or failure.done():
+            return
+        try:
+            if sid != session_id or owner_account_id != owner:
+                raise AssertionError("Unexpected file approval identity")
+            request_id = payload["request_id"]
+            if request_id in decided:
+                return
+            pending = app.security_service.pending(context, include_nonce=True)
+            request, = [row for row in pending if row["request_id"] == request_id]
+            current = app.plan_manager.snapshot(session_id, owner_account_id=owner).to_body()
+            action = request["action"]
+            permissions = request["additional_permissions"]
+            filesystem = permissions["filesystem"]
+            if (
+                not current["active"] or current["awaiting_approval"]
+                or not current["plan_file"] or Path(current["plan_file"]).resolve() != expected
+                or request["tool_name"] != "file_write" or action["operation"] != "write"
+                or Path(action["path"]).resolve() != expected
+                or len(filesystem) != 1 or Path(filesystem[0]["root"]).resolve() != expected
+                or filesystem[0]["access"] != "read_write"
+                or permissions["network"] or permissions["allow_local_binding"]
+            ):
+                raise AssertionError("Unexpected approval outside the isolated Plan file")
+            app.security_service.decide(
+                replace(context, task_id=request["task_id"]),
+                request_id=request_id, nonce=request["nonce"],
+                decision=ApprovalDecision.ONCE, submission_id=uuid4().hex,
+            )
+            decided.add(request_id)
+        except Exception as error:
+            failure.set_result(error)
+
+    app.set_push(push_payload_fn=on_push)
+    return failure
+
+
+async def _run_with_approval_channel(
+    app, envelope, label: str, failure: asyncio.Future[Exception],
+) -> list[tuple[str, str]]:
+    turn = asyncio.create_task(_run_turn(app, envelope, label))
+    try:
+        done, _ = await asyncio.wait({turn, failure}, timeout=90, return_when=asyncio.FIRST_COMPLETED)
+        if failure in done:
+            raise failure.result()
+        if turn not in done:
+            raise TimeoutError(f"Plan E2E stage timed out: {label}")
+        return turn.result()
+    finally:
+        if not turn.done():
+            turn.cancel()
+            with suppress(asyncio.CancelledError):
+                await turn
+
+
 async def main(config_path: Path | None = None) -> int:
     root = Path(tempfile.mkdtemp(prefix="crew_plan_e2e_"))
     work = root / "project"
@@ -122,10 +198,16 @@ async def main(config_path: Path | None = None) -> int:
         workspace_id = app.workspace_store.create("Plan E2E", root_path=str(work), owner_account_id="local")["id"]
         app.session_store.ensure_session(sid, workspace_id=workspace_id, owner_account_id="local")
         app.plan_manager.enter(sid, owner_account_id="local")
-        print(f"[进入 plan 模式] 计划文件: {plan_path(sid, owner_account_id='local')}")
+        plan_file = plan_path(sid, owner_account_id="local")
+        print(f"[进入 plan 模式] 计划文件: {plan_file}")
+        approval_failure = _bind_plan_file_approval(
+            app, session_id=sid, workspace_id=workspace_id, profile=root / "profile", plan_file=plan_file,
+        )
 
         env1 = Envelope.of(TASK, session_id=sid, channel="cli", mode="agent", workspace_id=workspace_id)
-        events = await _run_turn(app, env1, "规划轮（只读探索 + 写计划 + exit_plan_mode）")
+        events = await _run_with_approval_channel(
+            app, env1, "规划轮（只读探索 + 写计划 + exit_plan_mode）", approval_failure,
+        )
 
         used = {n for n, p in events if p == "start"}
         print(f"\n规划轮用到的工具: {sorted(used)}")
@@ -157,10 +239,12 @@ async def main(config_path: Path | None = None) -> int:
             app.plan_manager.approve(sid, owner_account_id="local")
             print("\n[用户批准计划]")
             env2 = Envelope.of(
-                "计划已批准，请按计划开始执行（只在当前目录操作，勿用 git）。",
+                "计划已批准，请仅修改当前目录的 cli.py。测试脚本会运行 /version，请不要调用终端。",
                 session_id=sid, channel="cli", mode="agent", workspace_id=workspace_id,
             )
-            exec_events = await _run_turn(app, env2, "执行轮（已解锁写工具）")
+            exec_events = await _run_with_approval_channel(
+                app, env2, "执行轮（已解锁写工具）", approval_failure,
+            )
             child_env = {k: v for k, v in os.environ.items() if k.upper() in {"SYSTEMROOT", "WINDIR", "PATH"}}
             cli = subprocess.run(
                 [sys.executable, "-I", "-B", str(work / "cli.py")],
