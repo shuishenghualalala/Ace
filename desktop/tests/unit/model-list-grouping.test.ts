@@ -3,9 +3,9 @@
  *
  * 设置页模型列表按厂商分组：
  *   - 命中厂商目录的模型按目录顺序归组，组头显示厂商名
- *   - 通用/未知 provider 归入「自定义」组，排在目录厂商之后
+ *   - 未收录的具名厂商排在目录之后，通用协议归入最后的「自定义」组
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   __setVendorCatalogForTest,
   renderConfigModels,
@@ -68,6 +68,21 @@ describe('设置页模型列表分组', () => {
       'group:Kimi For Coding', 'item:kimi',
       'group:自定义', 'item:my-proxy',
     ]);
+  });
+
+  it.each(['zh-CN', 'en-US'])('在 %s 区域中，部分目录的排序保持目录、具名厂商、自定义', async (locale) => {
+    __setVendorCatalogForTest([VENDORS[1]]);
+    const collator = new Intl.Collator(locale);
+    const compare = vi.spyOn(String.prototype, 'localeCompare').mockImplementation(function (this: string, other) {
+      return collator.compare(this, other);
+    });
+    try {
+      await renderConfigModels();
+      const groups = [...document.querySelectorAll('.settings-integrations__group')].map(el => el.textContent);
+      expect(groups).toEqual(['Kimi For Coding', 'deepseek', '自定义']);
+    } finally {
+      compare.mockRestore();
+    }
   });
 
   it('目录为空时按原样 provider id 分组，通用协议落入「自定义」', async () => {

@@ -900,13 +900,14 @@ export function modelStatusText(m: ModelOption, isDefault: boolean): string {
   return '已配置';
 }
 
-/** 模型列表分组：命中厂商目录的按厂商名分组，通用/未知 provider 归入「自定义」。 */
+/** 厂商目录优先，其次是未收录的具名厂商，通用协议归入最后的「自定义」组。 */
 function modelGroup(model: ModelOption): { label: string; order: number } {
   const pid = (model.provider ?? '').trim().toLowerCase();
-  const index = (vendorCatalogCache ?? []).findIndex((vendor) => vendor.id === pid);
-  if (index >= 0) return { label: vendorCatalogCache![index].name, order: index };
-  if (pid === 'openai' || pid === 'anthropic' || !pid) return { label: '自定义', order: Number.MAX_SAFE_INTEGER };
-  return { label: pid, order: Number.MAX_SAFE_INTEGER };
+  const catalog = vendorCatalogCache ?? [];
+  const index = catalog.findIndex((vendor) => vendor.id === pid);
+  if (index >= 0) return { label: catalog[index].name, order: index };
+  if (pid === 'openai' || pid === 'anthropic' || !pid) return { label: '自定义', order: catalog.length + 1 };
+  return { label: pid, order: catalog.length };
 }
 
 export async function renderConfigModels(): Promise<void> {
