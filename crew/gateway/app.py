@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import uvicorn
+from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -535,6 +536,14 @@ def _write_gateway_discovery_file(host: str, port: int) -> None:
         log.warning("Gateway 发现文件写入失败", exc_info=True)
 
 
+class _GatewayWebSocketProtocol(AutoWebSocketsProtocol):
+    def shutdown(self) -> None:
+        # A peer close can start draining the transport one loop turn before
+        # connection_lost removes this protocol from the server's active set.
+        if not self.transport.is_closing():
+            super().shutdown()
+
+
 class _DesktopLeaseServer(uvicorn.Server):
     def __init__(
         self,
@@ -591,7 +600,7 @@ def _serve_managed_build_failure(parent_lease: DesktopParentLease, port: int) ->
             payload["readiness"] = readiness
         return JSONResponse(payload, status_code=status, headers={"Cache-Control": "no-store"})
 
-    config = uvicorn.Config(api, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(api, host="127.0.0.1", port=port, log_level="warning", ws=_GatewayWebSocketProtocol)
     _DesktopLeaseServer(config, parent_lease, lambda: None).run()
 
 
@@ -635,10 +644,11 @@ def run(*, parent_lease: DesktopParentLease | None = None) -> None:
     log.info("Gateway 启动: http://%s:%s", cfg.gateway_host, cfg.gateway_port)
     _write_gateway_discovery_file(cfg.gateway_host, cfg.gateway_port)
     if parent_lease is None:
-        uvicorn.run(api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning")
+        uvicorn.run(api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning", ws=_GatewayWebSocketProtocol)
     else:
         config = uvicorn.Config(
-            api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning", timeout_graceful_shutdown=5,
+            api, host=cfg.gateway_host, port=cfg.gateway_port, log_level="warning",
+            ws=_GatewayWebSocketProtocol, timeout_graceful_shutdown=5,
         )
         _DesktopLeaseServer(config, parent_lease, crew.dispatcher.begin_shutdown).run()
         if crew.dispatcher.shutdown_timed_out:

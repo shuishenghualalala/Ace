@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import uvicorn
+from fastapi import WebSocket
 from fastapi.testclient import TestClient
 
 from crew.gateway import app as gateway_app
@@ -120,7 +121,9 @@ def test_standalone_gateway_runs_without_managed_lease(monkeypatch):
     monkeypatch.setattr(gateway_app.uvicorn, "run", lambda api, **kwargs: calls.append((api, kwargs)))
 
     gateway_app.run()
-    assert calls == [(gateway, {"host": "127.0.0.1", "port": 28180, "log_level": "warning"})]
+    assert calls == [(gateway, {
+        "host": "127.0.0.1", "port": 28180, "log_level": "warning", "ws": gateway_app._GatewayWebSocketProtocol,
+    })]
 
 
 @pytest.mark.parametrize("drain_timed_out", [False, True])
@@ -233,3 +236,76 @@ def test_blocked_lease_reader_does_not_prevent_normal_process_exit():
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=2)
+
+
+@pytest.mark.parametrize("already_closing", [True, False])
+def test_server_shutdown_closes_each_transport_once(monkeypatch, already_closing):
+    protocol = gateway_app._GatewayWebSocketProtocol
+    closes = []
+    monkeypatch.setattr(protocol.__base__, "shutdown", lambda self: closes.append(self))
+    peer = object.__new__(protocol)
+    peer.transport = SimpleNamespace(is_closing=lambda: already_closing)
+    peer.shutdown()
+    assert closes == ([] if already_closing else [peer])
+
+
+@pytest.mark.asyncio
+async def test_gateway_shutdown_during_peer_close_preserves_lifespan():
+    import asyncio
+    import socket
+    from contextlib import asynccontextmanager
+
+    import websockets
+    from fastapi import FastAPI, WebSocketDisconnect
+
+    stopped = asyncio.Event()
+    peers = []
+    shutdown_errors = []
+
+    class ClosingProtocol(gateway_app._GatewayWebSocketProtocol):
+        def connection_lost(self, exc):
+            # Deliver shutdown while the closing connection is still registered.
+            try:
+                self.shutdown()
+            except Exception as error:
+                shutdown_errors.append(error)
+            finally:
+                peers.append(self.transport.is_closing())
+                super().connection_lost(exc)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield
+        stopped.set()
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.websocket("/stream")
+    async def stream(ws: WebSocket):
+        await ws.accept()
+        try:
+            await ws.receive_text()
+        except WebSocketDisconnect:
+            pass
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        server = uvicorn.Server(uvicorn.Config(app, ws=ClosingProtocol, log_level="error"))
+        url = f"ws://127.0.0.1:{sock.getsockname()[1]}/stream"
+        async with asyncio.timeout(10):
+            task = asyncio.create_task(server.serve(sockets=[sock]))
+            try:
+                while not server.started:
+                    await asyncio.sleep(0.01)
+                async with websockets.connect(url) as open_peer:
+                    async with websockets.connect(url):
+                        pass
+                    server.should_exit = True
+                    await open_peer.wait_closed()
+                    assert open_peer.close_code == 1012
+            finally:
+                server.should_exit = True
+                await task
+    assert peers == [True, True]
+    assert not shutdown_errors
+    assert stopped.is_set()
