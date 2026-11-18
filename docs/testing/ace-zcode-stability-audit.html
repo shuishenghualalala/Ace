@@ -349,6 +349,12 @@
 <p><strong>同包键入配对</strong> 用相同的 2,000 轮混合历史及固定键入序列，两档各交替运行两对，每批 60 键。480 个前景可信事件均取得 Chromium Event Timing、<code>beforeinput</code> 和 <code>input</code>，八条正文在持久历史逐字节一致。每秒 20 片时，两对总时延 P95 都从 80 降到 64 毫秒，聚合 P50 从 72 降到 56 毫秒。每秒 100 片时，两对 P95 分别为 80→48 和 48→64 毫秒，聚合 P50/P95 为 48/80→48/64 毫秒，样本尚不足以确认该档持续改善。两档 <code>input</code> 从捕获到文档冒泡的 P95 分别为 6.4→6.1 和 5.9→5.5 毫秒。总时延按 8 毫秒量化。两套应用均正常退出，双端口释放。50 毫秒目标在配对的聚合数据中仍未达到。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/composer-view.ts</code>、<code>desktop/src/ui/features/conversation-panel.ts</code>、<code>desktop/src/ui/reducers/store-bus.ts</code>。ZCode <code>packages/ui/src/LexicalChatInput.tsx:853</code>、<code>packages/ui/src/v4/ConversationTimeline.tsx:1340</code>。</p>
 </article>
+<article id="evolution-worker-lifecycle">
+<h3>F13 · 后台进化完成后仍保留空闲队列和 worker</h3>
+<p>启用后台技能进化后，旧代码一次处理完 18 个会话，仍保留 18 个空队列和 18 个等待新任务的 worker，直到应用关闭。ZCode 的 Gen UI 存储按目标串行写入，当前队尾完成后从注册表移除。Ace 在会话队列排空时同步注销持有该队列的 worker。新任务可启动下一个 worker，后续回合仍能按原顺序读取结果。</p>
+<p><strong>验收</strong> 两项异步回归在旧代码上均因任务已完成但 worker 未退出而失败，最终候选通过。覆盖 18 个排空会话、同会话 FIFO、重开、只取一次结果及关闭等待期间同会话和另一会话追加任务。以 <code>024e03da</code> Windows 正式运行时为基底，仅覆盖最终队列文件。通过实际 Gateway、WebSocket 和本地 SSE 处理 6 个新会话，再重开第一个会话。七轮均读回所属账号的历史正文和对应轨迹。关闭前基线的空闲 worker 和队列随会话数增至各 6 个，最终候选每轮均为零。两组 Gateway 退出码均为 0，双端口释放。Windows 技能、进化、异步桥接与配置组合复跑为 202 项通过、8 项跳过。首次组合测试有一条打包技能发布用例失败；最终候选的独立复跑和完整组合均通过，旧版独立三次也通过，原因未确定。</p>
+<p class="evidence">Ace <code>crew/evolution/queue.py</code>、<code>crew/agent/runtime.py</code>、<code>tests/test_skills.py</code>。ZCode <code>packages/services/src/gen-ui/adapters/stateStorage.ts:147</code>、<code>apps/zcode-cli/packages/bootstrap/src/app/workflow-concurrency-governor.ts:347</code>。</p>
+</article>
 </section>
 
 <section id="handoff">

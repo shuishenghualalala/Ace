@@ -2301,3 +2301,101 @@ def test_watcher_dispatch_does_not_acquire_the_index_lock(tmp_path):
     assert callbacks == []
     watcher.sync()
     assert callbacks == [threading.get_ident()]
+
+
+@pytest.mark.asyncio
+async def test_evolution_workers_retire_after_each_session_drains():
+    import asyncio
+    from types import SimpleNamespace
+
+    from crew.evolution import EvolutionQueue
+
+    pool = EvolutionQueue()
+    calls = []
+    manager = SimpleNamespace(extract_session=lambda sid, owner: calls.append((sid, owner)))
+    sessions = [f"session-{i}" for i in range(18)]
+    try:
+        for sid in sessions:
+            await pool.enqueue(sid, "owner", sid, manager, full_cycle=False)
+        workers = list(pool._workers.values())
+        queues = list(pool._queues.values())
+        await asyncio.wait_for(asyncio.gather(*(queue.join() for queue in queues)), 5)
+        assert sorted(calls) == sorted((sid, "owner") for sid in sessions)
+        assert all(worker.done() for worker in workers)
+        assert not pool._workers
+        assert not pool._queues
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_evolution_queue_preserves_fifo_results_across_idle_restart_and_shutdown():
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from crew.evolution import EvolutionQueue
+
+    pool = EvolutionQueue()
+    loop = asyncio.get_running_loop()
+    first, restarted, other = [(asyncio.Event(), threading.Event()) for _ in range(3)]
+    calls = []
+
+    def manager(label, gate):
+        def extract(sid, owner):
+            calls.append((sid, label))
+            if gate:
+                entered, release = gate
+                loop.call_soon_threadsafe(entered.set)
+                release.wait(5)
+
+        def propose(*, evolution_suggestions, **kwargs):
+            evolution_suggestions.append(SimpleNamespace(
+                suggestion_type="evolve", skill_slug=label, skill_name=label, suggested_value=label,
+            ))
+            return []
+
+        return SimpleNamespace(
+            extract_session=extract, optimize_all=lambda **kwargs: {}, generate_proposals=propose,
+        )
+
+    async def enqueue(label, *, sid="session", gate=None):
+        await pool.enqueue(sid, "owner", sid, manager(label, gate), full_cycle=True)
+
+    try:
+        await enqueue("first", gate=first)
+        await asyncio.wait_for(first[0].wait(), 5)
+        worker = pool._workers["session"]
+        await enqueue("second")
+        assert pool._workers["session"] is worker
+        first[1].set()
+        await asyncio.wait_for(pool._queues["session"].join(), 5)
+        assert worker.done()
+        assert pool.has_pending("session")
+
+        await enqueue("third", gate=restarted)
+        await asyncio.wait_for(restarted[0].wait(), 5)
+        assert pool._workers["session"] is not worker
+        closing = asyncio.create_task(pool.shutdown())
+        await asyncio.sleep(0)
+        await enqueue("fourth")
+        await enqueue("independent", sid="other", gate=other)
+        await asyncio.wait_for(other[0].wait(), 5)
+        same_session = pool._queues["session"]
+        restarted[1].set()
+        await asyncio.wait_for(same_session.join(), 5)
+        assert not closing.done()
+        other[1].set()
+        await asyncio.wait_for(closing, 5)
+        assert [label for sid, label in calls if sid == "session"] == ["first", "second", "third", "fourth"]
+        assert [result["evolved_skills"][0]["slug"] for result in pool.drain_results("session")] == [
+            "first", "second", "third", "fourth",
+        ]
+        assert not pool.has_pending("session")
+        assert [result["evolved_skills"][0]["slug"] for result in pool.drain_results("other")] == ["independent"]
+        assert not pool._workers
+        assert not pool._queues
+    finally:
+        for _, release in (first, restarted, other):
+            release.set()
+        await pool.shutdown()

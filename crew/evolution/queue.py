@@ -51,14 +51,12 @@ class EvolutionQueue:
         full_cycle: bool,
     ) -> None:
         """入队一个 evolution 任务，自动启动 session 级 worker。"""
-        if session_id not in self._queues:
-            self._queues[session_id] = asyncio.Queue()
-            self._workers[session_id] = asyncio.create_task(
-                self._worker(session_id)
-            )
-        await self._queues[session_id].put(
-            (owner_account_id, conversation_id, manager, full_cycle)
-        )
+        queue = self._queues.get(session_id)
+        if queue is None:
+            queue = self._queues[session_id] = asyncio.Queue()
+        queue.put_nowait((owner_account_id, conversation_id, manager, full_cycle))
+        if session_id not in self._workers:
+            self._workers[session_id] = asyncio.create_task(self._worker(session_id, queue))
 
     def drain_results(self, session_id: str) -> list[dict]:
         """取出并清空该 session 的 pending evolution 结果。"""
@@ -69,43 +67,41 @@ class EvolutionQueue:
         return bool(self._pending_results.get(session_id))
 
     async def shutdown(self) -> None:
-        """优雅关闭：向所有队列发送哨兵，等待 worker 退出。"""
-        for queue in self._queues.values():
-            await queue.put(None)
-        for task in list(self._workers.values()):
-            try:
-                await asyncio.wait_for(task, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                task.cancel()
-        self._queues.clear()
-        self._workers.clear()
+        """等待已接纳的工作，包括关停期间进入队列的任务。"""
+        while self._workers:
+            for session_id, task in tuple(self._workers.items()):
+                try:
+                    await asyncio.wait_for(task, timeout=10)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    task.cancel()
+                    if self._workers.get(session_id) is task:
+                        self._workers.pop(session_id)
+                        self._queues.pop(session_id)
 
     # ── 内部实现 ──────────────────────────────────────────────────────
 
-    async def _worker(self, session_id: str) -> None:
+    async def _worker(self, session_id: str, queue: asyncio.Queue) -> None:
         """单 session 串行处理：取任务 → 执行 → 存结果。"""
-        queue = self._queues[session_id]
-        while True:
-            item = await queue.get()
-            if item is None:
-                break  # 哨兵：shutdown
-            owner_account_id, conversation_id, manager, full_cycle = item
-            try:
-                result = await self._run_evolution(
-                    manager, session_id, owner_account_id,
-                    conversation_id, full_cycle,
-                )
-                if result is not None:
-                    self._pending_results.setdefault(session_id, []).append(result)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("[EVOLUTION] 队列任务失败: session=%s err=%s", session_id, exc)
-            finally:
-                queue.task_done()
-
-        # worker 退出，清理自身引用
-        self._queues.pop(session_id, None)
-        self._workers.pop(session_id, None)
-        log.debug("[EVOLUTION] worker 退出: session=%s", session_id)
+        try:
+            while not queue.empty():
+                owner_account_id, conversation_id, manager, full_cycle = queue.get_nowait()
+                try:
+                    result = await self._run_evolution(
+                        manager, session_id, owner_account_id,
+                        conversation_id, full_cycle,
+                    )
+                    if result is not None:
+                        self._pending_results.setdefault(session_id, []).append(result)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[EVOLUTION] 队列任务失败: session=%s err=%s", session_id, exc)
+                finally:
+                    queue.task_done()
+        finally:
+            # 同一事件循环中，检查队列为空到移除注册之间不让出执行权。
+            if self._queues.get(session_id) is queue:
+                self._queues.pop(session_id)
+                self._workers.pop(session_id, None)
+            log.debug("[EVOLUTION] worker 退出: session=%s", session_id)
 
     async def _run_evolution(
         self,
