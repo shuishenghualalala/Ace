@@ -17,6 +17,21 @@ fn native_linux_gate_is_explicit() {
 }
 
 #[test]
+fn native_fixture_reaches_authenticated_dispatch() {
+    let workspace = tempfile::tempdir().unwrap();
+    let events = run_request(
+        workspace.path(),
+        serde_json::json!({
+            "op": "classify_shell",
+            "shell_kind": "bash",
+            "executable": "/bin/bash",
+            "raw_command": "pwd"
+        }),
+    );
+    assert_eq!(events[0]["type"], "classified");
+}
+
+#[test]
 fn stdin_environment_and_output_stream_through_hardened_child() {
     let workspace = tempfile::tempdir().unwrap();
     let events = run_request(
@@ -157,10 +172,12 @@ fn run_request(cwd: &std::path::Path, request: serde_json::Value) -> Vec<serde_j
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
     assert!(line.contains("\"stdin_once\""));
+    // Each helper process serves one request, including when the test binary is PID 1.
+    let nonce = "linux-native-single-request";
     let envelope = serde_json::json!({
         "version": 3,
         "token": token,
-        "nonce": format!("linux-native-{}", std::process::id()),
+        "nonce": nonce,
         "request": request,
     });
     writeln!(stdin, "{envelope}").unwrap();
@@ -181,10 +198,7 @@ fn run_request(cwd: &std::path::Path, request: serde_json::Value) -> Vec<serde_j
     }
     assert!(child.wait().unwrap().success());
     assert!(events.iter().enumerate().all(|(index, event)| {
-        event["seq"].as_u64() == Some(index as u64)
-            && event["nonce"]
-                .as_str()
-                .is_some_and(|nonce| nonce.starts_with("linux-native-"))
+        event["seq"].as_u64() == Some(index as u64) && event["nonce"].as_str() == Some(nonce)
     }));
     assert!(cwd.is_dir());
     events
