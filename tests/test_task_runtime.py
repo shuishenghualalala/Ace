@@ -380,6 +380,9 @@ async def test_restart_reconciliation(tmp_path):
     shell_row = recovered.get(shell["task_id"], owner_account_id="local")
     assert shell_row["status"] == "running"
     assert shell_row["progress"]["detached"] is True
+    # A Windows liveness probe must not signal the restored process.
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(process.wait(), timeout=0.1)
     await recovered.cancel(shell["task_id"], "restart cancel", owner_account_id="local")
     await asyncio.wait_for(process.wait(), timeout=2)
     assert recovered.get(shell["task_id"], owner_account_id="local")["status"] == "cancelled"
@@ -686,4 +689,42 @@ async def test_async_facade_does_not_block_event_loop(tmp_path):
         gaps = [b - a for a, b in zip(ticks, ticks[1:])]
         assert max(gaps) < 0.05, f"ticker 出现大间隔（{max(gaps):.3f}s），事件循环疑似被阻塞"
     finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_finish_worker_until_its_coroutine_returns(tmp_path, monkeypatch):
+    monkeypatch.setattr("crew.tasks.runtime._WORKER_STOP_GRACE_SECONDS", 0.02)
+    runtime = _runtime(tmp_path)
+    started, leave = asyncio.Event(), asyncio.Event()
+
+    async def work():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await leave.wait()
+
+    row = runtime.create_runtime(kind="subagent", session_id="s", title="fixture", owner_account_id="local")
+    task_id = row["task_id"]
+    runtime.mark_running(task_id)
+    other = runtime.create_runtime(
+        kind="subagent", session_id="s::turn::r::another", request_id="r::another", title="other", owner_account_id="local",
+    )
+    runtime.mark_running(other["task_id"])
+    assert await runtime.active_stop_targets("s", "local", "r") == []
+    assert {r["task_id"] for r in await runtime.active_stop_targets("s", "local", "r::another")} == {other["task_id"]}
+    worker = asyncio.create_task(work())
+    runtime.attach_worker(task_id, worker)
+    try:
+        await started.wait()
+        pending = await runtime.cancel(task_id, owner_account_id="local")
+        assert pending["status"] == "running" and pending["cancel_requested"]
+        leave.set()
+        await worker
+        await asyncio.sleep(0)
+        assert runtime.get(task_id, owner_account_id="local")["status"] == "cancelled"
+    finally:
+        leave.set()
+        await worker
         runtime.close()

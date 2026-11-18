@@ -188,6 +188,11 @@ export default function AgentProcessTimeline({ items, isStreaming }: Props) {
   );
 }
 
+export function ToolExitNotice({ items }: Pick<Props, "items">) {
+  if (!items.some((item) => item.kind === "tool" && item.tool.exitUnconfirmed)) return null;
+  return <p role="status">工具实际退出尚未确认。</p>;
+}
+
 export function AgentProcessFold({
   items,
   label,

@@ -81,6 +81,7 @@ export class ChatSocket {
   readonly plans = new WebPlanDecisions((frame) => this.send(frame));
   private ws: WebSocket | null = null;
   private closed = false;
+  private requestStop = false;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private connectCount = 0; // 临时诊断：连接序号，排查断连来源
 
@@ -105,6 +106,7 @@ export class ChatSocket {
     ws.onclose = (e) => {
       if (this.closed || this.ws !== ws) return;
       this.ws = null;
+      this.requestStop = false;
       this.plans.disconnect();
       this.onStatus(false);
       // 临时诊断：close code/reason/wasClean 用来判断是哪层心跳触发的断连
@@ -127,6 +129,9 @@ export class ChatSocket {
         queueMicrotask(() => this.send({ kind: "pong" }));
         return;
       }
+      if (payload?.kind === "send_receipt_capability") {
+        this.requestStop = payload.body?.version === 1 && payload.body?.request_stop === 1;
+      }
       if (!this.plans.receive(payload as Chunk)) this.onChunk(payload as Chunk);
     };
   }
@@ -139,8 +144,8 @@ export class ChatSocket {
     return false;
   }
 
-  stop(sessionId: string): boolean {
-    return this.send({ action: "stop", session_id: sessionId });
+  stop(sessionId: string, requestId: string): boolean {
+    return this.requestStop && !!requestId && this.send({ action: "stop", session_id: sessionId, request_id: requestId });
   }
 
   /** 订阅一个或多个会话，用于断线重连后恢复后台流式推送。 */

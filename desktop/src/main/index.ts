@@ -216,7 +216,7 @@ const gatewayRetirement = new GatewayProcessRetirement({
 let ensureGatewayPromise: Promise<GatewayBinding> | null = null;
 const securityApprovalNonces = new Map<string, string>();
 const gatewaySockets = new Map<number, WebSocket>();
-type GatewaySocketChat = { scope: string | null; capability?: { frame: string; storeId: string } };
+type GatewaySocketChat = { scope: string | null; capability?: { frame: string; storeId: string; requestStop: boolean } };
 const gatewaySocketChat = new WeakMap<WebSocket, GatewaySocketChat>();
 let desktopChatOutbox: DesktopChatOutbox | undefined;
 let desktopRendererCheckpoint: RendererCheckpointStore | undefined;
@@ -3926,14 +3926,14 @@ function registerIpc() {
       try {
         const parsed = JSON.parse(frame) as {
           kind?: string; request_id?: string; session_id?: string;
-          body?: { version?: number; store_id?: unknown; status?: unknown; code?: unknown };
+          body?: { version?: number; store_id?: unknown; request_stop?: unknown; status?: unknown; code?: unknown };
         };
         kind = parsed.kind ?? 'unknown';
         request_id = parsed.request_id;
         session_id = parsed.session_id;
         if (kind === 'send_receipt_capability' && parsed.body?.version === 1) {
           const storeId = parsed.body.store_id;
-          if (typeof storeId === 'string' && /^[a-f0-9]{32}$/.test(storeId)) socketChat.capability = { frame, storeId };
+          if (typeof storeId === 'string' && /^[a-f0-9]{32}$/.test(storeId)) socketChat.capability = { frame, storeId, requestStop: parsed.body.request_stop === 1 };
         }
         if (kind === 'send_receipt') {
           const { status, code } = parsed.body ?? {};
@@ -3977,6 +3977,10 @@ function registerIpc() {
     const currentScope = currentChatOutboxScope();
     if (!socketChat || socketChat.scope !== currentScope) {
       return { ok: false, error: 'WebSocket 账号已变更' };
+    }
+    if (payload && typeof payload === 'object' && 'action' in payload && payload.action === 'stop'
+      && 'request_id' in payload && !socketChat.capability?.requestStop) {
+      return { ok: false, error: '当前网关无法按回合停止' };
     }
     if (outboxScope !== undefined || outboxStoreId !== undefined) {
       if (typeof outboxScope !== 'string' || currentScope !== outboxScope || typeof outboxStoreId !== 'string'

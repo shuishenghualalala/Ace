@@ -4,7 +4,7 @@ import type { AgentTurnState } from "../lib/agentTurnState";
 import { processSummaryLabel } from "../lib/processDisplay";
 import { useProcessTiming } from "../hooks/useProcessTiming";
 import AgentAvatarLogo from "./AgentAvatarLogo";
-import { AgentProcessFold } from "./AgentProcessTimeline";
+import { AgentProcessFold, ToolExitNotice } from "./AgentProcessTimeline";
 import MarkdownContent from "./MarkdownContent";
 import { PlanReviewCard } from "./PlanReviewPanel";
 import TurnFileChangesCard from "./TurnFileChangesCard";
@@ -68,6 +68,7 @@ export default function AgentTurnBubble({
         onOpenChange={setPinnedOpen}
         className={processClassName}
       />
+      <ToolExitNotice items={state.processItems} />
       {state.planReviews.map((item) => (
         <PlanReviewCard
           key={item.id}

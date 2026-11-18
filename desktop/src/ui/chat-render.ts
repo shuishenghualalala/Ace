@@ -164,6 +164,7 @@ export interface ChatMessage {
   } | undefined;
   /** 被停止/断连截断的半截回复：不再显示执行中，但仍按流式 Markdown 容错渲染。 */
   interrupted?: boolean | undefined;
+  stopNotice?: string | undefined;
   turnOutcome?: TurnOutcome | undefined;
   /** Wiki Agent 回合引用的 Wiki 页面卡片（wiki.cards 事件 → wikiCardsReducer patch 进来）；
    *  chat-render 据此在正文下方渲染「Wiki 结果」卡片网格。 */
@@ -1461,6 +1462,13 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
   const outcome = messages.findLast((message) => message.turnOutcome)?.turnOutcome;
   const outcomeNode = outcome && renderTurnOutcome(outcome);
   if (outcomeNode) frag.appendChild(outcomeNode);
+  const stopNotice = messages.findLast((message) => message.stopNotice)?.stopNotice;
+  if (stopNotice) {
+    const note = document.createElement('p');
+    note.setAttribute('role', 'status');
+    note.textContent = stopNotice;
+    frag.appendChild(note);
+  }
 
   // HTML 成果直接以网站卡打开右侧 Browser workbench；这是确定性 UI 动作，
   // 不需要把 browser 工具暴露给模型。

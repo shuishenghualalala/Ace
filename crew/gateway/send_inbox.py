@@ -156,12 +156,12 @@ class DesktopSendInbox:
 
         return await self._execute(write)
 
-    async def cancel_pending(self, owner: str, session_id: str) -> None:
-        await self._execute(lambda conn: conn.execute("""
+    async def cancel_pending(self, owner: str, session_id: str, request_id: str | None = None) -> bool:
+        return await self._execute(lambda conn: conn.execute("""
             UPDATE desktop_send_inbox
             SET status='cancelled', code='cancelled_before_dispatch', payload_json=NULL, updated_at=?
-            WHERE owner_account_id=? AND session_id=? AND status='accepted'
-        """, (time.time(), owner, session_id)))
+            WHERE owner_account_id=? AND session_id=? AND status='accepted' AND (? IS NULL OR request_id=?)
+        """, (time.time(), owner, session_id, request_id, request_id)).rowcount > 0)
 
     async def begin(self, key: SendKey) -> bool:
         return await self._execute(lambda conn: conn.execute("""
@@ -206,12 +206,15 @@ class DesktopSendInbox:
 
         task.add_done_callback(settled)
 
-    def stop_preparation(self, owner: str, session_id: str, dispatcher_tasks: set[asyncio.Task]) -> bool:
+    def stop_preparation(
+        self, owner: str, session_id: str, dispatcher_tasks: set[asyncio.Task], request_id: str | None = None,
+    ) -> bool:
         """Stop work still outside Dispatcher, which owns cancellation from then on."""
         stopped = False
         for key, task in self._scheduled.items():
             if (
-                key.owner == owner and key.session_id == session_id and task not in dispatcher_tasks
+                key.owner == owner and key.session_id == session_id and (request_id is None or key.request_id == request_id)
+                and task not in dispatcher_tasks
                 and not task.done() and not task.cancelling()
             ):
                 task.cancel()

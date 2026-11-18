@@ -184,7 +184,16 @@ class FunctionTool(Tool):
                 result = await result
         else:
             # 同步 handler 丢线程池执行，避免阻塞事件循环（拖垮网关心跳）。
-            result = await asyncio.to_thread(self.handler, args)
+            from crew.core.runctx import observe_tool_exit
+
+            worker = asyncio.create_task(asyncio.to_thread(self.handler, args))
+            observe_tool_exit(worker.done)
+            try:
+                result = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # The thread owns its handler until it returns, including any final exception.
+                worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+                raise
         if isinstance(result, (str, ToolOutput)):
             return result
         return json.dumps(result, ensure_ascii=False)

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api } from "../api";
-import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails, type BackendHistoryItem } from "../lib/historyMap";
+import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails, toolExitUnconfirmed, type ToolResultMetadata, type BackendHistoryItem } from "../lib/historyMap";
 import { backendSecondsToMs } from "../lib/backendTime";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
@@ -18,6 +18,7 @@ import {
 import type { Attachment, Chunk, FollowupQuestion, Mode, MsgRole, PendingMessage, PlanDecision, PlanReview, TeamExecutionTier, TodoItem, ToolCallInfo, TurnFileChangeSummary, UiMessage, UserAgentMention, WikiIngestProgress, WikiPage, SessionStatus } from "../types";
 
 let _seq = 0;
+const newRequestId = () => "web_" + Array.from(crypto.getRandomValues(new Uint32Array(4)), (n) => n.toString(16).padStart(8, "0")).join("");
 const newId = () => `m${Date.now()}_${_seq++}`;
 const HISTORY_LOADING_TEXT = "正在加载历史记录…";
 const HISTORY_LOAD_TIMEOUT_MS = 8000;
@@ -298,6 +299,7 @@ export interface ToolChunkBody {
   ui_label?: string;
   args?: string;
   detail?: string;
+  result_metadata?: ToolResultMetadata;
 }
 
 /**
@@ -356,14 +358,17 @@ export function applyToolChunk(
   }
 
   // result / error
+  const exitUnconfirmed = toolExitUnconfirmed(b.result_metadata);
+  const result = b.detail || (exitUnconfirmed ? "工具实际退出尚未确认。" : existing?.result ?? "");
   if (existing) {
     next.set(toolCallId, {
       ...existing,
       name: b.name ?? existing.name,
       uiLabel: b.ui_label ?? existing.uiLabel,
       args: b.args ?? existing.args,
-      status: b.phase === "error" ? "error" : "done",
-      result: b.detail ?? existing.result ?? "",
+      status: b.phase === "error" || exitUnconfirmed ? "error" : "done",
+      result,
+      ...(exitUnconfirmed ? { exitUnconfirmed: true } : {}),
       duration: now - existing.startedAt,
     });
   } else {
@@ -372,8 +377,9 @@ export function applyToolChunk(
       name: b.name ?? "unknown",
       uiLabel: b.ui_label ?? "",
       args: b.args ?? "",
-      result: b.detail ?? "",
-      status: b.phase === "error" ? "error" : "done",
+      result,
+      ...(exitUnconfirmed ? { exitUnconfirmed: true } : {}),
+      status: b.phase === "error" || exitUnconfirmed ? "error" : "done",
       startedAt: now,
       duration: 0,
     });
@@ -673,6 +679,8 @@ export function useChat(
   const historyLoads = useRef(new Map<string, symbol>());
   const snapshotBooks = useRef(new WeakSet<Bookkeeping>());
   const transportOpen = useRef(false);
+  const activeRequests = useRef(new Map<string, string>());
+  const stopNotices = useRef(new Map<string, { id: string; uncertainTool: boolean; terminal: boolean }>());
 
   const bookFor = (sid: string): Bookkeeping => {
     let b = bookRef.current.get(sid);
@@ -770,6 +778,7 @@ export function useChat(
   const finishLocalTurn = (sid: string, status: SessionStatus = "idle") => {
     const book = bookFor(sid);
     snapshotBooks.current.delete(book);
+    activeRequests.current.delete(sid);
     book.toolMap.clear();
     book.assistantId = null;
     book.turnStartedAt = null;
@@ -954,6 +963,7 @@ export function useChat(
         const history = mapHistoryItems(snapshot.history.items);
         recoveries.current.delete(sid);
         bookRef.current.set(sid, projected.book);
+        activeRequests.current.set(sid, snapshot.request_id);
         snapshotBooks.current.add(projected.book);
         loadedSessionsRef.current.add(sid);
         setMessagesMap((prev) => ({
@@ -994,8 +1004,42 @@ export function useChat(
           ? c.body.message.request_id
           : "") || "",
       ).trim();
-      if (isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
+      const ack = c.kind === "status" && c.body.stop;
+      if (ack && typeof ack.request_id === "string") {
+        const notice = stopNotices.current.get(suppressedRequestKey(sid, ack.request_id));
+        if (notice && !notice.terminal && !notice.uncertainTool) {
+          if (ack.state === "requested") patch(sid, notice.id, { text: "网关已收到停止请求，正在等待回合结束。" });
+          if (ack.state === "not_active") {
+            patch(sid, notice.id, { text: "该回合已不在运行。" });
+            if (activeRequests.current.get(sid) === ack.request_id) {
+              void loadHistory(sid).then(() => {
+                if (!activeRequests.current.has(sid) && !busyRef.current[sid]) consumePendingRef.current(sid);
+              });
+            }
+          }
+        }
+        return;
+      }
+      const notice = stopNotices.current.get(suppressedRequestKey(sid, chunkRequestId));
+      const unconfirmed = c.kind === "tool" && toolExitUnconfirmed(c.body.result_metadata);
+      if (notice && unconfirmed) {
+        notice.uncertainTool = true;
+        patch(sid, notice.id, { text: "已请求停止，工具实际退出尚未确认。" });
+      }
       const terminal = c.kind === "final" || c.kind === "error";
+      if (notice && terminal) {
+        notice.terminal = true;
+        if (!notice.uncertainTool) {
+          patch(sid, notice.id, { text: c.body.outcome?.status === "stopped" ? "回合已停止。" : "回合已结束。" });
+        }
+      }
+      const identity = activeRequests.current.get(sid);
+      if (chunkRequestId && (terminal || ["delta", "thinking", "tool"].includes(c.kind))) {
+        if (identity && identity !== chunkRequestId) return;
+        if (!identity && notice) return;
+        if (!identity && !terminal) activeRequests.current.set(sid, chunkRequestId);
+      }
+      if (!terminal && !unconfirmed && isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
       const executingPlan = sockRef.current?.plans.observeExecution(sid, chunkRequestId, terminal);
       if (executingPlan && !terminal && !busyRef.current[sid]) {
         bookRef.current.delete(sid);
@@ -1257,8 +1301,9 @@ export function useChat(
         setStatus(sessionId, "queued");
         return;
       }
+      const requestId = newRequestId();
       const payload: Record<string, unknown> = {
-        query,
+        request_id: requestId, query,
         session_id: sessionId,
         mode,
         workspace_id: workspaceId,
@@ -1293,11 +1338,12 @@ export function useChat(
         appendRef.current(sessionId, "error", "未连接到后端网关（请确认 python -m crew.gateway.server 已启动）");
         return;
       }
+      activeRequests.current.set(sessionId, requestId);
       subscribedSessionsRef.current.add(sessionId);
       suppressChunksRef.current.delete(sessionId);
       startLocalTurn(sessionId);
       appendRef.current(sessionId, "user", query, {
-        attachments: sendAttachments.length > 0 ? sendAttachments : undefined,
+        requestId, attachments: sendAttachments.length > 0 ? sendAttachments : undefined,
       });
       setBusy(sessionId, true);
       setStatus(sessionId, "running");
@@ -1311,8 +1357,9 @@ export function useChat(
     if (queue.length === 0) return;
     const [next, ...rest] = queue;
     setPendingQueue(sid, rest);
+    const requestId = newRequestId();
     const payload: Record<string, unknown> = {
-      query: next.query,
+      request_id: requestId, query: next.query,
       session_id: sid,
       mode: next.mode,
       workspace_id: next.workspaceId,
@@ -1349,11 +1396,12 @@ export function useChat(
       setStatus(sid, "idle");
       return;
     }
+    activeRequests.current.set(sid, requestId);
     subscribedSessionsRef.current.add(sid);
     suppressChunksRef.current.delete(sid);
     startLocalTurn(sid);
     appendRef.current(sid, "user", next.query, {
-      attachments: next.attachments.length > 0 ? next.attachments : undefined,
+      requestId, attachments: next.attachments.length > 0 ? next.attachments : undefined,
     });
     setBusy(sid, true);
     setStatus(sid, "running");
@@ -1362,40 +1410,34 @@ export function useChat(
   const consumePendingRef = useRef(consumePending);
   consumePendingRef.current = consumePending;
 
-  /** 停止生成：取消当前会话的运行任务，并清空本地待发队列。
-   *  这里走后端 stop 硬取消路径，而不是 interrupt 软中断；软中断需要等模型流或工具
-   *  到达安全点才会收尾，遇到上游阻塞时会让 UI 一直保持 busy。 */
-  const stop = useCallback((sessionId: string) => {
-    setPendingQueue(sessionId, []);
-    const ok = sockRef.current?.stop(sessionId) ?? false;
-    suppressChunksRef.current.add(sessionId);
-    const book = bookFor(sessionId);
-    const timing = localTurnTiming(sessionId);
-    if (book.assistantId) patchRef.current(sessionId, book.assistantId, timing);
-    finishLocalTurn(sessionId, ok ? "idle" : "error");
-    if (!ok) {
-      appendRef.current(
-        sessionId,
-        "error",
-        "未连接到后端网关，已在本地停止等待",
-        timing,
-      );
+  const stop = useCallback((sid: string, expectedRequest?: string) => {
+    const current = activeRequests.current.get(sid);
+    if (current !== expectedRequest) return;
+    const key = suppressedRequestKey(sid, current ?? "");
+    const sent = current && sockRef.current?.stop(sid, current);
+    const text = sent ? "已发送停止请求，正在等待网关确认。" : "尚未确认停止。当前连接无法停止指定回合。";
+    const old = stopNotices.current.get(key);
+    if (old) {
+      if (!old.uncertainTool && !old.terminal) patchRef.current(sid, old.id, { text });
+      return;
     }
+    const id = appendRef.current(sid, "assistant", text, { requestId: current });
+    stopNotices.current.set(key, { id, uncertainTool: false, terminal: false });
+    if (stopNotices.current.size > 200) stopNotices.current.delete(stopNotices.current.keys().next().value!);
   }, []);
 
   const cancelMention = useCallback((sessionId: string, requestId?: string) => {
     const normalizedRequestId = String(requestId || "").trim();
-    if (normalizedRequestId) {
-      suppressedRequestIdsRef.current.add(suppressedRequestKey(sessionId, normalizedRequestId));
-      // 只保留最近的取消请求，避免长时间打开页面后集合无限增长。
-      while (suppressedRequestIdsRef.current.size > 200) {
-        const oldest = suppressedRequestIdsRef.current.values().next().value;
-        if (oldest == null) break;
-        suppressedRequestIdsRef.current.delete(oldest);
-      }
+    if (!normalizedRequestId || normalizedRequestId !== activeRequests.current.get(sessionId)) return;
+    stop(sessionId, normalizedRequestId);
+    suppressedRequestIdsRef.current.add(suppressedRequestKey(sessionId, normalizedRequestId));
+    // 只保留最近的取消请求，避免长时间打开页面后集合无限增长。
+    while (suppressedRequestIdsRef.current.size > 200) {
+      const oldest = suppressedRequestIdsRef.current.values().next().value;
+      if (oldest == null) break;
+      suppressedRequestIdsRef.current.delete(oldest);
     }
-    stop(sessionId);
-    if (!normalizedRequestId) return;
+
     setMessagesMap((prev) => ({
       ...prev,
       [sessionId]: (prev[sessionId] ?? []).map((message) => message.requestId === normalizedRequestId
@@ -1524,7 +1566,8 @@ export function useChat(
     if (!resume && (recoveries.current.has(sessionId) || (book && snapshotBooks.current.has(book)))) return;
     const load = Symbol();
     historyLoads.current.set(sessionId, load);
-    const isCurrent = () => historyLoads.current.get(sessionId) === load
+    const requestAtLoad = activeRequests.current.get(sessionId);
+    const isCurrent = () => activeRequests.current.get(sessionId) === requestAtLoad && historyLoads.current.get(sessionId) === load
       && (!resume || recoveryIsCurrent(sessionId, resume.recovery, resume.revision));
     const isLoaded = loadedSessionsRef.current.has(sessionId);
     const wasRunning = busyRef.current[sessionId] || !!bookRef.current.get(sessionId)?.assistantId;
@@ -1609,6 +1652,7 @@ export function useChat(
       loadedSessionsRef.current.add(sessionId);
 
       if (st?.live === "running") {
+        if (st.active_request_id) activeRequests.current.set(sessionId, st.active_request_id);
         // 仍在运行：恢复 busy/状态，后续 chunk 继续追加。
         setBusy(sessionId, true);
         setStatus(sessionId, "running");
@@ -1625,6 +1669,7 @@ export function useChat(
           });
         }
       } else {
+        activeRequests.current.delete(sessionId);
         // 已结束：用后端历史覆盖本地，补齐可能错过的 final 文本。
         setBusy(sessionId, false);
         setMessagesMap((prev) => ({
@@ -1686,6 +1731,10 @@ export function useChat(
 
   /** 删除/清理某会话的本地缓存（删除会话时调用）。 */
   const clearSession = useCallback((sessionId: string) => {
+    activeRequests.current.delete(sessionId);
+    for (const key of stopNotices.current.keys()) {
+      if (key.startsWith(suppressedRequestKey(sessionId, ""))) stopNotices.current.delete(key);
+    }
     currentReviews.current.delete(sessionId);
     sockRef.current?.plans.forget(sessionId);
     const compactionTimer = compactionTimersRef.current[sessionId];
@@ -1731,6 +1780,7 @@ export function useChat(
   return {
     messages: messagesMap[currentSessionId] ?? [],
     busy: busyMap[currentSessionId] ?? false,
+    activeRequestId: activeRequests.current.get(currentSessionId),
     queueHint: queueMap[currentSessionId] ?? "",
     recoveryNotice: recoveryNotices[currentSessionId] ?? "",
     pendingQueue: pendingQueueMap[currentSessionId] ?? [],
@@ -1746,6 +1796,7 @@ export function useChat(
     forSession: (sid: string) => ({
       messages: messagesMap[sid] ?? [],
       busy: busyMap[sid] ?? false,
+      activeRequestId: activeRequests.current.get(sid),
       queueHint: queueMap[sid] ?? "",
       recoveryNotice: recoveryNotices[sid] ?? "",
       pendingQueue: pendingQueueMap[sid] ?? [],

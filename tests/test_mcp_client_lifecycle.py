@@ -508,3 +508,31 @@ async def test_resync_replaces_tool_list_in_registry(monkeypatch):
     assert "flaky__t1" not in worker.registry.names()
 
     await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_stopping_dispatched_call_cancels_only_its_sdk_request(monkeypatch):
+    worker, session = await _started_worker(monkeypatch, call_timeout=3.0)
+    exited = asyncio.Event()
+
+    async def call(name, args):
+        if name == "slow":
+            session.call_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                exited.set()
+        return SimpleNamespace(content=[SimpleNamespace(text=name)], is_error=False)
+
+    monkeypatch.setattr(session, "call_tool", call)
+    try:
+        first = asyncio.create_task(worker._make_handler("slow")({}))
+        await session.call_started.wait()
+        followup = asyncio.create_task(worker._make_handler("second")({}))
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await asyncio.wait_for(exited.wait(), 1)
+        assert await asyncio.wait_for(followup, 1) == "second"
+    finally:
+        await worker.stop()

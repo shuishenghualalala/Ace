@@ -2,6 +2,14 @@ import type { MsgRole, ToolCallInfo, TurnFileChangeSummary, UiMessage } from "..
 import { backendDurationToMs, backendSecondsToMs } from "./backendTime";
 import { isDuplicateAssistantOfTeamResult, mergeTeamInternalMessage } from "./teamMessageMerge";
 
+export interface ToolResultMetadata {
+  code?: string;
+  details?: { exit_confirmed?: boolean };
+}
+export function toolExitUnconfirmed(metadata?: ToolResultMetadata) {
+  return metadata?.code === "tool_exit_unconfirmed" || metadata?.details?.exit_confirmed === false;
+}
+
 export interface BackendHistoryItem {
   role: string;
   content: string;
@@ -38,6 +46,7 @@ export interface BackendHistoryItem {
     started_at?: number;
     duration?: number;
     result?: string;
+    result_metadata?: ToolResultMetadata;
     status?: "generating" | "running" | "done" | "error";
   }>;
 }
@@ -84,8 +93,9 @@ function mapToolCalls(
     name: tc.name,
     uiLabel: tc.ui_label,
     args: JSON.stringify(tc.arguments),
-    result: tc.result ?? "",
-    status: tc.status ?? "done",
+    ...(toolExitUnconfirmed(tc.result_metadata) ? { exitUnconfirmed: true } : {}),
+    result: tc.result || (toolExitUnconfirmed(tc.result_metadata) ? "工具实际退出尚未确认。" : ""),
+    status: toolExitUnconfirmed(tc.result_metadata) ? "error" : tc.status ?? "done",
     startedAt: backendSecondsToMs(tc.started_at) ?? 0,
     duration: tc.duration == null ? undefined : backendDurationToMs(tc.duration) || undefined,
   }));

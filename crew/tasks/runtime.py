@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sqlite3
 import threading
 import time
@@ -23,7 +22,7 @@ from crew.state.logging import get_logger
 from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tasks.models import RuntimeTask, TaskKind, normalize_task_status
-from crew.security.process_lifecycle import terminate_process_tree_sync
+from crew.security.process_lifecycle import ProcessOwner, terminate_process_tree_sync
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
 _WORKER_STOP_GRACE_SECONDS = 3.0
@@ -460,6 +459,25 @@ class TaskRuntime:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    async def active_stop_targets(
+        self, session_id: str, owner_account_id: str, request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Select only live rows in this session or its execution sidechains."""
+        sidechain = f"{session_id}::turn::{request_id or ''}"
+
+        def read():
+            with self._lock:
+                rows = self._conn.execute("""
+                    SELECT task_id, kind, session_id, request_id FROM runtime_tasks
+                    WHERE owner_account_id=? AND status NOT IN ('completed','failed','cancelled','timed_out')
+                    AND ((session_id=? AND (? IS NULL OR request_id=?))
+                         OR session_id=? OR (? IS NULL AND substr(session_id, 1, length(?))=?))
+                """, (owner_account_id, session_id, request_id, request_id, sidechain,
+                      request_id, sidechain, sidechain)).fetchall()
+            return [dict(row) for row in rows]
+
+        return await asyncio.to_thread(read)
+
     # ---- async 门面 ----
     # 事件循环上的调用一律经 asyncio.to_thread 转发到上面的同步实现
     # （RLock + BEGIN IMMEDIATE 语义不变）；线程化决策只收敛在本文件。
@@ -569,22 +587,28 @@ class TaskRuntime:
         )
         self.update(task_id, owner_account_id=owner_account_id, cancel_requested=True)
         callback = self._cancel_callbacks.get(task_id)
+        confirmed = True
         if callback is not None:
             value = callback(terminal_reason)
             if asyncio.iscoroutine(value):
                 if callback_timeout is None:
-                    await value
+                    value = await value
                 else:
                     try:
-                        await asyncio.wait_for(value, timeout=callback_timeout)
+                        value = await asyncio.wait_for(value, timeout=callback_timeout)
                     except asyncio.TimeoutError:
-                        pass
+                        value = False
+            confirmed = value is not False
         elif task["kind"] == "shell":
-            self.kill_process_group(int((task.get("progress") or {}).get("pid") or 0), terminal_reason)
+            pid = int((task.get("progress") or {}).get("pid") or 0)
+            process_owner = ProcessOwner.for_pid(pid)
+            await asyncio.to_thread(self.kill_process_group, pid, terminal_reason)
+            confirmed = pid > 0 and await asyncio.to_thread(process_owner.wait_for_exit_sync, _WORKER_STOP_GRACE_SECONDS)
 
         worker = self._workers.get(task_id)
         if worker is not None and not worker.done():
-            worker.cancel()
+            if not worker.cancelling():
+                worker.cancel()
             if worker is not asyncio.current_task():
                 try:
                     await asyncio.wait_for(
@@ -598,11 +622,17 @@ class TaskRuntime:
                         raise
                 except Exception:  # noqa: BLE001 - 被停止的 worker 的原始异常不覆盖终态
                     pass
+        if worker is not None and not worker.done():
+            def settled(_done: asyncio.Task) -> None:
+                if self.pending_termination(task_id):
+                    self.finish(task_id, owner_account_id=owner_account_id, status=terminal_status, error=terminal_reason)
+
+            worker.add_done_callback(settled)
+            confirmed = False
+        if not confirmed:
+            return self.get(task_id, owner_account_id=owner_account_id)
         return self.finish(
-            task_id,
-            owner_account_id=owner_account_id,
-            status=terminal_status,
-            error=terminal_reason,
+            task_id, owner_account_id=owner_account_id, status=terminal_status, error=terminal_reason,
         )
 
     async def wait(
@@ -932,17 +962,7 @@ class TaskRuntime:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except OSError:
-            return False
+        return pid > 0 and not ProcessOwner.for_pid(pid).wait_for_exit_sync(0)
 
     @staticmethod
     def kill_process_group(pid: int, _reason: str = "") -> None:

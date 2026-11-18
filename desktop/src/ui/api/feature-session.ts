@@ -107,6 +107,7 @@ export interface BackendHistoryItem {
     name: string;
     ui_label?: string;
     arguments: Record<string, unknown>;
+    result_metadata?: { code?: string; details?: { exit_confirmed?: boolean } };
     result?: string;
     status?: string;
     started_at?: number;
@@ -852,6 +853,7 @@ export function computeWsReconnectDelayMs(attempts: number): number {
 export class BackendChatSocket {
   private ws: WebSocket | null = null;
   private closed = false;
+  private stopStore: string | undefined;
   private usingGatewayProxy = false;
   private gatewayProxyOpen = false;
   private connectInFlight = false;
@@ -983,7 +985,7 @@ export class BackendChatSocket {
             is_final: frame.is_final,
             textLen: typeof frame.body?.text === 'string' ? frame.body.text.length : undefined,
           });
-          this.onChunk(frame);
+          this.deliverChunk(frame);
           return;
         }
         if (payload.type === 'error') {
@@ -1028,14 +1030,17 @@ export class BackendChatSocket {
     if (this.ws?.readyState === WebSocket.CONNECTING || this.ws?.readyState === WebSocket.OPEN) return;
     logStream('ws-renderer', 'connect-direct-ws', { wsBase: wsBase() });
     const wsUrl = `${wsBase()}/ws?send_receipts=1`;
-    this.ws = new WebSocket(wsUrl);
-    this.ws.onopen = () => {
+    const ws = this.ws = new WebSocket(wsUrl);
+    this.stopStore = undefined;
+    ws.onopen = () => {
+      if (this.ws !== ws || this.closed) return;
       this.reconnectAttempts = 0;
       this.onStatus(true);
       this.resubscribe();
       this.onOpen?.();
     };
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this.ws !== ws || this.closed) return;
       let payload: ChatChunk | null = null;
       try {
         payload = JSON.parse(event.data) as ChatChunk;
@@ -1054,16 +1059,28 @@ export class BackendChatSocket {
         request_id: payload.request_id,
         session_id: payload.session_id,
       });
-      this.onChunk(payload);
+      this.deliverChunk(payload);
     };
-    this.ws.onerror = () => this.onStatus(false);
-    this.ws.onclose = () => {
+    ws.onerror = () => { if (this.ws === ws) { this.stopStore = undefined; this.onStatus(false); } };
+    ws.onclose = () => {
+      if (this.ws !== ws || this.closed) return;
+      this.stopStore = undefined;
       this.onStatus(false);
       this.scheduleReconnect();
     };
   }
 
+  private deliverChunk(frame: ChatChunk): void {
+    if (frame.kind === 'send_receipt_capability') {
+      const store = frame.body.store_id;
+      this.stopStore = frame.body.version === 1 && frame.body.request_stop === 1
+        && typeof store === 'string' && /^[a-f0-9]{32}$/.test(store) ? store : undefined;
+    }
+    this.onChunk(frame);
+  }
+
   private publishProxyStatus(open: boolean, meta?: BackendSocketStatusMeta): void {
+    this.stopStore = undefined;
     this.onStatus(open, this.gatewayGeneration === undefined ? meta : { ...meta, gatewayGeneration: this.gatewayGeneration });
   }
 
@@ -1166,8 +1183,11 @@ export class BackendChatSocket {
     return Array.from(this.subscribedSessions);
   }
 
-  stop(sessionId: string): Promise<boolean> {
-    return this.send({ action: 'stop', session_id: sessionId });
+  requestStopStore(): string | undefined { return this.stopStore; }
+
+  stop(sessionId: string, requestId: string, transport?: { scope: string; storeId: string } | null): Promise<boolean> {
+    if (!requestId || !this.stopStore || (this.usingGatewayProxy && transport?.storeId !== this.stopStore)) return Promise.resolve(false);
+    return this.send({ action: 'stop', session_id: sessionId, request_id: requestId }, transport?.scope, transport?.storeId);
   }
 
   interrupt(sessionId: string): Promise<boolean> {

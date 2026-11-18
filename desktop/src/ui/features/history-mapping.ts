@@ -266,6 +266,8 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     // 有正文时单条层面按 answer（折叠区外）处理；多段拆段历史的旁白修正由
     // mapBackendHistoryItems 批内推断（连续 assistant 段里非末段正文降级为 process）。
     segmentRole: item.tool_calls?.length && !item.content?.trim() ? 'process' : 'answer',
+    stopNotice: item.tool_calls?.some((tc) => tc.result_metadata?.code === 'tool_exit_unconfirmed'
+      || tc.result_metadata?.details?.exit_confirmed === false) ? '工具实际退出尚未确认。' : undefined,
     toolCalls: item.tool_calls?.map((tc) => ({
       toolCallId: tc.id,
       name: tc.name,

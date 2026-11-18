@@ -357,3 +357,49 @@ describe("Web Gateway recovery", () => {
     expect(tracker.accept(sid, frame("delta", 9, {}))).toBe(false);
   });
 });
+
+describe("Web request-scoped stop", () => {
+  it("binds a pre-token stop to the clicked round, preserves queued messages and keeps an unconfirmed tool visible", async () => {
+    const ws = TestWebSocket.instances[0];
+    const deliver = (kind: Chunk["kind"], request_id: string, body: Chunk["body"], terminal = false) =>
+      ws.receive({ kind, request_id, session_id: sid, body, sequence: 0, is_final: terminal });
+    await act(async () => {
+      deliver("send_receipt_capability", "", { version: 1, request_stop: 1 });
+      chat.send("one", sid, "agent", workspace);
+    });
+    const first = chat.activeRequestId!;
+    expect(first).toBeTruthy();
+    expect(ws.sent.at(-1)).toMatchObject({ query: "one", request_id: first });
+    const stopFirst = () => chat.stop(sid, first);
+    await act(async () => { chat.send("two", sid, "agent", workspace); stopFirst(); });
+    expect(ws.sent.at(-1)).toEqual({ action: "stop", session_id: sid, request_id: first });
+    await act(async () => {
+      deliver("status", "control", { stop: { request_id: first, state: "requested" } });
+      deliver("tool", first, { phase: "error", tool_call_id: "t", result_metadata: { code: "tool_exit_unconfirmed", details: { exit_confirmed: false } } });
+      deliver("error", first, { message: "cancelled", outcome: { status: "stopped" } }, true);
+    });
+    const second = chat.activeRequestId!;
+    expect(ws.sent.at(-1)).toMatchObject({ query: "two", request_id: second });
+    expect(second).not.toBe(first);
+    expect(chat.messages.some((m) => m.text.includes("实际退出尚未确认"))).toBe(true);
+    await act(async () => {
+      stopFirst();
+      deliver("final", first, { text: "late" }, true);
+      deliver("status", "control", { stop: { request_id: first, state: "not_active" } });
+    });
+    expect(chat.busy).toBe(true);
+    expect(chat.activeRequestId).toBe(second);
+    expect(chat.messages.some((m) => m.text === "late")).toBe(false);
+    expect(ws.sent.filter((f) => f.action === "stop")).toHaveLength(1);
+  });
+
+  it("does not send a wildcard to an older or disconnected gateway", async () => {
+    const ws = TestWebSocket.instances[0];
+    await act(async () => chat.send("one", sid, "agent", workspace));
+    const first = chat.activeRequestId!;
+    await act(async () => chat.stop(sid, first));
+    expect(ws.sent.some((f) => f.action === "stop")).toBe(false);
+    expect(chat.messages.some((m) => m.text.includes("尚未确认停止"))).toBe(true);
+    expect(chat.busy).toBe(true);
+  });
+});

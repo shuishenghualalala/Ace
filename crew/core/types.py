@@ -205,6 +205,7 @@ class ToolCall:
     result: str = ""
     status: Literal["running", "done", "error"] = "done"
     ui_label: str = ""
+    exit_confirmed: bool | None = None
 
 
 @dataclass

@@ -219,7 +219,7 @@ def test_websocket_recovers_accepted_before_start_but_never_reexecutes_running(t
         with client.websocket_connect("/ws?send_receipts=1") as socket:
             capability = socket.receive_json()
             assert capability["kind"] == "send_receipt_capability"
-            assert capability["body"] == {"version": 1, "store_id": previous.store_id, "followup_receipts": 1}
+            assert capability["body"] == {"version": 1, "store_id": previous.store_id, "followup_receipts": 1, "request_stop": 1}
             # A persisted offline withdrawal wins before any query resumes work.
             socket.send_json(_command("send_receipt_cancel", "withdrawing"))
             assert _receive(socket, "send_receipt", "withdrawing")["body"]["status"] == "cancelled"
@@ -388,5 +388,46 @@ def test_graceful_shutdown_keeps_accepted_queued_turn_for_next_gateway(tmp_path)
             socket.send_json(_command("send_receipt_query", "queued"))
             assert _receive(socket, "send_receipt", "queued")["body"]["status"] == "accepted"
         assert invoked == ["running"]
+    finally:
+        store.close()
+
+
+def test_stop_targets_only_the_requested_turn_across_queue_and_late_delivery(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "send.db")
+    release = asyncio.Event()
+    invoked = []
+
+    async def execute(envelope):
+        invoked.append(envelope.request_id)
+        yield ResponseChunk.delta(envelope.request_id, "start")
+        if envelope.request_id == "older":
+            await asyncio.Event().wait()
+        await release.wait()
+        yield ResponseChunk.final(envelope.request_id, "done")
+
+    def stop_reply(socket, rid):
+        for _ in range(25):
+            frame = socket.receive_json()
+            receipt = frame.get("body", {}).get("stop")
+            if receipt and receipt["request_id"] == rid:
+                return receipt["state"]
+        pytest.fail("No targeted stop receipt")
+
+    try:
+        app = _app(store, _new_inbox(store), execute)
+        with TestClient(app).websocket_connect("/ws?send_receipts=1") as socket:
+            assert socket.receive_json()["body"]["request_stop"] == 1
+            socket.send_json(_payload("older"))
+            _receive(socket, "delta", "older")
+            socket.send_json(_payload("newer"))
+            _receive(socket, "send_receipt", "newer")
+            socket.send_json(_command("stop", "older"))
+            assert stop_reply(socket, "older") == "requested"
+            _receive(socket, "delta", "newer")
+            socket.send_json(_command("stop", "older"))
+            assert stop_reply(socket, "older") == "not_active"
+            socket.portal.call(release.set)
+            _receive(socket, "final", "newer")
+            assert invoked == ["older", "newer"]
     finally:
         store.close()

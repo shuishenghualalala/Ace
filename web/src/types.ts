@@ -116,6 +116,7 @@ export interface FollowupQuestion {
 }
 
 export interface ToolCallInfo {
+  exitUnconfirmed?: boolean;
   toolCallId: string;
   name: string;
   uiLabel?: string;

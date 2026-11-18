@@ -683,6 +683,7 @@ describe('wiki-page 入口挂点', () => {
     await refreshWikiData();
     await vi.waitFor(() => expect(document.querySelector('[data-wiki-agent-panel] [data-composer-send]')).not.toBeNull());
 
+    patchBook(WIKI_SID, { activeRequestId: 'wiki-stop-request', turnSealed: false });
     setBusy(WIKI_SID, true);
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')?.hidden).toBe(true);
@@ -690,7 +691,7 @@ describe('wiki-page 入口挂点', () => {
     });
 
     document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-stop]')!.click();
-    expect(socket().stop).toHaveBeenCalledWith(WIKI_SID);
+    expect(socket().stop).toHaveBeenCalledWith(WIKI_SID, 'wiki-stop-request', null);
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-send]')?.hidden).toBe(false);
       expect(document.querySelector<HTMLButtonElement>('[data-wiki-agent-panel] [data-composer-stop]')?.hidden).toBe(true);

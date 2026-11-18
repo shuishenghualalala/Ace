@@ -3,8 +3,8 @@
 agent 即可像调内置工具一样调用它们（工具名 ``{server}__{tool}``）。
 
 连接模型：每个 server 一个常驻 worker task，task 内打开传输 + MCP 2 Client 并保持，
-然后从 asyncio.Queue 取 (tool_name, args, future)，在**本 task** 内 call_tool 后回填 future。
-工具 handler 只负责入队 + await future——所有 session I/O 都在持有它的 task 里，
+每次从队列取一个请求，等待独立的 call_tool task 并回填 future。
+调用方取消时只取消所属请求，连接上下文仍由 worker 打开与关闭，
 单事件循环下正确，且避免 Hermes 那套专用事件循环/跨 loop 编组（其 mcp_tool.py 达 3915 行）。
 
 仅复用 MCP SDK 的调用范式（stdio_client / streamable_http_client / sse_client +
@@ -83,6 +83,13 @@ class _CallRequest:
     deadline: float
     observation_context: ObservationContext
     started: bool = False
+    replied: bool = False
+    call_task: asyncio.Task[Any] | None = None
+
+    def abandon(self) -> None:
+        self.future.cancel()
+        if self.call_task is not None and not self.call_task.done():
+            self.call_task.cancel()
 
 
 def _interpolate(value: Any) -> Any:
@@ -598,7 +605,7 @@ class _ServerWorker:
             self._drain_queue(reason)
 
     async def _serve(self, session: Any) -> None:
-        """服务循环：在本 task 内执行所有 call_tool；空闲时 ping 探活。"""
+        """Serialize individual requests on the connection and ping while idle."""
         consecutive_errors = 0
         while True:
             if self._ping_supported and self._ping_interval > 0:
@@ -645,7 +652,9 @@ class _ServerWorker:
                             },
                         )
                         async with asyncio.timeout_at(request.deadline):
-                            result = await session.call_tool(request.tool_name, request.args or {})
+                            request.call_task = asyncio.create_task(session.call_tool(request.tool_name, request.args or {}))
+                            result = await request.call_task
+                            request.replied = True
                         consecutive_errors = 0
                         extracted = _extract_text(result)
                         response_capture = capture_payload(
@@ -680,6 +689,10 @@ class _ServerWorker:
                             # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
                             truncated, _ = truncate_output(extracted)
                             self._complete(request, truncated)
+            except asyncio.CancelledError:
+                if request.future.cancelled() and not asyncio.current_task().cancelling():
+                    continue
+                raise
             except TimeoutError:
                 consecutive_errors = 0
                 self._complete(
@@ -832,6 +845,9 @@ class _ServerWorker:
                 deadline=loop.time() + self._call_timeout,
                 observation_context=capture_context(),
             )
+            from crew.core.runctx import observe_tool_exit
+
+            observe_tool_exit(lambda: not request.started or request.replied)
             try:
                 self._queue.put_nowait(request)
             except asyncio.QueueFull:
@@ -855,8 +871,8 @@ class _ServerWorker:
                 self._complete(request, result)
                 return future.result()
             except asyncio.CancelledError:
-                # 调用方已离开时取消 Future；worker 取到后会跳过，不触达远端。
-                future.cancel()
+                # Cancelling the SDK request signals abandonment to the server; remote exit needs its own evidence.
+                request.abandon()
                 raise
 
         return handler

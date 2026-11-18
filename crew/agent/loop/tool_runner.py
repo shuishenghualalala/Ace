@@ -375,6 +375,11 @@ class ToolRunner:
             self.direct_tool_names.update(names)
 
     def _append_tool_outcome(self, messages: list[Message], call: ToolCall, result: ToolResult) -> None:
+        if isinstance(result.details.get("exit_confirmed"), bool):
+            call.exit_confirmed = result.details["exit_confirmed"]
+        if result.code == "tool_exit_unconfirmed":
+            call.status = "error"
+            call.result = result.content
         messages.append(Message.tool(call.id, result.content, name=call.name))
         self._latest_outcomes[call.id, call.name] = (result, call.arguments)
 
@@ -573,7 +578,7 @@ class ToolRunner:
         results: list[ToolResult] = []
         for tc, task in zip(calls, tasks):
             if task.cancelled() or not task.done():
-                result = self._cancelled_result(tc)
+                result = self._cancelled_result(tc) if task.done() else self._unconfirmed_result(tc)
                 results.append(result)
                 await self._record_tool_result_commit(tc, result, status="cancelled")
                 continue
@@ -885,6 +890,9 @@ class ToolRunner:
         started = started_at if started_at is not None else self._mark_tool_started(tc)
         timeout = self.tool_total_timeout_seconds
         total_deadline = _ToolExecutionDeadline(timeout) if timeout > 0 else None
+        from crew.core.runctx import current_tool_exit_probes
+
+        token = current_tool_exit_probes.set([])
         try:
             async def _run_pipeline() -> ToolResult:
                 async with self._ensure_sem():
@@ -897,6 +905,7 @@ class ToolRunner:
             )
             return self._normalize_result(result)
         finally:
+            current_tool_exit_probes.reset(token)
             self._mark_tool_finished(tc, started=started)
 
     async def _cancel_task_with_grace(self, task: asyncio.Task[Any], label: str) -> bool:
@@ -906,6 +915,9 @@ class ToolRunner:
         task.cancel()
         done, pending = await asyncio.wait({task}, timeout=_CLEANUP_GRACE_SECONDS)
         if pending:
+            from crew.core.runctx import observe_tool_exit
+
+            observe_tool_exit(task.done)
             self._leaked_tasks.add(task)
 
             def _forget(done_task: asyncio.Task[Any]) -> None:
@@ -1240,6 +1252,14 @@ class ToolRunner:
                         tc.id, tc.name = tool_identity
                         if effective_call is not None:
                             tc.arguments = effective_call.arguments
+                    if self._interrupted and result.code != "tool_exit_unconfirmed":
+                        from crew.core.runctx import current_tool_exit_probes
+
+                        probes = current_tool_exit_probes.get()
+                        if probes:
+                            result = self._unknown_exit_result(tc) or replace(
+                                result, details={**result.details, "exit_confirmed": True},
+                            )
                     output_capture = capture_payload(
                         "tool.output.raw",
                         {"content": result.content, "is_error": result.is_error, "code": result.code},
@@ -1316,7 +1336,9 @@ class ToolRunner:
             {
                 "tool_call_id": tc.id,
                 "name": tc.name,
-                "status": status or ("error" if result.is_error else "ok"),
+                "status": "unconfirmed" if result.code == "tool_exit_unconfirmed" else (
+                    status or ("error" if result.is_error else "ok")
+                ),
                 **result.protocol_metadata(),
             },
         )
@@ -1346,8 +1368,24 @@ class ToolRunner:
         )
 
     @staticmethod
-    def _timeout_result(tc, timeout: float) -> ToolResult:
+    def _unknown_exit_result(tc) -> ToolResult | None:
+        from crew.core.runctx import current_tool_exit_probes
+
+        if all(probe() for probe in current_tool_exit_probes.get() or ()):
+            return None
+        return ToolRunner._unconfirmed_result(tc)
+
+    @staticmethod
+    def _unconfirmed_result(tc) -> ToolResult:
         return ToolResult(
+            tc.id, tc.name, "已请求停止工具，实际退出尚未确认。请核对任务状态与已产生的改动。",
+            is_error=True, code="tool_exit_unconfirmed", retryable=False, side_effect_state="unknown",
+            details={"exit_confirmed": False},
+        )
+
+    @staticmethod
+    def _timeout_result(tc, timeout: float) -> ToolResult:
+        return ToolRunner._unknown_exit_result(tc) or ToolResult(
             tc.id,
             tc.name,
             f"timed out after {timeout:.1f}s",
@@ -1359,7 +1397,7 @@ class ToolRunner:
 
     @staticmethod
     def _aborted_result(tc, elapsed: float) -> ToolResult:
-        return ToolResult(
+        return ToolRunner._unknown_exit_result(tc) or ToolResult(
             tc.id,
             tc.name,
             f"aborted by user after {elapsed:.1f}s",

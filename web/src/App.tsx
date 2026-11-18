@@ -549,7 +549,7 @@ export default function App() {
     attachments,
     onSend: (text, sendAttachments) => handleSend(text, sendAttachments),
     onAsk: (text) => handleSend(text, []),
-    onStop: () => chat.stop(currentSessionId),
+    onStop: () => chat.stop(currentSessionId, chat.activeRequestId),
     onSteer: (text) => chat.steer(currentSessionId, text),
     onRemoveFromQueue: (i) => chat.removeFromQueue(currentSessionId, i),
     onEditQueueItem: (i, q) => chat.editQueueItem(currentSessionId, i, q),
@@ -737,7 +737,7 @@ export default function App() {
               onSend={handleSend}
               onAsk={(text) => handleSend(text, [])}
               onWikiLink={openWikiLinkFromChat}
-              onStop={() => chat.stop(currentSessionId)}
+              onStop={() => chat.stop(currentSessionId, chat.activeRequestId)}
               onSteer={(text) => chat.steer(currentSessionId, text)}
               planActive={chat.planActive}
               onEnterPlan={() => chat.enterPlan(currentSessionId)}

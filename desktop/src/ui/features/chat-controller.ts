@@ -1126,8 +1126,8 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   // 副作用四个行为点复用，避免各分支重复解 body。
   const featureEvent = featureEventFrameOf(chunk);
   // 撤回/中断后忽略该会话的迟到分片，避免重建已被删除的幽灵助手消息。
+  if (applyLocalStopFrame(sid, chunk)) return;
   if (state.suppressChunks.has(sid)) {
-    applyConfirmedLocalStop(sid, chunk);
     logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });
     return;
   }
@@ -2167,35 +2167,71 @@ export function finalizeStreamingTurn(sessionId: string): void {
   }
 }
 
-function applyConfirmedLocalStop(sessionId: string, chunk: ChatChunk): void {
-  const book = bookFor(sessionId);
-  const pending = book.pendingStopOutcome;
-  if (!pending || pending.owner !== interactiveOwnerKey() || chunk.request_id !== pending.requestId
-    || book.activeRequestId || chunk.is_final !== true || (chunk.kind !== 'error' && chunk.kind !== 'final')) return;
-  const outcome = readTurnOutcome(chunk.body.outcome, chunk.body.message);
-  if (outcome?.status !== 'stopped') return;
+type StoppedTurn = { requestId: string; assistantId: string | null; owner: string; exitUnconfirmed?: boolean; terminal?: boolean };
+const stoppedTurns = new Map<string, StoppedTurn>();
+const stoppedTurnKey = (owner: string, sid: string, rid: string) => JSON.stringify([owner, sid, rid]);
 
-  patchBook(sessionId, { pendingStopOutcome: undefined });
-  noteGatewaySequence(sessionId, chunk);
-  const messages = getMessages(sessionId);
-  const assistant = pending.assistantId
-    ? messages.findLast((message) => message.id === pending.assistantId && message.role === 'assistant')
-    : undefined;
-  if (assistant && (!assistant.requestId || assistant.requestId === pending.requestId)) {
-    patchMessage(sessionId, assistant.id, { turnOutcome: outcome, requestId: pending.requestId });
-  } else if (!assistant && messages.at(-1)?.role === 'user' && messages.at(-1)?.requestId === pending.requestId) {
-    appendMessage(sessionId, 'assistant', '', { turnOutcome: outcome, requestId: pending.requestId });
-  } else {
-    return;
+function applyLocalStopFrame(sid: string, chunk: ChatChunk): boolean {
+  const ack = chunk.kind === 'status' ? chunk.body.stop as { request_id?: string; state?: string } | undefined : undefined;
+  const requestId = ack?.request_id || chunk.request_id;
+  if (!requestId) return false;
+  const key = stoppedTurnKey(interactiveOwnerKey(), sid, requestId);
+  const target = stoppedTurns.get(key);
+  if (!target) return Boolean(ack);
+  const assistant = getMessages(sid).find((message) => message.id === target.assistantId && message.role === 'assistant');
+  if (!assistant || (assistant.requestId && assistant.requestId !== requestId)) {
+    stoppedTurns.delete(key);
+    return Boolean(ack);
   }
-  notifyMessagesChanged(sessionId);
-  if (sessionId === state.activeSessionId) renderChat();
+  const metadata = chunk.body.result_metadata as { code?: string; details?: { exit_confirmed?: boolean } } | undefined;
+  const unknownExit = chunk.kind === 'tool' && (metadata?.code === 'tool_exit_unconfirmed' || metadata?.details?.exit_confirmed === false);
+  const final = chunk.is_final === true && (chunk.kind === 'final' || chunk.kind === 'error');
+  if (!ack && !unknownExit && !final) return true;
+  let notice = assistant.stopNotice;
+  const outcome = final ? readTurnOutcome(chunk.body.outcome, chunk.body.message) : undefined;
+  if (unknownExit) {
+    target.exitUnconfirmed = true;
+    notice = '已请求停止，工具实际退出尚未确认。';
+  } else if (final && !target.terminal && outcome?.status === 'stopped') {
+    target.terminal = true;
+    if (!target.exitUnconfirmed) notice = undefined;
+  } else if (ack && !target.terminal && !target.exitUnconfirmed) {
+    if (ack.state === 'requested') notice = '网关已收到停止请求，正在等待回合结束。';
+    if (ack.state === 'not_active') notice = '该回合已不在运行。';
+  } else {
+    return true;
+  }
+  if (!ack) noteGatewaySequence(sid, chunk);
+  patchMessage(sid, assistant.id, { requestId, stopNotice: notice, ...(outcome?.status === 'stopped' ? { turnOutcome: outcome } : {}) });
+  if (target.terminal || ack?.state === 'not_active') {
+    if (bookFor(sid).pendingStopOutcome?.requestId === requestId) {
+      patchBook(sid, { pendingStopOutcome: undefined });
+      if (!isBusy(sid)) consumePending(sid);
+    }
+  }
+  notifyMessagesChanged(sid);
+  if (state.activeSessionId === sid) renderChat();
+  return true;
+}
+
+function withCurrentStopTarget(sid: string, callback: (requestId: string | null) => void): void {
+  const clicked = bookFor(sid);
+  const requestId = clicked.turnSealed ? null : clicked.activeRequestId;
+  const owner = interactiveOwnerKey();
+  const socket = state.socket;
+  const store = socket?.requestStopStore?.();
+  const apply = () => {
+    const live = bookFor(sid);
+    if (owner === interactiveOwnerKey() && state.socket === socket && socket?.requestStopStore?.() === store && live.activeRequestId === clicked.activeRequestId
+      && live.turnSealed === clicked.turnSealed && (requestId || live.assistantId === clicked.assistantId)) callback(requestId);
+  };
+  if (requestId) withOutboxWithdrawal(sid, apply, requestId);
+  else apply();
 }
 
 export function stopGeneration(sessionIdOverride?: string | Event): void {
   const sessionId = typeof sessionIdOverride === 'string' ? sessionIdOverride : state.activeSessionId;
-  if (!sessionId) return;
-  withOutboxWithdrawal(sessionId, () => stopGenerationNow(sessionId, true));
+  if (sessionId) withCurrentStopTarget(sessionId, (requestId) => stopGenerationNow(sessionId, requestId, true));
 }
 
 function withOutboxWithdrawal(sessionId: string, apply: () => void, requestId?: string): void {
@@ -2212,17 +2248,24 @@ function withOutboxWithdrawal(sessionId: string, apply: () => void, requestId?: 
   });
 }
 
-function stopGenerationNow(sessionId: string, trackOutcome = false): void {
+function stopGenerationNow(sessionId: string, requestId: string | null, trackOutcome = false): void {
   const book = bookFor(sessionId);
-  const pendingStop = trackOutcome && book.activeRequestId && !book.turnSealed
-    ? { requestId: book.activeRequestId, assistantId: book.assistantId, owner: interactiveOwnerKey() }
-    : undefined;
+  const owner = interactiveOwnerKey();
+  const stopNotice = '已请求停止，正在等待网关确认。';
+  let assistantId = book.assistantId;
+  if (trackOutcome && !assistantId) assistantId = appendMessage(sessionId, 'assistant', '', { requestId: requestId ?? undefined }).id;
+  if (trackOutcome && assistantId) patchMessage(sessionId, assistantId, { stopNotice });
+  const pendingStop: StoppedTurn | undefined = trackOutcome && requestId
+    ? { requestId, assistantId, owner } : undefined;
+  if (pendingStop) {
+    stoppedTurns.set(stoppedTurnKey(owner, sessionId, pendingStop.requestId), pendingStop);
+    if (stoppedTurns.size > 200) stoppedTurns.delete(stoppedTurns.keys().next().value!);
+  }
   cancelSessionStreamRecovery(sessionId);
   // 修法3：用户主动停止是终态（每会话仅一个活跃回合）→ 清该会话 delta 重组缓冲，防泄漏。
   // withdrawMessage 走 stopGeneration，故撤回编辑也由此覆盖。
   resetSession(sessionId);
-  replacePendingQueue(sessionId, []);
-  setQueueHintWithUi(sessionId, '');
+  if (!getPendingQueue(sessionId).length) setQueueHintWithUi(sessionId, '');
   // 用户主动停止：立即以停止时刻结算当前 streaming 回合的耗时显示。
   // 同时屏蔽迟到分片，直到下一次 dispatchWs 解除，避免取消竞态重建旧回复。
   finalizeStreamingTurn(sessionId);
@@ -2231,12 +2274,13 @@ function stopGenerationNow(sessionId: string, trackOutcome = false): void {
   addSuppressedSession(sessionId);
   setBusyWithUi(sessionId, false);
   setStatusWithUi(sessionId, 'idle');
-  const stopSent = state.socket?.stop(sessionId) ?? Promise.resolve(false);
-  void stopSent.then((ok) => {
-    if (!ok && (!pendingStop || bookFor(sessionId).pendingStopOutcome === pendingStop)) {
-      setStatusWithUi(sessionId, 'error');
-      appendMessage(sessionId, 'error', '服务未连接，已在本地停止等待');
-      renderChat();
+  const stopSent = requestId ? state.socket?.stop(sessionId, requestId, chatOutbox.transportIdentity()) : undefined;
+  void Promise.resolve(stopSent).catch(() => false).then((ok) => {
+    if (!ok && trackOutcome && owner === interactiveOwnerKey() && assistantId
+      && (!pendingStop || (!pendingStop.terminal && !pendingStop.exitUnconfirmed))) {
+      patchMessage(sessionId, assistantId, { stopNotice: '尚未确认停止。当前连接无法停止指定回合。' });
+      notifyMessagesChanged(sessionId);
+      if (sessionId === state.activeSessionId) renderChat();
     }
   });
   renderChat();
@@ -2249,10 +2293,10 @@ function stopGenerationNow(sessionId: string, trackOutcome = false): void {
 export function withdrawMessage(msgId: string): void {
   const sessionId = state.activeSessionId;
   if (!sessionId) return;
-  withOutboxWithdrawal(sessionId, () => withdrawMessageNow(sessionId, msgId));
+  withCurrentStopTarget(sessionId, (requestId) => withdrawMessageNow(sessionId, msgId, requestId));
 }
 
-function withdrawMessageNow(sessionId: string, msgId: string): void {
+function withdrawMessageNow(sessionId: string, msgId: string, requestId: string | null): void {
   if (state.activeSessionId !== sessionId) return;
   const list = state.messages[sessionId];
   const idx = list.findIndex((m) => m.id === msgId);
@@ -2260,7 +2304,7 @@ function withdrawMessageNow(sessionId: string, msgId: string): void {
   const content = list[idx].content;
 
   // 1. 中断当前工作流 + 立即解除 busy（让发送按钮可点）
-  stopGenerationNow(sessionId);
+  stopGenerationNow(sessionId, requestId);
   setBusyWithUi(sessionId, false);
 
   // 2. 冻结「该消息起」的所有内容（把还在流式的助手消息标记为非流式，

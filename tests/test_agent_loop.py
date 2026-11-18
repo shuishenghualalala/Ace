@@ -2794,3 +2794,33 @@ async def test_estimate_tokens_cached_for_unchanged_view(monkeypatch):
     # 共 2 次迭代：迭代1 压缩前估算 1 次；迭代2 压缩前 provisional/overflow 两处
     # 命中缓存，压缩后新视图估算 1 次。无缓存时迭代2 压缩前会多算 2 次（总数 4）。
     assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_reports_unconfirmed_exit_while_a_sync_tool_thread_still_runs():
+    import threading
+
+    reg = Registry()
+    opened, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def work(_args):
+        opened.set()
+        try:
+            assert release.wait(5)
+            return "finished"
+        finally:
+            done.set()
+
+    reg.register(name="fixture_wait", toolset="fixture", schema={"name": "fixture_wait", "parameters": {}}, handler=work)
+    control = TurnControl()
+    runner = _runner(reg, control=control)
+    try:
+        running = asyncio.create_task(runner._execute_one(ToolCall("work", "fixture_wait", {})))
+        assert await asyncio.to_thread(opened.wait, 3)
+        control.interrupt("stop")
+        result = await asyncio.wait_for(running, 2)
+        assert (result.code, result.details, result.side_effect_state) == ("tool_exit_unconfirmed", {"exit_confirmed": False}, "unknown")
+        assert not done.is_set()
+    finally:
+        release.set()
+        assert await asyncio.to_thread(done.wait, 3)

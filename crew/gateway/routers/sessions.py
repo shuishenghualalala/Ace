@@ -165,6 +165,13 @@ def _session_messages_to_history_items(
                         "arguments": tool_arguments_for_ui(tc.name, tc.arguments),
                         "result": _tool_result_for_history(tc, tool_results),
                         "status": tc.status,
+                        **({"result_metadata": {
+                            "code": "tool_exit_unconfirmed", "details": {"exit_confirmed": False},
+                            "retryable": False, "side_effect_state": "unknown",
+                        }} if tc.exit_confirmed is False else (
+                            {"result_metadata": {"details": {"exit_confirmed": True}}}
+                            if tc.exit_confirmed is True else {}
+                        )),
                         **({"ui_label": tc.ui_label} if tc.ui_label else {}),
                         **({"started_at": tc.started_at} if tc.started_at is not None else {}),
                         **(

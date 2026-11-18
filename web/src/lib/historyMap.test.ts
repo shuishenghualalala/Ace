@@ -752,3 +752,14 @@ describe("mergeHistoryWithLiveMessages", () => {
     expect(mergeTeamInternalMessage([first], second)).toHaveLength(2);
   });
 });
+
+it("keeps an unconfirmed tool exit visible when history only contains structured result metadata", () => {
+  const [message] = mapHistoryItems([{
+    role: "assistant", content: "", tool_calls: [{
+      id: "tool", name: "terminal", arguments: {}, result_metadata: {
+        code: "tool_exit_unconfirmed", details: { exit_confirmed: false },
+      },
+    }],
+  }]);
+  expect(message.toolCalls?.[0]).toMatchObject({ status: "error", result: "工具实际退出尚未确认。" });
+});

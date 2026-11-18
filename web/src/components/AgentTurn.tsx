@@ -4,7 +4,7 @@ import { formatDuration } from "../lib/formatDuration";
 import AgentAvatarLogo from "./AgentAvatarLogo";
 import MarkdownContent from "./MarkdownContent";
 import { PlanReviewCard } from "./PlanReviewPanel";
-import AgentProcessTimeline, { type ProcessTimelineItem } from "./AgentProcessTimeline";
+import AgentProcessTimeline, { ToolExitNotice, type ProcessTimelineItem } from "./AgentProcessTimeline";
 import WikiCard from "./WikiCard";
 import WikiPageView from "./WikiPageView";
 import TurnFileChangesCard from "./TurnFileChangesCard";
@@ -280,6 +280,7 @@ export default function AgentTurn({
             </div>
           </details>
         )}
+        <ToolExitNotice items={processItems} />
         {textParts}
         <TurnFileChangesCard files={Array.from(fileChanges.values())} />
       </div>

@@ -898,14 +898,20 @@ async def handle_terminal(
     log_identity = f"task_id={task_id!r}" if task_id else f"session_id={session.id!r}"
     log_hint = f"用 process(action='log', {log_identity}, cursor=0) 读取日志。"
 
-    async def terminate(reason: str) -> None:
-        await asyncio.to_thread(
+    from crew.core.runctx import observe_tool_exit
+
+    observe_tool_exit(session._done_event.is_set)
+
+    async def terminate(reason: str) -> bool:
+        response = await asyncio.to_thread(
             process_registry.kill_process, session.id, owner_account_id=owner, reason=reason,
         )
 
-    async def cancel_worker(_reason: str) -> None:
+        return response.get("status") in {"killed", "already_exited"} and session._done_event.is_set()
+
+    async def cancel_worker(_reason: str) -> bool:
         intent = runtime.pending_termination(task_id)
-        await terminate(intent[0] if intent else "cancelled")
+        return await terminate(intent[0] if intent else "cancelled")
 
     async def background_result(*, automatic: bool = False) -> str:
         output_metadata = await asyncio.to_thread(process_registry.output_metadata, session)

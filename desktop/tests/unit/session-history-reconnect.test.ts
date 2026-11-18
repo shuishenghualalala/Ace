@@ -721,6 +721,42 @@ describe('conversation recovery after a socket outage', () => {
     expect(sessionStore.get().books[sid]?.turnSealed).toBe(false);
   });
 
+  it('sends only the negotiated request and keeps a late unconfirmed tool on its original row', async () => {
+    const store = 'b'.repeat(32);
+    vi.spyOn(chatOutbox, 'transportIdentity').mockReturnValue({ scope: 'owner-a', storeId: store });
+    emitSocket({ type: 'open' });
+    emitSocket({ type: 'message', data: JSON.stringify({ kind: 'send_receipt_capability', body: { version: 1, request_stop: 1, store_id: store } }) });
+    emitFrame('delta', 1, { text: 'Original' });
+    const original = messageStore.get().messages[sid][0]!;
+    stopGeneration(sid);
+    expect(window.Crew!.gatewayWsSend).toHaveBeenCalledWith(
+      { action: 'stop', session_id: sid, request_id: oldRequest }, 'owner-a', store,
+    );
+    openTurnForRequest(sid, 'next-request');
+    setBusy(sid, true);
+    emitFrame('tool', 2, { phase: 'result', result_metadata: { code: 'tool_exit_unconfirmed', details: { exit_confirmed: false } } });
+    expect(messageStore.get().messages[sid].find((row) => row.id === original.id)?.stopNotice).toContain('实际退出尚未确认');
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe('next-request');
+    expect(sessionStore.get().busySessions[sid]).toBe(true);
+  });
+
+  it('discards a stopped click if another request starts while the original outbox withdrawal is pending', async () => {
+    const deferred = Promise.withResolvers<void>();
+    const withdraw = vi.spyOn(chatOutbox, 'withdraw').mockReturnValue(deferred.promise);
+    Object.assign(window.Crew!, {
+      chatOutboxList: vi.fn(), chatOutboxPut: vi.fn(), chatOutboxRemove: vi.fn(),
+    });
+    emitSocket({ type: 'open' });
+    stopGeneration(sid);
+    expect(withdraw).toHaveBeenCalledWith(sid, oldRequest);
+    openTurnForRequest(sid, 'next-request');
+    deferred.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe('next-request');
+    expect(sessionStore.get().busySessions[sid]).toBe(true);
+    expect(vi.mocked(window.Crew!.gatewayWsSend!).mock.calls.some(([frame]) => (frame as { action?: string }).action === 'stop')).toBe(false);
+  });
+
   it('shows only the matching terminal stopped outcome without reopening the locally stopped stream', async () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
     vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult());

@@ -932,7 +932,7 @@ def create_ws_router(
                 await connections.send_socket(socket, {
                     "kind": "send_receipt_capability",
                     "body": {
-                        "version": 1, "store_id": send_inbox.store_id, "followup_receipts": 1,
+                        "version": 1, "store_id": send_inbox.store_id, "followup_receipts": 1, "request_stop": 1,
                         **({"plan_receipts": 1} if plan_journal is not None else {}),
                     },
                     "sequence": 0,
@@ -1049,6 +1049,23 @@ def create_ws_router(
                 if data.get("action") == "stop":
                     if not _session_owned(session_id):
                         await _reject_missing_session(session_id)
+                        continue
+                    if "request_id" in data:
+                        target = SendKey.from_frame(owner, data)
+                        if target is None:
+                            await _send_status(session_id, "停止请求标识无效")
+                            continue
+                        pending = False
+                        if send_inbox is not None:
+                            pending = await send_inbox.cancel_pending(owner, session_id, target.request_id)
+                            pending = send_inbox.stop_preparation(
+                                owner, session_id, dispatcher.active_tasks_snapshot(), target.request_id,
+                            ) or pending
+                        running = await dispatcher.stop_request(session_id, target.request_id, owner_account_id=owner)
+                        state = "requested" if running or pending else "not_active"
+                        ack = status_frame(session_id, "已请求停止该回合" if running or pending else "指定回合已不在运行")
+                        ack["body"]["stop"] = {"request_id": target.request_id, "state": state}
+                        await connections.send_socket(socket, ack)
                         continue
                     stopped_preparation = False
                     if send_inbox is not None:

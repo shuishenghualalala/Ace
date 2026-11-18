@@ -132,6 +132,7 @@ export default function WikiFeature({
     chatRef.current.loadHistory(session_id);
   }, [installationStore, chat, kbId, sessionId]);
 
+  const activeRequestId = chat.forSession(sessionId).activeRequestId;
   const wikiChatProps = useMemo<ChatPanelProps>(() => ({
     ...baseChatProps,
     ...chat.forSession(sessionId),
@@ -145,7 +146,7 @@ export default function WikiFeature({
       if (!sessionId) return;
       chat.send(text, sessionId, mode, workspaceId, [], { wikiKbId: kbId });
     },
-    onStop: () => chat.stop(sessionId),
+    onStop: () => chat.stop(sessionId, activeRequestId),
     onSteer: (text) => chat.steer(sessionId, text),
     onRemoveFromQueue: (i) => chat.removeFromQueue(sessionId, i),
     onEditQueueItem: (i, q) => chat.editQueueItem(sessionId, i, q),
@@ -155,7 +156,7 @@ export default function WikiFeature({
     onPlanDecision: (action, review) => chat.decidePlan(action, review, sessionId, mode, workspaceId),
     onAnswerFollowup: (questionId, answers) => chat.answerFollowup(sessionId, questionId, answers),
     onDismissFollowup: () => chat.dismissFollowup(sessionId),
-  }), [baseChatProps, chat, currentAgentLabel, kbId, mode, sessionId, workspaceId]);
+  }), [activeRequestId, baseChatProps, chat, currentAgentLabel, kbId, mode, sessionId, workspaceId]);
 
   return (
     <WikiHub

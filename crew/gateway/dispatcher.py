@@ -132,6 +132,8 @@ class SessionDispatcher:
         self._run_task_ids: dict[SessionKey, str] = {}
         self._active_exec_session_ids: dict[SessionKey, str] = {}
         self._tasks: dict[SessionKey, set[asyncio.Task]] = {}
+        self._request_for_task: dict[asyncio.Task, str] = {}
+        self._exec_session_for_task: dict[asyncio.Task, str] = {}
         self._stop_reasons: dict[SessionKey, str] = {}
         self._steer_texts: dict[SessionKey, str] = {}
         # Logout is an owner-wide generation fence.  Old turns keep the epoch
@@ -385,6 +387,36 @@ class SessionDispatcher:
         snap = self._active_children_snapshot(session_id, owner_account_id=owner_account_id)
         return bool(snap)
 
+    async def stop_request(self, session_id: str, request_id: str, *, owner_account_id: str) -> bool:
+        """Stop this exact turn, including work waiting for its session lock."""
+        key = self._key(session_id, owner_account_id)
+        reason = "已停止当前回复"
+        tasks = [task for task in self._tasks.get(key, ())
+                 if self._request_for_task.get(task) == request_id and not task.done()]
+        active = self._running_task.get(key) if self._running_request_ids.get(key) == request_id else None
+        def hard_stop(task: asyncio.Task) -> None:
+            if self._request_for_task.get(task) == request_id and not task.done() and not task.cancelling():
+                task.cancel()
+
+        for task in tasks:
+            exec_sid = self._exec_session_for_task.get(task)
+            interrupt = getattr(self._controller, "interrupt", None)
+            if task is active:
+                self._stop_reasons[key] = reason
+            if exec_sid and (task is active or exec_sid != session_id) and callable(interrupt):
+                try:
+                    if interrupt(exec_sid, reason, owner_account_id=owner_account_id):
+                        # Give the tool a chance to report its actual exit before cancelling a stuck turn.
+                        asyncio.get_running_loop().call_later(1.0, hard_stop, task)
+                        continue
+                except Exception:
+                    log.exception("回合中断失败 session=%s request=%s", session_id, request_id)
+            hard_stop(task)
+        found = await self._cancel_runtime_tasks_for_session_prefix(
+            session_id, owner_account_id=owner_account_id, reason=reason, request_id=request_id,
+        )
+        return bool(tasks or found)
+
     async def stop(self, session_id: str, reason: str = "已停止当前回复", *, owner_account_id: str) -> bool:
         """停止某会话当前运行/等待的请求——取消所有 task。"""
         key = self._resolve_key(session_id, owner_account_id)
@@ -448,40 +480,28 @@ class SessionDispatcher:
         *,
         owner_account_id: str,
         reason: str,
+        request_id: str | None = None,
     ) -> bool:
         if self._task_runtime is None:
             return False
-        prefix = f"{session_id}::turn::"
         try:
-            tasks = await self._task_runtime.list_tasks_async(
-                limit=1000,
-                owner_account_id=owner_account_id,
-            )
+            tasks = await self._task_runtime.active_stop_targets(session_id, owner_account_id, request_id)
         except Exception:  # noqa: BLE001 — runtime task 查询失败不能影响内存 task 取消
             log.exception("查询运行任务失败 session=%s", session_id)
             return False
         did_cancel = False
         for task in tasks:
             sid = str(task.get("session_id") or "")
-            if sid != session_id and not sid.startswith(prefix):
-                continue
-            if str(task.get("status") or "") in {"completed", "failed", "cancelled", "timed_out"}:
-                continue
             try:
-                await self._task_runtime.update_async(
-                    str(task.get("task_id") or task.get("id") or ""),
-                    owner_account_id=owner_account_id,
-                    cancel_requested=True,
-                )
-                if str(task.get("kind") or "") == "shell":
-                    pid = int((task.get("progress") or {}).get("pid") or 0)
-                    self._task_runtime.kill_process_group(pid, reason)
-                await self._task_runtime.finish_async(
-                    str(task.get("task_id") or task.get("id") or ""),
-                    owner_account_id=owner_account_id,
-                    status="cancelled",
-                    error=reason,
-                )
+                task_id = str(task.get("task_id") or task.get("id") or "")
+                live = self._tasks.get((owner_account_id, sid), ())
+                if task.get("kind") == "agent_turn" and any(
+                    self._request_for_task.get(owner_task) == task.get("request_id") for owner_task in live
+                ):
+                    # The dispatcher already signalled the owner. Its finally block records the actual exit.
+                    await self._task_runtime.update_async(task_id, owner_account_id=owner_account_id, cancel_requested=True)
+                else:
+                    await self._task_runtime.cancel(task_id, reason, owner_account_id=owner_account_id)
                 did_cancel = True
             except Exception:  # noqa: BLE001 — 单个任务取消失败不影响其它任务
                 log.exception("取消运行任务失败 task=%s", task.get("task_id") or task.get("id"))
@@ -716,6 +736,7 @@ class SessionDispatcher:
 
         if current_task is not None:
             self._tasks.setdefault(key, set()).add(current_task)
+            self._request_for_task[current_task] = rid
         try:
             try:
                 if queued_status:
@@ -800,7 +821,7 @@ class SessionDispatcher:
                                     owned: asyncio.Task = current_task,
                                 ) -> None:
                                     interrupt_fn = getattr(self._controller, "interrupt", None)
-                                    if callable(interrupt_fn):
+                                    if callable(interrupt_fn) and self._running_request_ids.get(key) == rid:
                                         try:
                                             target_session_id = self._control_session_id(key, sid)
                                             try:
@@ -906,6 +927,8 @@ class SessionDispatcher:
                     )
                     exec_session_id = sidechain_id or sid
                     self._active_exec_session_ids[key] = exec_session_id
+                    if current_task is not None:
+                        self._exec_session_for_task[current_task] = exec_session_id
                     sidechain_output_ref = ""
                     if runtime_task_id and self._task_runtime is not None:
                         sidechain_output_ref = str(
@@ -1351,6 +1374,8 @@ class SessionDispatcher:
             _dequeue_once()
             if current_task is not None:
                 self._settling_tasks.discard(current_task)
+                self._request_for_task.pop(current_task, None)
+                self._exec_session_for_task.pop(current_task, None)
                 tasks = self._tasks.get(key)
                 if tasks is not None:
                     tasks.discard(current_task)
