@@ -1427,7 +1427,10 @@ class BuiltinExecutor(AgentExecutor):
                         base_url=_prov_base_url,
                         provider_index=prov_idx,
                     )
-                    raw_messages = final_view.messages
+                    raw_messages = (
+                        runner.project_recovery(final_view.messages, final_view.tools)
+                        if runner is not None else final_view.messages
+                    )
                     messages_arg = project_file_reads(raw_messages)
                     final_view = final_view.with_messages(messages_arg)
                     budget_check = _request_budget(final_view, active_provider)

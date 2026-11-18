@@ -458,7 +458,7 @@ class Registry(ToolRegistry):
         try:
             tool, deprecation_note = self._lookup(tool_call.name)
         except ToolNotFoundError as exc:
-            return ToolResult(tool_call.id, tool_call.name, str(exc), is_error=True)
+            return ToolResult(tool_call.id, tool_call.name, str(exc), is_error=True, code="tool_not_found")
 
         args = tool_call.arguments
         # JSON Schema 结构校验
@@ -481,7 +481,7 @@ class Registry(ToolRegistry):
                     tool_call.id, tool.name,
                     StructuredToolError(message, code="invalid_arguments", next_action="fix_arguments"),
                 )
-            return ToolResult(tool_call.id, tool.name, message, is_error=True)
+            return ToolResult(tool_call.id, tool.name, message, is_error=True, code="invalid_arguments")
 
         try:
             output = await tool.run(args)

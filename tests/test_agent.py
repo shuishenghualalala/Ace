@@ -18,6 +18,7 @@ from crew.agent.executor import (
 )
 from crew.agent.executor.builtin import _RETRY_DELAY_CAP_SECONDS
 from crew.agent.runtime import SingleAgent
+from crew.agent.subagent.tools import build_run_agent_schema
 from crew.core.envelope import Envelope, ResponseChunk
 from crew.core.errors import ConfigError, CrewErrorKind, ProviderError
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
@@ -65,6 +66,39 @@ async def test_agent_plain_answer_no_tools():
         if ch.kind == "final":
             final = ch.body["text"]
     assert "你好" in final
+
+
+async def test_custom_role_and_common_prompt_reach_real_executor_request(tmp_path):
+    profile = tmp_path / "reviewer.md"
+    profile.write_text("角色表达：用英文报告。", encoding="utf-8")
+    provider = FakeProvider(script=[ChatResponse(text="Verified.")])
+    agent = _agent(provider, profile_path=str(profile), system_prompt="只审查本次改动。", tool_filter=["file_read"])
+
+    chunks = [chunk async for chunk in agent.run(Envelope.of("请审查", session_id="profile-wire"))]
+
+    prompt = provider.calls[0][0].content
+    assert chunks[-1].kind == "final"
+    assert prompt.index("用英文报告") < prompt.index("只审查本次改动") < prompt.index("## 操作安全规则")
+    assert "file_read" in prompt and "terminal" not in prompt
+    assert "## 输出与核验" in prompt and "## 工具使用规则" in prompt
+
+
+@pytest.mark.parametrize("preset, allowed", [("Wiki", True), ("Review", True), ("Wiki", False)])
+async def test_explicit_wiki_workflow_requires_authorized_preset_in_real_request(preset, allowed):
+    provider = FakeProvider(script=[ChatResponse(text="结果。")])
+    agent = _agent(provider, tool_filter=["run_agent"] if allowed else [])
+    agent.registry.register(
+        name="run_agent", toolset="subagent.preset", schema=build_run_agent_schema([preset]),
+        handler=lambda _args: "unused",
+    )
+
+    chunks = [chunk async for chunk in agent.run(Envelope.of("查询 Wiki", session_id="named-workflow"))]
+
+    assert chunks[-1].kind == "final"
+    prompt = provider.calls[0][0].content
+    assert ("该请求只授权这项 Wiki 工作流程" in prompt) is (preset == "Wiki" and allowed)
+    assert "可以主动调用子智能体" not in prompt
+    assert prompt.count("子智能体委派纪律") == int(allowed)
 
 
 @pytest.mark.parametrize("segments", [

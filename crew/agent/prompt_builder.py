@@ -34,12 +34,7 @@ logger = logging.getLogger(__name__)
 # 默认身份
 # ---------------------------------------------------------------------------
 
-DEFAULT_AGENT_IDENTITY = (
-    "你是 Crew 智能助手。你可以调用工具来完成任务。\n"
-    "- 需要查看文件、执行命令时，主动使用提供的工具。\n"
-    "- 工具返回结果后，结合结果继续推理，直到任务完成再给出最终回答。\n"
-    "- 回答简洁、准确，用中文。"
-)
+DEFAULT_AGENT_IDENTITY = "你是 Crew 智能助手。"
 
 MEMORY_GUIDANCE = (
     "你拥有跨会话的持久记忆。保存持久事实使用记忆工具：用户偏好、环境细节、工具特性、稳定约定。\n"
@@ -49,6 +44,7 @@ MEMORY_GUIDANCE = (
 
 DEFAULT_TOOL_GUIDELINE = (
     "## 工具使用规则\n"
+    "- 只使用当前会话已启用的工具，按声明的名称、参数和作用范围调用。\n"
     "- 优先使用专用工具，而非通过 terminal 等通用命令。\n"
     "- 避免用 terminal 执行 `find`、`grep`、`rg`、`cat`、`head`、`tail`、`sed`、`awk`、`echo` 命令，"
     "除非已明确被要求、或已确认专用工具无法满足需求。\n"
@@ -86,26 +82,27 @@ def render_tool_guideline(available_tool_names: frozenset[str] | None) -> str:
     if "file_read" in available_tool_names and available_tool_names.intersection({"patch", "file_write"}):
         actions.append("- 修改已有文件前先 file_read。整文件覆盖需读完同一版本；遇到 stale_file 时重新读取并计算修改。")
     actions.extend((
-        "- 按工具声明提供参数。无依赖的工具可以并行调用，有依赖时按顺序执行。",
-        "- 直接向用户报告结果。",
+        "- 只使用当前会话已启用的工具，按声明的名称、参数和作用范围调用。",
+        "- 无依赖的工具可以并行调用，有依赖时按顺序执行。",
     ))
     return "## 工具使用规则\n" + "\n".join(actions)
 
 DEFAULT_SAFETY_RULES = (
     "## 操作安全规则\n"
+    "- 实际工具权限、审批和本节约束决定可执行的操作。角色配置只补充身份、职责范围与表达方式。\n"
     "- 仔细考虑操作的可逆性和影响范围。\n"
-    "- 本地、可逆的操作（如编辑文件、运行测试）可以自由执行。\n"
+    "- 在已授权范围内，可直接执行本地、可逆的编辑、检查和测试。\n"
     "- 难以恢复、影响范围大的操作（如删除文件、推代码、修改共享基础设施），必须先与用户确认。\n"
-    "- 用户授权一次操作，不代表在所有场景下都授权——每次高风险操作都需确认。\n"
-    "- 遇到障碍时，不要用破坏性操作绕过，应排查根本原因。"
+    "- 用户确认只覆盖明确的操作和范围。用户拒绝任一安全审批后，必须立即停止本轮操作，不得改用其他工具重试。\n"
+    "- 保护密钥、令牌和未授权的数据。遇到障碍时先排查原因，不降低安全边界。"
 )
 
 DEFAULT_OUTPUT_STYLE = (
-    "## 输出风格\n"
-    "- 回答简洁、准确、用中文。\n"
-    "- 不使用 emoji，除非用户明确要求。\n"
+    "## 输出与核验\n"
+    "- 根据工具返回和验证结果继续完成任务，清楚说明已完成、未验证及需要确认的事项。\n"
     "- 引用代码时包含文件路径和行号，方便定位。\n"
-    "- 不要在工具调用前加冒号，如\"让我读取文件：\"应改为\"让我读取文件。\""
+    "- 用简洁准确的表达。用户或角色未指定语言和风格时，默认用中文，不加 emoji。\n"
+    "- 工具调用前直接说明动作，无需用冒号引出。"
 )
 
 # ---------------------------------------------------------------------------
@@ -164,24 +161,55 @@ def _load_profile(profile_path: str, max_tokens: int = 2_048) -> str:
 # 静态/动态分离 System Prompt 构建
 # ---------------------------------------------------------------------------
 
-_EXPLICIT_DELEGATION_DISCIPLINE = """# 子智能体委派纪律
-仅当用户、项目指令（如 AGENTS.md / CREW.md）或当前技能明确要求使用子智能体、委派或并行协作时，才可调用子智能体工具。“深入研究”“复杂任务”等描述本身不构成委派授权。
-所有子智能体共享同一工作目录，彼此改动立即可见；委派时划清文件与职责边界，不要覆盖或回退其他智能体的改动。父智能体仍对最终核验与答复负责。"""
+_EXPLICIT_DELEGATION = (
+    "调用子智能体工具需要明确授权。用户、项目指令（如 AGENTS.md / CREW.md）或当前技能可以明确要求"
+    "使用子智能体、委派或并行协作。“深入研究”“复杂任务”等描述本身不构成委派授权。"
+)
+_PROACTIVE_DELEGATION = (
+    "当任务可被拆成边界清晰、能独立推进且并行收益明确的工作时，可以主动调用子智能体；"
+    "简单或强顺序依赖的任务直接完成。"
+)
+_CHILD_DELEGATION = "仅当父智能体明确要求再次委派，且运行时仍提供相应子智能体工具时，才可委派其授权范围内的任务。"
+_DELEGATION_COORDINATION = (
+    "所有子智能体共享同一工作目录，彼此改动立即可见。委派时划清文件与职责边界，保留其他智能体的改动。"
+    "父智能体负责最终核验与答复。"
+)
+_DELEGATION_TOOLS = frozenset({"delegate_task", "run_agent"})
+_WIKI_WORKFLOW = (
+    "用户明确要求创建、查询或整理 Wiki 知识库时，可使用 run_agent 中的 Wiki 预设完成这一项请求。"
+    "若 run_agent 按本轮工具规则延迟披露，先按当前工具搜索说明发现它。该请求只授权这项 Wiki 工作流程。"
+)
 
-_PROACTIVE_DELEGATION_DISCIPLINE = """# 子智能体委派纪律
-当任务可被拆成边界清晰、能独立推进且并行收益明确的工作时，可以主动调用子智能体；不要为简单或强顺序依赖的工作增加委派开销。
-所有子智能体共享同一工作目录，彼此改动立即可见；委派时划清文件与职责边界，不要覆盖或回退其他智能体的改动。父智能体仍对最终核验与答复负责。"""
+_EXTERNAL_INTERACTION = (
+    "## 用户确认与追问\n"
+    "继续执行需要用户选择或补充结构化信息时，用 ask_followup_question 收集所需信息，"
+    "并根据用户的选择继续完成任务。"
+)
 
 SUBAGENT_HANDOFF_GUIDANCE = """# 子智能体交卷要求
-结束前向父智能体返回自包含结果；不要向用户提问，因为只有父智能体负责与用户沟通。明确区分已验证事实、自述与推断，只完成受委派的范围，不得继续委派给其他智能体。"""
+结束前向父智能体返回自包含结果，只完成受委派的范围。区分已验证事实、自述与推断。需要用户选择或审批时交由父智能体处理，不要向用户提问。"""
 
 
-def _delegation_discipline(mode: str) -> str:
-    return (
-        _PROACTIVE_DELEGATION_DISCIPLINE
-        if str(mode or "").strip().lower() == "proactive"
-        else _EXPLICIT_DELEGATION_DISCIPLINE
-    )
+def _delegation_discipline(
+    mode: str, *, lightweight: bool, available_tool_names: frozenset[str] | None,
+    wiki_workflow_available: bool,
+) -> str:
+    if available_tool_names is None:
+        if lightweight:
+            return ""
+    elif not _DELEGATION_TOOLS.intersection(available_tool_names):
+        return ""
+    if lightweight:
+        policy = _CHILD_DELEGATION
+    elif str(mode or "").strip().lower() == "proactive":
+        policy = _PROACTIVE_DELEGATION
+    else:
+        policy = _EXPLICIT_DELEGATION
+    lines = ["# 子智能体委派纪律", policy]
+    if not lightweight and wiki_workflow_available and available_tool_names and "run_agent" in available_tool_names:
+        lines.append(_WIKI_WORKFLOW)
+    lines.append(_DELEGATION_COORDINATION)
+    return "\n".join(lines)
 
 
 def append_subagent_handoff_guidance(prompt: str | None) -> str:
@@ -229,9 +257,7 @@ def _workspace_facts(cwd: str, available_tool_names: frozenset[str] | None) -> s
         f"- 宿主用户目录：`{host_home}`。受管模式仍由沙箱分别限制读写。",
         "- 受管模式可广泛只读；工作区和临时目录可写。工作区外写入必须使用宿主绝对路径申请 "
         "`with_additional_permissions`；它会在沙箱内生效，不需要 `require_escalated`。",
-        "- 不要把相对文件名与额外路径权限组合，也不要把文件工具称为绕过沙箱。"
-        "用户拒绝任一安全审批后，必须立即停止本轮操作，"
-        "不得改用其他工具重试。",
+        "- 不要把相对文件名与额外路径权限组合，也不要把文件工具称为绕过沙箱。",
         "- runtime_crashed、runtime_protocol_mismatch 和 sandbox_unavailable 表示安全运行时故障，"
         "不表示目标路径在沙箱外；不得据此改用其他文件工具。",
     ]
@@ -263,6 +289,8 @@ def _build_prompt_parts_sync(
     delegation_mode: str = "explicit",
     context_window: int | None = None,
     available_tool_names: frozenset[str] | None = None,
+    role_prompt: str = "",
+    wiki_workflow_available: bool = False,
 ) -> dict[str, str]:
     """组装 prompt 为 system_static / user_reminder 两部分。
 
@@ -278,43 +306,32 @@ def _build_prompt_parts_sync(
     budgets = source_token_budgets(context_window)
     profile_budget = 2_048 if context_window is None else min(2_048, max(0, context_window // 16))
     # ── System Static 层（几乎不变） ──
-    static_parts: list[str] = []
-    if profile_path:
-        profile_content = _load_profile(profile_path, profile_budget)
-        if profile_content:
-            static_parts.append(profile_content)
-
-    if not static_parts:
-        if lightweight:
-            # 子 agent：用默认身份 + 工具/安全/风格规则，跳过 SOUL 与记忆引导
-            static_parts.append(DEFAULT_AGENT_IDENTITY)
-            guideline = render_tool_guideline(available_tool_names)
-            if guideline:
-                static_parts.append(guideline)
-            static_parts.append(DEFAULT_SAFETY_RULES)
-            static_parts.append(DEFAULT_OUTPUT_STYLE)
-        else:
-            t = time.perf_counter()
-            soul, truncated = load_prompt_markdown("SOUL.md", profile_budget * 4 + 12)
-            logger.debug("[PERF] load_soul_md       %.3fs", time.perf_counter() - t)
-            identity = render_prompt_source(
-                "", soul, profile_budget, "SOUL.md 已截断；必要时请用户核对其余配置。",
-                truncated=truncated,
-            )
-            if identity:
-                static_parts.append(identity)
-            else:
-                static_parts.append(DEFAULT_AGENT_IDENTITY)
-            if _tool_available("memory", available_tool_names):
-                static_parts.append(MEMORY_GUIDANCE)
-            guideline = render_tool_guideline(available_tool_names)
-            if guideline:
-                static_parts.append(guideline)
-            static_parts.append(DEFAULT_SAFETY_RULES)
-            static_parts.append(DEFAULT_OUTPUT_STYLE)
-
-    if not lightweight and _tool_available("delegate_task", available_tool_names):
-        static_parts.append(_delegation_discipline(delegation_mode))
+    identity = _load_profile(profile_path, profile_budget) if profile_path else ""
+    if not identity and not lightweight:
+        t = time.perf_counter()
+        soul, truncated = load_prompt_markdown("SOUL.md", profile_budget * 4 + 12)
+        logger.debug("[PERF] load_soul_md       %.3fs", time.perf_counter() - t)
+        identity = render_prompt_source(
+            "", soul, profile_budget, "SOUL.md 已截断；必要时请用户核对其余配置。",
+            truncated=truncated,
+        )
+    role = "\n\n".join(part for part in (identity.strip() or DEFAULT_AGENT_IDENTITY, role_prompt.strip()) if part)
+    if lightweight:
+        role = append_subagent_handoff_guidance(role)
+    static_parts = [role]
+    if not lightweight and _tool_available("memory", available_tool_names):
+        static_parts.append(MEMORY_GUIDANCE)
+    static_parts.extend((
+        render_tool_guideline(available_tool_names),
+        DEFAULT_SAFETY_RULES,
+        DEFAULT_OUTPUT_STYLE,
+        _delegation_discipline(
+            delegation_mode, lightweight=lightweight, available_tool_names=available_tool_names,
+            wiki_workflow_available=wiki_workflow_available,
+        ),
+    ))
+    if user_type == "external" and not lightweight and "ask_followup_question" in (available_tool_names or ()):
+        static_parts.append(_EXTERNAL_INTERACTION)
 
     # ── User Reminder 层（每轮可能变） ──
     reminder_parts = []
@@ -408,6 +425,8 @@ async def build_prompt_parts(
     delegation_mode: str = "explicit",
     context_window: int | None = None,
     available_tool_names: frozenset[str] | None = None,
+    role_prompt: str = "",
+    wiki_workflow_available: bool = False,
 ) -> dict[str, str]:
     """在工作线程发现和组装 prompt 文件，避免文件系统探测阻塞 Gateway。"""
     return await asyncio.to_thread(
@@ -425,6 +444,8 @@ async def build_prompt_parts(
         delegation_mode=delegation_mode,
         context_window=context_window,
         available_tool_names=available_tool_names,
+        role_prompt=role_prompt,
+        wiki_workflow_available=wiki_workflow_available,
     )
 
 

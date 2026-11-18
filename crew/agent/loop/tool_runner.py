@@ -15,7 +15,7 @@ import mimetypes
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Sequence
 
 from crew.agent.file_changes import (
     FILE_CHANGE_MAX_BYTES,
@@ -33,6 +33,7 @@ from crew.agent.loop.tool_dispatch_helpers import (
     should_parallelize_tool_batch,
 )
 from crew.agent.loop.tool_guardrails import ToolCallGuardrailController, append_toolguard_guidance, toolguard_synthetic_result
+from crew.agent.loop.tool_recovery import project_tool_recovery, structured_tool_error_code
 from crew.agent.loop.tool_result_classification import file_mutation_result_landed
 from crew.core.envelope import ResponseChunk
 from crew.core.followup import (
@@ -52,7 +53,7 @@ from crew.tools.pipeline import (
     should_block_for_tool_call,
 )
 from crew.security.workspace_guard import check_workspace_guard
-from crew.tools.tool_search import ToolSearchConfig, dispatch_bridge_tool, is_bridge_tool
+from crew.tools.tool_search import ToolSearchConfig, dispatch_bridge_tool, function_name, is_bridge_tool
 
 log = get_logger("agent.tool_runner")
 _MAX_TOOL_WORKERS = 8  # Crew run_agent.py / agent.tool_executor default
@@ -115,6 +116,7 @@ class ToolRunner:
             ),
         )
         self.tool_search_schemas = list(tool_search_schemas or [])
+        self._catalog_tool_names = {function_name(schema) for schema in self.tool_search_schemas}
         self.tool_search_config = tool_search_config
         self.authorized_tool_names = authorized_tool_names
         self.allowed_tool_names = (
@@ -134,6 +136,7 @@ class ToolRunner:
         self._prewarm_keys: set[tuple[str, str]] = set()  # (name, repr(args)) 去重
         self._sem: asyncio.Semaphore | None = None  # 全轮共享并发闸门，懒创建
         self._pending_media: list[tuple[str, str, MediaPart]] = []
+        self._latest_outcomes: dict[tuple[str, str], tuple[ToolResult, dict[str, Any]]] = {}
         self._leaked_tasks: set[asyncio.Task[Any]] = set()
         self.approval_rejected = False
         self.security_boundary_failed = False
@@ -224,6 +227,7 @@ class ToolRunner:
         self.approval_rejected = False
         self.security_boundary_failed = False
         segments = self._plan_segments(tool_calls)
+        self._latest_outcomes.clear()
         started_ids = set(started_tool_call_ids or set())
         llm_trace("tool_batch_plan", {
             "session_id": self.session_id,
@@ -345,6 +349,57 @@ class ToolRunner:
         if self.direct_tool_names is not None:
             self.direct_tool_names.update(names)
 
+    def _append_tool_outcome(self, messages: list[Message], call: ToolCall, result: ToolResult) -> None:
+        messages.append(Message.tool(call.id, result.content, name=call.name))
+        self._latest_outcomes[call.id, call.name] = (result, call.arguments)
+
+    def project_recovery(
+        self, messages: Sequence[Message], tools: Sequence[dict[str, Any]] | None,
+    ) -> list[Message]:
+        """Add recovery guidance to the current batch using the final request's tool scope."""
+        projected = list(messages)
+        if not self._latest_outcomes:
+            return projected
+
+        visible = {
+            function_name(schema) for schema in tools or ()
+            if isinstance(schema, dict) and isinstance(schema.get("function"), dict)
+        }
+        available = visible.intersection(self.registry.names())
+        if self.allowed_tool_names is not None:
+            available.intersection_update(self.allowed_tool_names)
+        if self.authorized_tool_names is not None:
+            available.intersection_update(self.authorized_tool_names)
+        if self.direct_tool_names is not None:
+            available.intersection_update(self.direct_tool_names)
+        available.update(name for name in visible if is_bridge_tool(name))
+        if self._plan_mode_active():
+            from crew.agent.plan.policy import PLAN_MODE_TOOLS
+
+            available.intersection_update(PLAN_MODE_TOOLS)
+        available_names = frozenset(available)
+
+        for index in range(len(projected) - 1, -1, -1):
+            message = projected[index]
+            if message.role == "assistant" and message.tool_calls:
+                break
+            if message.role != "tool" or message.tool_call_id is None or message.name is None:
+                continue
+            outcome = self._latest_outcomes.get((message.tool_call_id, message.name))
+            if outcome is None:
+                continue
+            result, arguments = outcome
+            # Respect redaction or edits performed by request middleware.
+            if message.content != result.content:
+                continue
+            content = project_tool_recovery(
+                result.name, message.content, available_tool_names=available_names,
+                code=result.code, side_effect_state=result.side_effect_state, arguments=arguments,
+            )
+            if content != message.content:
+                projected[index] = replace(message, content=content)
+        return projected
+
     # ------------------------------------------------------------------ #
     async def _run_sequential_segment(
         self,
@@ -380,15 +435,10 @@ class ToolRunner:
             before = self._read_file_before(tc) if tc.name in {"file_write", "file_delete"} else None
             terminal_before = self._terminal_workspace_snapshot(tc)
             result = await self._resolve(tc)
-            if self._is_explicit_approval_rejection(result):
-                self.approval_rejected = True
-                result.is_error = True
-            if self._is_security_boundary_failure(result):
-                self.security_boundary_failed = True
-                result.is_error = True
+            self._record_security_outcome(result)
             status = "cancelled" if self._interrupted else ("error" if result.is_error else "ok")
             yield self._result_event(tc, result, rid, next_seq, status=status)
-            messages.append(Message.tool(tc.id, result.content, name=tc.name))
+            self._append_tool_outcome(messages, tc, result)
             self._attach_mcp_images(tc, result, messages)
             self._queue_media(tc, result)
             self._append_followup_answers(messages)
@@ -427,13 +477,14 @@ class ToolRunner:
                 before_map[tc.id] = self._read_file_before(tc)
         results = await self._resolve_parallel(calls)
         for tc, result in zip(calls, results):
+            self._record_security_outcome(result)
             status = (
                 "cancelled"
                 if "用户中断" in result.content or "aborted by user" in result.content
                 else ("error" if result.is_error else "ok")
             )
             yield self._result_event(tc, result, rid, next_seq, status=status)
-            messages.append(Message.tool(tc.id, result.content, name=tc.name))
+            self._append_tool_outcome(messages, tc, result)
             self._attach_mcp_images(tc, result, messages)
             self._queue_media(tc, result)
             self._append_followup_answers(messages)
@@ -535,12 +586,18 @@ class ToolRunner:
                 dynamic = await resolver(tc)
             except Exception:  # noqa: BLE001 - permission resolver must fail closed
                 log.exception("工具动态权限判定失败: %s", tc.name)
-                return json.dumps({"error": "工具权限判定失败，已按拒绝处理"}, ensure_ascii=False)
+                return json.dumps(
+                    {"error": "工具权限判定失败，已按拒绝处理", "error_code": "approval_unavailable"},
+                    ensure_ascii=False,
+                )
         if dynamic is not None:
             if dynamic.behavior == "allow":
                 return None
             if dynamic.behavior == "deny":
-                return json.dumps({"error": dynamic.reason or "该浏览器动作已被安全策略拒绝"}, ensure_ascii=False)
+                return json.dumps(
+                    {"error": dynamic.reason or "该浏览器动作已被安全策略拒绝", "error_code": "permission_denied"},
+                    ensure_ascii=False,
+                )
             blocked = await self._ask_permission(
                 tc,
                 dynamic.reason or "该动作可能产生外部副作用",
@@ -554,7 +611,7 @@ class ToolRunner:
                 not callable(confirmer) or not await confirmer(tc, dynamic)
             ):
                 return json.dumps(
-                    {"error": "页面或目标在审批后已变化，一次性审批已失效，请重新观察"},
+                    {"error": "页面或目标在审批后已变化，一次性审批已失效，请重新观察", "error_code": "approval_expired"},
                     ensure_ascii=False,
                 )
             return None
@@ -582,7 +639,8 @@ class ToolRunner:
             return None
         if behavior == "deny":
             return json.dumps(
-                {"error": f"权限拒绝：{reason or '匹配 deny 规则'}"}, ensure_ascii=False
+                {"error": f"权限拒绝：{reason or '匹配 deny 规则'}", "error_code": "permission_denied"},
+                ensure_ascii=False,
             )
         # ask
         return await self._ask_permission(tc, reason, suggested)
@@ -624,7 +682,8 @@ class ToolRunner:
         except Exception as exc:  # noqa: BLE001 - 无 push_fn 等无法交互环境 → fail-closed
             log.info("权限 ask 无法交互（%s），按拒绝处理: %s", type(exc).__name__, tc.name)
             return json.dumps(
-                {"error": f"需要权限确认但当前环境无法交互：{exc}"}, ensure_ascii=False
+                {"error": f"需要权限确认但当前环境无法交互：{exc}", "error_code": "approval_unavailable"},
+                ensure_ascii=False,
             )
         answers = await self._wait_permission_answer(session_id, qid)
         choice = ""
@@ -647,7 +706,8 @@ class ToolRunner:
                 ensure_ascii=False,
             )
         return json.dumps(
-            {"error": "权限确认未得到明确许可（超时或未选择），按拒绝处理"}, ensure_ascii=False
+            {"error": "权限确认未得到明确许可（超时或未选择），按拒绝处理", "error_code": "approval_expired"},
+            ensure_ascii=False,
         )
 
     async def _wait_permission_answer(
@@ -946,19 +1006,6 @@ class ToolRunner:
                 if self.direct_tool_names is not None:
                     self.direct_tool_names.add(tc.name)
 
-            if (
-                not resolved_from_bridge
-                and self.direct_tool_names is not None
-                and tc.name not in self.direct_tool_names
-            ):
-                log.warning("拒绝直接执行未披露的延迟工具: %s", tc.name)
-                return ToolResult(
-                    tc.id,
-                    tc.name,
-                    "该工具按需加载，必须先通过 tool_search 加载后再直接调用，已拒绝执行。",
-                    is_error=True,
-                )
-
             # Schema filtering is the model-facing boundary; this is the execution boundary.
             # Some providers can still hallucinate a hidden tool name, so never dispatch a
             # call that was not part of this Agent's effective per-turn tool scope.
@@ -969,6 +1016,7 @@ class ToolRunner:
                     tc.name,
                     "工具不在当前 Agent 的允许范围内，已拒绝执行。",
                     is_error=True,
+                    code="tool_not_in_scope",
                 )
 
             if not self._is_authorized(tc):
@@ -990,6 +1038,23 @@ class ToolRunner:
                         ensure_ascii=False,
                     ),
                     is_error=True,
+                    code="tool_not_authorized",
+                )
+
+            if (
+                not resolved_from_bridge
+                and self.direct_tool_names is not None
+                and tc.name not in self.direct_tool_names
+            ):
+                if tc.name not in self._catalog_tool_names:
+                    return ToolResult(
+                        tc.id, tc.name, "工具不在当前 Agent 的允许范围内，已拒绝执行。",
+                        is_error=True, code="tool_not_in_scope",
+                    )
+                log.warning("拒绝直接执行未披露的延迟工具: %s", tc.name)
+                return ToolResult(
+                    tc.id, tc.name, "该工具按需加载；本次调用未执行。",
+                    is_error=True, code="tool_not_disclosed",
                 )
 
             # 0. plugin request middleware：参数脱敏/改写必须早于 guardrail、hook 与真实执行。
@@ -1013,7 +1078,7 @@ class ToolRunner:
             )
             if not workspace_decision.allowed:
                 log.info("workspace guard blocked tool %s: %s", tc.name, workspace_decision.reason)
-                return ToolResult(tc.id, tc.name, workspace_decision.reason, is_error=True)
+                return ToolResult(tc.id, tc.name, workspace_decision.reason, is_error=True, code="workspace_denied")
 
             # 1. guardrail 拦截（同参失败 N 次 / 只读无进展）
             decision = self.guardrails.before_call(tc.name, tc.arguments)
@@ -1035,7 +1100,10 @@ class ToolRunner:
             # 权限检查：allow/deny/ask 规则匹配，ask 走 followup 交互确认
             perm_block = await self._check_permission(tc)
             if perm_block is not None:
-                return ToolResult(tc.id, tc.name, perm_block, is_error=True)
+                return ToolResult(
+                    tc.id, tc.name, perm_block, is_error=True,
+                    code=structured_tool_error_code(perm_block),
+                )
 
             # 3. 真正执行
             await self._record_durable_event(
@@ -1244,36 +1312,31 @@ class ToolRunner:
             side_effect_state="none",
         )
 
-    @staticmethod
-    def _is_explicit_approval_rejection(result: ToolResult) -> bool:
-        return bool(result.is_error or '"success": false' in result.content) and (
-            '"error_code": "approval_rejected"' in result.content
-            or '"error_code":"approval_rejected"' in result.content
-        )
+    def _record_security_outcome(self, result: ToolResult) -> None:
+        code = result.code
+        if (not code or code == "tool_error") and (result.is_error or result.name == "terminal"):
+            code = structured_tool_error_code(result.content)
+        if code == "approval_rejected":
+            self.approval_rejected = True
+            result.is_error = True
+        elif code in {
+            "runtime_crashed", "runtime_protocol_mismatch", "sandbox_unavailable", "sandbox_denied", "network_unavailable",
+        }:
+            self.security_boundary_failed = True
+            result.is_error = True
 
-    @staticmethod
-    def _is_security_boundary_failure(result: ToolResult) -> bool:
-        return any(
-            f'"error_code": "{code}"' in result.content
-            or f'"error_code":"{code}"' in result.content
-            for code in (
-                "runtime_crashed",
-                "runtime_protocol_mismatch",
-                "sandbox_unavailable",
-                "sandbox_denied",
-                "network_unavailable",
+    def _plan_mode_active(self) -> bool:
+        from crew.core.runctx import current_owner_account_id
+
+        return self.plan_mode_at_start or (
+            self.plan_manager is not None and self.plan_manager.is_active(
+                self.session_id, owner_account_id=current_owner_account_id.get(),
             )
         )
 
     def _plan_mode_block(self, tc) -> str | None:
         """Apply the same Plan scope before dispatch, including mid-turn entry."""
-        from crew.core.runctx import current_owner_account_id
-
-        owner = current_owner_account_id.get()
-        active = self.plan_manager is not None and self.plan_manager.is_active(
-            self.session_id, owner_account_id=owner,
-        )
-        if not self.plan_mode_at_start and not active:
+        if not self._plan_mode_active():
             return None
         from crew.agent.plan.policy import PLAN_MODE_TOOLS
 
@@ -1283,7 +1346,7 @@ class ToolRunner:
             return None
         from pathlib import Path
 
-        from crew.core.runctx import current_agent_workdir
+        from crew.core.runctx import current_agent_workdir, current_owner_account_id
         from crew.agent.plan import plan_display_path, plan_path
 
         target = Path(str((tc.arguments or {}).get("path", ""))).expanduser()
@@ -1291,6 +1354,7 @@ class ToolRunner:
             cwd = current_agent_workdir.get()
             if cwd:
                 target = Path(cwd).expanduser() / target
+        owner = current_owner_account_id.get()
         allowed = plan_path(self.session_id, owner_account_id=owner)
         try:
             same = target.resolve() == allowed.resolve()

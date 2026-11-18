@@ -67,6 +67,17 @@ def _turn_prompt_reminder(content: str) -> Message:
     return message
 
 
+def _wiki_preset_available(tool_schemas: list[dict[str, Any]]) -> bool:
+    for schema in tool_schemas:
+        if function_name(schema) != "run_agent":
+            continue
+        parameters = schema["function"].get("parameters") or {}
+        agent_type = (parameters.get("properties") or {}).get("agent_type") or {}
+        presets = agent_type.get("enum")
+        return isinstance(presets, list) and "Wiki" in presets
+    return False
+
+
 def _session_source_for_run(envelope: Envelope) -> dict[str, Any]:
     """Return a serializable source snapshot for tools invoked in this turn."""
     normalized = envelope.params.get("session_source")
@@ -419,7 +430,7 @@ class SingleAgent(Agent):
         self, envelope: Envelope, att_contents: list[str], cwd: str | None = None,
         *,
         task_sid: str | None = None,
-        available_tool_names: frozenset[str] | None = None,
+        tool_schemas: list[dict[str, Any]] | None = None,
     ) -> tuple[str, str]:
         """组装 system_static + user_reminder 两部分。
 
@@ -436,6 +447,10 @@ class SingleAgent(Agent):
         )
         ws_instructions = envelope.params.get("workspace_instructions", "")
         context_window = getattr(self.provider, "context_window", None)
+        available_tool_names = frozenset(map(function_name, tool_schemas)) if tool_schemas is not None else None
+        wiki_workflow_available = (
+            self.user_type == "internal" and not self.lightweight and _wiki_preset_available(tool_schemas or [])
+        )
         prompt_parts = await build_prompt_parts(
             workspace_instructions=ws_instructions,
             memory_text=memory_text,
@@ -450,13 +465,11 @@ class SingleAgent(Agent):
             delegation_mode=self.delegation_mode,
             context_window=context_window if type(context_window) is int else None,
             available_tool_names=available_tool_names,
+            role_prompt=self.system_prompt if self.system_prompt and self.system_prompt != DEFAULT_AGENT_IDENTITY else "",
+            wiki_workflow_available=wiki_workflow_available,
         )
 
         system_static = prompt_parts["system_static"]
-        # 自定义 system_prompt 追加到静态部分末尾，使其成为最靠近用户问题的身份指令，
-        # 从而覆盖 SOUL.md 中的通用 Crew 身份。
-        if self.system_prompt and self.system_prompt != DEFAULT_AGENT_IDENTITY:
-            system_static = f"{system_static}\n\n{self.system_prompt}"
 
         # 动态内容 + 附件
         reminder_parts = [prompt_parts["user_reminder"]]
@@ -689,7 +702,7 @@ class SingleAgent(Agent):
             )
             system_static, user_reminder = await self._build_prompts(
                 envelope, [], cwd, task_sid=session_id,
-                available_tool_names=frozenset(map(function_name, tool_schemas)),
+                tool_schemas=tool_schemas,
             )
 
             view_messages = list(history)
@@ -935,7 +948,7 @@ class SingleAgent(Agent):
         t = time.perf_counter()
         system_static, user_reminder = await self._build_prompts(
             envelope, att_contents, cwd, task_sid=task_sid,
-            available_tool_names=frozenset(map(function_name, tool_schemas)),
+            tool_schemas=tool_schemas,
         )
         log.info("[PERF] build_prompts      %.3fs  (static=%d, reminder=%d)",
                  time.perf_counter() - t, len(system_static), len(user_reminder))

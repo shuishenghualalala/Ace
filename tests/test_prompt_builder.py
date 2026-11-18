@@ -2,6 +2,7 @@
 
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -231,6 +232,83 @@ async def test_workspace_facts_and_truncation_do_not_advertise_hidden_tools(tmp_
     )
     reminder = parts["user_reminder"]
     assert "grep" in reminder and "file_read" not in reminder and "terminal" not in reminder
-    assert "用户拒绝任一安全审批" in reminder and "runtime_protocol_mismatch" in reminder
+    assert "runtime_protocol_mismatch" in reminder
+    assert "用户拒绝任一安全审批" in parts["system_static"]
     assert "其余规则" in reminder and "记忆工具" not in parts["system_static"]
     assert "子智能体委派纪律" not in parts["system_static"]
+
+
+@pytest.mark.parametrize("lightweight", [False, True])
+async def test_prompt_role_keeps_one_shared_harness_and_filtered_tools(tmp_path, lightweight):
+    profile = tmp_path / "role.md"
+    profile.write_text("# 审查员\n以英文回复并先列验证结果。", encoding="utf-8")
+    parts = await build_prompt_parts(
+        profile_path=str(profile),
+        role_prompt="负责读代码。",
+        lightweight=lightweight,
+        available_tool_names=frozenset({"file_read", "memory"}),
+    )
+    prompt = parts["system_static"]
+
+    assert prompt.index("以英文回复") < prompt.index("负责读代码") < prompt.index("## 工具使用规则")
+    for heading in ("## 工具使用规则", "## 操作安全规则", "## 输出与核验"):
+        assert prompt.count(heading) == 1
+    assert "先与用户确认" in prompt and "文件路径和行号" in prompt
+    assert "file_read" in prompt and "terminal" not in prompt and "file_write" not in prompt
+    assert ("持久记忆" in prompt) is not lightweight
+    assert ("子智能体交卷要求" in prompt) is lightweight
+
+
+@pytest.mark.parametrize("has_profile", [False, True])
+async def test_custom_main_role_composes_with_existing_identity(monkeypatch, tmp_path, has_profile):
+    monkeypatch.setattr(prompt_builder, "load_prompt_markdown", lambda name, _: ("默认 SOUL 身份" if name == "SOUL.md" else "", False))
+    profile = tmp_path / "profile.md"
+    profile.write_text("已选择的 profile 身份", encoding="utf-8")
+    args = {"profile_path": str(profile)} if has_profile else {}
+    prompt = (await build_prompt_parts(role_prompt="当前角色职责", **args))["system_static"]
+    identity = "已选择的 profile 身份" if has_profile else "默认 SOUL 身份"
+
+    assert prompt.index(identity) < prompt.index("当前角色职责") < prompt.index("## 操作安全规则")
+    assert ("默认 SOUL 身份" in prompt) is not has_profile
+
+
+async def test_child_with_nested_tools_only_delegates_on_parent_request():
+    parts = await build_prompt_parts(
+        lightweight=True,
+        role_prompt=prompt_builder.append_subagent_handoff_guidance("你负责检索。"),
+        delegation_mode="proactive",
+        available_tool_names=frozenset({"run_agent"}),
+    )
+    prompt = parts["system_static"]
+    assert prompt.count("子智能体交卷要求") == prompt.count("子智能体委派纪律") == 1
+    assert "父智能体明确要求再次委派" in prompt
+    assert "可以主动调用子智能体" not in prompt and "不得继续委派" not in prompt
+
+
+@pytest.mark.parametrize("profile", ["internal", "external"])
+@pytest.mark.parametrize("mode", ["explicit", "proactive"])
+async def test_bundled_profiles_follow_only_effective_delegation_mode(profile, mode):
+    path = Path(__file__).resolve().parents[1] / "config" / "prompts" / "profiles" / f"{profile}.md"
+    parts = await build_prompt_parts(
+        profile_path=str(path),
+        user_type=profile,
+        delegation_mode=mode,
+        available_tool_names=frozenset({"run_agent", "grep"}),
+    )
+    prompt = parts["system_static"]
+
+    assert prompt.count("## 工具使用规则") == prompt.count("## 操作安全规则") == 1
+    assert prompt.count("子智能体委派纪律") == 1
+    assert ("不构成委派授权" in prompt) is (mode == "explicit")
+    assert ("可以主动调用子智能体" in prompt) is (mode == "proactive")
+    assert "当多个独立子任务适合并行" not in prompt and "记忆工具" not in prompt
+    assert "ask_followup_question" not in prompt and "Wiki 预设" not in prompt
+
+
+async def test_external_followup_guidance_requires_the_actual_tool():
+    parent = await build_prompt_parts(user_type="external", available_tool_names=frozenset({"ask_followup_question"}))
+    child = await build_prompt_parts(
+        user_type="external", lightweight=True, available_tool_names=frozenset({"ask_followup_question"}),
+    )
+    assert "用 ask_followup_question" in parent["system_static"]
+    assert "ask_followup_question" not in child["system_static"]

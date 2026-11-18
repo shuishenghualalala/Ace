@@ -38,7 +38,7 @@ from crew.agent.loop.tool_dispatch_helpers import (
     should_parallelize_tool_batch,
 )
 from crew.agent.loop.tool_runner import ToolRunner
-from crew.core.errors import ProviderError
+from crew.core.errors import ProviderError, ToolError
 from crew.core.interfaces import LLMProvider
 from crew.core.mocks import FakeProvider
 from crew.core.types import ChatResponse, MediaPart, Message, StreamChunk, ToolCall, ToolOutput
@@ -512,8 +512,80 @@ async def test_guardrail_warn_only_when_hard_stop_disabled():
     # 跑到 max_iter，不触发 halt
     assert final.kind == "final" and "最大迭代次数" in final.body["text"]
     assert "已自动停止" not in final.body["text"]
-    # warn 把 guidance 后缀贴进了 tool result 历史，模型能自行调整
-    assert any("Tool loop warning" in (m.content or "") for m in ctx.messages)
+    latest = next(message for message in reversed(ctx.messages) if message.role == "tool")
+    payload = json.loads(latest.content)
+    assert payload["error"] == "总是失败"
+    assert payload["guardrail"]["code"] == "repeated_exact_failure_warning"
+
+
+@pytest.mark.parametrize("remove_reader", [False, True])
+async def test_model_recovery_uses_final_tool_scope_and_preserves_canonical_result(remove_reader):
+    reg = Registry()
+    stale_patch = tool_error("stale version", code="stale_file", details={"path": "example.txt"})
+    reg.register(
+        name="patch", toolset="file", schema={"name": "patch", "parameters": {"type": "object"}},
+        handler=lambda args: stale_patch, is_async=False,
+    )
+    reg.register(
+        name="file_read", toolset="file", schema={"name": "file_read", "parameters": {"type": "object"}},
+        handler=lambda args: tool_result(success=True), is_async=False,
+    )
+    provider = ScriptStreamProvider([
+        ChatResponse(tool_calls=[ToolCall("patch-1", "patch", {})]),
+        ChatResponse(text="done", finish_reason="stop"),
+    ])
+    executor = _executor(provider, reg)
+    if remove_reader:
+        async def remove_file_read(request, next_call, **kwargs):
+            return await next_call({
+                **request,
+                "tools": [schema for schema in request["tools"] if schema["function"]["name"] != "file_read"],
+            })
+
+        executor.plugins._middleware.setdefault(LLM_EXECUTION_MIDDLEWARE, []).append(remove_file_read)
+
+    historical = Message.tool("patch-old", stale_patch, name="patch")
+    ctx = _ctx([
+        Message.user("earlier"), Message.assistant(tool_calls=[ToolCall("patch-old", "patch", {})]),
+        historical, Message.assistant("previous answer"), Message.user("edit the file"),
+    ], tool_schemas=reg.list_schemas(), enforce_tool_scope=True, tool_disclosure_mode=ToolDisclosureMode.DIRECT)
+    await _collect(executor, ctx)
+
+    canonical = next(message for message in ctx.messages if message.tool_call_id == "patch-1")
+    assert canonical.content == stale_patch
+    sent = {message.tool_call_id: message.content for message in provider.calls[1] if message.role == "tool"}
+    assert sent["patch-old"] == stale_patch
+    payload = json.loads(sent["patch-1"])
+    recovery = payload.pop("recovery")
+    assert payload == json.loads(stale_patch)
+    assert recovery["reason"] == "stale_file"
+    assert ("file_read" in recovery["instruction"]) is (not remove_reader)
+
+
+async def test_model_recovery_classifies_registry_validation_before_execution():
+    reg = Registry()
+
+    def should_not_execute(args):
+        pytest.fail("invalid arguments reached the handler")
+
+    reg.register(
+        name="example", toolset="test",
+        schema={"name": "example", "parameters": {
+            "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
+        }},
+        handler=should_not_execute, is_async=False,
+    )
+    provider = ScriptStreamProvider([
+        ChatResponse(tool_calls=[ToolCall("bad-1", "example", {})]),
+        ChatResponse(text="done", finish_reason="stop"),
+    ])
+    ctx = _ctx(tool_schemas=reg.list_schemas(), enforce_tool_scope=True)
+    await _collect(_executor(provider, reg), ctx)
+
+    original = next(message.content for message in ctx.messages if message.tool_call_id == "bad-1")
+    projected = next(message.content for message in provider.calls[1] if message.tool_call_id == "bad-1")
+    assert 'reason="invalid_arguments"' in projected
+    assert projected.startswith(original) and "tool-recovery" not in original
 
 
 def test_config_guardrail_hard_stop_default_false():
@@ -1978,6 +2050,52 @@ async def test_security_runtime_failure_is_a_real_tool_error():
     assert runner.security_boundary_failed is True
     assert any(chunk.body.get("phase") == "result" for chunk in chunks)
     assert messages[-1].content.endswith('"runtime_crashed"}')
+
+
+async def test_wrapped_approval_rejection_in_parallel_results_fences_the_next_segment():
+    reg = Registry()
+
+    async def read_file(args):
+        if args["path"] == "/tmp/denied.txt":
+            raise ToolError('{"error_code":"approval_rejected","error":"owner rejected access"}')
+        return tool_result(success=True)
+
+    def should_not_execute(_args):
+        pytest.fail("a subsequent segment executed after owner approval was rejected")
+
+    for name, handler in (("file_read", read_file), ("file_write", should_not_execute)):
+        reg.register(
+            name=name, toolset="file", schema={"name": name, "parameters": {}},
+            handler=handler, is_async=name == "file_read",
+        )
+    runner = _runner(reg)
+    messages: list[Message] = []
+    calls = [
+        ToolCall("read-1", "file_read", {"path": "/tmp/denied.txt"}),
+        ToolCall("read-2", "file_read", {"path": "/tmp/allowed.txt"}),
+        ToolCall("write-1", "file_write", {"path": "/tmp/a.txt", "content": "denied"}),
+    ]
+    assert runner._plan_segments(calls) == [(True, calls[:2]), (False, calls[2:])]
+    _ = [chunk async for chunk in runner.run_batch(calls, messages, "rid", _seq_counter())]
+    assert runner.approval_rejected
+    assert json.loads(messages[-1].content)["error_code"] == "approval_rejected_turn_stopped"
+
+
+async def test_successful_terminal_result_with_error_code_data_does_not_end_the_turn():
+    reg = Registry()
+    reg.register(
+        name="terminal", toolset="terminal", schema={"name": "terminal", "parameters": {}},
+        handler=lambda _args: tool_result(success=True, error_code="sandbox_denied", exit_code=0),
+        is_async=False,
+    )
+    runner = _runner(reg, parallel_enabled=False)
+    messages: list[Message] = []
+    _ = [chunk async for chunk in runner.run_batch(
+        [ToolCall("t1", "terminal", {"command": "pwd"})], messages, "rid", _seq_counter(),
+    )]
+    assert not runner.security_boundary_failed
+    assert not runner.approval_rejected
+    assert json.loads(messages[-1].content)["success"] is True
 
 
 class ReadyStreamProvider(LLMProvider):

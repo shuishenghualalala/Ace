@@ -217,11 +217,8 @@ def canonical_tool_args(args: Mapping[str, Any]) -> str:
 def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
     """Safety-fallback classifier used only when callers don't pass ``failed``.
 
-    Mirrors ``agent.display._detect_tool_failure`` exactly so the guardrail
-    never disagrees with the CLI's user-visible ``[error]`` tag. Production
-    callers in ``run_agent.py`` always pass an explicit ``failed=`` derived
-    from ``_detect_tool_failure``; this function exists so standalone callers
-    (tests, tooling) still get consistent behavior.
+    Typed failures from the runner take precedence. Some tools, including
+    terminal, also encode their execution status in a structured result.
     """
     if result is None:
         return False, ""
@@ -234,6 +231,8 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
             exit_code = data.get("exit_code")
             if exit_code is not None and exit_code != 0:
                 return True, f" [exit {exit_code}]"
+            if data.get("success") is False or data.get("error"):
+                return True, " [error]"
         return False, ""
 
     if tool_name == "memory":
@@ -364,7 +363,11 @@ class ToolCallGuardrailController:
                 return ToolGuardrailDecision(
                     action="warn",
                     code="same_tool_failure_warning",
-                    message=_tool_failure_recovery_hint(tool_name, same_count),
+                    message=(
+                        f"{tool_name} has failed {same_count} times this turn. "
+                        "Review the latest error and recovery guidance before trying a different "
+                        "approach within the allowed scope. Report a blocker if you cannot proceed."
+                    ),
                     tool_name=tool_name,
                     count=same_count,
                     signature=signature,
@@ -443,41 +446,21 @@ def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> s
     """Append runtime guidance to the current tool result content."""
     if decision.action not in {"warn", "halt"} or not decision.message:
         return result
-    if decision.tool_name == "file_read" and decision.code == IDEMPOTENT_NO_PROGRESS_WARNING:
-        try:
-            payload = json.loads(result)
-        except (ValueError, RecursionError):
-            pass
-        else:
-            if isinstance(payload, dict) and payload.get("success") is True and "guardrail" not in payload:
-                payload["guardrail"] = decision.to_metadata()
-                return json.dumps(payload, ensure_ascii=False)
+    try:
+        payload = json.loads(result)
+    except (ValueError, RecursionError):
+        payload = None
+    if isinstance(payload, dict):
+        if "guardrail" in payload:
+            return result
+        payload["guardrail"] = decision.to_metadata()
+        return json.dumps(payload, ensure_ascii=False)
     label = "Tool loop hard stop" if decision.action == "halt" else "Tool loop warning"
     suffix = (
         f"\n\n[{label}: "
         f"{decision.code}; count={decision.count}; {decision.message}]"
     )
     return (result or "") + suffix
-
-
-def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
-    """Action-oriented guidance for recovering from repeated tool failures."""
-    common = (
-        f"{tool_name} has failed {count} times this turn. This looks like a loop. "
-        "Do not switch to text-only replies; keep using tools, but diagnose before retrying. "
-        "First inspect the latest error/output and verify your assumptions. "
-    )
-    if tool_name == "terminal":
-        return common + (
-            "For terminal failures, run a small diagnostic such as `pwd && ls -la` "
-            "in the same tool, then try an absolute path, a simpler command, a different "
-            "working directory, or a different tool such as read_file/write_file/patch."
-        )
-    return common + (
-        "Try different arguments, a narrower query/path, an absolute path when relevant, "
-        "or a different tool that can make progress. If the blocker is external, report "
-        "the blocker after one diagnostic attempt instead of repeating the same failing path."
-    )
 
 
 def _coerce_args(args: Mapping[str, Any] | None) -> Mapping[str, Any]:
