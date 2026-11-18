@@ -933,9 +933,9 @@ class SecurityApprovalService:
     @staticmethod
     def _push_pending_approval(context: SecurityContext, request: dict) -> None:
         """Wake the renderer immediately; polling remains the disconnect fallback."""
-        from crew.core.runctx import current_push_fn
+        from crew.core.runctx import current_push_fn, current_security_approval_push
 
-        push = current_push_fn.get()
+        push = current_security_approval_push.get() or current_push_fn.get()
         if push is None:
             return
         payload = {

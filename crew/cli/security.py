@@ -2,12 +2,141 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import aclosing, suppress
 from typing import Any
+from uuid import uuid4
 
 from crew.cli.app import CliContext, CliError, CliResult
 from crew.security.approvals import ApprovalDecision, ApprovalError
-from crew.security.context import SecurityContextError, build_gateway_security_context
+from crew.core.envelope import Envelope, ResponseChunk
+from crew.core.runctx import current_security_approval_push
+from crew.security.context import SecurityContext, SecurityContextError, build_gateway_security_context, build_security_context
 from crew.security.models import ConversationPermissionMode, serialize_additional_permissions
+from crew.tools.redact import redact_sensitive_display_text
+
+
+class CliApprovalRequired(CliError):
+    def __init__(self) -> None:
+        super().__init__("工具需要人工权限审批，请使用 crew chat", exit_code=2)
+
+
+def _conversation_approval_prompt(request: dict) -> str:
+    action = request["action"]
+    target = action["path"] or action["raw_command"] or " ".join(action["argv"])
+    if action["host"]:
+        target = f"{action['protocol']}://{action['host']}:{action['port']}"
+    details = f"{request['tool_name']} {action['operation']} {target}".strip()
+    if action["cwd"]:
+        details += f" (cwd {action['cwd']})"
+    permissions = request["additional_permissions"]
+    if permissions["filesystem"]:
+        filesystem = ", ".join(f"{item['access']} {item['root']}" for item in permissions["filesystem"])
+        details += f" · 文件权限: {filesystem}"
+    if permissions["network"]:
+        network = ", ".join(
+            f"{item['access']} {item['protocol']}://{item['host']}:{item['port']}"
+            + (" (专用地址)" if item["allow_private"] else "")
+            for item in permissions["network"]
+        )
+        details += f" · 网络权限: {network}"
+    if permissions["allow_local_binding"]:
+        details += " · 允许本地端口绑定"
+    if permissions["sandbox_permissions"] != "use_default":
+        details += f" · 沙箱权限: {permissions['sandbox_permissions']}"
+    return f"工具权限审批 {redact_sensitive_display_text(details)!r} [once/reject] "
+
+
+async def consume_conversation_turn(
+    app: Any,
+    envelope: Envelope,
+    on_chunk: Callable[[ResponseChunk], None],
+    *,
+    prompt: Callable[[str], Awaitable[bool]] | None = None,
+) -> None:
+    """Consume a CLI turn with a permission responder scoped to its runtime tasks."""
+    failure: asyncio.Future[Exception] = asyncio.get_running_loop().create_future()
+    pending: dict[str, tuple[SecurityContext, dict[str, Any]]] = {}
+    decisions: dict[str, asyncio.Task[None]] = {}
+    input_lock = asyncio.Lock()
+    closed = False
+    needs_operator = False
+
+    def decide(request_id: str, decision: ApprovalDecision) -> None:
+        context, request = pending[request_id]
+        app.security_service.decide(
+            context, request_id=request_id, nonce=request["nonce"], decision=decision,
+            submission_id=uuid4().hex,
+        )
+        pending.pop(request_id)
+
+    async def handle_request(request_id: str, request: dict[str, Any]) -> None:
+        nonlocal needs_operator
+        try:
+            async with input_lock:
+                allowed = await prompt(_conversation_approval_prompt(request)) if prompt is not None else False
+                decide(request_id, ApprovalDecision.ONCE if allowed else ApprovalDecision.REJECT)
+                needs_operator = prompt is None
+        except Exception as error:
+            if not failure.done():
+                failure.set_result(error)
+
+    def on_push(session_id: str, payload: dict) -> None:
+        if closed or failure.done() or payload.get("kind") != "security_approval":
+            return
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not request_id or request_id in decisions:
+            return
+        try:
+            context = build_security_context(app.workspace_store)
+            if (
+                context.owner_account_id != envelope.user_id
+                or context.workspace_id != envelope.workspace_id
+                or context.session_id != session_id
+            ):
+                raise SecurityContextError("审批事件与当前 CLI 回合不匹配")
+            request = next(
+                (item for item in app.security_service.pending(context, include_nonce=True)
+                 if item["request_id"] == request_id and item["task_id"] == context.task_id),
+                None,
+            )
+            if request is None:
+                raise ApprovalError("当前任务的待审批请求已失效")
+        except Exception as error:
+            if not failure.done():
+                failure.set_result(error)
+            return
+        pending[request_id] = (context, request)
+        decisions[request_id] = asyncio.create_task(handle_request(request_id, request))
+
+    async def consume() -> None:
+        token = current_security_approval_push.set(on_push)
+        try:
+            async with aclosing(app.handle(envelope)) as stream:
+                async for chunk in stream:
+                    on_chunk(chunk)
+        finally:
+            current_security_approval_push.reset(token)
+
+    turn = asyncio.create_task(consume())
+    try:
+        done, _ = await asyncio.wait({turn, failure}, return_when=asyncio.FIRST_COMPLETED)
+        if failure in done:
+            raise CliError("无法处理工具权限审批") from failure.result()
+        await turn
+        if needs_operator:
+            raise CliApprovalRequired()
+    finally:
+        closed = True
+        if not turn.done():
+            turn.cancel()
+        for task in decisions.values():
+            task.cancel()
+        await asyncio.gather(turn, *decisions.values(), return_exceptions=True)
+        for request_id in tuple(pending):
+            with suppress(ApprovalError):
+                decide(request_id, ApprovalDecision.REJECT)
 
 
 def register(subparsers, handlers: dict[str, Any]) -> None:

@@ -140,6 +140,12 @@ async def emit_tool_progress(text: str, *, metadata: dict[str, Any] | None = Non
 PushFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
 current_push_fn: ContextVar[PushFn | None] = ContextVar("current_push_fn", default=None)
 
+# Security-only responder for hosts that cannot receive general frontend events.
+SecurityApprovalPush = Callable[[str, dict[str, Any]], None]
+current_security_approval_push: ContextVar[SecurityApprovalPush | None] = ContextVar(
+    "current_security_approval_push", default=None,
+)
+
 # 当前 turn 在 TaskRuntime 中的任务 ID 与 runtime 实例。
 # 长耗时工具（如 Dynamic Kanban workflow）可直接 touch_activity 保活，避免被 inactivity 超时取消。
 current_task_runtime_id: ContextVar[str] = ContextVar("current_task_runtime_id", default="")

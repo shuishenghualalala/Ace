@@ -11,6 +11,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
 from crew.cli.app import CliContext, CliError, CliResult
+from crew.cli.security import CliApprovalRequired, consume_conversation_turn
 from crew.core.envelope import Envelope, ResponseChunk
 
 console = Console()
@@ -134,12 +135,12 @@ async def _repl(app: Any, ctx: CliContext) -> None:
             user_id=ctx.owner,
             workspace_id=ctx.workspace_id,
         )
-        await _render(app, envelope)
+        await _render(app, envelope, session)
         if (
             app.plan_manager is not None
             and app.plan_manager.is_awaiting_approval(session_id, owner_account_id=ctx.owner)
         ):
-            await _handle_plan_approval(app, session, session_id, mode, ctx.owner)
+            await _handle_plan_approval(app, session, envelope)
 
 
 async def _compact_context(app: Any, session_id: str, owner_account_id: str) -> None:
@@ -177,43 +178,49 @@ def _print_todos(app: Any, session_id: str, owner_account_id: str) -> None:
         console.print(f"  {markers.get(it['status'], '[?]')} {it['id']}. {it['content']} ([dim]{it['status']}[/dim])")
 
 
-async def _handle_plan_approval(
-    app: Any,
-    session: PromptSession,
-    session_id: str,
-    mode: str,
-    owner_account_id: str,
-) -> None:
+def _plan_execution_envelope(envelope: Envelope) -> Envelope:
+    return Envelope.of(
+        "计划已批准，请按上述计划开始执行。",
+        session_id=envelope.session_id,
+        channel=envelope.channel,
+        mode=envelope.mode,
+        user_id=envelope.user_id,
+        workspace_id=envelope.workspace_id,
+    )
+
+
+async def _confirm(session: PromptSession, message: str, accepted: tuple[str, ...]) -> bool:
+    try:
+        with patch_stdout():
+            answer = await session.prompt_async(message)
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() in accepted
+
+
+async def _handle_plan_approval(app: Any, session: PromptSession, envelope: Envelope) -> None:
     from crew.agent.plan import read_plan
 
+    session_id = envelope.session_id
+    owner_account_id = envelope.user_id
     plan_text = read_plan(session_id, owner_account_id=owner_account_id) or "(计划文件为空)"
     console.print("\n[bold cyan]──── 待审批的计划 ────[/bold cyan]")
     console.print(plan_text)
     console.print("[bold cyan]─────────────────────[/bold cyan]")
-    try:
-        with patch_stdout():
-            ans = await session.prompt_async("批准计划并开始执行？[y/N] ")
-    except (EOFError, KeyboardInterrupt):
-        ans = ""
-    if ans.strip().lower() in ("y", "yes", "是", "ok"):
+    if await _confirm(session, "批准计划并开始执行？[y/N] ", ("y", "yes", "是", "ok")):
         app.plan_manager.approve(session_id, owner_account_id=owner_account_id)
         console.print("[green]计划已批准，开始执行……[/green]\n")
-        kickoff = Envelope.of(
-            "计划已批准，请按上述计划开始执行。",
-            session_id=session_id,
-            channel="cli",
-            mode=mode,
-            user_id=owner_account_id,
-        )
-        await _render(app, kickoff)
+        await _render(app, _plan_execution_envelope(envelope), session)
     else:
         app.plan_manager.reject(session_id, owner_account_id=owner_account_id)
         console.print("[yellow]已保留 Plan 模式，请继续告诉我如何完善计划。[/yellow]")
 
 
-async def _render(app: Any, envelope: Envelope) -> None:
-    async for chunk in app.handle(envelope):
-        _render_chunk(chunk)
+async def _render(app: Any, envelope: Envelope, session: PromptSession) -> None:
+    async def prompt_tool_approval(message: str) -> bool:
+        return await _confirm(session, message, ("once",))
+
+    await consume_conversation_turn(app, envelope, _render_chunk, prompt=prompt_tool_approval)
 
 
 def _render_chunk(chunk: ResponseChunk) -> None:
@@ -263,26 +270,26 @@ async def _run(args: Any, ctx: CliContext) -> CliResult:
             user_id=ctx.owner,
             workspace_id=ctx.workspace_id,
         )
-        chunks = []
-        async for chunk in app.handle(envelope):
+        chunks: list[ResponseChunk] = []
+
+        def collect(chunk: ResponseChunk) -> None:
             chunks.append(chunk)
             if output_format == "stream-json":
-                print(
-                    json.dumps(
-                        {
-                            "kind": chunk.kind,
-                            "body": chunk.body,
-                            "sequence": chunk.sequence,
-                            "is_final": chunk.is_final,
-                            "status": chunk.status,
-                            "ts": chunk.ts,
-                        },
-                        ensure_ascii=False,
-                        default=str,
-                    )
-                )
+                print(json.dumps(_chunk_dict(chunk), ensure_ascii=False, default=str))
             elif output_format == "text":
                 _render_chunk(chunk)
+
+        async def collect_turn(turn_envelope: Envelope) -> None:
+            try:
+                await consume_conversation_turn(app, turn_envelope, collect)
+            except CliApprovalRequired as error:
+                if output_format == "json":
+                    data = _summarize(session_id, chunks)
+                    data.update(status="stopped", error=str(error), error_code="approval_required")
+                    print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+                raise
+
+        await collect_turn(envelope)
 
         if (
             args.yes
@@ -290,20 +297,7 @@ async def _run(args: Any, ctx: CliContext) -> CliResult:
             and app.plan_manager.is_awaiting_approval(session_id, owner_account_id=ctx.owner)
         ):
             app.plan_manager.approve(session_id, owner_account_id=ctx.owner)
-            kickoff = Envelope.of(
-                "计划已批准，请按上述计划开始执行。",
-                session_id=session_id,
-                channel="cli",
-                mode=args.mode,
-                user_id=ctx.owner,
-                workspace_id=ctx.workspace_id,
-            )
-            async for chunk in app.handle(kickoff):
-                chunks.append(chunk)
-                if output_format == "stream-json":
-                    print(json.dumps(_chunk_dict(chunk), ensure_ascii=False, default=str))
-                elif output_format == "text":
-                    _render_chunk(chunk)
+            await collect_turn(_plan_execution_envelope(envelope))
         elif (
             app.plan_manager is not None
             and app.plan_manager.is_awaiting_approval(session_id, owner_account_id=ctx.owner)

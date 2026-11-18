@@ -278,6 +278,8 @@ Ace 私有路径  ────────────────────�
 
     <p>审批请求本身有随机 nonce、有效期、上下文、Ace 工具名、动作摘要和额外权限。Desktop 会逐条显示额外文件根、访问级别、精确网络目标与本地监听能力；提交决定时必须同时满足登录 owner、workspace、session、task 与 nonce。动作相同但权限范围或 Ace 工具入口不同的请求不会复用同一个动作 grant 或永久规则。会话 permission profile 只复用已展示的能力范围，因此 <code>terminal</code> 批准的目录可以被 <code>file_write</code>/<code>patch</code>/<code>file_delete</code> 使用，精确网络目标也可以被 <code>web_search</code>/<code>web_extract</code> 使用；动作规则则不会从 <code>terminal</code> 串到 <code>publish_site</code>、远程 MCP 或外部 Agent 的合成执行动作。</p>
 
+    <p>CLI 回合可绑定专用审批回调。回调在发起动作的任务上下文中按账号、工作区、会话和任务查找待处理请求，使用原 nonce 提交一次性允许或拒绝。取消回合时按原上下文清理该回合已接收的待审批请求。Desktop 和 Gateway 继续使用通用事件推送。<a href="cli.html">CLI 的审批交互</a></p>
+
     <h4>2.2.4 一次批准如何真正进入执行边界</h4>
     <p>用户批准后，终端重新按同一动作执行授权判断，再把获批的权限范围编译进实际进程启动参数。</p>
 
