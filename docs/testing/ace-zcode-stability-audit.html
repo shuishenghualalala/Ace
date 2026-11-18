@@ -158,7 +158,8 @@
 <p>macOS 和 Linux 启动分支会异步按同用户与进程命令行清理匹配的网关，启动新进程前没有等待该清理完成。相同账号下的另一个 profile、另一个 checkout 或外置网关可能被误停。Windows 打包分支已有避免广泛清理的处理，开发模式另有命令行匹配。ZCode 的 utility host 采用自身持有的进程句柄管理退出。</p>
 <p><strong>修复</strong> 删除开发版及打包版启动路径的进程扫描，以及 Linux 更新脚本里的按名称终止。桌面为每次受管启动持有专属管道，网关收到 EOF 后执行现有关停流程。健康探针验证应用目录证明和本次启动的证明，避免把同目录下其他托管实例当成当前网关。开发版和打包版在候选范围内检查主端口及相邻健康端口，遇到占用就继续选择。允许复用的独立网关保留原有协议和独立生命周期。</p>
 <p><strong>验收</strong> <code>856fb5cc</code> 已提交。真实 Windows Electron 双实例覆盖 API 和健康端口占用、就绪前后强退、正常退出、重启、独立 CLI 网关复用及五轮端到端回复。临时打包布局另走真实 Windows 打包分支，内嵌 Python 启动并完成一轮回复，强退后释放端口，独立网关存活。Linux 离线容器验证真实管道、Unix socketpair、父进程强退、端口回退和启动证明。Python 636 项通过、2 项跳过。桌面全量 2030 项通过、2 项跳过，仍有两项 Windows 符号链接权限失败及一项已知模型分组顺序失败。默认模型的最小请求仍返回 HTTP 400 <code>InvalidSubscription</code>，端到端使用本地协议测试模型。</p>
-<p><strong>仍待验证</strong> macOS 安装包的原生端到端，以及 Python 完全失去执行能力时的子进程树回收。Windows 和 Linux 安装包验证见 D8。同一 <code>CREW_HOME</code> 下多个实例曾共用后台终端恢复文件。<code>85951895</code> 已按任务保存宿主及子进程的启动身份，Windows 双 Gateway 与 Linux 并发恢复结果见<a href="#handoff">合并后复核</a>。应用显式等待关停和完成写入见 D6。</p>
+<p><strong>仍待验证</strong> macOS 安装包的原生端到端，以及 POSIX 平台上冻结 Gateway 后的整树回收。Windows 的冻结与强退已实测，见下。Windows 和 Linux 安装包验证见 D8。同一 <code>CREW_HOME</code> 下多个实例曾共用后台终端恢复文件。<code>85951895</code> 已按任务保存宿主及子进程的启动身份，Windows 双 Gateway 与 Linux 并发恢复结果见<a href="#handoff">合并后复核</a>。应用显式等待关停和完成写入见 D6。</p>
+<p><strong>Windows 宿主完全冻结</strong> 从 <code>56eb6de6</code> 真实 EXE 的同一内嵌 Python 启动两个 Gateway，共用一个临时 Crew Home。每端通过正常的后台终端注册表启动 PowerShell 和独立 Python 子进程。暂停第一端全部线程，以原来每 50 毫秒写一次的心跳连续 700 毫秒不变确认冻结，再用操作系统终止该 Gateway。其绑定的 Job Object 在 0.172 秒内回收 shell 与子进程，业务和健康端口可重新绑定。第二端的两个进程仍存活，HTTP 仍就绪；关闭其桌面父管道后，第二端返回 0，子进程和双端口均已释放。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1396</code>、<code>:1404</code>、<code>:2012</code>，<code>crew/gateway/desktop_parent_lease.py:30</code>，<code>crew/gateway/app.py:527</code>。ZCode <code>packages/desktop/src/main/desktopHostProcess.ts:669</code>、<code>:714</code>，<code>packages/server/src/stdio-lifecycle.ts:103</code>。</p>
 </article>
 <article id="replay">
@@ -208,6 +209,16 @@
 <p><strong>发布门禁</strong> <code>release-desktop.yml</code> 在上传之前启动候选桌面，Windows 用新编译的 EXE 静默安装至带空格和中文的临时目录，macOS 两个架构通过 LaunchServices 打开只读 DMG 内的应用，Linux 在私有挂载空间分别只读挂载 UOS、Kylin 的 <code>/opt</code> 并以普通用户启动。<code>desktop/scripts/smoke-packaged-desktop.mjs</code> 为每轮创建独立用户目录和本地 SSE 模型，从实际输入框验证首聊、精确停止、后继回合、Renderer 与 Gateway 故障恢复、重启历史，以及退出后两个端口可重新绑定。每个阶段单独计时。</p>
 <p><strong>Windows 包态验收</strong> 从 <code>30e6cb78</code> 以 Inno Setup 6.7.1 编译的 EXE 为 291,089,105 字节，SHA-256 为 <code>abfdcc7cd7b4bd757f7dc87ff0933e5e49b2ca9d9422f157bab4a6bb46f47fdd</code>。解包目录与 staging 的 17,403 个文件逐个校验一致，其中 133 个一方 wheel 资源另与源码核对。两份桌面分别跑通九阶段，EXE 解包桌面的首退和重开后退出为 1.770、1.992 秒。另从同一 EXE 复跑旧库的五种故障和六次实际 HTTP 重开，均保留唯一旧正文。额外一轮在 8000/8001 运行时，Gateway 遇到正在关闭的 WebSocket，返回退出码 1，桌面记录本次 Gateway 清理失败，门禁拦截该轮。Windows 本机使用解包发行程序。静默安装步骤在全新 CI 账号中执行，本地通过实际编译的 Inno 规则及非安装参数夹具验证；macOS 原生结果待对应 runner。</p>
 <p><strong>Windows 最终复验</strong> 使用 <code>56eb6de6</code> 重编的 EXE 为 291,101,005 字节，SHA-256 为 <code>cad921e83fe7358910538c7d0c8370a76c96413542f73695fc53ac38c94d2fdc</code>。解包后的 17,404 个发行文件与 staging 完全一致，实际安装规则包含 <code>skipifsilent</code>。两份桌面各自通过九阶段。staging 两次正常退出耗时 1.637、2.661 秒，EXE 解包桌面为 3.106、2.656 秒。四次均有 Gateway 退出码 0、桌面清理失败列表为空，业务和健康端口均可重新绑定。两轮故障注入分别拉起新 Gateway 并恢复历史。用该 EXE 的内嵌 Python 另跑 10 轮双 WebSocket 客户端与服务端同时关闭，开放连接每次收到 1012，应用生命周期清理均完成。同一 EXE 的旧库五项故障和六次 HTTP 历史重开也全部通过。</p>
+<h4>Linux 发行包与实际安装</h4>
+<p>固定 <code>56eb6de6</code> 构建 UOS、Kylin 两个 amd64 发行包。门禁各执行两次：先在只读 <code>/opt</code> 中测试解包内容，再在全新 Debian 12.15 用户态执行 <code>dpkg -i</code> 并从实际安装目录启动。四次均通过九个阶段，每次核对三代 Gateway 的实例签名、会话历史、正常退出及双端口释放。桌面使用普通用户（UID 1000、有效 capabilities 为零）、Xvfb、DBus 和发行版自带的 Chromium 沙箱，内核为 WSL2 6.18.58.1。UOS 和 Kylin 表示包的目标与应用内渠道标识，实际运行主机使用相同的 Debian 用户态。</p>
+<div class="table"><table>
+<thead><tr><th>0.28.36 安装包</th><th>字节数和 SHA-256</th><th>正式安装后的阶段耗时（秒）</th></tr></thead>
+<tbody>
+<tr><td>UOS amd64</td><td>315,438,764<br><code>218595da72457a4d2e00e00fb1f26302be79683a168d8da23968dd1cf08368b5</code></td><td>冷启 11.762，首聊 1.475，停止并接续 2.045，渲染恢复 2.013，网关恢复 7.519，首退 1.814，重开 10.442，历史 0.270，末退 4.541。</td></tr>
+<tr><td>Kylin amd64</td><td>315,438,776<br><code>596d202f1c83d20f1010b293495192fc3f8251bc94112b9470396d834ad71535</code></td><td>冷启 9.523，首聊 1.110，停止并接续 2.018，渲染恢复 2.759，网关恢复 10.447，首退 2.136，重开 9.342，历史 0.589，末退 5.339。</td></tr>
+</tbody></table></div>
+<p>两包由 dpkg 1.21.23 正常安装，状态均为 <code>install ok installed</code>，<code>dpkg --audit</code> 无输出。<code>postinst</code> 执行并刷新图标，<code>chrome-sandbox</code> 所有者为 root:root，模式 4755。随后在各自安装根移除和清除，入口文件与包清单均已删除。另一组默认 Docker 安全配置也完成了安装与卸载，其中 Chromium 创建命名空间收到 <code>EPERM</code>，该容器的图形冷启动计为失败。</p>
+<p>构建使用官方 Python 3.11.9 和 Electron 43.1.0 Linux x64 发行文件，核对 SHA-256，68 个 Rust 依赖核对锁文件后离线构建。Gateway 复用相同清单的依赖层后覆盖候选源码，校对七个发生变更的 Python 文件。打包阶段使用相同 Buster 构建中已有的 dpkg-deb 1.19.8 和 ImageMagick 6.9.10，以项目原 <code>Dockerfile.pack</code> 的制包步骤分别写入渠道元数据。</p>
 <p class="evidence">Ace <code>.github/workflows/ci.yml:28</code>，<code>.github/workflows/nightly-desktop.yml:49</code>、<code>:78</code>、<code>:110</code>，<code>desktop/electron-builder.yml</code>。Ace 发布脚本 <code>deb-package/pack_exe.ps1:357</code>、<code>deb-package/pack_mac.sh:344</code>。ZCode <code>packages/desktop/test/e2e/smoke.test.ts:12</code>，<code>packages/desktop/package.json:28</code>，<code>apps/zcode-cli/packages/adapters/tests/migration-crash-recovery.test.ts:10</code>。</p>
 </article>
 </section>
@@ -260,6 +271,13 @@
 <p>旧版本在回合门控前记录“首个可见正文”，局部 patch 也会在尚未检查正文元素时记录。回退到整轮渲染时则缺少对应事件。Windows Electron 运行旧版时，正文已可见，只记录了 956 ms 的接收事件。</p>
 <p><strong>修复与实测</strong> 当前账号、会话和请求共用本地发送时刻。接收先独立记录，重组成功且正文实际写入后记录接纳，增量与整轮渲染从同一助手消息的已挂载正文确认呈现。连续两个动画帧回调校验前台和同一元素，记录绘制机会。最终 Windows Electron 接实际 Gateway 和可暂停的回环 SSE，正常窗口分别在 879、882、917、926 ms 达到这四个阶段。另一轮窗口隐藏时只记录 513、515 ms 的接收、接纳，重显后在 619、657 ms 观察到挂载和绘制机会。第二个文本片段未重复计数。10 个定向套件共 180 项通过，TypeScript 与 ESLint 检查通过。</p>
 <p class="evidence">Ace <code>desktop/src/ui/first-text-timing.ts</code>、<code>desktop/src/ui/features/chat-controller.ts</code>。ZCode <code>packages/ui/src/lib/conversationTelemetryLegacyParityE2E.ts:191</code>、<code>:275</code> 和 <code>packages/ui/src/v4/telemetry/conversationTelemetrySupervisor.ts:785</code> 按已接纳命令及会话前台归属记录。</p>
+</article>
+<article id="bundled-skill-startup">
+<h3>F9 · 首次打开时复制全部内置技能</h3>
+<p>Windows 正式发行版首次打开时，把随包技能文件复制进用户目录。ZCode 在启动时解析内置技能根，在发现阶段把它与插件根合并。Ace 的扫描器也能直接发现发行目录；已有的用户覆盖按原优先级读取。</p>
+<p><strong>修复与实测 · <code>ef997e1c</code></strong> 新配置直接使用发行目录。修复某项技能元数据时，工具先授权具体的用户目标，再向该目标发布可写副本。分组内的其他成员继续使用发行资源。用正式 Windows 内嵌 Python、两份只差候选源码的独立 Gateway 交替启动六对，在同机负载下，初始化中位数从 1.657 秒降至 0.015 秒，主端口就绪从 12.663 秒降至 10.563 秒，首次打开技能商店从 0.749 秒降至 0.282 秒。两版均列出 23 个技能，首次创建的用户技能文件由 397 个降至 0 个。</p>
+<p>旧用户定制重开后保持原内容。实际元数据修复只在用户目录落盘，发行源字节保持一致。随包没有可选技能样本，另用合成仓库走过安装、编辑和卸载。Windows 相关六模块共 256 项通过、11 项跳过；隔离的 Debian 普通账号通过 9 项文件系统用例。</p>
+<p class="evidence">Ace <code>crew/state/config.py</code>、<code>crew/agent/skills/manage.py</code>、<code>crew/tools/skills_tools.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/app/create-app.ts:249</code>、<code>:864</code> 和 <code>apps/zcode-cli/packages/bootstrap/src/skills.ts:114</code>。</p>
 </article>
 </section>
 
@@ -317,7 +335,7 @@
 </section>
 <section id="validation">
 <h2>5. 证据和验收</h2>
-<p>源码观察定位可以确定的契约与控制流。运行证据来自 Windows 的本地测试和小范围探针。产品性能排名、安装包行为和三平台市场环境下的故障率需要同条件实测。ZCode 作为指定的本地对照，源码快照工作区干净，分支落后本地记录的 <code>origin/main</code> 五个提交。</p>
+<p>源码观察定位可以确定的契约与控制流。原审计从 Windows 本地测试和小范围探针起步。本次接手补充了 Windows 正式安装包、Linux 两个发行包、真实模型与跨进程测试。产品性能排名、安装包行为和三平台市场环境下的故障率需要同条件实测。ZCode 作为指定的本地对照，源码快照工作区干净，分支落后本地记录的 <code>origin/main</code> 五个提交。</p>
 <h3>本次运行记录</h3>
 <ul>
 <li>Agent 源码探针验证 <code>AGENTS.md</code> 漏读、Plan schema 缺少搜索、扫描超时返回无匹配、长终端日志断流与分页重复。文件编辑和提示词的 13 项同步单测通过。</li>
