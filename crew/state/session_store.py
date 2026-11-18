@@ -586,6 +586,7 @@ class SQLiteSessionStore(SessionStore):
             "events_generation": "ALTER TABLE sessions ADD COLUMN events_generation INTEGER NOT NULL DEFAULT 0",
             "source_session_id": "ALTER TABLE sessions ADD COLUMN source_session_id TEXT NOT NULL DEFAULT ''",
             "source_parent_seq": "ALTER TABLE sessions ADD COLUMN source_parent_seq INTEGER",
+            "source_incarnation": "ALTER TABLE sessions ADD COLUMN source_incarnation TEXT NOT NULL DEFAULT ''",
             "history_incarnation": "ALTER TABLE sessions ADD COLUMN history_incarnation TEXT NOT NULL DEFAULT ''",
             "history_rewinds": "ALTER TABLE sessions ADD COLUMN history_rewinds INTEGER NOT NULL DEFAULT 0",
         }
@@ -623,6 +624,15 @@ class SQLiteSessionStore(SessionStore):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_workspace_sessions_list ON sessions(owner_account_id, workspace_id, pinned DESC, updated_at DESC, session_id DESC)")
         # fork 子会话枚举（list_branches）按 (owner, source_session_id) 等值查询
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(owner_account_id, source_session_id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_fork_prefix_events (
+                owner_account_id TEXT NOT NULL, fork_session_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                seq INTEGER NOT NULL, parent_seq INTEGER, type TEXT NOT NULL, payload TEXT NOT NULL, created_at REAL NOT NULL,
+                PRIMARY KEY (owner_account_id, fork_session_id, session_id, seq),
+                FOREIGN KEY (owner_account_id, fork_session_id) REFERENCES sessions(owner_account_id, session_id)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+            ) WITHOUT ROWID
+        """)
         # 存储级 KV 标记（当前仅 legacy 回填完成标记，P1-4）
         conn.execute(
             "CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -657,6 +667,7 @@ class SQLiteSessionStore(SessionStore):
                     events_generation INTEGER NOT NULL DEFAULT 0,
                     source_session_id TEXT NOT NULL DEFAULT '',
                     source_parent_seq INTEGER,
+                    source_incarnation TEXT NOT NULL DEFAULT '',
                     history_incarnation TEXT NOT NULL DEFAULT '',
                     history_rewinds INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (owner_account_id, session_id)
@@ -666,14 +677,14 @@ class SQLiteSessionStore(SessionStore):
                 INSERT OR IGNORE INTO sessions_new (
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
-                    archived, pinned, leaf_seq, events_generation, source_session_id, source_parent_seq,
+                    archived, pinned, leaf_seq, events_generation, source_session_id, source_parent_seq, source_incarnation,
                     history_incarnation, history_rewinds, last_outcome_json
                 )
                 SELECT
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
                     COALESCE(archived, 0), COALESCE(pinned, 0), COALESCE(leaf_seq, 0), COALESCE(events_generation, 0),
-                    COALESCE(source_session_id, ''), source_parent_seq, history_incarnation, history_rewinds,
+                    COALESCE(source_session_id, ''), source_parent_seq, source_incarnation, history_incarnation, history_rewinds,
                     last_outcome_json
                 FROM sessions
             """,
@@ -935,17 +946,26 @@ class SQLiteSessionStore(SessionStore):
             raise SessionIncarnationChanged(f"会话已删除或重建：{session_id}")
         return cursor[:2] if cursor is not None else None
 
+    @staticmethod
+    def _event_source(owner: str, sid: str, snapshot: str | None) -> tuple[str, tuple[str, ...]]:
+        if snapshot is None:
+            return "session_events WHERE owner_account_id=? AND session_id=?", (owner, sid)
+        return (
+            "session_fork_prefix_events WHERE owner_account_id=? AND fork_session_id=? AND session_id=?",
+            (owner, snapshot, sid),
+        )
+
     def _fetch_chain_rows(
-        self, owner: str, session_id: str, upto_seq: int, after_seq: int = 0,
+        self, owner: str, session_id: str, upto_seq: int, after_seq: int = 0, snapshot: str | None = None,
     ) -> dict[int, tuple[int | None, str, str]]:
         """读取 (after_seq, upto_seq] 内的事件行。"""
+        source, params = self._event_source(owner, session_id, snapshot)
         with self._lock:
             return {
                 int(row[0]): (row[1], str(row[2]), str(row[3]))
                 for row in self._conn.execute(
-                    "SELECT seq, parent_seq, type, payload FROM session_events "
-                    "WHERE owner_account_id = ? AND session_id = ? AND seq > ? AND seq <= ?",
-                    (owner, session_id, after_seq, upto_seq),
+                    f"SELECT seq, parent_seq, type, payload FROM {source} AND seq > ? AND seq <= ?",
+                    (*params, after_seq, upto_seq),
                 ).fetchall()
             }
 
@@ -987,6 +1007,12 @@ class SQLiteSessionStore(SessionStore):
         return chain
 
     def _resolve_chain(
+        self, owner: str, session_id: str, upto_seq: int, *, include_seeds: bool = False,
+    ) -> list[tuple[str, int, str, str]]:
+        with self._lock, self._projection_snapshot():
+            return self._resolve_segment_chain(owner, session_id, upto_seq, include_seeds=include_seeds)
+
+    def _resolve_segment_chain(
         self,
         owner: str,
         session_id: str,
@@ -994,6 +1020,7 @@ class SQLiteSessionStore(SessionStore):
         _seen: frozenset[tuple[str, str]] = frozenset(),
         *,
         include_seeds: bool = False,
+        snapshot: str | None = None,
     ) -> list[tuple[str, int, str, str]]:
         """正序解析投影链（含 fork 前缀拼接）：[(session_id, seq, type, payload)]。
 
@@ -1004,21 +1031,16 @@ class SQLiteSessionStore(SessionStore):
         if key in _seen:
             raise SessionEventLogError(f"fork 前缀成环：{session_id}，拒绝加载")
         seen = _seen | {key}
-        chain = self._ordered_chain(self._fetch_chain_rows(owner, session_id, upto_seq), upto_seq)
+        chain = self._ordered_chain(self._fetch_chain_rows(owner, session_id, upto_seq, 0, snapshot), upto_seq)
         resolved: list[tuple[str, int, str, str]] = []
         for seq, etype, payload in chain:
             if etype != SessionEventType.END_SEED.value:
                 resolved.append((session_id, seq, etype, payload))
                 continue
-            try:
-                meta = json.loads(payload)
-            except json.JSONDecodeError as exc:
-                raise SessionEventLogError(f"end_seed 载荷损坏（seq={seq}），拒绝加载") from exc
-            source_id = meta.get("source_session_id")
-            source_seq = meta.get("source_parent_seq")
-            if not isinstance(source_id, str) or not source_id or not isinstance(source_seq, int):
-                raise SessionEventLogError(f"end_seed 载荷缺前缀指针（seq={seq}），拒绝加载")
-            resolved.extend(self._resolve_chain(owner, source_id, source_seq, seen, include_seeds=include_seeds))
+            source_id, source_seq, storage = self._fork_link(owner, session_id, payload, snapshot)
+            resolved.extend(self._resolve_segment_chain(
+                owner, source_id, source_seq, seen, include_seeds=include_seeds, snapshot=storage,
+            ))
             if include_seeds:
                 resolved.append((session_id, seq, etype, payload))
         return resolved
@@ -1051,61 +1073,59 @@ class SQLiteSessionStore(SessionStore):
     # 链走行的分批取行大小：> 窗口上限，容纳回合标记 / 弃尾行等非角色事件混排
     WINDOW_FETCH_BATCH = 640
 
-    def _fork_source_of(self, owner: str, session_id: str) -> tuple[str, int] | None:
-        """读会话的 end_seed 前缀指针 (source_session_id, source_parent_seq)；无则 None。"""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT payload FROM session_events "
-                "WHERE owner_account_id = ? AND session_id = ? AND seq = 1 AND type = ?",
-                (owner, session_id, SessionEventType.END_SEED.value),
-            ).fetchone()
-        if row is None:
-            return None
+    def _fork_link(
+        self, owner: str, sid: str, payload: str, snapshot: str | None,
+    ) -> tuple[str, int, str | None]:
         try:
-            meta = json.loads(row[0] or "{}")
-        except json.JSONDecodeError as exc:
-            raise SessionEventLogError(
-                f"end_seed 载荷损坏（session={session_id}），拒绝窗口读取"
-            ) from exc
-        source_id = meta.get("source_session_id")
-        source_seq = meta.get("source_parent_seq")
-        if not isinstance(source_id, str) or not source_id or not isinstance(source_seq, int):
-            raise SessionEventLogError(
-                f"end_seed 载荷缺前缀指针（session={session_id}），拒绝窗口读取"
-            )
-        return source_id, source_seq
+            seed = json.loads(payload)
+            parent, cut = seed["source_session_id"], seed["source_parent_seq"]
+            if not isinstance(parent, str) or not parent or not isinstance(cut, int) or cut < 1:
+                raise ValueError("invalid fork cut")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionEventLogError(f"分叉切点无效：{sid}") from exc
+        if snapshot is None and seed.get("frozen_prefix") is True:
+            snapshot = sid
+        if snapshot is None:
+            row = self._conn.execute(
+                "SELECT history_incarnation FROM sessions WHERE owner_account_id=? AND session_id=?",
+                (owner, parent),
+            ).fetchone()
+            expected = seed.get("source_incarnation")
+            if row is None or (expected is not None and expected != row[0]):
+                raise SessionEventLogError(f"分叉来源已删除或重建：{sid}")
+        return parent, cut, snapshot
 
-    def _fork_chain(self, owner: str, session_id: str) -> list[tuple[str, int | None]]:
-        """fork 前缀链 [(sid, seq 上界)]，从本会话到根。
-
-        本会话上界为 None（读自身 leaf）；祖先的上界来自子会话 end_seed 内联的
-        source_parent_seq——它界定了「属于本 fork 分支」的源前缀终点。
-        成环时截断返回（读取路径有独立 fail-closed 校验）。
-        """
-        chain: list[tuple[str, int | None]] = [(session_id, None)]
+    def _fork_chain(self, owner: str, session_id: str) -> list[tuple[str, int | None, str | None]]:
+        """跟随每一段的持久来源，保持原始会话和事件序号作为翻页游标。"""
+        chain: list[tuple[str, int | None, str | None]] = [(session_id, None, None)]
         seen = {session_id}
-        hop = session_id
+        sid, snapshot = session_id, None
         while True:
-            source = self._fork_source_of(owner, hop)
-            if source is None or source[0] in seen:
+            source, params = self._event_source(owner, sid, snapshot)
+            row = self._conn.execute(f"SELECT payload FROM {source} AND seq=1 AND type=?", (
+                *params, SessionEventType.END_SEED.value,
+            )).fetchone()
+            if row is None:
                 return chain
-            seen.add(source[0])
-            chain.append(source)
-            hop = source[0]
+            sid, cut, snapshot = self._fork_link(owner, sid, row[0], snapshot)
+            if sid in seen:
+                raise SessionEventLogError(f"分叉来源成环：{sid}")
+            seen.add(sid)
+            chain.append((sid, cut, snapshot))
 
     def _fetch_rows_desc(
-        self, owner: str, session_id: str, from_seq: int, limit: int, *, user_payload_only: bool = False,
+        self, owner: str, session_id: str, from_seq: int, limit: int, snapshot: str | None = None, *,
+        user_payload_only: bool = False,
     ) -> dict[int, tuple[int | None, str, str]]:
         """取 seq <= from_seq 的最后 limit 行 {seq: (parent_seq, type, payload)}（含非角色事件）。"""
         payload = "CASE WHEN type='user_message' THEN payload ELSE '' END" if user_payload_only else "payload"
+        source, params = self._event_source(owner, session_id, snapshot)
         with self._lock:
             return {
                 int(r[0]): (r[1], str(r[2]), str(r[3]))
                 for r in self._conn.execute(
-                    f"SELECT seq, parent_seq, type, {payload} FROM session_events "
-                    "WHERE owner_account_id = ? AND session_id = ? AND seq <= ? "
-                    "ORDER BY seq DESC LIMIT ?",
-                    (owner, session_id, from_seq, limit),
+                    f"SELECT seq, parent_seq, type, {payload} FROM {source} AND seq <= ? ORDER BY seq DESC LIMIT ?",
+                    (*params, from_seq, limit),
                 ).fetchall()
             }
 
@@ -1118,6 +1138,7 @@ class SQLiteSessionStore(SessionStore):
         *,
         stop_before: Callable[[str, int], bool] | None = None,
         include_outcomes: bool = False,
+        snapshot: str | None = None,
     ):
         """沿活链从 head_seq 向旧走，产出角色事件 (sid, seq, Message)，从新到旧。
 
@@ -1135,7 +1156,7 @@ class SQLiteSessionStore(SessionStore):
         visited: set[str] = {session_id}
         while cur is not None:
             if cur not in batch:
-                batch = self._fetch_rows_desc(owner, cur_sid, cur, self.WINDOW_FETCH_BATCH)
+                batch = self._fetch_rows_desc(owner, cur_sid, cur, self.WINDOW_FETCH_BATCH, snapshot)
                 if cur not in batch:
                     raise SessionEventLogError(
                         f"事件链断裂：{cur_sid}#{cur} 缺失，拒绝窗口读取"
@@ -1144,14 +1165,7 @@ class SQLiteSessionStore(SessionStore):
             if stop_before is not None and stop_before(cur_sid, cur):
                 return
             if etype == SessionEventType.END_SEED.value:
-                try:
-                    meta = json.loads(payload)
-                    next_sid = str(meta["source_session_id"])
-                    next_seq = int(meta["source_parent_seq"])
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-                    raise SessionEventLogError(
-                        f"end_seed 载荷损坏（{cur_sid}#{cur}），拒绝窗口读取"
-                    ) from exc
+                next_sid, next_seq, snapshot = self._fork_link(owner, cur_sid, payload, snapshot)
                 if next_sid in visited:
                     raise SessionEventLogError(
                         f"fork 前缀成环：{next_sid}，拒绝窗口读取"
@@ -1202,20 +1216,24 @@ class SQLiteSessionStore(SessionStore):
         - 游标 "{session_id}:{seq}" 对客户端不透明，原样回传即可；
           游标会话必须在本会话的 fork 前缀链上（防跨会话越权读取）
         """
+        with self._lock, self._projection_snapshot():
+            return self._load_window(session_id, owner_account_id, limit, before)
+
+    def _load_window(self, session_id: str, owner_account_id: str, limit: int, before: str | None):
         limit = max(1, min(int(limit), self.WINDOW_MAX_LIMIT))
         chain = self._fork_chain(owner_account_id, session_id)
 
         start_sid, start_seq = self.parse_window_cursor(before)
         start_at = 0
         if start_sid:
-            if start_sid not in {sid for sid, _bound in chain}:
+            if start_sid not in {sid for sid, _bound, _snapshot in chain}:
                 raise SessionEventLogError(
                     f"游标会话 {start_sid} 不在 {session_id} 的 fork 前缀链上，拒绝读取"
                 )
-            start_at = next(i for i, (sid, _bound) in enumerate(chain) if sid == start_sid)
+            start_at = next(i for i, (sid, _bound, _snapshot) in enumerate(chain) if sid == start_sid)
 
-        head_sid, head_bound = chain[start_at]
-        cursor = self._read_event_cursor(owner_account_id, head_sid)
+        head_sid, head_bound, storage = chain[start_at]
+        cursor = self._read_event_cursor(owner_account_id, head_sid) if head_bound is None else (head_bound, 0)
         if cursor is None:
             return [], False, None
         if start_seq is not None:
@@ -1224,6 +1242,8 @@ class SQLiteSessionStore(SessionStore):
             # 边界与游标之间的整段被跳过——游标是上一页实际走过的链位置，
             # 其下行路径不受源会话 leaf 移动影响（弃尾行仍在、fork 前缀链不变）；
             # 行若已不存在则链走行 fail-closed。
+            if head_bound is not None and start_seq > head_bound:
+                raise SessionEventLogError(f"游标超过分叉切点：{head_sid}#{start_seq}")
             head = start_seq
         else:
             head = cursor[0] if head_bound is None else min(head_bound, cursor[0])
@@ -1231,7 +1251,7 @@ class SQLiteSessionStore(SessionStore):
             return [], False, None
 
         collected: list[tuple[str, int, Message]] = []
-        walker = self._walk_chain_window(owner_account_id, head_sid, head, start_seq)
+        walker = self._walk_chain_window(owner_account_id, head_sid, head, start_seq, snapshot=storage)
         for entry in walker:
             collected.append(entry)
             if len(collected) >= limit:
@@ -1264,7 +1284,13 @@ class SQLiteSessionStore(SessionStore):
             finally:
                 self._conn.rollback()
 
-    def _history_identity(self, owner: str, sid: str):
+    def _history_identity(self, owner: str, sid: str, snapshot: str | None = None):
+        if snapshot is not None:
+            source, params = self._event_source(owner, sid, snapshot)
+            header = self._conn.execute(f"SELECT payload FROM {source} AND seq=0", params).fetchone()
+            if header is None:
+                raise SessionEventLogError(f"缺少分叉快照：{sid}")
+            return json.loads(header[0])
         row = self._conn.execute(
             "SELECT leaf_seq, events_generation, history_incarnation, history_rewinds, "
             "CASE WHEN leaf_seq = 0 THEN messages != '[]' ELSE 0 END "
@@ -1283,10 +1309,12 @@ class SQLiteSessionStore(SessionStore):
         leaf, generation, incarnation, rewinds, has_blob = self._history_identity(owner, sid)
         legacy = leaf == 0 and bool(has_blob)
         sources = {sid: f"{incarnation}:{generation}{':blob' if legacy else ''}"}
-        for ancestor, _ in chain[1:]:
-            _, old_generation, old_incarnation, _, _ = self._history_identity(owner, ancestor)
+        for ancestor, _, storage in chain[1:]:
+            _, old_generation, old_incarnation, _, _ = self._history_identity(owner, ancestor, storage)
             sources[ancestor] = f"{old_incarnation}:{old_generation}"
-        snapshot_identity = [self.desktop_send_store_id, owner, sid, rewinds, legacy, chain, sources]
+        snapshot_identity = [self.desktop_send_store_id, owner, sid, rewinds, legacy, [link[:2] for link in chain], sources]
+        if any(storage is not None for _, _, storage in chain):
+            snapshot_identity.append([storage for _, _, storage in chain])
         current = hashlib.sha256(json.dumps(snapshot_identity, separators=(",", ":")).encode()).hexdigest()
         head = f"h1:{current}:{leaf}"
 
@@ -1300,7 +1328,8 @@ class SQLiteSessionStore(SessionStore):
                     if rows is not None:
                         return SessionHistoryPage(rows, "append", current, head, None, sources)
 
-        bounds = dict(chain)
+        bounds = {source: cut for source, cut, _ in chain}
+        archives = {source: storage for source, _, storage in chain}
         start_sid, start_seq = sid, None
         if before and revision in (None, current):
             prefix = f"p1:{current}:"
@@ -1318,7 +1347,7 @@ class SQLiteSessionStore(SessionStore):
         if legacy:
             rows, older = self._read_legacy_history_tail(owner, sid, start_seq, limit)
         else:
-            rows, older = self._read_history_tail(owner, start_sid, start_seq or leaf, start_seq, limit)
+            rows, older = self._read_history_tail(owner, start_sid, start_seq or leaf, start_seq, limit, snapshot=archives[start_sid])
         next_before = f"p1:{current}:{older[0]}:{older[1]}" if older else None
         return SessionHistoryPage(rows, mode, current, head, next_before, sources)
 
@@ -1381,7 +1410,7 @@ class SQLiteSessionStore(SessionStore):
         return None
 
     def _read_history_tail(
-        self, owner: str, sid: str, leaf: int, before: int | None, limit: int,
+        self, owner: str, sid: str, leaf: int, before: int | None, limit: int, *, snapshot: str | None = None,
     ) -> tuple[list[HistoryRow], tuple[str, int] | None]:
         if leaf <= 0:
             return [], None
@@ -1397,7 +1426,7 @@ class SQLiteSessionStore(SessionStore):
             last = (source, seq)
             return False
 
-        walker = self._walk_chain_window(owner, sid, leaf, before, stop_before=stop, include_outcomes=True)
+        walker = self._walk_chain_window(owner, sid, leaf, before, stop_before=stop, include_outcomes=True, snapshot=snapshot)
         rows = []
         visible = 0
         aligned_limit = limit + min(limit, 32)
@@ -1711,6 +1740,10 @@ class SQLiteSessionStore(SessionStore):
                 seq = base + 1
                 parent: int | None = (current_leaf or None) if append else anchor
             else:
+                if base:
+                    self._freeze_fork_prefixes(conn, owner_account_id, session_id)
+                    conn.execute("DELETE FROM session_fork_prefix_events WHERE owner_account_id=? AND fork_session_id=?",
+                                 (owner_account_id, session_id))
                 conn.execute(
                     "DELETE FROM session_events WHERE owner_account_id = ? AND session_id = ?",
                     (owner_account_id, session_id),
@@ -2191,6 +2224,51 @@ class SQLiteSessionStore(SessionStore):
         self._writer.execute(_write)
         self._evict_projection(key)
 
+    def _freeze_fork_prefixes(
+        self, conn: sqlite3.Connection, owner: str, parent: str, deleting: set[tuple[str, str]] | None = None,
+    ) -> None:
+        """Snapshot surviving direct dependents before this transaction destroys source rows."""
+        children = conn.execute(
+            "SELECT c.session_id, e.payload, p.history_incarnation, p.created_at FROM sessions AS c "
+            "JOIN session_events AS e ON e.owner_account_id=c.owner_account_id AND e.session_id=c.session_id "
+            "AND e.seq=1 AND e.type=? JOIN sessions AS p ON p.owner_account_id=c.owner_account_id "
+            "AND p.session_id=c.source_session_id WHERE c.owner_account_id=? AND c.source_session_id=?",
+            (SessionEventType.END_SEED.value, owner, parent),
+        ).fetchall()
+        for child, payload, incarnation, created in children:
+            if deleting and (owner, child) in deleting:
+                continue
+            seed = json.loads(payload)
+            if seed.get("frozen_prefix") or seed.get("source_session_id") != parent:
+                continue
+            expected = seed.get("source_incarnation")
+            if expected is not None and expected != incarnation:
+                continue
+            for source, cut, storage in self._fork_chain(owner, child)[1:]:
+                table, params = self._event_source(owner, source, storage)
+                events = conn.execute(
+                    f"SELECT seq,parent_seq,type,payload,created_at FROM {table} AND seq>0 AND seq<=?", (*params, cut),
+                ).fetchall()
+                rows = {seq: (previous, kind, body) for seq, previous, kind, body, _ in events}
+                timestamps = {row[0]: row[4] for row in events}
+                chain = self._ordered_chain(rows, cut)
+                identity = list(self._history_identity(owner, source, storage))
+                identity[0] = cut
+                conn.execute(
+                    "INSERT INTO session_fork_prefix_events VALUES (?,?,?,0,NULL,'source_identity',?,?)",
+                    (owner, child, source, json.dumps(identity), created),
+                )
+                conn.executemany(
+                    "INSERT INTO session_fork_prefix_events VALUES (?,?,?,?,?,?,?,?)",
+                    ((owner, child, source, seq, rows[seq][0], kind, body, timestamps[seq]) for seq, kind, body in chain),
+                )
+            seed.update(frozen_prefix=True, source_incarnation=incarnation)
+            conn.execute("UPDATE sessions SET source_incarnation=? WHERE owner_account_id=? AND session_id=?",
+                         (incarnation, owner, child))
+            conn.execute("UPDATE session_events SET payload=? WHERE owner_account_id=? AND session_id=? AND seq=1",
+                         (json.dumps(seed, ensure_ascii=False), owner, child))
+
+
     def fork(
         self,
         session_id: str,
@@ -2205,22 +2283,29 @@ class SQLiteSessionStore(SessionStore):
         new_id = new_session_id or uuid.uuid4().hex
         key = (owner_account_id, new_id)
         now = time.time()
-        self._validate_cut(owner_account_id, session_id, boundary_seq)
-        prefix, _ = self._chain_at_cut(owner_account_id, session_id, boundary_seq)
+        with self._lock, self._projection_snapshot():
+            prepared = self._read_projection_cursor(owner_account_id, session_id)
+            if prepared is None:
+                raise ValueError(f"会话不存在: {session_id}")
+            if new_session_id is not None and any(sid == new_id for sid, _, _ in self._fork_chain(owner_account_id, session_id)):
+                raise ValueError(f"分叉会话标识与其前缀来源重复：{new_id}")
+            self._validate_cut(owner_account_id, session_id, boundary_seq)
+            prefix, _ = self._chain_at_cut(owner_account_id, session_id, boundary_seq)
 
         def _write(conn) -> str:
             self._ensure_writer_lease(conn, owner_account_id, new_id, now)
             src = conn.execute(
-                "SELECT workspace_id, title FROM sessions "
+                "SELECT workspace_id, title, events_generation, history_incarnation FROM sessions "
                 "WHERE owner_account_id = ? AND session_id = ?",
                 (owner_account_id, session_id),
             ).fetchone()
-            if src is None:
-                raise ValueError(f"会话不存在: {session_id}")
+            if src is None or src[2:] != prepared[1:]:
+                raise SessionWriteConflict(f"分叉来源在准备期间已变化：{session_id}")
             fork_title = title if title is not None else (str(src[1] or "") + " · 分支")
             seed_payload = json.dumps(
                 {
                     "source_session_id": session_id,
+                    "source_incarnation": prepared[2],
                     "source_parent_seq": boundary_seq,
                     "created_at": now,
                 },
@@ -2230,8 +2315,8 @@ class SQLiteSessionStore(SessionStore):
                 "INSERT INTO sessions "
                 "(session_id, owner_account_id, messages, updated_at, created_at, workspace_id, "
                 "title, message_count, token_count, leaf_seq, events_generation, "
-                "source_session_id, source_parent_seq) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)",
+                "source_session_id, source_parent_seq, source_incarnation) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)",
                 (
                     new_id,
                     owner_account_id,
@@ -2244,6 +2329,7 @@ class SQLiteSessionStore(SessionStore):
                     self._estimate_tokens(prefix),
                     session_id,
                     boundary_seq,
+                    prepared[2],
                 ),
             )
             conn.execute(
@@ -2263,8 +2349,10 @@ class SQLiteSessionStore(SessionStore):
         branches: list[dict[str, Any]] = []
         with self._lock:
             fork_rows = self._conn.execute(
-                "SELECT session_id, source_parent_seq, leaf_seq, title, created_at "
-                "FROM sessions WHERE owner_account_id = ? AND source_session_id = ?",
+                "SELECT c.session_id,c.source_parent_seq,c.leaf_seq,c.title,c.created_at FROM sessions AS c "
+                "JOIN sessions AS p ON p.owner_account_id=c.owner_account_id AND p.session_id=c.source_session_id "
+                "WHERE c.owner_account_id=? AND c.source_session_id=? "
+                "AND (c.source_incarnation='' OR c.source_incarnation=p.history_incarnation)",
                 (owner_account_id, session_id),
             ).fetchall()
         for sid, parent_seq, leaf, title, created_at in fork_rows:
@@ -2732,6 +2820,7 @@ class SQLiteSessionStore(SessionStore):
     ) -> None:
         def delete(conn: sqlite3.Connection) -> None:
             self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
+            self._freeze_fork_prefixes(conn, owner_account_id, session_id)
             self._delete_session_rows(conn, session_id, owner_account_id)
 
         self._writer.execute(delete)
@@ -2775,24 +2864,24 @@ class SQLiteSessionStore(SessionStore):
         writer: Any | None = None,
     ) -> list[str]:
         """删除某工作空间下的全部会话，返回被删除的 session_id 列表。"""
-        if writer is not None:
-            rows = writer.execute(
-                "SELECT session_id FROM sessions "
-                "WHERE owner_account_id = ? AND workspace_id = ? AND session_id NOT LIKE '%::%'",
-                (owner_account_id, workspace_id),
-            ).fetchall()
-            ids = [str(row[0]) for row in rows]
+        def delete(conn: sqlite3.Connection) -> list[str]:
+            if writer is None:
+                ids = [row["session_id"] for row in self.list_sessions(workspace_id, owner_account_id=owner_account_id)]
+            else:
+                ids = [row[0] for row in conn.execute(
+                    "SELECT session_id FROM sessions WHERE owner_account_id=? AND workspace_id=? AND session_id NOT LIKE '%::%'",
+                    (owner_account_id, workspace_id),
+                )]
+            deleting = {(owner_account_id, sid) for sid in ids}
             for sid in ids:
-                self._delete_session_rows(writer, sid, owner_account_id)
-            return ids
-        rows = self.list_sessions(workspace_id, owner_account_id=owner_account_id)
-        ids = [str(r["session_id"]) for r in rows]
-
-        def _write(conn):
+                self._freeze_fork_prefixes(conn, owner_account_id, sid, deleting)
             for sid in ids:
                 self._delete_session_rows(conn, sid, owner_account_id)
+            return ids
 
-        self._writer.execute(_write)
+        if writer is not None:
+            return delete(writer)
+        ids = self._writer.execute(delete)
         for sid in ids:
             self._evict_projection((owner_account_id, sid))
         return ids
@@ -3284,6 +3373,9 @@ class SQLiteSessionStore(SessionStore):
             expired = conn.execute(
                 f"SELECT owner_account_id, session_id FROM sessions WHERE {where}", params
             ).fetchall()
+            deleting = set(expired)
+            for owner, sid in expired:
+                self._freeze_fork_prefixes(conn, owner, sid, deleting)
             # 先清事件与租约（子查询仍能命中待删的 sessions 行），再删会话本体。
             conn.execute(
                 "DELETE FROM session_events WHERE (owner_account_id, session_id) IN "

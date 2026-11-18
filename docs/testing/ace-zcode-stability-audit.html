@@ -182,6 +182,15 @@
 <p><strong>验收</strong> Windows 存储、事件、历史窗口、投影缓存和 Gateway 回执组合共 155 项通过。双连接 SQLite 夹具覆盖同游标重建、迟到确认、缓存淘汰、冷读快照、同代追加、追问答案的原事件引用、旧 blob 回填和 fork 前缀。2,000 条消息下，连续 40 次热读执行 40 条 SELECT，没有额外事务。Windows 官方发行副本加载最终候选源码，经正常 WebSocket 完成两轮回环模型对话，第二轮输入含第一轮问答。重连后查得两个完成回执。重启复用同一临时账号目录，无模型重跑，原始 HTTP 历史逐字节相同。两次进程退出均为 0，双端口均释放。</p>
 <p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>tests/test_session_store_contract.py</code>。ZCode <code>packages/ui/src/v4/conversationProjectionStore.ts:660</code>、<code>packages/ui/src/v4/conversationProjectionStore.ts:1114</code>、<code>packages/ui/src/v4/conversationProjectionStore.ts:1256</code>。</p>
 </article>
+<article id="fork-prefix-lifetime">
+<h3>分叉历史依赖源会话的生命周期</h3>
+<p>旧分叉只保存源会话 ID 与切口序号。普通清除或过期清理源会话后，子和孙仍在目录中，打开历史却会报事件链断裂。相同 ID 下创建新源会话后，冷读可能把它的正文当成旧分叉前缀，热缓存仍显示原正文。两个并行 SQLite 连接可复现前后差异。</p>
+<p>ZCode 在提交分叉的写事务中生成子会话自身的消息及部件，并保存它们的稳定身份。Ace 的公开历史仍需保留既有来源和序号，普通创建也保留单行切口的写入规模。源事件即将被删除或整链重写时，再冻结仍有依赖的前缀。</p>
+<p>新分叉在写入前核对源会话实例和事件修订。整链重写、单删、工作空间批删和过期清理都在同一写事务内先冻结幸存分叉的活动前缀。全量投影和历史窗口保留原始来源、事件序号和时间。切换到已冻结前缀会更新分页修订，消息 ID 保持原值。归档随对应子会话移除，仍存活的后代在移除之前保存自身引用。</p>
+<p><strong>验收</strong> Windows 数据迁移、存储、历史和 Gateway 组合 175 项通过。旧版七项定向回归均失败，候选覆盖单删、过期、整链重写、部分工作空间批删、事务回滚、另一个连接切换来源和来源实例校验。1,000、5,000、10,000 条三个切口各只写一条约 155 字节的切口事件。删除源后写入 16,003 行前缀及来源元数据，单次合成测量约 607 毫秒，最后一个子会话删除后归档表回到零行。</p>
+<p>Windows 官方 Gateway 副本的旧版在正常删除源后，仍共享前缀的子孙历史各返回 HTTP 400。加载最终候选后，同一类子孙均能读取原四行，逐行来源和消息 ID 不变。两个分叉各含一对子孙，四个会话均继续聊天并完成，共七次回环模型请求。新连接查得四个完成回执。重启不重跑模型，四个会话的原始历史和回执响应逐字节相同。两次进程正常退出并释放双端口。</p>
+<p class="evidence">Ace <code>crew/state/session_store.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/session-fork.ts:585</code>、<code>:660</code>，<code>apps/zcode-cli/packages/adapters/src/storage/session-store/sqlite-session-store.ts:374</code>。</p>
+</article>
 </section>
 
 <section id="desktop">

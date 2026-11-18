@@ -581,3 +581,143 @@ def test_settlement_preserves_unmigrated_blob_and_expires_its_history_cursor(tmp
         assert TurnOutcome.from_body(migrated["items"][-1]["outcome"]) == outcome
         raw, _, _ = store.load_window("s1", owner_account_id=OWNER, limit=20)
         assert [message for _, _, message in raw] == legacy
+
+
+@pytest.mark.parametrize("mutation", ["clear", "rewrite", "expire", "workspace"])
+def test_fork_prefix_survives_source_lifetime_and_keeps_nested_cursor(tmp_path, mutation):
+    path = str(tmp_path / "fork-lifetime.db")
+    messages = [
+        replace(Message.user("Original"), request_id="r"),
+        Message.assistant("", [ToolCall("t", "read", {"path": "fixture"})]),
+        Message.tool("t", "Text", name="read"), replace(Message.assistant("Review"), request_id="r"),
+    ]
+    source, child, grandchild = "source", "child", "grandchild"
+    with closing(SQLiteSessionStore(path)) as store:
+        store.save(source, messages, workspace_id="old", owner_account_id=OWNER)
+        store.record_turn_outcome(source, "r", {"status": "completed"}, owner_account_id=OWNER, last_status="completed")
+        cut = store._read_event_cursor(OWNER, source)[0]
+        store.fork(source, cut, owner_account_id=OWNER, new_session_id=child)
+        store.save(child, store.load(child, OWNER) + [Message.user("Local")], owner_account_id=OWNER)
+        store.fork(child, 2, owner_account_id=OWNER, new_session_id=grandchild)
+        initial = store.load(grandchild, OWNER)
+        before = store.read_history_page(grandchild, owner_account_id=OWNER, limit=20)
+        original_source = store.get_history_incarnation(source, OWNER)
+        store.save(source, [Message.user("Other owner")], owner_account_id="other")
+        if mutation == "clear":
+            store.clear(source, OWNER)
+            store.save(source, [Message.user("Reused"), Message.assistant("Different")], owner_account_id=OWNER)
+            assert store.get_history_incarnation(source, OWNER) != original_source
+            assert not any(b["kind"] == "fork" for b in store.list_branches(source, owner_account_id=OWNER))
+        elif mutation == "rewrite":
+            store.save(source, [Message.user("New root")], owner_account_id=OWNER)
+            assert any(b.get("session_id") == child for b in store.list_branches(source, owner_account_id=OWNER))
+        elif mutation == "expire":
+            store.transaction(lambda conn: conn.execute(
+                "UPDATE sessions SET updated_at=0 WHERE session_id=? AND owner_account_id=?", (source, OWNER),
+            ))
+            assert store.expire_idle_sessions(3600) == 1
+        else:
+            store.transaction(lambda conn: conn.execute(
+                "UPDATE sessions SET workspace_id='keep' WHERE session_id=? AND owner_account_id=?", (grandchild, OWNER),
+            ))
+            assert set(store.delete_sessions_for_workspace("old", owner_account_id=OWNER)) == {source, child}
+        assert store.load(grandchild, OWNER) == initial
+        assert store.load(source, "other")[0].content == "Other owner"
+    with closing(SQLiteSessionStore(path)) as cold:
+        assert cold.load(grandchild, OWNER) == initial
+        current = cold.read_history_page(grandchild, owner_account_id=OWNER, limit=20)
+        assert current.rows == before.rows and current.sources == before.sources
+        assert current.revision != before.revision
+        older, _, _ = cold.load_window(grandchild, owner_account_id=OWNER, before="source:3", limit=10)
+        assert [(sid, seq) for sid, seq, _ in older] == [(source, 1), (source, 2)]
+        with pytest.raises(SessionEventLogError):
+            cold.load_window(grandchild, owner_account_id=OWNER, before=f"source:{cut + 1}", limit=10)
+
+
+def test_legacy_fork_freeze_is_atomic_and_owned_by_surviving_child(tmp_path):
+    with closing(SQLiteSessionStore(str(tmp_path / "atomic.db"))) as store:
+        _save_turns(store, "root", 3)
+        child = store.fork("root", 4, owner_account_id=OWNER)
+        # Old persisted seeds predate source-incarnation binding and may have imprecise clocks.
+        store.transaction(lambda conn: conn.execute(
+            "UPDATE session_events SET payload=json_remove(json_set(payload,'$.created_at',0),'$.source_incarnation') "
+            "WHERE owner_account_id=? AND session_id=? AND seq=1", (OWNER, child),
+        ))
+
+        def rollback(conn):
+            store.delete_sessions_for_workspace("delete", owner_account_id=OWNER, writer=conn)
+            raise RuntimeError("roll back")
+
+        store.transaction(lambda conn: conn.execute(
+            "UPDATE sessions SET workspace_id='delete' WHERE session_id='root' AND owner_account_id=?", (OWNER,),
+        ))
+        with pytest.raises(RuntimeError, match="roll back"):
+            store.transaction(rollback)
+        previous = store.read_history_page(child, owner_account_id=OWNER, limit=20)
+        assert len(previous.rows) == 4
+        assert store.delete_sessions_for_workspace("delete", owner_account_id=OWNER) == ["root"]
+        assert store.read_history_page(child, owner_account_id=OWNER, limit=20).rows == previous.rows
+        store.clear(child, OWNER)
+        assert store.read_query(lambda conn: conn.execute("SELECT count(*) FROM session_fork_prefix_events").fetchone()[0]) == 0
+
+
+def test_fork_rejects_source_replacement_while_preparing_boundary(tmp_path, monkeypatch):
+    from crew.state.session_store import SessionWriteConflict
+
+    path = str(tmp_path / "prepare.db")
+    with closing(SQLiteSessionStore(path)) as creator:
+        _save_turns(creator, "source", 2)
+    with closing(SQLiteSessionStore(path)) as reader, closing(SQLiteSessionStore(path)) as writer:
+        execute = reader._writer.execute
+
+        def replace_before_write(operation):
+            monkeypatch.setattr(reader._writer, "execute", execute)
+            writer.clear("source", OWNER)
+            writer.save("source", [Message.user("Reused"), Message.assistant("Replaced")], owner_account_id=OWNER)
+            return execute(operation)
+
+        monkeypatch.setattr(reader._writer, "execute", replace_before_write)
+        with pytest.raises(SessionWriteConflict):
+            reader.fork("source", 2, owner_account_id=OWNER, new_session_id="partial")
+        assert reader.get_history_incarnation("partial", OWNER) is None
+
+
+def test_fork_lineage_rejects_reused_ancestor_sid_even_after_child_rewrite(tmp_path):
+    with closing(SQLiteSessionStore(str(tmp_path / "lineage.db"))) as store:
+        _save_turns(store, "source", 2)
+        linked = store.fork("source", 2, owner_account_id=OWNER)
+        rewritten = store.fork("source", 2, owner_account_id=OWNER)
+        store.save(rewritten, [Message.user("Replacement child")], owner_account_id=OWNER)
+        assert rewritten in {b.get("session_id") for b in store.list_branches("source", owner_account_id=OWNER)}
+        store.clear("source", OWNER)
+        with pytest.raises(ValueError, match="分叉"):
+            store.fork(linked, 1, owner_account_id=OWNER, new_session_id="source")
+        _save_turns(store, "source", 2)
+        assert not any(b["kind"] == "fork" for b in store.list_branches("source", owner_account_id=OWNER))
+
+
+def test_fork_snapshot_preserves_event_times_and_legacy_identity_limits(tmp_path):
+    path = str(tmp_path / "legacy-identity.db")
+    with closing(SQLiteSessionStore(path)) as store:
+        _save_turns(store, "root", 2)
+        linked = store.fork("root", 3, owner_account_id=OWNER)
+        original = store.read_query(lambda conn: conn.execute(
+            "SELECT seq,parent_seq,type,payload,created_at FROM session_events "
+            "WHERE owner_account_id=? AND session_id='root' AND seq<=3 ORDER BY seq", (OWNER,),
+        ).fetchall())
+        store.clear("root", OWNER)
+        archived = store.read_query(lambda conn: conn.execute(
+            "SELECT seq,parent_seq,type,payload,created_at FROM session_fork_prefix_events "
+            "WHERE owner_account_id=? AND fork_session_id=? AND session_id='root' AND seq>0 ORDER BY seq", (OWNER, linked),
+        ).fetchall())
+        assert archived == original
+        _save_turns(store, "old-source", 2)
+        orphan = store.fork("old-source", 2, owner_account_id=OWNER)
+        # A pre-fix database can already be missing the source while still containing its seed.
+        store.transaction(lambda conn: conn.execute("DELETE FROM sessions WHERE owner_account_id=? AND session_id='old-source'", (OWNER,)))
+    with closing(SQLiteSessionStore(path)) as cold:
+        with pytest.raises(SessionEventLogError):
+            cold.load(orphan, OWNER)
+        _save_turns(cold, "old-source", 2)
+        with pytest.raises(SessionEventLogError):
+            cold.read_history_page(orphan, owner_account_id=OWNER, limit=10)

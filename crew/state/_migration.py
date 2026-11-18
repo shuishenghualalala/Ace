@@ -504,6 +504,7 @@ CORE_MAIN_DB_TABLES: frozenset[str] = frozenset({
     "desktop_send_identity",
     "desktop_send_inbox",
     "followup_receipts",
+    "session_fork_prefix_events",
     "plan_gateway_state",
     "plan_receipts",
     "store_meta",
