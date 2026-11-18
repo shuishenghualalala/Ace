@@ -193,16 +193,34 @@ def test_retry_after_missing_everywhere_is_none():
     assert classify_provider_error(exc).retry_delay is None
 
 
-def test_retry_after_http_date_not_supported_falls_back():
-    """HTTP-date 形式的 Retry-After 不解析（需时钟对比），回落 body 兜底。"""
+def test_retry_after_http_date(monkeypatch):
     import openai
+
+    monkeypatch.setattr("crew.providers.classify.time.time", lambda: 1445412477)
 
     exc = _sdk_error(
         openai.InternalServerError, 503,
         headers={"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"},
         body={"retry_delay": 7},
     )
-    assert classify_provider_error(exc).retry_delay == 7
+    assert classify_provider_error(exc).retry_delay == 3
+
+
+@pytest.mark.parametrize("value", ["false", " FALSE ", "0"])
+def test_upstream_retry_veto_overrides_rate_limit_and_delay(value):
+    exc = _bare(429)
+    exc.response_headers = {"X-Should-Retry": value, "Retry-After": "5"}
+    classified = classify_provider_error(exc)
+    assert classified.kind is CrewErrorKind.USAGE_LIMIT
+    assert not classified.retryable
+    assert classified.retry_delay is None
+
+
+@pytest.mark.parametrize(("ms", "expected"), [("25", 0.025), ("0", 0.0), ("inf", 4), ("bad", 4)])
+def test_milliseconds_take_precedence_when_valid(ms, expected):
+    exc = _bare(429)
+    exc.response_headers = {"Retry-After-Ms": ms, "Retry-After": "4"}
+    assert classify_provider_error(exc).retry_delay == expected
 
 
 def test_retry_after_httpx_response_headers():

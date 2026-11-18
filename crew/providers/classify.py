@@ -2,14 +2,16 @@
 
 openai 与 anthropic 两个 provider 共用这一份判定（此前各自维护一份类名启发式，
 同一错误两家的结论可能不同）。判定顺序：httpx 原生异常 isinstance → __cause__
-递归 → 消息文本 → 类名 + HTTP status。Retry-After 优先取响应头（仅支持秒数
-格式），body 的 retry_delay 字段兜底；解析失败静默回落 None。
+递归 → 消息文本 → 类名 + HTTP status。重试遵循服务端的禁止标记与等待时间。
 """
 
 from __future__ import annotations
 
 import json
+import math
+import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -68,11 +70,16 @@ def classify_provider_error(exc: Exception, *, status: int | None = None) -> Err
     """
     resolved_status = _resolve_status(exc, status)
     kind = _kind_for(exc, resolved_status)
+    raw_headers = getattr(exc, "response_headers", None)
+    if raw_headers is None:
+        raw_headers = getattr(getattr(exc, "response", None), "headers", None)
+    headers = {str(k).lower(): str(v).strip() for k, v in (raw_headers or {}).items()}
+    blocked = headers.get("x-should-retry", "").lower() in {"false", "0"}
     return ErrorClassification(
         kind=kind,
         status=resolved_status,
-        retryable=_retryable_for(exc, kind, resolved_status),
-        retry_delay=_retry_delay_for(exc, resolved_status),
+        retryable=not blocked and _retryable_for(exc, kind, resolved_status),
+        retry_delay=None if blocked else _retry_delay_for(exc, resolved_status, headers),
         category=category_for_kind(kind),
     )
 
@@ -152,30 +159,37 @@ def _retryable_for(exc: Exception, kind: CrewErrorKind, status: int | None) -> b
     return False
 
 
-def _retry_delay_for(exc: Exception, status: int | None) -> float | None:
+def _retry_delay_for(exc: Exception, status: int | None, headers: dict[str, str]) -> float | None:
     # Retry-After 只对限流/过载有意义；body 的 retry_delay 字段不限状态兜底。
-    delay = _header_retry_delay(exc) if status in (429, 503) else None
+    delay = _header_retry_delay(headers) if status in (429, 503) else None
     if delay is None:
         delay = _body_retry_delay(exc)
     return delay
 
 
-def _header_retry_delay(exc: Exception) -> float | None:
-    # openai SDK 异常带 response_headers；httpx 异常（如 HTTPStatusError）带 response。
-    headers: Any = getattr(exc, "response_headers", None)
-    if headers is None:
-        headers = getattr(getattr(exc, "response", None), "headers", None)
-    if headers is None:
-        return None
-    value = headers.get("retry-after")
-    if value is None:
-        return None
-    # 只支持秒数格式；HTTP-date 形式需要与服务端时钟对比，此处不解析，回落 None。
+def _nonnegative_delay(value: object) -> float | None:
     try:
-        seconds = float(value)
-    except (TypeError, ValueError):
+        number = float(value) if isinstance(value, (str, int, float)) else None
+    except (ValueError, OverflowError):
         return None
-    return seconds if seconds >= 0 else None
+    return number if number is not None and math.isfinite(number) and number >= 0 else None
+
+
+def _header_retry_delay(headers: dict[str, str]) -> float | None:
+    milliseconds = _nonnegative_delay(headers.get("retry-after-ms"))
+    if milliseconds is not None:
+        return milliseconds / 1000
+    value = headers.get("retry-after")
+    seconds = _nonnegative_delay(value)
+    if seconds is not None or not value:
+        return seconds
+    try:
+        instant = parsedate_to_datetime(value)
+        if instant.tzinfo is not None:
+            return max(0.0, instant.timestamp() - time.time())
+    except (ValueError, TypeError, OverflowError, OSError):
+        pass
+    return None
 
 
 def _body_retry_delay(exc: Exception) -> float | None:
@@ -190,12 +204,7 @@ def _body_retry_delay(exc: Exception) -> float | None:
     error_body = body.get("error")
     candidates = (body.get("retry_delay"), error_body.get("retry_delay") if isinstance(error_body, dict) else None)
     for value in candidates:
-        if value is None:
-            continue
-        try:
-            seconds = float(value)
-        except (TypeError, ValueError):
-            continue
-        if seconds >= 0:
+        seconds = _nonnegative_delay(value)
+        if seconds is not None:
             return seconds
     return None

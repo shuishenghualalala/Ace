@@ -1864,7 +1864,7 @@ class BuiltinExecutor(AgentExecutor):
                     # 服务端建议的退避（Retry-After / body retry_delay）优先于本地
                     # 指数退避，并封顶防异常大值拖死重试循环。
                     retry_delay = exc.retry_delay if isinstance(exc, CrewError) else None
-                    if retry_delay is not None and retry_delay > 0:
+                    if retry_delay is not None and retry_delay >= 0:
                         delay = min(retry_delay, _RETRY_DELAY_CAP_SECONDS)
                     exc_info = f"{type(exc).__name__}: {str(exc) or '(无详情)'}"
                     log.warning("LLM 瞬时失败，第 %d 次重试（%.1fs 后）：%s", attempt, delay, exc_info)

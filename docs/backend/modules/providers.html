@@ -97,6 +97,9 @@ provider: deepseek
 model: deepseek-reasoner
 api_key_env: DEEPSEEK_API_KEY</code></pre>
 
+  <h3>模型请求遇到限流时的处理</h3>
+  <p>OpenAI 兼容协议与 Anthropic 共用异常分类。上游通过 <code>x-should-retry</code> 明确禁止重试时，执行器结束对该提供方的重试，错误帧保留原有分类。HTTP 429 和 503 的等待时间依次读取毫秒响应头、秒数或带时区的 HTTP 日期、响应体的 <code>retry_delay</code>。执行器在可重试时应用等待时间，零表示立即重试，单次等待最多 60 秒。</p>
+
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>档案里的模型目录为 models.dev 快照，未收录的模型字段留空（宁缺勿猜）；后续可做定期刷新。</li>

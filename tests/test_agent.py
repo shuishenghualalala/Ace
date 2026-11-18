@@ -555,14 +555,15 @@ def _retry_ctx() -> ExecutionContext:
     )
 
 
-async def test_builtin_executor_retry_waits_server_retry_delay(_recorded_sleeps):
+@pytest.mark.parametrize("server_delay", [0.0, 0.05])
+async def test_builtin_executor_retry_waits_server_retry_delay(_recorded_sleeps, server_delay):
     """服务端建议的 retry_delay 优先于本地指数退避（本地 backoff=10s，实际应等 0.05s）。"""
-    err = ProviderError("限流", kind=CrewErrorKind.USAGE_LIMIT, retryable=True, status=429, retry_delay=0.05)
+    err = ProviderError("限流", kind=CrewErrorKind.USAGE_LIMIT, retryable=True, status=429, retry_delay=server_delay)
     provider = _DelayFlakyProvider(fail_times=1, error=err)
     ex = _retry_executor(provider)
     kinds = [ch.kind async for ch in ex.execute(_retry_ctx())]
     assert kinds[-1] == "final"
-    assert _recorded_sleeps == [0.05]
+    assert _recorded_sleeps == [server_delay]
 
 
 async def test_builtin_executor_retry_delay_capped(_recorded_sleeps):
