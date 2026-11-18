@@ -52,7 +52,7 @@
 <h3>A1 · P1 · Plan 模式要求搜索，却不提供搜索工具</h3>
 <p>规划提示词指向 <code>glob</code> 和 <code>grep</code>，Plan 白名单仍写 <code>search_files</code>。用真实工具注册表核对，文件模块注册的 <code>glob</code>、<code>grep</code>、<code>patch</code> 与 Plan 白名单交集为空。模型会碰到缺失工具或用终端绕行，权限拒绝和额外轮次随之增加。ZCode 的 Plan 权限会按内置工具能力识别 Glob/Grep。</p>
 <p><strong>修复</strong> 保留 Plan manager 的状态机和现有写入门控。以工具能力或单一声明生成模型 schema 与提示词工具表，并由运行时执行同一授权。计划文件保留单独、精确的写入例外。验证 Desktop、Web 和 CLI 的实际模型请求包含读取与搜索能力，执行阶段按预期恢复写工具。</p>
-<p><strong>验收</strong> <code>9673fa74</code> 已提交。Windows Electron、Chrome 和 CLI 均连接本地测试模型，检查出站工具 schema、实际搜索、计划文件落盘和审批后执行。审批前尝试写普通文件被拒绝。Plan 使用结构化搜索和读取工具，通用终端在审批后按会话权限恢复。后端回归 227 项通过、1 项跳过。已配置的远端模型最小请求仍返回 <code>InvalidSubscription</code>。</p>
+<p><strong>验收</strong> <code>9673fa74</code> 已提交。Windows Electron、Chrome 和 CLI 均连接本地测试模型，检查出站工具 schema、实际搜索、计划文件落盘和审批后执行。审批前尝试写普通文件被拒绝。Plan 使用结构化搜索和读取工具，通用终端在审批后按会话权限恢复。后端回归 227 项通过、1 项跳过。当轮原测试配置的远端请求返回 <code>InvalidSubscription</code>。随后改用维护者指定的测试配置复验，见下。</p>
 <p><strong>真实模型复验（2026-11-18）</strong> <code>deepseek-flash</code> 从维护者指定的配置发出真实请求。已绑定项目的规划轮调用 <code>file_read</code>、<code>file_write</code>、<code>exit_plan_mode</code>；计划含从文件读出的随机标记，审批前项目文件字节保持不变。批准后实际调用读取、<code>patch</code>、重读，文件只有指定状态变更，未产生第二次审批。仓库的 <code>tests/e2e_plan_mode.py</code> 已显式绑定临时项目和会话并独立管理运行数据。另一次真实模型运行在审批后修改玩具 CLI，启动该程序输入 <code>/version</code> 得到 <code>9.9.9</code>。可通过 <code>--config</code> 选择测试模型，凭据从其配置的环境变量读取。</p>
 <p class="evidence">Ace <code>crew/agent/plan/prompts.py:24</code>，<code>crew/agent/plan/tools.py:27</code>，<code>crew/agent/runtime.py:555</code>，<code>crew/tools/file_tools.py:781</code>。ZCode <code>apps/zcode-cli/packages/core/src/permission/service.ts:451</code>、<code>:605</code>。</p>
 </article>
@@ -158,7 +158,7 @@
 <h3>D2 · P1 · 进程清理的范围超过当前实例</h3>
 <p>macOS 和 Linux 启动分支会异步按同用户与进程命令行清理匹配的网关，启动新进程前没有等待该清理完成。相同账号下的另一个 profile、另一个 checkout 或外置网关可能被误停。Windows 打包分支已有避免广泛清理的处理，开发模式另有命令行匹配。ZCode 的 utility host 采用自身持有的进程句柄管理退出。</p>
 <p><strong>修复</strong> 删除开发版及打包版启动路径的进程扫描，以及 Linux 更新脚本里的按名称终止。桌面为每次受管启动持有专属管道，网关收到 EOF 后执行现有关停流程。健康探针验证应用目录证明和本次启动的证明，避免把同目录下其他托管实例当成当前网关。开发版和打包版在候选范围内检查主端口及相邻健康端口，遇到占用就继续选择。允许复用的独立网关保留原有协议和独立生命周期。</p>
-<p><strong>验收</strong> <code>856fb5cc</code> 已提交。真实 Windows Electron 双实例覆盖 API 和健康端口占用、就绪前后强退、正常退出、重启、独立 CLI 网关复用及五轮端到端回复。临时打包布局另走真实 Windows 打包分支，内嵌 Python 启动并完成一轮回复，强退后释放端口，独立网关存活。Linux 离线容器验证真实管道、Unix socketpair、父进程强退、端口回退和启动证明。Python 636 项通过、2 项跳过。桌面全量 2030 项通过、2 项跳过，仍有两项 Windows 符号链接权限失败及一项已知模型分组顺序失败。默认模型的最小请求仍返回 HTTP 400 <code>InvalidSubscription</code>，端到端使用本地协议测试模型。</p>
+<p><strong>验收</strong> <code>856fb5cc</code> 已提交。真实 Windows Electron 双实例覆盖 API 和健康端口占用、就绪前后强退、正常退出、重启、独立 CLI 网关复用及五轮端到端回复。临时打包布局另走真实 Windows 打包分支，内嵌 Python 启动并完成一轮回复，强退后释放端口，独立网关存活。Linux 离线容器验证真实管道、Unix socketpair、父进程强退、端口回退和启动证明。Python 636 项通过、2 项跳过。当轮桌面全量 2030 项通过、2 项跳过，余下两项 Windows 符号链接权限和一项模型分组顺序在后续复验修复。原模型配置返回 HTTP 400 <code>InvalidSubscription</code>。这一轮用本地协议端点，维护者指定的真实模型与桌面全量见<a href="#handoff">合并后复核</a>。</p>
 <p><strong>仍待验证</strong> macOS 安装包的原生端到端和 Linux 用户级 systemd scope 的冻结回收。Windows Job Object 及 Linux POSIX 进程组的冻结路径已分别实测。Windows 和 Linux 安装包验证见 D8。同一 <code>CREW_HOME</code> 下多个实例曾共用后台终端恢复文件。<code>85951895</code> 已按任务保存宿主及子进程的启动身份，Windows 双 Gateway 与 Linux 并发恢复结果见<a href="#handoff">合并后复核</a>。应用显式等待关停和完成写入见 D6。</p>
 <p><strong>Windows 宿主完全冻结</strong> 从 <code>56eb6de6</code> 真实 EXE 的同一内嵌 Python 启动两个 Gateway，共用一个临时 Crew Home。每端通过正常的后台终端注册表启动 PowerShell 和独立 Python 子进程。暂停第一端全部线程，以原来每 50 毫秒写一次的心跳连续 700 毫秒不变确认冻结，再用操作系统终止该 Gateway。其绑定的 Job Object 在 0.172 秒内回收 shell 与子进程，业务和健康端口可重新绑定。第二端的两个进程仍存活，HTTP 仍就绪；关闭其桌面父管道后，第二端返回 0，子进程和双端口均已释放。</p>
 <p><strong>健康端口在启动期间被占用</strong> Linux 共享回环压测的第 4 轮中，Python 后端回归与桌面共用默认健康端口。Gateway 打印了 <code>EADDRINUSE</code>，桌面仍报告可用，九阶段脚本在第二端口验签失败。改用独立回环网络后继续测量。修复后的桌面受管 Gateway 必须绑定主端口 +1。绑定失败时主端口返回可验签的 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>，业务仍受启动门控。主进程确认子进程身份，关闭父管道，等旧进程退出，再在原启动时限内选择后续端口。独立 Gateway 仍支持显式健康端口和单端口运行。</p>
@@ -182,16 +182,18 @@
 <p>Desktop 主进程调用 <code>socket.send</code> 后即返回成功，Gateway 是否受理仍未知。即使内部发送函数检测到失败并返回 false，外层 <code>sendMessage</code> 也把结果变成 void。输入框在 promise 正常结束后清空，附件列表也已被消费。在 UI 已可发送后连接断开，用户可能看到错误提示却丢失草稿及附件。忙时待发队列还只驻留内存。ZCode 有按请求身份去重的 command inbox，并将结果事实持久化、供连接恢复后查询。</p>
 <p><strong>修复</strong> 以现有 <code>request_id</code> 加 owner、session 作为受理身份。网关持久记录受理，发送明确的 <code>accepted</code> 或拒绝结果。桌面保留待确认内容，重连后查询同一标识，需重投时保持相同 ID。持久记录与执行意图区分，相关 side effect 使用现有意图对账，避免重放执行。验收在发送前、网关已受理、回执丢失和工具已执行等阶段断连或重启，统计重复执行和静默丢失均为零。</p>
 <p><strong>实现</strong> Electron 在发送前原子写入待发记录，存放原请求 ID、正文和附件引用。Gateway 在 SQLite 事务提交后返回受理回执，再竞争执行权。桌面查询原数据库中的记录，只有未确认的请求得到 <code>unknown</code> 时才按原样重发。已受理且尚未执行的请求可在重连时接续。执行已开始但终态无法确认时，界面将消息保留为待核对项，避免再次执行工具。回执跟踪按账号和数据库校验。停止或删除前先保存撤销意图，避免重连复活待发消息。重载遇到终态回执时，界面重新加载权威历史。</p>
-<p><strong>验收</strong> <code>ffce87d8</code> 已提交。最终构建通过六项 Windows Electron 端到端测试。覆盖发送前断线、落库回执丢失后重载、拒绝后保留草稿和真实上传附件、持久受理后首次执行前崩溃、实际文件写入后执行进程崩溃、忙时排队后重载。恢复后请求 ID 与内容一致，会话历史无重复。执行中崩溃场景保留待核对项，原文件内容和修改时间均未改变。Gateway 定向回归通过 194 项，较早的广泛回归通过 735 项、跳过 1 项。最终桌面全量通过 2072 项、跳过 2 项，保留 3 项基线失败。默认模型仍返回 HTTP 400 <code>InvalidSubscription</code>，Windows 故障测试使用本地协议兼容模型驱动真实 Gateway 和 Electron。</p>
-<p><strong>边界</strong> 队列重启恢复为原始入队顺序，手动排序只在当前运行期间有效。撤销持久化覆盖尚未调度的请求，已经开始的任务仍由运行时停止。外部渠道送达由渠道模块独立确认。故障测试覆盖进程终止，SQLite 使用现有 WAL 同步设置。macOS 和 Linux 尚待同场景原生复验。</p>
+<p><strong>验收</strong> <code>ffce87d8</code> 已提交。最终构建通过六项 Windows Electron 端到端测试。覆盖发送前断线、落库回执丢失后重载、拒绝后保留草稿和真实上传附件、持久受理后首次执行前崩溃、实际文件写入后执行进程崩溃、忙时排队后重载。恢复后请求 ID 与内容一致，会话历史无重复。执行中崩溃场景保留待核对项，原文件内容和修改时间均未改变。Gateway 定向回归通过 194 项，较早的广泛回归通过 735 项、跳过 1 项。最终桌面全量通过 2072 项、跳过 2 项，保留 3 项基线失败。原配置的默认模型当时返回 HTTP 400 <code>InvalidSubscription</code>，Windows 故障测试使用本地协议兼容模型驱动真实 Gateway 和 Electron。</p>
+<p><strong>边界</strong> 队列重启恢复为原始入队顺序，手动排序只在当前运行期间有效。撤销持久化覆盖尚未调度的请求，已经开始的任务仍由运行时停止。外部渠道送达由渠道模块独立确认。故障测试覆盖进程终止，SQLite 使用现有 WAL 同步设置。Linux 其余故障点和 macOS 同组场景待原生复验。</p>
+<p><strong>Linux 受理回执丢失 · <code>93631f3d</code></strong> UOS amd64 正式包在 Debian 12.15 / WSL2 的普通用户、独立回环和原 Chromium 沙箱中运行。测试先从独立只读 SQLite 连接确认原请求已受理，再截断这一条回执。重载桌面后原 ID 的本地待发记录仍在。桌面只查询一次该 ID，未重复提交。模型调用、用户消息、助手消息及界面显示各一次。持久状态转为 <code>completed</code> 后清除待发记录，Gateway 代次保持一致，正常退出后双端口释放。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:3919</code>，<code>desktop/src/ui/features/chat-controller.ts:1661</code>、<code>:1755</code>，<code>desktop/src/ui/features/attachments.ts:222</code>，<code>composer-view.ts:348</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/command-inbox.ts:120</code>、<code>:223</code>，<code>persistent-command-facts.ts:144</code>。</p>
 </article>
 <article id="readiness">
 <h3>D5 · P1 · 进程健康与聊天就绪存在时间差</h3>
 <p>Ace 的独立健康端口可在 ASGI 和延迟初始化完成前返回，主进程探针优先尝试它，并可能将进程从 starting 提升为 ready。界面还允许 unknown transport，忽略 <code>components.startup</code>。此时 REST 仍可能等待或返回 503，WS 仍可能拒绝接入。ZCode 以可查询、可重试的启动 attempt 管理数据库和本地请求受理。</p>
 <p><strong>修复</strong> 独立端口证明进程存活。通过实例校验的主端口报告核心状态及启动代次。核心初始化完成前，业务 REST 返回可识别的 503，经过认证的 WebSocket 客户端收到阶段对应的关闭码。桌面只有在当前代次核心就绪且本窗口 WebSocket 已打开时才允许发消息。旧探针和旧 socket 回调不能改变新代次。首屏先读取已知鉴权状态，Gateway 就绪后再验证账号。恢复期间可保留草稿，Cron 和 MCP 故障单独显示。</p>
-<p><strong>验收</strong> <code>ec6b6b86</code> 已提交。真实 Windows Electron 的五项端到端覆盖核心启动阻塞、独立健康端口先起、WebSocket 握手延迟、启动失败后重试、上一代健康响应迟到、Cron 和 MCP 同时失败，以及普通本地模式从鉴权未知进入免账号对话。各场景的首条消息在连接就绪后只发送和落盘一次。最终后端定向回归 193 项通过、1 项跳过。桌面全量 2058 项通过、2 项跳过，仍有 3 项原有失败。默认模型返回 HTTP 400 <code>InvalidSubscription</code>，对话用本地协议测试模型验证。</p>
-<p><strong>边界</strong> 核心异步启动限时 90 秒。监听前的同步数据库构建若卡住，仍由桌面的冷启动时限处理。macOS 和 Linux 原生桌面尚未执行这组端到端。</p>
+<p><strong>验收</strong> <code>ec6b6b86</code> 已提交。真实 Windows Electron 的五项端到端覆盖核心启动阻塞、独立健康端口先起、WebSocket 握手延迟、启动失败后重试、上一代健康响应迟到、Cron 和 MCP 同时失败，以及普通本地模式从鉴权未知进入免账号对话。各场景的首条消息在连接就绪后只发送和落盘一次。最终后端定向回归 193 项通过、1 项跳过。桌面全量 2058 项通过、2 项跳过，仍有 3 项原有失败。原配置的默认模型当时返回 HTTP 400 <code>InvalidSubscription</code>，对话用本地协议测试模型验证。</p>
+<p><strong>边界</strong> 核心异步启动限时 90 秒。监听前的同步数据库构建若卡住，仍由桌面的冷启动时限处理。Linux 待验启动失败后重试、旧探针迟到、可选服务故障以及独立的普通冷启鉴权流程。macOS 同组端到端待验。</p>
+<p><strong>Linux 核心慢启动和握手门控 · <code>93631f3d</code></strong> 同一 UOS 发行包从两份干净配置启动，均核对独立健康端和主端口属于本次受管实例。核心延迟期间，主端口报告 <code>starting</code>，业务 REST 返回 <code>503 GATEWAY_STARTING</code> 和 <code>Retry-After: 1</code>，已认证 WebSocket 收到关闭码 1013。桌面不可发送，模型调用为零。释放核心后原代次报告 <code>ready</code>。仍暂缓桌面握手时可编辑草稿，按 Enter 或点击发送没有发出请求。握手完成后每轮各发一次，界面显示回复，HTTP 历史和退出后重新打开的 SQLite 均只有一条用户消息和一条助手回复。应用正常退出，双端口释放。首轮预演修正跨层代次比较后开始正式计数。</p>
 <p class="evidence">Ace <code>crew/gateway/app.py</code>、<code>crew/gateway/ws.py</code>，<code>desktop/src/main/gateway-readiness.ts</code>、<code>desktop/src/main/index.ts</code>、<code>desktop/src/ui/features/backend-status-guard.ts</code>。ZCode <code>packages/desktop/src/host/databaseStartupCoordinator.ts:58</code>、<code>:63</code>、<code>:143</code>。</p>
 </article>
 <article id="shutdown">
@@ -199,7 +201,7 @@
 <p>Ace 退出钩子异步发起 Gateway 停止，应用可以在停止 promise 完成前继续退出。强制终止回退主要面向直接子进程。ZCode 首次退出可被拦截并等待受管宿主执行 dispose，超时再结束进程。</p>
 <p><strong>修复</strong> 第一次原生退出会被拦截，后续退出请求等待同一次收尾。桌面暂停新请求，并行等待 WebSocket、浏览器、下载句柄和自有 Gateway。Gateway 收到关闭信号后停止接收新回合，保护正在写入的历史，并在原调度任务里关闭被暂停的异步流。排队请求退出时停止执行。正常退出有硬截止时间，超时仍可退出。更新和卸载须确认资源关闭及系统启动助手，失败后恢复桌面服务并保留更新包。托盘隐藏不进入退出流程。</p>
 <p><strong>验收</strong> <code>8b9a0e63</code> 已提交。Windows Electron 实测关窗隐藏和托盘重开，托盘退出等待真实浏览器标签页和 Gateway 收尾，耗时 2.65 秒。重开同一会话，已完成的回复仍可见，中断回合的用户消息只保存一次，持久状态为 <code>stopped</code>。用缩短的测试超时模拟 Gateway 卡死，到期只回收自有进程，另一实例继续对话。有效签名的临时程序验证 Windows 更新交接顺序，无法启动的签名测试程序验证保留下载记录和恢复服务。下载回归实测写入关闭及 Range 续传，Linux 离线验证模块与真实子进程，卸载交接使用模拟助手。</p>
-<p><strong>覆盖范围</strong> 后端 324 项通过、2 项跳过。桌面 2048 项通过、2 项跳过，仍有基线中的两项 Windows 符号链接权限失败和一项模型分组顺序失败。默认模型最小请求仍返回 HTTP 400 <code>InvalidSubscription</code>，对话端到端使用本地协议测试模型。macOS 原生退出和正式安装、卸载待验；超时强退时还未提交的写入可能中断。</p>
+<p><strong>覆盖范围</strong> 后端 324 项通过、2 项跳过。当轮桌面 2048 项通过、2 项跳过，另有两项 Windows 符号链接权限失败和一项模型分组顺序失败，均已在后续版本复验。原配置模型请求返回 HTTP 400 <code>InvalidSubscription</code>，当轮对话使用本地协议端点。macOS 原生退出和正式安装、卸载待验；超时强退时还未提交的写入可能中断。</p>
 <p class="evidence">Ace <code>desktop/src/main/desktop-shutdown.ts:15</code>，<code>desktop/src/main/index.ts:3957</code>，<code>crew/gateway/dispatcher.py:297</code>。ZCode <code>packages/desktop/src/main/index.ts:1228</code>、<code>:2602</code>，<code>desktopHostProcess.ts:714</code>。</p>
 </article>
 <article id="renderer-recovery">
@@ -207,8 +209,9 @@
 <p>Ace 能在部分 renderer 异常退出和主页面失败时限次重载。OOM、启动失败、长期无响应或重载耗尽时，缺少同等明确的交互恢复路径。ZCode 额外存储有界本地崩溃归档，采集冻结和 ANR 事件。</p>
 <p><strong>修复</strong> 区分进程崩溃、初始化失败、长卡顿和 OOM，有限次重建窗口，从已落盘 session 与 draft 恢复。重试耗尽后显示可重开或导出本地诊断的窗口。验收多数情况下界面自动回到原会话，连续失败后仍可退出或重新打开。</p>
 <p><strong>实现</strong> 主进程记录当前渲染文档和连续失败次数。常见进程异常退出、主页面加载失败、首屏 20 秒未就绪，或收到原生无响应事件后 12 秒仍未恢复，都会触发受限重建。可见前台窗口另有 16 秒心跳失联检测，覆盖 Chromium 未发出事件的卡死。后台窗口允许节流，主进程长时间暂停后重新开始计时。最多自动重试三次，文档连续健康 60 秒后重新获得预算。恢复会新建 BrowserWindow，回收上一文档的连接和流式请求，保留 Gateway 及其正在运行的 WebSocket 对话。耗尽后由系统原生对话框提供重试、诊断导出和退出。活动会话必须在当前账号可访问的会话列表中才能自动打开。正文和上传附件引用按账号落盘，已受理的草稿版本由发送回执去重。</p>
-<p><strong>验收</strong> <code>e7230ad6</code> 已提交。最终 Windows 构建通过 9 项原生生命周期端到端和 1 项诊断对话框打开、取消测试。验证流式回复中崩溃后回到原会话并接续同一轮、保留草稿和上传附件、托盘隐藏时重建、隐藏启动标志下正常显示、重试耗尽后从托盘进入原生弹窗、脚本缺失后的原生重试与退出，以及主页面缺失后恢复。真实渲染线程阻塞约 10.14 秒时继续使用原窗口，持续卡顿约 20.28 秒时自动重建，Gateway PID 保持一致。最终桌面全量 2090 项通过、2 项跳过、3 项基线失败；Gateway 回归 40 项通过、1 项跳过。默认配置模型实测返回 HTTP 400 <code>InvalidSubscription</code>，对话由真实 Electron 和 Gateway 接本地协议测试模型验证。</p>
-<p><strong>边界</strong> 草稿写入采用 150 毫秒合并提交，崩溃时间早于最近一次落盘时可能丢失最后的编辑。原生故障启动用例缩短了测试版就绪时限。诊断保存窗口已验证打开和取消。另用当前代码构建的 Windows Electron 触发四次实际窗口启动失败，再从进程自己的原生保存对话框将诊断写入隔离目录。文件 2,207 字节，可解析为 JSON，含四次失败、三次重试和一次耗尽记录，另外四条记录为各窗口启动。保存后使用原生退出按钮结束；该场景未发送模型请求。macOS、Linux 的原生导出仍待复验。</p>
+<p><strong>验收</strong> <code>e7230ad6</code> 已提交。最终 Windows 构建通过 9 项原生生命周期端到端和 1 项诊断对话框打开、取消测试。验证流式回复中崩溃后回到原会话并接续同一轮、保留草稿和上传附件、托盘隐藏时重建、隐藏启动标志下正常显示、重试耗尽后从托盘进入原生弹窗、脚本缺失后的原生重试与退出，以及主页面缺失后恢复。真实渲染线程阻塞约 10.14 秒时继续使用原窗口，持续卡顿约 20.28 秒时自动重建，Gateway PID 保持一致。该提交的桌面全量 2090 项通过、2 项跳过、3 项后来已修复的基线失败。Gateway 回归 40 项通过、1 项跳过。原配置模型返回 HTTP 400 <code>InvalidSubscription</code>，该轮真实 Electron 与 Gateway 使用本地协议测试模型。</p>
+<p><strong>边界</strong> 草稿写入采用 150 毫秒合并提交，崩溃时间早于最近一次落盘时可能丢失最后的编辑。原生故障启动用例缩短了测试版就绪时限。诊断保存窗口已验证打开和取消。另用当前代码构建的 Windows Electron 触发四次实际窗口启动失败，再从进程自己的原生保存对话框将诊断写入隔离目录。文件 2,207 字节，可解析为 JSON，含四次失败、三次重试和一次耗尽记录，另外四条记录为各窗口启动。保存后使用原生退出按钮结束；该场景未发送模型请求。macOS 原生导出仍待复验。</p>
+<p><strong>Linux 原生诊断导出 · <code>93631f3d</code></strong> UOS 正式包的 Electron 43.1 在 Debian 12.15 / WSL2 的独立 Xvfb、普通用户和原 Chromium 沙箱下运行。对四个不同的实际渲染进程逐个注入崩溃。前三次分别在 1.374、1.847、2.643 秒恢复，双端口均通过同一 Gateway 的实例校验。第四次出现原生错误对话框，从中选取导出，使用 GTK 保存窗口将诊断写入临时目录。2,917 字节的 JSON 含四次失败、三次重试、一次耗尽，总计 16 条事件，与主进程恢复日志逐项一致。通过原生按钮退出后，桌面及 Gateway 均返回 0，双端口可重新绑定。最小 Debian 测试环境缺少中文字体，原生按钮中的中文以缺字框显示。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1164</code>、<code>:1189</code>、<code>:1199</code>。ZCode <code>packages/desktop/src/main/desktopCrashCapture.ts:360</code>、<code>:422</code>，<code>desktopStabilityTelemetry.ts:864</code>。</p>
 </article>
 <article id="release">
@@ -374,18 +377,18 @@
 <li><strong>Windows 本地技能安装 · <code>21386885</code></strong> 在普通 Windows 账户通过真实 Gateway 执行安装、修改源文件、卸载后检查源文件仍在、再次安装。115 项定向回归通过、8 项跳过。Ace <code>crew/agent/skills/manage.py</code>，ZCode <code>packages/services/src/symlinkPointsToTarget.ts</code>。</li>
 <li><strong>安装树内的模型日志 · <code>30e6cb78</code></strong> 原 Windows staging 运行测试后出现 37,038 字节的模型日志；编译生成的安装器包含该文件，解包运行后日志增至 74,076 字节。现默认日志写入有效的 Crew Home，指定日志文件时沿用其所在目录，打包时排除运行日志。通过实际 Windows 目录权限禁止在安装树创建文件后，包态验收仍可完成。两个 Inno 安装器分别验证旧配置会纳入合成日志、修复后排除日志且保留正常资源。54 项回归通过。</li>
 </ul>
-<p>D8 已安装桌面、旧版升级、文件系统故障和跨平台原生运行的验收结果将按平台分别记录。以上数据仅对应各条描述的输入、边界和平台。</p>
+<p><a href="#release">D8 发行验收</a>已经记录 Windows 正式 EXE、UOS 和 Kylin DEB。Windows 另验收了旧库升级、文件系统空间耗尽和重复打开。各组测试条件与仍需原生结果的平台随数据列出。</p>
 </section>
 <section id="validation">
 <h2>5. 证据和验收</h2>
 <p>源码观察定位可以确定的契约与控制流。原审计从 Windows 本地测试和小范围探针起步。本次接手补充了 Windows 正式安装包、Linux 两个发行包、真实模型与跨进程测试。产品性能排名、安装包行为和三平台市场环境下的故障率需要同条件实测。ZCode 作为指定的本地对照，源码快照工作区干净，分支落后本地记录的 <code>origin/main</code> 五个提交。</p>
-<h3>本次运行记录</h3>
+<h3>初次审计运行记录</h3>
 <ul>
 <li>Agent 源码探针验证 <code>AGENTS.md</code> 漏读、Plan schema 缺少搜索、扫描超时返回无匹配、长终端日志断流与分页重复。文件编辑和提示词的 13 项同步单测通过。</li>
-<li>桌面全量 Vitest 首轮报告 1950 通过、3 失败、2 跳过，另有 2 个套件因隔离 worktree 缺 Electron 二进制未加载。用本机同版 Electron 复跑这 5 个文件，两个加载失败的套件通过。剩余两处失败在 Windows 创建文件符号链接时返回 <code>EPERM</code>；另一处为设置页模型分组顺序断言，复跑仍然失败。</li>
-<li>设置页分组在无厂商目录时让未知 provider 与“自定义”共享同一排序权重，最终取决于环境的 <code>localeCompare</code>。实际 Collator 校验显示 en-US 将自定义放在末尾，zh-CN 将它放在开头。建议先用明确的分组优先级固定“自定义”在末尾，再按本地化名称排序。Ace <code>desktop/src/ui/features/config-panes.ts:903</code>、<code>:941</code>，<code>desktop/tests/unit/model-list-grouping.test.ts:79</code>。</li>
-<li>网关回放、watchdog、长对话性能均用内存 fixture 或合成输入验证。真实模型差异、双端整体性能和跨平台包态结果需要按下述矩阵测量。</li>
-<li>Windows 后端定向 pytest 共 1007 项，1004 通过、2 跳过、1 失败。失败用例 <code>test_mac_pack_script_logs_app_path_with_nounset</code> 在 Windows 默认 GBK 下用 <code>Path.read_text()</code> 读取 UTF-8 打包脚本，触发 <code>UnicodeDecodeError</code>。复跑确认默认编码失败，Python <code>-X utf8</code> 下通过。建议在用例的文件读取和子进程文本解码显式声明 UTF-8。Ace <code>tests/test_release_delivery_matrix.py:62</code>。</li>
+<li>桌面全量 Vitest 首轮报告 1950 通过、3 失败、2 跳过，另有 2 个套件因隔离 worktree 缺 Electron 二进制未加载。用本机同版 Electron 复跑这 5 个文件，两个加载失败的套件通过。剩余两处失败在 Windows 创建文件符号链接时返回 <code>EPERM</code>；另一处为设置页模型分组顺序断言，当时复跑仍然失败。后续 Windows 文件系统夹具和模型分组已修复，见<a href="#handoff">合并后复核</a>。</li>
+<li>设置页分组在无厂商目录时让未知 provider 与“自定义”共享同一排序权重，最终取决于环境的 <code>localeCompare</code>。实际 Collator 校验显示 en-US 将自定义放在末尾，zh-CN 将它放在开头。<code>b891d17e</code> 已明确分组优先级，中文、英文及空或部分厂商目录的四种组合均复验通过。Ace <code>desktop/src/ui/features/config-panes.ts:903</code>、<code>:941</code>，<code>desktop/tests/unit/model-list-grouping.test.ts:79</code>。</li>
+<li>初次审计使用内存夹具与合成输入验证网关回放、watchdog 和长对话。后续用实际 Windows 与 Linux 发行桌面进行了重复故障、独立 WebSocket 断开和重开历史复验，结果见下。</li>
+<li>Windows 后端定向 pytest 共 1007 项，1004 通过、2 跳过、1 失败。失败用例 <code>test_mac_pack_script_logs_app_path_with_nounset</code> 在 Windows 默认 GBK 下用 <code>Path.read_text()</code> 读取 UTF-8 打包脚本，触发 <code>UnicodeDecodeError</code>。复跑确认默认编码失败，Python <code>-X utf8</code> 下通过。当前用例已显式声明 UTF-8。Windows 强制关闭 Python UTF-8 模式后，该用例复跑通过。Ace <code>tests/test_release_delivery_matrix.py:144</code>。</li>
 </ul>
 <h3>对标场景</h3>
 <div class="table"><table>
@@ -457,6 +460,10 @@
 <tr><td>进程数 / 页面节点数</td><td>6 / 1,689</td><td>6 / 1,689</td><td>全程不变</td></tr>
 </tbody></table></div>
 <p>另在两份相同的 Windows Gateway 解包树上比较启动时预编译 Python 的收益。实验组为入口实际导入的 902 个模块生成按源文件哈希验证的字节码，增加 20,266,580 字节。每份包用全新临时配置启动六次，交替先后次序，测量从启动到主 HTTP 端口报告 ready。原包中位数为 12.137 秒，实验组为 11.402 秒；此对照使用同机有其他回归负载的环境。先导轮另有一次主端口未在 100 秒内就绪，Windows 的 asyncio 接收连接时记录 <code>WinError 64</code>；该轮单列，后续六对使用与实际健康检查相近的读取等待。本次发行未加入该缓存。进一步采样发现首次配置初始化的技能复制在一次 14.45 秒的应用构建中占 7.05 秒。</p>
+<h3>配置模型的 SDK 导入实验</h3>
+<p>Windows 发行运行时的单次剖析中，已配置 OpenAI 兼容模型时，客户端装配约 1.79 秒，其中 SDK 首次导入约 1.57 秒。ZCode 在服务端装配中将若干可选依赖初始化集中到独立入口，对并发者共享同一次初始化。Ace 临时原型只在模型已配置且有密钥时并行导入 SDK，在插件装配前等待结果并沿用原客户端构造。两份副本用无密钥配置运行时均未导入 SDK。</p>
+<p>四对温热样本交替运行两份发行副本，使用回环模型端点。原版与候选的主端口就绪中位数为 9.611、9.575 秒，启动到公共 WebSocket 首正文为 10.446、10.394 秒，发送到首正文为 0.597、0.611 秒。候选在四对中三对更早收到首正文。实际重叠时间为 0.313 至 0.354 秒，启动到首正文的逐对变化却从慢 0.018 秒到快 1.774 秒。首次启动的缓存波动更大，单独保留，不计入温热组。原型还引入线程，并改变无效模型配置和 SQLite 装配的先后顺序。根据本组结果，发行代码仍采用同步构造。针对本次实际导入的 522 个 SDK 模块另估算约 1.79 MB 的哈希字节码，尚无计时结果。</p>
+<p class="evidence">Ace <code>crew/app.py</code>、<code>crew/providers/openai_provider.py</code>。ZCode <code>packages/services/src/node.ts:909</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-execution.ts</code>。</p>
 <h3>观测如何归因</h3>
 <p>沿用 <a href="../frontend/stream-performance-diagnostics.html">首 token 诊断</a> 和 <a href="observability-tracing.html">已有 tracing</a>。以 <code>request_id</code> 串起 Desktop 接收、网关受理、provider 首事件、首正文、持久化和首绘，以 <code>gateway_instance_id</code>、进程代次、退出原因串起启动与回收。恢复路径记录模式、游标距离、缺口、队列字节与同步耗时。按平台、通道、事件类别等有限维度报 P50/P95/P99，实例和请求 ID 留在结构化事件。采样只记行为类别、计时和大小。审计基线的 <code>first-visible-text</code> 出现在回合门控前，<code>first-dom-patch</code> 也可能早于正文挂载。<a href="#first-text-timing">F8</a> 已分别记录收到正文、接纳正文、确认挂载和下一绘制时机。用故障测试验证每个阶段都能找到，便于判断慢在模型、路由、重放、磁盘或绘制。</p>
 </section>
