@@ -1392,6 +1392,53 @@ def test_cold_tool_checkpoints_preserve_verified_results_and_only_recover_dead_o
         reopened.close()
 
 
+def test_cold_recovery_skips_completed_engine_history_but_keeps_open_branches(tmp_path, monkeypatch):
+    db = str(tmp_path / "crew.db")
+    writer = SQLiteSessionStore(db)
+
+    def add_intent(owner, sid):
+        user = Message.user("run")
+        user.request_id = "current"
+        writer.save(sid, [*writer.load(sid, owner_account_id=owner), user], owner_account_id=owner)
+        writer.record_durable_event(
+            sid, owner_account_id=owner, kind=SessionEventType.TOOL_EXECUTION_INTENT,
+            payload={"step": 1, "request_id": "current", "tool_call_id": "c", "name": "read", "arguments": {}},
+        )
+        return writer._read_event_cursor(owner, sid)[0]
+
+    try:
+        add_intent("A", "same")
+        writer.record_turn_event("same", owner_account_id="A", kind=SessionEventType.TURN_END, status="completed")
+        writer.fork("same", writer._read_event_cursor("A", "same")[0], owner_account_id="A", new_session_id="fork")
+        add_intent("A", "fork")
+        add_intent("B", "same")
+        writer.record_durable_event(
+            "same", owner_account_id="B", kind=SessionEventType.TURN_END,
+            payload={"request_id": "older", "status": "completed"},
+        )
+        cut = add_intent("A", "rewound")
+        writer.record_turn_event("rewound", owner_account_id="A", kind=SessionEventType.TURN_END, status="completed")
+        writer.rewind("rewound", cut, owner_account_id="A")
+    finally:
+        writer.close()
+
+    reader = SQLiteSessionStore(db)
+    try:
+        load = reader.load
+
+        def check_load(sid, owner_account_id):
+            assert (owner_account_id, sid) != ("A", "same"), "completed history was decoded"
+            return load(sid, owner_account_id=owner_account_id)
+
+        monkeypatch.setattr(reader, "load", check_load)
+        assert reader.recover_interrupted_tool_checkpoints() == 3
+        for owner, sid in (("A", "fork"), ("A", "rewound"), ("B", "same")):
+            outcome = reader.get_status_details(sid, owner_account_id=owner)[2]
+            assert (outcome["status"], outcome["code"]) == ("partial", "tool_outcome_unknown")
+    finally:
+        reader.close()
+
+
 def test_cold_tool_checkpoint_does_not_combine_foreign_calls_or_invent_results():
     from crew.state.tool_checkpoints import recover_tool_messages
 

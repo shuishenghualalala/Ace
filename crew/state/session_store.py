@@ -2248,12 +2248,23 @@ class SQLiteSessionStore(SessionStore):
     def recover_interrupted_tool_checkpoints(self) -> int:
         """Publish the last dead writer's tool checkpoints before accepting another turn."""
         with self._lock:
+            # Only an unscoped engine completion at the current leaf closes the
+            # branch unconditionally. Replay must match scoped markers to their request.
             candidates = self._conn.execute("""
                 SELECT s.owner_account_id, s.session_id, s.leaf_seq, s.events_generation,
                        s.workspace_id, lease.owner_pid
                 FROM sessions AS s LEFT JOIN writer_leases AS lease
                   ON lease.owner_account_id=s.owner_account_id AND lease.session_id=s.session_id
-                WHERE s.last_status IN ('running','') AND s.leaf_seq>0 AND EXISTS (
+                WHERE s.last_status IN ('running','') AND s.leaf_seq>0
+                AND NOT EXISTS (
+                    SELECT 1 FROM session_events AS tip
+                    WHERE tip.owner_account_id=s.owner_account_id AND tip.session_id=s.session_id
+                    AND tip.seq=s.leaf_seq
+                    AND tip.type='turn_end' AND CASE WHEN json_valid(tip.payload) THEN
+                        json_extract(tip.payload,'$.status')='completed'
+                        AND json_type(tip.payload,'$.request_id') IS NULL
+                    END
+                ) AND EXISTS (
                     SELECT 1 FROM session_events AS e
                     WHERE e.owner_account_id=s.owner_account_id AND e.session_id=s.session_id
                     AND e.type IN ('assistant_tool_calls','tool_execution_intent','tool_result_commit')

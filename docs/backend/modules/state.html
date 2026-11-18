@@ -54,6 +54,7 @@
   </ul>
 
   <h2>2. 功能拆解</h2>
+  <p>冷启动恢复工具检查点时，先按账号、会话和当前叶序号读取该分支的末个事件。引擎写入的 <code>turn_end</code> 若状态为 <code>completed</code> 且未指定请求 ID，该分支已结束，可以跳过历史正文。带请求 ID 的终态仍由事件链匹配，其他分支的终态也不能关闭当前分支。未确认的工具结果继续按 <code>partial</code> 恢复。</p>
   <p>只有 <code>session_id</code>、<code>messages</code> 和 <code>updated_at</code> 三列的旧会话库分两次提交升级。启动事务内完成复合主键替换、旧行的 <code>local</code> 归属和 <code>sessions_schema_version</code> 版本登记。后台事务将正文转为事件，同时写入 <code>legacy_blob_backfill_done</code>。结构提交后，正文在回填前仍可从旧行读取。重启只需打开同一个数据库，SQLite 回滚未提交的事务，存储层根据已提交的版本、事件和标记继续。</p>
   <p>会话目录在账号或指定工作空间内按置顶、更新时间、会话 ID 三列倒序排列。SQLite 复合索引支持同时间戳下的确定顺序。分页用上一页最后一行的三列作为排他游标，删除该行后仍可继续分页。断点只检查当前页的会话。客户端未指定分页时仍可读取全量，模型配置批查按 SQLite 参数上限分批执行。</p>
   <table>
@@ -138,6 +139,7 @@ runtime.health_port                     # 独立线程 health 服务端口，默
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-18</td><td>10,000 个正常结束的工具会话中，5,000 个仅有引擎终态，其余 5,000 个另有 Gateway 终态。冷恢复扫描五次中位数从 1.160 秒降至 0.046 秒，已结束会话的正文读取数降至零。另加一个开放分叉启动 Gateway，仅解码并恢复该分叉，HTTP 历史保留其未确认状态与账号隔离。</td><td>工具检查点冷恢复、分叉和侧栏首屏等待。</td></tr>
       <tr><td>2026-11-18</td><td><code>tests/test_state_memory.py</code> 覆盖结构升级与正文回填各自在提交前、提交后进程退出，以及 <code>PRAGMA max_page_count</code> 触发 <code>SQLITE_FULL</code>。Windows 发布暂存目录的内嵌 Python 在带中文和重音字符的临时用户目录执行这五例。随后六次启动正式 Gateway，<code>GET /api/session/old/history</code> 均返回一条旧正文。重开后结构为 v3，账号为 <code>local</code>，事件仅一条。</td><td>三列旧会话库升级、重试与重启。</td></tr>
       <tr><td>2026-11-18</td><td>会话摘要增加稳定分页索引，收窄断点及配置批查范围。</td><td>账号、工作空间和旧会话目录。</td></tr>
       <tr><td>2026-09-23</td><td>P1 测试反馈落修（F1/F2/F541）。<b>F1 祖先游标 head 被夹低</b>：翻页游标落在 fork 源会话且源在 fork 后被 rewind 到边界之下时，<code>load_window</code> 用 <code>min(bound, leaf)</code> 把 head 夹到回退后的 leaf，边界与游标之间的整段消息被跳过——改为「有游标时 head 即游标位置本身」（游标是上一页实际走过的链位置，其下行不受源 leaf 移动影响；行缺失仍 fail-closed）。<b>F2 回填抢锁竞态丢 legacy 前缀</b>：save 抢在后台回填之前对 legacy 行（blob 有数据、无事件）落库时，「前缀一致 → 追加」只写新尾部，blob 前缀永久留在不再被读的 blob 列——投影新增 <code>from_blob</code> 标记，<code>_save_write</code> 遇到它强制整链重写一次，与回填谁先谁后都正确。<b>F541</b> 测试文件多余 f 前缀。新增回归：<code>test_window_continues_after_source_rewind_below_fork_boundary</code>（显式断言被跳过中段）、<code>test_save_before_backfill_preserves_legacy_blob_prefix</code>、<code>test_window_random_fork_rewind_chains_paging_parity</code>（种子随机 save/fork/rewind 链 × 5 档 limit 的翻页等价性 fuzz，固化测试人员 790/790 结论）。<b>口径修正</b>：回填事务与读共用 <code>self._lock</code>，回填在途时同实例的 store 读会阻塞到迁移事务提交（大库实测可 &gt;2s）——「启动与 legacy 数据量解耦」成立，「读路径解耦」不成立；窗口端点与全量端点的 <code>source_session_id</code> 标签存在声明偏差（窗口按消息物理来源会话标注，仅 team_internal 分支消费，普通 fork 无影响）。</td><td><code>crew/state/session_store.py</code>（load_window head / from_blob 守卫 / wait 防御）、<code>tests/test_session_history_window.py</code>、<code>tests/test_session_events.py</code>、<code>tests/test_session_loop_offload_and_cache.py</code>。</td></tr>
