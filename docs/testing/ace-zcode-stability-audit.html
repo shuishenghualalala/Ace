@@ -390,6 +390,7 @@
 <li>初次审计使用内存夹具与合成输入验证网关回放、watchdog 和长对话。后续用实际 Windows 与 Linux 发行桌面进行了重复故障、独立 WebSocket 断开和重开历史复验，结果见下。</li>
 <li>Windows 后端定向 pytest 共 1007 项，1004 通过、2 跳过、1 失败。失败用例 <code>test_mac_pack_script_logs_app_path_with_nounset</code> 在 Windows 默认 GBK 下用 <code>Path.read_text()</code> 读取 UTF-8 打包脚本，触发 <code>UnicodeDecodeError</code>。复跑确认默认编码失败，Python <code>-X utf8</code> 下通过。当前用例已显式声明 UTF-8。Windows 强制关闭 Python UTF-8 模式后，该用例复跑通过。Ace <code>tests/test_release_delivery_matrix.py:144</code>。</li>
 </ul>
+<p>在包含全部本轮修复的审计分支上，Windows 再次组合运行发行矩阵、用户追问回执、Plan 回执与 Wiki 多模态测试，69 项全部通过。发行脚本的文本检查另在关闭 Python UTF-8 模式后独立复跑通过。</p>
 <h3>对标场景</h3>
 <div class="table"><table>
 <thead><tr><th scope="col">场景</th><th scope="col">固定条件与观测</th><th scope="col">建议初始门槛</th></tr></thead>
@@ -460,10 +461,29 @@
 <tr><td>进程数 / 页面节点数</td><td>6 / 1,689</td><td>6 / 1,689</td><td>全程不变</td></tr>
 </tbody></table></div>
 <p>另在两份相同的 Windows Gateway 解包树上比较启动时预编译 Python 的收益。实验组为入口实际导入的 902 个模块生成按源文件哈希验证的字节码，增加 20,266,580 字节。每份包用全新临时配置启动六次，交替先后次序，测量从启动到主 HTTP 端口报告 ready。原包中位数为 12.137 秒，实验组为 11.402 秒；此对照使用同机有其他回归负载的环境。先导轮另有一次主端口未在 100 秒内就绪，Windows 的 asyncio 接收连接时记录 <code>WinError 64</code>；该轮单列，后续六对使用与实际健康检查相近的读取等待。本次发行未加入该缓存。进一步采样发现首次配置初始化的技能复制在一次 14.45 秒的应用构建中占 7.05 秒。</p>
+<h3>Windows 正式包长历史流式输入 · <code>56eb6de6</code></h3>
+<p>在独立配置的真实 Windows Electron 与 Gateway 中打开分别预置了 100、500、2,000 轮的 SQLite 会话。预置内容混合代码、工具调用、折叠内容和图片占位。桌面按正常历史窗口加载。每组由回环 SSE 运行约八秒，发送 160 或 800 个片段，期间重复向输入框发送真实可信键盘事件。每组仅调用模型一次，末尾标记在窗口和持久历史中可见。在另外两次独立启动中复现全部六组，确认每组仅有一条新助手消息，历史正文的 UTF-8 字节与实际发送的首块、中间片段和终块逐字节一致。桌面及 Gateway 正常退出，双端口均可重新绑定。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">预置轮次</th><th scope="col">片段/秒</th><th scope="col">正文更新帧数</th><th scope="col">同步回调 P50/P95（毫秒）</th><th scope="col">键盘事件至下一绘制 P50/P95（毫秒）</th></tr></thead>
+<tbody>
+<tr><td>100</td><td>20</td><td>149</td><td>1.2 / 2.8</td><td>56 / 64</td></tr>
+<tr><td>100</td><td>100</td><td>166</td><td>1.2 / 3.4</td><td>32 / 48</td></tr>
+<tr><td>500</td><td>20</td><td>146</td><td>1.2 / 3.1</td><td>56 / 64</td></tr>
+<tr><td>500</td><td>100</td><td>162</td><td>1.3 / 3.6</td><td>56 / 64</td></tr>
+<tr><td>2,000</td><td>20</td><td>142</td><td>1.1 / 4.2</td><td>56 / 64</td></tr>
+<tr><td>2,000</td><td>100</td><td>159</td><td>1.2 / 6.5</td><td>40 / 48</td></tr>
+</tbody></table></div>
+<p>同一帧只累加引起聊天正文变化的 <code>requestAnimationFrame</code> 同步回调，浏览器之后的布局及绘制尚未计入，完整更新的 8 毫秒门槛仍需测量。每组 52 个可信 <code>keydown</code> 全部匹配 Chromium Event Timing，四组 P95 高于 50 毫秒。每档仅一次，未给第二个连接施加背压。导航期间的节点计数未纳入分档比较。</p>
+<h3>30 次桌面首正文呈现实验 · <code>56eb6de6</code></h3>
+<p>Windows 正式包依次完成 30 条带唯一首片的公开聊天请求。回环模型端在写入首个 SSE 正文前记录单调时钟，每轮用 Chromium DevTools 握手换算浏览器时间范围，所选往返耗时 1.19–3.03 毫秒。前 11 轮在终态之前得到匹配正文的 <code>PerformanceElementTiming</code>，所见范围为 52.8–126 毫秒。后 19 轮的第一条匹配记录出现在终态重绘，直接把 30 条记录并入分位数会得到约 570–572 毫秒。</p>
+<p>第二组 30 轮将终态延迟到首文被观测到或 1.5 秒上限，同样在第 12 轮起缺失流中记录，对应分位数随终态延迟到约 1,654–1,656 毫秒。第三组 15 轮同步观测 DOM 和视口。所有轮次窗口均可见且有焦点。其中复现缺失记录的四轮，正文在 23.7–42.3 毫秒已挂载，文字几何在窗口边界内，但刚挂载时仍可能超出聊天滚动容器。浏览器直到终态重绘才给出元素呈现记录。三组均核对了实际回复和退出回收。</p>
+<p>另保持终态待发，从同一正式包截取第 12 至 15 轮的发送前、流中及终态截图。四轮都能在两张终态前截图中读到唯一首文，先前的 Element Timing 因而漏记了流中的实际文字。截图时聊天视图距底端至多 0.5 像素，首张流中截图在 SSE 写入后 371–390 毫秒返回。截图只能给出该时刻文字已可见的证据，30 轮的 150 毫秒 P95 暂不能据此验收。</p>
 <h3>配置模型的 SDK 导入实验</h3>
 <p>Windows 发行运行时的单次剖析中，已配置 OpenAI 兼容模型时，客户端装配约 1.79 秒，其中 SDK 首次导入约 1.57 秒。ZCode 在服务端装配中将若干可选依赖初始化集中到独立入口，对并发者共享同一次初始化。Ace 临时原型只在模型已配置且有密钥时并行导入 SDK，在插件装配前等待结果并沿用原客户端构造。两份副本用无密钥配置运行时均未导入 SDK。</p>
 <p>四对温热样本交替运行两份发行副本，使用回环模型端点。原版与候选的主端口就绪中位数为 9.611、9.575 秒，启动到公共 WebSocket 首正文为 10.446、10.394 秒，发送到首正文为 0.597、0.611 秒。候选在四对中三对更早收到首正文。实际重叠时间为 0.313 至 0.354 秒，启动到首正文的逐对变化却从慢 0.018 秒到快 1.774 秒。首次启动的缓存波动更大，单独保留，不计入温热组。原型还引入线程，并改变无效模型配置和 SQLite 装配的先后顺序。根据本组结果，发行代码仍采用同步构造。针对本次实际导入的 522 个 SDK 模块另估算约 1.79 MB 的哈希字节码，尚无计时结果。</p>
 <p class="evidence">Ace <code>crew/app.py</code>、<code>crew/providers/openai_provider.py</code>。ZCode <code>packages/services/src/node.ts:909</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-execution.ts</code>。</p>
+<p>ZCode 的桌面宿主构建将运行服务内联到 ESM 产物，主进程仍独立启动宿主。Ace 以相同 Windows 包做了纯 Python SDK 布局实验，使用 <code>ZIP_STORED</code> 存放 SDK 的 2,089 个原始文件。版本仍为 3.55.0，实际导入的 537 个 SDK 模块均由标准 <code>zipimporter</code> 装载，无散文件回退。包含先导的十次启动均通过公开流式聊天及正常退出。四对温热样本中，原版和 ZIP 的双端口就绪中位数为 10.128、10.328 秒，启动到 WebSocket 首正文为 10.976、11.062 秒。同对中位数分别慢 302、205 毫秒，当前发行保留散文件布局。</p>
+<p class="evidence">Ace <code>deb-package/pack_exe.ps1</code>。ZCode <code>packages/desktop/tsup.config.ts:346</code>、<code>packages/desktop/src/main/desktopHostProcess.ts:251</code>。</p>
 <h3>观测如何归因</h3>
 <p>沿用 <a href="../frontend/stream-performance-diagnostics.html">首 token 诊断</a> 和 <a href="observability-tracing.html">已有 tracing</a>。以 <code>request_id</code> 串起 Desktop 接收、网关受理、provider 首事件、首正文、持久化和首绘，以 <code>gateway_instance_id</code>、进程代次、退出原因串起启动与回收。恢复路径记录模式、游标距离、缺口、队列字节与同步耗时。按平台、通道、事件类别等有限维度报 P50/P95/P99，实例和请求 ID 留在结构化事件。采样只记行为类别、计时和大小。审计基线的 <code>first-visible-text</code> 出现在回合门控前，<code>first-dom-patch</code> 也可能早于正文挂载。<a href="#first-text-timing">F8</a> 已分别记录收到正文、接纳正文、确认挂载和下一绘制时机。用故障测试验证每个阶段都能找到，便于判断慢在模型、路由、重放、磁盘或绘制。</p>
 </section>
