@@ -68,22 +68,9 @@ class ProcessIdentity:
 def read_process_start_time(pid: int) -> str | None:
     """读取进程启动时刻（平台原生来源），任何失败都返回 None。"""
     try:
-        if os.name == "nt":
-            import psutil
+        import psutil
 
-            return str(psutil.Process(pid).create_time())
-        if sys.platform.startswith("linux"):
-            with open(f"/proc/{pid}/stat", encoding="ascii") as handle:
-                fields = handle.read().rpartition(")")[2].split()
-            return fields[19]  # starttime，/proc/<pid>/stat 第 22 字段
-        out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        value = out.stdout.strip()
-        return value or None
+        return str(psutil.Process(pid).create_time())
     except Exception:  # noqa: BLE001 - 围栏是尽力而为
         return None
 

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import sqlite3
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import time
 
@@ -21,14 +24,14 @@ from crew.tools.process_registry import (
 
 @pytest.fixture(autouse=True)
 def _isolate_checkpoint(tmp_path_factory, monkeypatch):
-    """把 checkpoint 指向临时目录，避免测试写脏真实 .crew/processes.json。
+    """把 checkpoint 指向临时目录，避免测试写入实际运行目录。
 
     单独 monkeypatch 自己 tmp 的用例会再覆盖一次，互不影响。
     """
     import crew.tools.process_registry as pr
 
     d = tmp_path_factory.mktemp("ckpt")
-    monkeypatch.setattr(pr, "_checkpoint_path", lambda: d / "processes.json")
+    monkeypatch.setattr(pr, "_checkpoint_path", lambda: d / "processes.sqlite3")
 
 
 def _wait_exit(reg: ProcessRegistry, sid: str, timeout: float = 10.0, *, owner_account_id: str = "local") -> dict:
@@ -182,69 +185,84 @@ def test_format_notification():
     assert "watch 模式" in text2 and "ERROR" in text2 and "2 条" in text2
 
 
-def test_recover_from_checkpoint(tmp_path, monkeypatch):
+def test_live_registry_retains_its_process(tmp_path, monkeypatch):
     import crew.tools.process_registry as pr
 
-    # 把 checkpoint 指向临时目录
-    monkeypatch.setattr(pr, "_checkpoint_path", lambda: tmp_path / "processes.json")
-
-    reg = pr.ProcessRegistry()
-    # 起一个真实存活的长进程，让它写进 checkpoint
-    s = reg.spawn_local(_py_cmd("import time; time.sleep(30)"), session_key="recov", notify_on_complete=True, owner_account_id="local")
-    assert (tmp_path / "processes.json").exists()
-    real_pid = s.pid
-
-    # 模拟主程序重启：新 registry 从 checkpoint 认领
-    reg2 = pr.ProcessRegistry()
-    n = reg2.recover_from_checkpoint()
-    assert n == 1
-    r = reg2.poll(s.id, owner_account_id="local")
-    assert r["status"] == "running"
-    assert r.get("detached") is True
-    assert "无输出历史" in r.get("note", "")
-
-    # detached 进程可被 kill（走 host PID）
-    kr = reg2.kill_process(s.id, owner_account_id="local")
-    assert kr["status"] == "killed"
-    # 真实进程应已被杀
-    time.sleep(0.3)
-    assert not pr._pid_alive(real_pid)
-    # 原 registry 也清理掉
-    reg.kill_process(s.id, owner_account_id="local")
+    path = tmp_path / "processes.sqlite3"
+    monkeypatch.setattr(pr, "_checkpoint_path", lambda: path)
+    original = ProcessRegistry()
+    session = original.spawn_local(_py_cmd("import time; time.sleep(30)"), owner_account_id="local")
+    try:
+        assert path.is_file()
+        other = ProcessRegistry()
+        assert other.recover_from_checkpoint() == 0
+        assert other.poll(session.id, owner_account_id="local")["status"] == "not_found"
+        assert original.poll(session.id, owner_account_id="local")["status"] == "running"
+    finally:
+        original.kill_process(session.id, owner_account_id="local")
 
 
-def test_recover_skips_dead_pid(tmp_path, monkeypatch):
+def test_recover_from_exited_host_once(tmp_path, monkeypatch):
     import crew.tools.process_registry as pr
 
-    monkeypatch.setattr(pr, "_checkpoint_path", lambda: tmp_path / "processes.json")
-    # 手写一个指向已死 PID 的 checkpoint（99999 基本不存在）
-    (tmp_path / "processes.json").write_text(
-        json.dumps([{"session_id": "proc_dead", "command": "x", "pid": 999999, "session_key": "k"}]),
-        encoding="utf-8",
-    )
-    reg = pr.ProcessRegistry()
-    assert reg.recover_from_checkpoint() == 0
-    assert reg.poll("proc_dead", owner_account_id="local")["status"] == "not_found"
+    path = tmp_path / "processes.sqlite3"
+    monkeypatch.setattr(pr, "_checkpoint_path", lambda: path)
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]) as child:
+        try:
+            # A separate owner records an already-running child and exits. The test owns
+            # the child handle throughout, including on systems with kill-on-close jobs.
+            owner = """
+from pathlib import Path
+import sys
+from crew.security.process_lifecycle import ProcessOwner
+from crew.tools import process_registry as pr
+pr._checkpoint_path = lambda: Path(sys.argv[1])
+pid = int(sys.argv[2])
+session = pr.ProcessSession(id="proc_1", command="sleep", pid=pid, owner_account_id="local",
+                            _owner=ProcessOwner.for_pid(pid))
+registry = pr.ProcessRegistry()
+registry._record_checkpoint(session)
+session.id = "damaged"
+registry._record_checkpoint(session)
+"""
+            subprocess.run([sys.executable, "-c", owner, str(path), str(child.pid)], check=True, timeout=30)
+            with sqlite3.connect(path) as db:
+                db.execute("UPDATE processes SET data='invalid' WHERE session_id='damaged'")
+            claimants = [ProcessRegistry(), ProcessRegistry()]
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                counts = list(pool.map(lambda registry: registry.recover_from_checkpoint(), claimants))
+            assert sorted(counts) == [0, 1]
+            registry = claimants[counts.index(1)]
+            assert registry.poll("proc_1", owner_account_id="other")["status"] == "not_found"
+            assert registry.poll("proc_1", owner_account_id="local")["detached"] is True
+            assert registry.recover_from_checkpoint() == 0
+            child.terminate()
+            child.wait(timeout=10)
+            assert registry.poll("proc_1", owner_account_id="local")["status"] == "exited"
+            with sqlite3.connect(path) as db:
+                assert db.execute("SELECT session_id FROM processes").fetchall() == [("damaged",)]
+        finally:
+            if child.poll() is None:
+                child.kill()
 
 
-def test_detached_dead_pid_transitions_to_exited(tmp_path, monkeypatch):
+def test_unverified_checkpoint_cannot_claim_live_pid(tmp_path, monkeypatch):
     import crew.tools.process_registry as pr
 
-    monkeypatch.setattr(pr, "_checkpoint_path", lambda: tmp_path / "processes.json")
-    reg = pr.ProcessRegistry()
-    # 起一个短进程并认领为 detached，等它自己退出后 poll 应转 exited
-    s = reg.spawn_local(_py_cmd("import time; time.sleep(0.2)"), session_key="d", owner_account_id="local")
-    pid = s.pid
-    reg2 = pr.ProcessRegistry()
-    reg2.recover_from_checkpoint()
-    # 等真实进程退出
-    deadline = time.monotonic() + 5
-    while pr._pid_alive(pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    time.sleep(0.1)
-    r = reg2.poll(s.id, owner_account_id="local")
-    assert r["status"] == "exited"
-    reg.kill_process(s.id, owner_account_id="local")
+    path = tmp_path / "processes.sqlite3"
+    monkeypatch.setattr(pr, "_checkpoint_path", lambda: path)
+    (tmp_path / "processes.json").write_text(json.dumps([{"session_id": "legacy", "pid": os.getpid()}]))
+    registry = ProcessRegistry()
+    assert registry.recover_from_checkpoint() == 0
+    assert not path.exists()
+    data = {"pid": os.getpid(), "command": "test", "owner_account_id": "local"}
+    registry._checkpoints.record(path, "reused", "previous-birth", data)
+    # Simulate a previous host generation with a subsequently recycled child PID.
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE processes SET host_started='previous-host-birth'")
+    assert ProcessRegistry().recover_from_checkpoint() == 0
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM processes").fetchone()[0] == 0
 
 
 def test_process_tool_handler():

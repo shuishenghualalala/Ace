@@ -338,9 +338,6 @@ def test_process_recovery_and_checkpoint_precede_ready_even_with_optional_servic
     def register_sessions(_sessions):
         calls.append(("register", threading.get_ident()))
 
-    def write_checkpoint():
-        calls.append(("checkpoint", threading.get_ident()))
-
     async def optional_services():
         calls.append(("optional", threading.get_ident()))
         optional_entered.set()
@@ -349,7 +346,6 @@ def test_process_recovery_and_checkpoint_precede_ready_even_with_optional_servic
 
     monkeypatch.setattr(process_registry, "_read_checkpoint_candidates", probe_checkpoint)
     monkeypatch.setattr(process_registry, "_register_recovered_sessions", register_sessions)
-    monkeypatch.setattr(process_registry, "_write_checkpoint", write_checkpoint)
     monkeypatch.setattr(api.state.crew, "startup_services", optional_services)
     with TestClient(api) as client:
         try:
@@ -360,10 +356,10 @@ def test_process_recovery_and_checkpoint_precede_ready_even_with_optional_servic
             finish_probe.set()
             assert optional_entered.wait(timeout=5)
             assert _wait_readiness(client, "ready")["status"] == "ready"
-            assert [name for name, _ in calls] == ["probe", "register", "checkpoint", "optional"]
-            _, registering, _, optional = [ident for _, ident in calls]
+            assert [name for name, _ in calls] == ["probe", "register", "optional"]
+            _, registering, optional = [ident for _, ident in calls]
             assert registering == optional
-            assert calls[0][1] != optional and calls[2][1] != optional
+            assert calls[0][1] != optional
         finally:
             finish_probe.set()
             finish_optional.set()

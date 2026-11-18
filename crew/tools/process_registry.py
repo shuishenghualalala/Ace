@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -43,7 +45,9 @@ from crew.security.launch import (
     shell_argv,
 )
 from crew.security.process_lifecycle import (
+    ProcessIdentity,
     ProcessOwner,
+    read_process_start_time,
     WINDOWS_CREATE_SUSPENDED,
     WindowsProcessJob,
     register_live,
@@ -53,12 +57,18 @@ from crew.security.process_lifecycle import (
 )
 from crew.tools.child_env import build_spawn_env
 from crew.tools.output_filters import strip_ansi
+from crew.tools.process_checkpoint import ProcessCheckpoints
 from crew.tools.process_output import MAX_PAGE_BYTES, OutputSnapshot, ProcessOutput
 from crew.tools.registry import tool_error
 
+logger = logging.getLogger(__name__)
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 SessionKey = tuple[str, str]
+_CHECKPOINT_FIELDS = (
+    "id", "command", "pid", "cwd", "started_at", "session_key", "owner_account_id",
+    "notify_on_complete", "watch_patterns", "task_id", "output_ref", "scope_unit",
+)
 
 # Trust root for the managed background bridge subprocess. The bridge must import
 # ``crew`` only from the installed package location, never from the task ``cwd``:
@@ -105,6 +115,9 @@ _WINDOWS_PROCESS_FLAGS = (
 
 def _session_alive(session: "ProcessSession") -> bool:
     """进程是否存活：scope 收容看单元状态，其余看 host PID。"""
+    if session.detached and session._owner and session._owner.identity:
+        if read_process_start_time(session._owner.pid) != session._owner.identity.started:
+            return False
     if session.scope_unit:
         return scope_alive(session.scope_unit)
     return _pid_alive(session.pid)
@@ -151,7 +164,7 @@ def _checkpoint_path() -> Path:
     """崩溃恢复 checkpoint 文件路径（懒解析，随 CREW_HOME 变化）。"""
     from crew.state.home import get_crew_home
 
-    return get_crew_home() / "processes.json"
+    return get_crew_home() / "processes.sqlite3"
 
 
 def _owner_matches(session: "ProcessSession", owner_account_id: str) -> bool:
@@ -212,6 +225,7 @@ class ProcessSession:
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, repr=False)
     _owner: ProcessOwner | None = field(default=None, repr=False)
+    _checkpoint: Path | None = field(default=None, repr=False)
     # 完全结算事件：reader 收尾 / kill / detached 结算时 set，wait() 条件唤醒（无轮询）
     _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _secret_values: tuple[str, ...] = field(default=(), repr=False)
@@ -243,6 +257,7 @@ class ProcessRegistry:
         self._pending: dict[SessionKey, list[dict[str, Any]]] = {}
         self._pending_lock = threading.Lock()
         self._task_runtime: Any = None
+        self._checkpoints = ProcessCheckpoints()
 
     def configure_task_runtime(self, runtime: Any) -> None:
         """Attach the unified task runtime without making tools import app."""
@@ -399,6 +414,7 @@ class ProcessRegistry:
             name=f"proc-reader-{session.id}",
         )
         session._reader_thread = reader
+        self._record_checkpoint(session)
         reader.start()
         if self._task_runtime is not None and task_id:
             heartbeat = threading.Thread(
@@ -410,7 +426,6 @@ class ProcessRegistry:
             session._heartbeat_thread = heartbeat
             heartbeat.start()
 
-        self._write_checkpoint()
         return session
 
     def spawn_security(
@@ -553,8 +568,8 @@ class ProcessRegistry:
             self._running[session.id] = session
         reader = threading.Thread(target=self._reader_loop, args=(session,), daemon=True, name=f"proc-reader-{session.id}")
         session._reader_thread = reader
+        self._record_checkpoint(session)
         reader.start()
-        self._write_checkpoint()
         return session
 
     def _heartbeat_loop(self, session: ProcessSession) -> None:
@@ -858,7 +873,11 @@ class ProcessRegistry:
         with self._lock:
             was_running = self._running.pop(session.id, None) is not None
             self._finished[session.id] = session
-        self._write_checkpoint()
+        if was_running and session._checkpoint:
+            try:
+                self._checkpoints.forget(session._checkpoint, session.id)
+            except (OSError, sqlite3.Error):
+                logger.warning("Could not retire process checkpoint", exc_info=True)
 
         if was_running and session.notify_on_complete:
             output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
@@ -1205,105 +1224,42 @@ class ProcessRegistry:
 
     # ----- 崩溃恢复 checkpoint -----
 
-    def _write_checkpoint(self) -> None:
-        """把运行中（未退出）进程的元数据原子写入 checkpoint 文件。失败静默。"""
+    def _record_checkpoint(self, session: ProcessSession) -> None:
+        identity = session._owner.identity if session._owner else None
+        if not identity or not identity.started:
+            return
+        path = _checkpoint_path()
+        data = {key: getattr(session, key) for key in _CHECKPOINT_FIELDS}
         try:
-            with self._lock:
-                entries = [
-                    {
-                        "session_id": s.id,
-                        "command": s.command,
-                        "pid": s.pid,
-                        "cwd": s.cwd,
-                        "started_at": s.started_at,
-                        "session_key": s.session_key,
-                        "owner_account_id": s.owner_account_id,
-                        "notify_on_complete": s.notify_on_complete,
-                        "watch_patterns": s.watch_patterns,
-                        "task_id": s.task_id,
-                        "output_ref": s.output_ref,
-                        "scope_unit": s.scope_unit,
-                    }
-                    for s in self._running.values()
-                    if not s.exited and s.pid
-                ]
-            path = _checkpoint_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)  # 原子替换，避免崩溃时读到半截文件
-        except Exception:  # noqa: BLE001 - checkpoint 失败不影响主流程
-            pass
+            self._checkpoints.record(path, session.id, identity.started, data)
+            session._checkpoint = path
+        except (OSError, sqlite3.Error):
+            logger.warning("Could not record process checkpoint", exc_info=True)
 
     def recover_from_checkpoint(self) -> int:
-        """启动时读取 checkpoint，按 host PID 存活检测重新认领后台进程。
-
-        返回认领为 detached 的进程数。已死进程跳过（无句柄取不到退出码）。
-        """
         sessions = self._read_checkpoint_candidates()
-        if sessions is None:
-            return 0
         self._register_recovered_sessions(sessions)
-        self._write_checkpoint()
         return len(sessions)
 
     async def recover_from_checkpoint_async(self) -> int:
-        """Probe off-loop and register recovered owners on the Gateway thread."""
+        """Claim on a worker, then register signal handlers on the Gateway thread."""
         sessions = await asyncio.to_thread(self._read_checkpoint_candidates)
-        if sessions is None:
-            return 0
-        # register_live installs signal handlers when invoked from the main
-        # thread. Only subprocess discovery and disk I/O belong on a worker.
         self._register_recovered_sessions(sessions)
-        await asyncio.to_thread(self._write_checkpoint)
         return len(sessions)
 
-    def _read_checkpoint_candidates(self) -> list[ProcessSession] | None:
+    def _read_checkpoint_candidates(self) -> list[ProcessSession]:
         path = _checkpoint_path()
-        if not path.exists():
-            return None
         try:
-            entries = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return None
-        if not isinstance(entries, list):
-            return None
-
+            claimed = self._checkpoints.claim(path)
+        except (OSError, sqlite3.Error, ValueError, KeyError):
+            logger.warning("Could not recover process checkpoints", exc_info=True)
+            return []
         sessions = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            pid = entry.get("pid")
-            if pid is not None and (type(pid) is not int or pid <= 0):
-                continue
-            scope_unit = str(entry.get("scope_unit") or "")
-            probe = ProcessSession(
-                id=entry.get("session_id") or f"proc_{uuid.uuid4().hex[:12]}",
-                command=entry.get("command", "unknown"),
-                pid=pid,
-                scope_unit=scope_unit,
-            )
-            if not pid and not scope_unit:
-                continue
-            if not _session_alive(probe):
-                continue
-            session = ProcessSession(
-                id=probe.id,
-                command=entry.get("command", "unknown"),
-                session_key=entry.get("session_key", ""),
-                owner_account_id=normalize_owner_account_id(entry.get("owner_account_id")),
-                pid=pid,
-                cwd=entry.get("cwd"),
-                scope_unit=scope_unit,
-                started_at=entry.get("started_at", time.time()),
-                detached=True,
-                notify_on_complete=entry.get("notify_on_complete", False),
-                watch_patterns=entry.get("watch_patterns", []),
-                task_id=entry.get("task_id", ""),
-                output_ref=entry.get("output_ref", ""),
-                _owner=ProcessOwner.for_pid(pid or 0, scope_unit=scope_unit or None),
-            )
-            sessions.append(session)
+        for data, started in claimed:
+            pid = data["pid"]
+            owner = ProcessOwner(pid, identity=ProcessIdentity(pid, started), scope_unit=data.get("scope_unit") or None)
+            fields = {key: data[key] for key in _CHECKPOINT_FIELDS if key in data}
+            sessions.append(ProcessSession(**fields, detached=True, _owner=owner, _checkpoint=path))
         return sessions
 
     def _register_recovered_sessions(self, sessions: list[ProcessSession]) -> None:

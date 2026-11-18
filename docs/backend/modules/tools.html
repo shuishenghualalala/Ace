@@ -236,7 +236,7 @@
       <tr><td>安全审批</td><td><code>security_guard</code>：文件/网络/外部运行时授权，需审批时阻塞等待 owner 决策；等待与 interrupt 竞争（interrupt 先到按拒绝结算），默认有界超时（<code>runtime.interaction_timeout_seconds</code>）。</td><td>已落地</td></tr>
       <tr><td>敏感脱敏</td><td><code>redact</code>：日志与工具输出的密钥 / URL / 凭据脱敏</td><td>已落地</td></tr>
       <tr><td>输出处理</td><td><code>output_filters</code>：去 ANSI、头尾截断、阈值可配</td><td>已落地</td></tr>
-      <tr><td>后台进程</td><td><code>process_registry</code>：terminal background 进程的跟踪、输出缓冲、回收</td><td>已落地</td></tr>
+      <tr><td>后台进程</td><td><code>process_registry</code>：terminal background 进程的跟踪、输出缓冲、回收。每个后台任务用 SQLite 单独记录宿主和子进程的启动身份。宿主退出后，仍匹配的子进程仅可由一个实例认领，同账号的并行 Gateway 各自管理活动任务。旧版仅含 PID 的 JSON 保留在原处，不能用于恢复进程控制权</td><td>已落地</td></tr>
       <tr><td>终端防护</td><td><code>terminal_guard</code>：危险 / 硬线命令检测</td><td>已落地</td></tr>
       <tr><td>MCP 客户端</td><td><code>mcp_client</code>：连接外部 MCP server，把其 tools 注册进 Registry</td><td>已落地</td></tr>
       <tr><td>托管二进制</td><td><code>managed_tools</code>：rg（ripgrep）自动下载 / 校验 / 安装</td><td>已落地</td></tr>
