@@ -1,14 +1,15 @@
-"""网关 WS 层的 Plan 模式控制测试（plan_enter / plan_reject）。
+"""网关 Plan 模式控制测试。真实模型的审批执行另见 tests/e2e_plan_mode.py。"""
 
-用 FakeProvider（无 key），经 TestClient 的 websocket 验证 action 路由：
-进入/拒绝会更新 PlanModeManager 状态并回一帧 status。plan_approve 会起一轮执行
-（依赖模型行为），不在此单元测试覆盖——见 tests/e2e_plan_mode.py。
-"""
-
+import asyncio
+import json
 import os
+import socket
 
 os.environ.setdefault("CREW_API_KEY", "")  # 确保走 FakeProvider
 
+import pytest
+import uvicorn
+import websockets
 from starlette.testclient import TestClient
 
 from crew.core.types import Message
@@ -255,12 +256,18 @@ def test_ws_plan_update_rejected_when_inactive(tmp_path, auth_headers):
         assert "不在 Plan 模式" in msg["body"]["message"]
 
 
-def test_ws_plan_approve_with_edited_plan_persists_before_execute(tmp_path, auth_headers):
-    """看板手改后批准：plan_approve 附带 plan 正文须先落盘，再进入执行。"""
+@pytest.mark.usefixtures("auth_headers")
+async def test_ws_plan_approve_with_edited_plan_persists_before_execute(
+    tmp_path, monkeypatch, unused_tcp_port,
+):
+    """执行读取已落盘的手改稿，提交审批的客户端断线后仍能完成该回合。"""
     from crew.agent.plan import read_plan
+    from crew.core.mocks import FakeProvider
 
     client, app = _client(tmp_path)
+    app.config.health_port = unused_tcp_port
     sid = "ws_plan_approve_edit"
+    request_id = "r-approve-edit"
     app.session_store.save(
         sid,
         [Message(role="user", content="进入计划")],
@@ -271,24 +278,54 @@ def test_ws_plan_approve_with_edited_plan_persists_before_execute(tmp_path, auth
     app.plan_manager.request_approval(sid, owner_account_id=OWNER)
 
     edited = "# 手改后批准\n\n- A\n- B 用户补充"
-    with client.websocket_connect("/ws", headers=auth_headers) as ws:
-        ws.send_json({
-            "action": "plan_approve",
-            "session_id": sid,
-            "mode": "agent",
-            "workspace_id": "default",
-            "plan": edited,
-            "request_id": "r-approve-edit",
-        })
-        # 批准会起一轮执行；至少应收到后续帧，且文件已是手改稿。
-        for _ in range(30):
-            msg = ws.receive_json()
-            if msg.get("kind") in ("delta", "final", "status", "error"):
-                break
+    plan_at_execution = asyncio.get_running_loop().create_future()
+    disconnected = asyncio.Event()
+    assert isinstance(app.provider, FakeProvider)
+    chat = app.provider.chat
 
-    assert read_plan(sid, owner_account_id=OWNER) == edited
-    assert not app.plan_manager.is_active(sid, owner_account_id=OWNER)
-    assert app.plan_manager.phase(sid, owner_account_id=OWNER) == "approved"
+    async def observe_execution(*args, **kwargs):
+        if not plan_at_execution.done():
+            plan_at_execution.set_result(read_plan(sid, owner_account_id=OWNER))
+        await asyncio.wait_for(disconnected.wait(), timeout=10)
+        return await chat(*args, **kwargs)
+
+    monkeypatch.setattr(app.provider, "chat", observe_execution)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        app.config.gateway_port = sock.getsockname()[1]
+        url = f"ws://127.0.0.1:{app.config.gateway_port}/ws"
+        server = uvicorn.Server(uvicorn.Config(client.app, log_config=None))
+        serving = asyncio.create_task(server.serve(sockets=[sock]))
+        try:
+            async with asyncio.timeout(30):
+                while not server.started or client.app.state.gateway_readiness["status"] == "starting":
+                    await asyncio.sleep(0.01)
+                assert client.app.state.gateway_readiness["status"] == "ready"
+                async with websockets.connect(url, close_timeout=2) as ws:
+                    await ws.send(json.dumps({
+                        "action": "plan_approve",
+                        "session_id": sid,
+                        "mode": "agent",
+                        "workspace_id": "default",
+                        "plan": edited,
+                        "request_id": request_id,
+                    }))
+                    assert await plan_at_execution == edited
+                    task, = app.tasks.list(sid, owner_account_id=OWNER)
+                    assert (task["request_id"], task["status"]) == (request_id, "running")
+                    assert app.connections.has_connection(sid, owner_account_id=OWNER)
+                while app.connections.has_connection(sid, owner_account_id=OWNER):
+                    await asyncio.sleep(0.01)
+                disconnected.set()
+                result = await app.tasks.wait(task["task_id"], timeout=5, owner_account_id=OWNER)
+                assert result["status"] == "completed"
+                assert app.provider.calls
+                assert not app.plan_manager.is_active(sid, owner_account_id=OWNER)
+                assert app.plan_manager.phase(sid, owner_account_id=OWNER) == "approved"
+        finally:
+            disconnected.set()
+            server.should_exit = True
+            await asyncio.wait_for(serving, timeout=10)
 
 
 def test_ws_rejects_empty_query_without_attachments(tmp_path, auth_headers):
