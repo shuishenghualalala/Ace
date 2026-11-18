@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from unittest.mock import Mock
+
+import pytest
 
 from crew.features import FeatureRuntime, FeatureState
 from crew.wiki.schemas import WikiPage
@@ -32,6 +35,28 @@ class _Host:
         self.work_service = None
         self.plugins = None
         self._notify_owner_fn = None
+
+
+@pytest.fixture(scope="module")
+def retired_work_services():
+    services = []
+    yield services
+    # Keep the objects alive past the function fixture teardown so GC cannot
+    # hide a host which left its FeatureScope or SQLite store open.
+    for runtime, service in services:
+        assert runtime.get(WORK_FEATURE_ID).state is FeatureState.DISCOVERED
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            service.knowledge.list_publish_requests("owner")
+
+
+def test_test_host_releases_work_without_gateway_lifespan(retired_work_services):
+    from crew.app import build_app
+    from crew.state.config import load_config
+
+    app = build_app(load_config())
+    runtime = app.plugins.feature_runtime
+    assert runtime.get(WORK_FEATURE_ID).state is FeatureState.ACTIVE
+    retired_work_services.append((runtime, app.work_service))
 
 
 def test_work_feature_owns_service_route_hook_and_preserves_database(tmp_path: Path):
