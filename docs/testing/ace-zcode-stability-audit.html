@@ -34,7 +34,7 @@
 <p><strong>接手目标与真实模型验收（2026-11-18）</strong> 在现有审计工作树上合入安全模块，按 Agent 基础能力、工具与提示词、桌面稳定性和性能继续核对 ZCode 源码。每项修复做定向回归、端到端验证并独立提交。真实模型测试使用维护者指定的本机配置文件 <code>D:\Codes\env</code>，以其中当前的模型和接口为准，测试数据放在隔离目录。故障、断连与重复请求用可控端点注入，分别记录两种验证的结果。</p>
 <h3>2026-11-18 接手后的实测结果</h3>
 <p>真实模型经本地 Gateway 和 WebSocket 完成了文件读取、遵守项目指令的搜索、保留 Unicode 的精确编辑及 Plan 审批执行。Windows 正式包也完成真实模型首聊和重开历史。Windows 的升级旧库、独立 Gateway 与后台任务归属、两种浏览器入口的审批重连已做过端到端核对。以下各节保留发现问题时的基线，复验使用的版本和结果在<a href="#handoff">合并后复核</a>逐项列出。</p>
-<p>Windows 万会话场景的单次首行时间从 73.26 秒降到 15.005 秒。后者对应 32 行首页，30 次 HTTP 首页请求的 P95 为 24.1 毫秒。首行可见与聊天可发送是两个测量点。Windows 另完成 180 次启动，分档的发送可用和目录挂载 P50/P95 见末章。Windows 和 Linux 另各完成 30 轮渲染及网关故障恢复。macOS 与单独断开 WebSocket 的重复分布仍待补齐。</p>
+<p>Windows 万会话场景的单次首行时间从 73.26 秒降到 15.005 秒。后者对应 32 行首页，30 次 HTTP 首页请求的 P95 为 24.1 毫秒。首行可见与聊天可发送是两个测量点。Windows 另完成 180 次启动，分档的发送可用和目录挂载 P50/P95 见末章。Windows 和 Linux 另各完成 30 轮渲染及网关故障恢复。Windows 另完成单独 WebSocket 断开的 30 轮复验，缺口正文恢复可见的 P95 为 1.872 秒。Linux 同类分布及 macOS 原生故障复验仍待补齐。</p>
 <p>在日常开发场景，Ace 首先要保证一轮请求能被明确受理、在故障后恢复，并保留完整结果。当前应优先处理网关卡死后的替换流程、回放游标失效后的状态恢复和 Plan 工具契约。应用层已有会话事件日志、写入意图与恢复、工具隔离、Markdown 合帧及历史分页，可以沿用这些模块。</p>
 <div class="table"><table>
 <thead><tr><th scope="col">批次</th><th scope="col">影响和代码归属</th><th scope="col">提交验收条件</th></tr></thead>
@@ -130,6 +130,7 @@
 <p><strong>Plan 提交</strong> <code>b27b896b</code> 已提交。按用户要求，完成此批后暂停后续修复。</p>
 <p><strong>合并后的独立审批</strong> <code>56cff6d0</code> 增加已处理决定的持久回执。并发和重启后的查询结果以及 Windows 桌面复验见<a href="#handoff">合并后复核</a>。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts:683</code>，<code>crew/gateway/ws.py:791</code>、<code>:912</code>，<code>crew/core/followup.py:99</code>，<code>crew/agent/loop/tool_runner.py:1122</code>。ZCode <code>packages/ui/src/v4/V4InteractionDialogs.tsx:344</code>。</p>
+<p><strong>Plan 断线专项复验 · <code>df400913</code></strong> 原测试没有维持 Gateway 的 lifespan，客户端关闭时，临时宿主也会取消回合。同一提交下，原用例的 16 次 Windows 运行均结束且记录为取消。维持 Gateway 后执行同样操作，4 次任务均从 <code>running</code> 进入 <code>completed</code>。更新后的回归通过真实回环 WebSocket 提交手改稿，在模型执行入口核对文件内容，然后断开提交客户端，确认原请求归属的任务仍完成。Windows 重复 12 次通过，Plan 与审批回执组合 21 项通过。独立副本模拟漏写时，测试读到旧稿并失败。历史 Linux 全量停顿缺少等待时的线程栈，根因未确认。</p>
 </article>
 <article id="agent-execution-recovery">
 <h3>A11 · P1 · 已完成的工作缺少可安全接续的执行检查点</h3>
@@ -170,6 +171,8 @@
 <p>Ace 将回放存在每进程、每会话 2000 条的内存队列。恢复只有 <code>seq &gt; after</code> 筛选。以生产 ConnectionManager 和内存 socket 生成 2005 帧，从序号 1 恢复只得到序号 6–2005，没有缺口提示。新的 ConnectionManager 产生 3 帧后用旧游标 2005 回放，收到 0 帧。队列超限后只能给出后缀，网关重启后序号从头计数。桌面按 session 保存最大号和已见集合，游标没有网关代次。现有 watchdog 和持久历史能在部分场景最终补齐，无法保证进行中的回复在这两种游标失效时立刻恢复。ZCode 的 publisher 校验 <code>logEpoch</code> 和可回放下界，超出范围时发布权威 snapshot。</p>
 <p><strong>修复</strong> 订阅明确携带会话事件代次和已应用水位。Gateway 返回可回放下界、当前水位及恢复模式，游标失效时以有界快照替换活跃状态。区分可丢弃的临时帧与需要重建的正文、终态和交互状态。Desktop 与 Web 共用语义，按版本原子应用快照并与后续实时流衔接。继续沿用现有持久化投影和工具意图日志，恢复时只重建状态。验收同代断网、长时间断网、网关重启、较大序号先到、回放与实时并发、审批状态、文本和工具结果无重复。</p>
 <p class="evidence">Ace <code>crew/gateway/connections.py:34</code>、<code>:440</code>、<code>:523</code>，<code>crew/gateway/ws.py:324</code>，<code>desktop/src/ui/features/gateway-sequence.ts:11</code>，<code>desktop/src/ui/api/feature-session.ts:1049</code>，<code>desktop/src/ui/features/stream-watchdog.ts:71</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:883</code>。</p>
+<p><strong>Windows 单独断开 WebSocket · <code>c3059f29</code></strong> 冻结源码后构建实际 Electron 43.1.0 开发版。每轮在真实 Gateway 进入当前回合的回放窗口后，仅以 1012 关闭桌面聊天连接。Gateway 代次、独立观察 WebSocket 与本地 SSE 模型始终存活。30 轮全部通过。每轮核对补回的各段只显示一次、原回复完整落盘、同会话后续回合正常，以及退出后本轮 Gateway 已结束。</p>
+<p>从故障注入到 renderer 收到重新打开事件的 P50/P95 为 1.557/1.770 秒，到缺口正文实际挂载可见为 1.681/1.872 秒，最大值分别为 1.790、1.907 秒。P95 取第 29 个升序样本。计时包含客户端退避和合成分段的回放等待。一次发生在发送尚不可用时的预演没有发出请求，也未注入断线，单独保留。Linux 与 macOS 的独立 WebSocket 计时尚未取得。</p>
 </article>
 <article id="ack">
 <h3>D4 · P1 · “已发送”缺少网关持久受理回执</h3>
@@ -202,7 +205,7 @@
 <p><strong>修复</strong> 区分进程崩溃、初始化失败、长卡顿和 OOM，有限次重建窗口，从已落盘 session 与 draft 恢复。重试耗尽后显示可重开或导出本地诊断的窗口。验收多数情况下界面自动回到原会话，连续失败后仍可退出或重新打开。</p>
 <p><strong>实现</strong> 主进程记录当前渲染文档和连续失败次数。常见进程异常退出、主页面加载失败、首屏 20 秒未就绪，或收到原生无响应事件后 12 秒仍未恢复，都会触发受限重建。可见前台窗口另有 16 秒心跳失联检测，覆盖 Chromium 未发出事件的卡死。后台窗口允许节流，主进程长时间暂停后重新开始计时。最多自动重试三次，文档连续健康 60 秒后重新获得预算。恢复会新建 BrowserWindow，回收上一文档的连接和流式请求，保留 Gateway 及其正在运行的 WebSocket 对话。耗尽后由系统原生对话框提供重试、诊断导出和退出。活动会话必须在当前账号可访问的会话列表中才能自动打开。正文和上传附件引用按账号落盘，已受理的草稿版本由发送回执去重。</p>
 <p><strong>验收</strong> <code>e7230ad6</code> 已提交。最终 Windows 构建通过 9 项原生生命周期端到端和 1 项诊断对话框打开、取消测试。验证流式回复中崩溃后回到原会话并接续同一轮、保留草稿和上传附件、托盘隐藏时重建、隐藏启动标志下正常显示、重试耗尽后从托盘进入原生弹窗、脚本缺失后的原生重试与退出，以及主页面缺失后恢复。真实渲染线程阻塞约 10.14 秒时继续使用原窗口，持续卡顿约 20.28 秒时自动重建，Gateway PID 保持一致。最终桌面全量 2090 项通过、2 项跳过、3 项基线失败；Gateway 回归 40 项通过、1 项跳过。默认配置模型实测返回 HTTP 400 <code>InvalidSubscription</code>，对话由真实 Electron 和 Gateway 接本地协议测试模型验证。</p>
-<p><strong>边界</strong> 草稿写入采用 150 毫秒合并提交，崩溃时间早于最近一次落盘时可能丢失最后的编辑。原生故障启动用例缩短了测试版就绪时限。诊断保存窗口已验证打开和取消，实际生成诊断文件以及 macOS、Linux 原生场景仍待复验。</p>
+<p><strong>边界</strong> 草稿写入采用 150 毫秒合并提交，崩溃时间早于最近一次落盘时可能丢失最后的编辑。原生故障启动用例缩短了测试版就绪时限。诊断保存窗口已验证打开和取消。另用当前代码构建的 Windows Electron 触发四次实际窗口启动失败，再从进程自己的原生保存对话框将诊断写入隔离目录。文件 2,207 字节，可解析为 JSON，含四次失败、三次重试和一次耗尽记录，另外四条记录为各窗口启动。保存后使用原生退出按钮结束；该场景未发送模型请求。macOS、Linux 的原生导出仍待复验。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1164</code>、<code>:1189</code>、<code>:1199</code>。ZCode <code>packages/desktop/src/main/desktopCrashCapture.ts:360</code>、<code>:422</code>，<code>desktopStabilityTelemetry.ts:864</code>。</p>
 </article>
 <article id="release">
@@ -299,7 +302,7 @@
 <h3>F10 · 内建请求能力的重复事件循环</h3>
 <p>同步构建 Gateway 时，内建 Agent Factory、执行 Driver 和四个上下文贡献器分别创建短命 asyncio 事件循环。ZCode 桌面在同一宿主循环内顺序等待启动协调步骤。Ace 将已知内建请求 Feature 顺序装配到同一个兼容循环内，每项仍单独记入启动审计、独立提交激活事务并按原逆序关停。静态内建内容之外的插件与在线激活仍用各自生命周期。</p>
 <p><strong>Windows 原生配对</strong> 两份正式 <code>8165a51b</code> EXE 的解包运行时只替换 <code>crew/app.py</code>，逐一核对 17,399 个文件。构建剖析中的激活次数仍为 15，临时 Proactor 循环从 14 个减至 9 个，唤醒管道累计从 0.759 秒减至 0.292 秒。未开启剖析时，六对首次启动的主端口就绪中位数从 11.147 秒降至 9.991 秒，六对同一配置重开从 10.686 秒降至 9.179 秒。逐对改善的中位数分别为 0.908 和 0.457 秒，两组各 6/6 改善。24 次启动均通过双端口身份、子进程 PID、会话 API 和正常退出验证。</p>
-<p>候选副本的原生 Electron 九阶段首次通过，首聊 1.014 秒，Gateway 故障恢复 11.282 秒，正常退出 1.435、2.271 秒。同步宿主与已有事件循环的嵌入式宿主在旧代码分别创建六个循环，修复后均以一个独立循环按既定顺序完成。Windows 后端分项 63 项通过。该对照使用发行内容副本，冷启动 5 秒目标仍待达到。</p>
+<p>候选副本的原生 Electron 九阶段首次通过，首聊 1.014 秒，Gateway 故障恢复 11.282 秒，正常退出 1.435、2.271 秒。同步宿主与已有事件循环的嵌入式宿主在旧代码分别创建六个循环，修复后均以一个独立循环按既定顺序完成。Windows 后端分项 63 项通过。该对照使用发行内容副本，冷启动 5 秒目标仍待达到。候选副本另用维护者指定的 <code>deepseek-flash</code> 完成真实文件读取。两次上游调用后得到精确内容，重开后在聊天窗口呈现同一条历史，两次正常退出。</p>
 <p class="evidence">Ace <code>crew/app.py</code> 中的内建请求能力与 <code>crew/features/manager.py</code> 的同步桥。ZCode <code>packages/desktop/src/host/index.ts:4155</code>、<code>packages/desktop/src/host/databaseStartupCoordinator.ts:58</code>。</p>
 </article>
 </section>
