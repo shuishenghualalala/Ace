@@ -74,6 +74,7 @@ from crew.state._migration import (
     claim_legacy_owner_databases,
     inspect_and_backfill_legacy_owners,
     legacy_owner_scan_targets,
+    orphan_main_db_tables,
 )
 from crew.state.config import Config, load_config
 from crew.state.schema_version import copy_legacy_feature_rows
@@ -2479,6 +2480,11 @@ _CORE_MAIN_DB_TABLES = frozenset(
         "security_audit_events",
         "compaction_summaries",
         "store_meta",
+        "desktop_send_identity",
+        "desktop_send_inbox",
+        "followup_receipts",
+        "plan_gateway_state",
+        "plan_receipts",
     }
 )
 
@@ -2600,9 +2606,8 @@ def test_fresh_install_wiki_learning_tables_live_only_in_plugin_db(tmp_path):
         ).fetchone()[0]
     assert component == 1
     assert feature_version == WIKI_LEARNING_SCHEMA_VERSION
-    # 主库最终清单复核（P1-1 全清终态）：只剩 core 状态表（9 表 + ADR-0042 W4 增补 3 表
-    # + P1 数据层的 store_meta 回填标记表）。
     assert main_tables == _CORE_MAIN_DB_TABLES
+    assert orphan_main_db_tables(main_db) == []
 
 
 def test_legacy_wiki_learning_rows_copied_on_first_activate_and_idempotent(tmp_path):

@@ -500,6 +500,13 @@ CORE_MAIN_DB_TABLES: frozenset[str] = frozenset({
     "security_audit_events",
     "plugin_preferences",
     "wiki_learning_schema",
+    # SQLiteSessionStore owns the inbox, interaction receipts and backfill marker.
+    "desktop_send_identity",
+    "desktop_send_inbox",
+    "followup_receipts",
+    "plan_gateway_state",
+    "plan_receipts",
+    "store_meta",
 })
 
 # 版本 stamp 表命名约定（schema_version.version_table_name）。

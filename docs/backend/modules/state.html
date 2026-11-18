@@ -136,6 +136,7 @@ runtime.health_port                     # 独立线程 health 服务端口，默
   <p>追问默认上限由装配层（<code>crew/app.py</code> 的 <code>set_followup_default_timeout</code>）注入 core/followup，core 不反向依赖配置实现；<code>wait_for_answer</code> 未传 timeout 时用该默认值，超时按「用户未回答」收尾（返回空答案）。</p>
 
   <h2>7. 变更记录</h2>
+  <p><code>crew migrate orphans</code> 只读检查主库表名归属。会话存储管理桌面发送队列及身份、追问与计划回执、计划状态，以及 <code>store_meta</code> 回填标记。插件数据库保留各自业务表，主库中未登记的表会单独列出。</p>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
