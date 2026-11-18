@@ -52,7 +52,7 @@ export type ChatChunkKind =
 
 export interface DeltaChunk {
   kind: 'delta';
-  body: { text?: string; delta_start?: number | string; delta_end?: number | string };
+  body: { text?: string; delta_start?: number | string; delta_end?: number | string; delta_parts?: unknown };
   sequence: number;
   session_id?: string;
 }
@@ -245,6 +245,8 @@ export interface ReducerSnapshot {
   now: number;
   /** 当前 chunk 的 sequence 序号，用于生成稳定 message id。 */
   sequence: number;
+  /** The Gateway fragment buffer will fill the content before publishing upserts. */
+  externallyOrderedDelta?: boolean;
 }
 
 /**
@@ -425,12 +427,15 @@ export function reassembleChunkDelta(
   result: ReducerResult,
   chunk: DeltaChunk,
   gatewaySequence: number | undefined,
-  record: (assistantId: string, sequence: number, text: string, range: DeltaRange | null) => string,
-): void {
+  record: (assistantId: string, sequence: number, text: string, range: DeltaRange | null, parts: unknown) => string | null,
+): boolean {
   const assistantId = result.replaceBook?.assistantId;
-  if (!assistantId || typeof gatewaySequence !== 'number' || !Number.isSafeInteger(gatewaySequence)
-    || gatewaySequence <= 0) return;
-  const content = record(assistantId, gatewaySequence, textOf(chunk.body), parseDeltaRange(chunk.body, chunk.sequence));
+  if (!assistantId || !hasGatewayDeltaSequence(gatewaySequence)) return chunk.body.delta_parts === undefined;
+  if (chunk.body.delta_parts !== undefined && typeof chunk.body.text !== 'string') return false;
+  const content = record(
+    assistantId, gatewaySequence, textOf(chunk.body), parseDeltaRange(chunk.body, chunk.sequence), chunk.body.delta_parts,
+  );
+  if (content === null) return false;
   for (const upsert of result.messageUpserts) {
     if (upsert.op === 'append' && upsert.message) {
       upsert.message = { ...upsert.message, content };
@@ -438,6 +443,16 @@ export function reassembleChunkDelta(
       upsert.patch = { ...upsert.patch, content };
     }
   }
+  return true;
+}
+
+export function hasGatewayDeltaSequence(sequence: number | undefined): sequence is number {
+  return typeof sequence === 'number' && Number.isSafeInteger(sequence) && sequence > 0;
+}
+
+export function isStreamToolBoundary(chunk: AnyChatChunk): boolean {
+  return chunk.kind === 'tool'
+    && !['progress', 'start', 'generating'].includes(chunk.body.phase ?? '');
 }
 
 // ---------- 7 个 reducer ----------
@@ -527,15 +542,6 @@ function mergeStreamingText(existing: string | undefined, incoming: string | und
   return overlapConcat(left, right);
 }
 
-function deltaRangeOf(chunk: DeltaChunk): { start: number; end: number } | null {
-  const startRaw = chunk.body.delta_start ?? chunk.sequence;
-  const endRaw = chunk.body.delta_end ?? chunk.sequence;
-  const start = typeof startRaw === 'number' ? startRaw : Number(startRaw);
-  const end = typeof endRaw === 'number' ? endRaw : Number(endRaw);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0) return null;
-  return { start: Math.min(start, end), end: Math.max(start, end) };
-}
-
 function renderDeltaText(book: Pick<Bookkeeping, 'deltaSpans' | 'legacyDeltaText'>): string {
   return book.legacyDeltaText + book.deltaSpans
     .slice()
@@ -549,7 +555,7 @@ export function applyOrderedDelta(
   chunk: DeltaChunk,
 ): string {
   const text = textOf(chunk.body);
-  const range = deltaRangeOf(chunk);
+  const range = parseDeltaRange(chunk.body, chunk.sequence);
   if (!range) {
     book.legacyDeltaText += text;
     return renderDeltaText(book);
@@ -626,15 +632,16 @@ function splitAssistantAfterSettledTools(
 }
 
 export function deltaReducer(chunk: DeltaChunk, snapshot: ReducerSnapshot): ReducerResult {
-  const book = {
-    ...snapshot.book,
-    deltaSpans: [...(snapshot.book.deltaSpans ?? [])],
-    legacyDeltaText: snapshot.book.legacyDeltaText ?? '',
-  };
-  if (book.assistantId && book.deltaSpans.length === 0 && !book.legacyDeltaText) {
-    book.legacyDeltaText = snapshot.messages.find((m) => m.id === book.assistantId)?.content ?? '';
+  const book = { ...snapshot.book };
+  let text = textOf(chunk.body);
+  if (!snapshot.externallyOrderedDelta) {
+    book.deltaSpans = [...(book.deltaSpans ?? [])];
+    book.legacyDeltaText ??= '';
+    if (book.assistantId && book.deltaSpans.length === 0 && !book.legacyDeltaText) {
+      book.legacyDeltaText = snapshot.messages.find((m) => m.id === book.assistantId)?.content ?? '';
+    }
+    text = applyOrderedDelta(book, chunk);
   }
-  const text = applyOrderedDelta(book, chunk);
   const upserts: MessageUpsert[] = [];
 
   // 首片 delta 来时若 book 已 finalize（assistantId=null），重置 firstChunkAt。

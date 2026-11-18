@@ -1061,6 +1061,8 @@ export class BackendChatSocket {
           last_gateway_sequences?: Record<string, number>;
           gateway_cursors?: Record<string, GatewayCursor>;
           gateway_snapshots?: boolean;
+          force_snapshot_sessions?: string[];
+          repair_id?: string;
           answers?: Record<string, unknown>;
           request_id?: string;
           mode?: string;
@@ -1108,7 +1110,7 @@ export class BackendChatSocket {
     void this.subscribe(sessions, this.resolveLastGatewaySequences?.(sessions));
   }
 
-  subscribe(sessionIds: string[], lastGatewaySequences?: Record<string, number>): Promise<boolean> {
+  subscribe(sessionIds: string[], lastGatewaySequences?: Record<string, number>, repairId?: string): Promise<boolean> {
     const sessions = Array.from(new Set(sessionIds.map((id) => id.trim()).filter(Boolean)));
     sessions.forEach((id) => this.subscribedSessions.add(id));
     if (sessions.length === 0) return Promise.resolve(true);
@@ -1119,9 +1121,15 @@ export class BackendChatSocket {
       session_id: sessions[0],
       sessions,
       gateway_snapshots: true,
+      ...(repairId ? { force_snapshot_sessions: sessions, repair_id: repairId } : {}),
       ...(hasSeqs ? { last_gateway_sequences: lastGatewaySequences } : {}),
       ...(cursors && Object.keys(cursors).length ? { gateway_cursors: cursors } : {}),
     });
+  }
+
+  requestStreamSnapshot(sessionId: string, repairId: string): Promise<boolean> {
+    const sessions = [sessionId];
+    return this.subscribe(sessions, this.resolveLastGatewaySequences?.(sessions), repairId);
   }
 
   /**

@@ -1,168 +1,269 @@
-/**
- * 流式 delta 按 gateway_sequence 重组 —— 根治「到达顺序 != 生成顺序」导致的正文串位/丢字。
- *
- * 背景：deltaReducer 原先用 `content = cur + text` 按**到达顺序**盲目拼接，隐含「分片到达顺序
- * 恒等于文本生成顺序」的假设。该假设在重连 replay（旧低序号帧在客户端已应用更高序号帧之后才
- * 到达）等场景下被打破，导致正文串位 / 丢字，靠 finalReducer 的兜底覆盖救回（而该覆盖对
- * builtin executor 的多步回合又会丢前言）。
- *
- * 本模块维护「每会话 × 每回合 assistant 消息」的 delta 片段缓冲，按 gateway_sequence（后端
- * push 时分配的会话级单调序号，见 crew/gateway/connections.py::push_payload）**升序**重组正文。
- * 这样无论分片以何种顺序到达，重组结果恒等于正确文本顺序——与到达顺序彻底解耦。
- *
- * 零依赖（不 import state/features），故 state.ts（会话删除）与 features 层（applyChunk /
- * loadBackendHistory）都可 import，无循环。reconstruct 是纯函数，可单测。
- *
- * 生命周期：回合封口（finalizeTurn）/ 用户停止（stopGeneration）/ 历史替换
- * （loadBackendHistory）/ 会话删除（removeSessionState）时清缓冲，防泄漏与串轮。
- * assistantId 每回合唯一（m-{now}-{seq}），跨回合天然隔离。
- */
-
-/** 单回合的 delta 片段缓冲：gateway_sequence → 文本。同一回合内 seq 单调唯一（后端保证）。 */
-type FragmentBuffer = Map<number, string>;
-
-/** delta 帧区间（回合内 1-based 帧序号，见 crew/gateway/outbound.py / connections.py 合并逻辑）。 */
+/** A turn keeps its text and a bounded, reorderable suffix of Gateway fragments. */
 export interface DeltaRange {
   start: number;
   end: number;
 }
 
-/** 单回合缓冲：文本片段 + 各片段的帧区间（合并帧为 min..max，无区间信息的旧帧缺省）。 */
-interface TurnBuffer {
-  frags: FragmentBuffer;
-  ranges: Map<number, DeltaRange>;
+export type DeltaPart = readonly [sequence: number, utf16Length: number];
+
+const MAX_DELTA_PARTS = 256;
+const MAX_RECENT_FRAGMENTS = 512;
+
+interface Fragment {
+  sequence: number;
+  text: string;
+  range: DeltaRange | null;
 }
 
-export type SessionReassembly = Map<string, TurnBuffer>;
+interface TurnBuffer {
+  prefix: string;
+  sealedThrough: number;
+  sealedRangeEnd: number;
+  sealedOpaqueRangeEnd: number;
+  recent: Fragment[];
+  bySequence: Map<number, Fragment>;
+  rangeEnd: number;
+  opaqueRangeEnd: number;
+  text: string;
+}
 
-/** session → assistantId → 回合缓冲。模块级状态，跨 applyChunk 调用累积。 */
+export interface SessionReassembly {
+  turns: Map<string, TurnBuffer>;
+  latestDelta: number;
+  toolBoundary: number;
+}
+
 const buffers = new Map<string, SessionReassembly>();
 
-/**
- * 从 delta 帧 body 解析帧区间；无效（缺失/非数/<=0）时返回 null，调用方按无区间旧帧处理。
- * 与 chat-reducer 的 deltaRangeOf 同一有效性规则。
- */
+export function createSessionReassembly(): SessionReassembly {
+  return { turns: new Map(), latestDelta: 0, toolBoundary: 0 };
+}
+
+function reassemblyFor(sessionId: string): SessionReassembly {
+  let reassembly = buffers.get(sessionId);
+  if (!reassembly) {
+    reassembly = createSessionReassembly();
+    buffers.set(sessionId, reassembly);
+  }
+  return reassembly;
+}
+
 export function parseDeltaRange(
   body: { delta_start?: number | string; delta_end?: number | string },
   sequenceFallback?: number,
 ): DeltaRange | null {
-  const startRaw = body.delta_start ?? sequenceFallback;
-  const endRaw = body.delta_end ?? sequenceFallback;
-  const start = typeof startRaw === 'number' ? startRaw : Number(startRaw);
-  const end = typeof endRaw === 'number' ? endRaw : Number(endRaw);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0) return null;
+  const start = Number(body.delta_start ?? sequenceFallback);
+  const end = Number(body.delta_end ?? sequenceFallback);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start <= 0 || end <= 0) return null;
   return { start: Math.min(start, end), end: Math.max(start, end) };
 }
 
-/** left 后缀与 right 前缀的最长重叠长度。 */
-function suffixPrefixOverlap(left: string, right: string): number {
-  const max = Math.min(left.length, right.length);
-  for (let k = max; k > 0; k--) {
-    if (left.endsWith(right.slice(0, k))) return k;
+/** Wire offsets are UTF-16 lengths, including zero-length fragments. */
+export function parseDeltaParts(
+  gatewaySequence: number,
+  text: string,
+  parts: unknown,
+): readonly DeltaPart[] | null {
+  if (!Array.isArray(parts) || parts.length < 1 || parts.length > MAX_DELTA_PARTS) return null;
+  let previous = 0;
+  let end = 0;
+  for (const part of parts) {
+    if (!Array.isArray(part) || part.length !== 2) return null;
+    const [sequence, length] = part;
+    if (!Number.isSafeInteger(sequence) || sequence <= previous
+      || !Number.isSafeInteger(length) || length < 0) return null;
+    previous = sequence;
+    end += length;
+    if (end > text.length) return null;
   }
-  return 0;
+  return previous === gatewaySequence && end === text.length ? parts as readonly DeltaPart[] : null;
 }
 
-/**
- * 纯函数：把「seq → text」片段按 seq 升序拼接成完整正文。可单测。
- *
- * delta 在一个回合内共享会话级单调 seq（中间夹带的 status/tool 帧占用别的 seq，不进本缓冲），
- * 故「按 seq 升序拼接 delta 片段」恒等于正确文本顺序——即便分片乱序到达、或 seq 非连续。
- *
- * 重复免疫（ranges 提供帧区间时）：live 投递经限流合并（一帧携带多帧文本 + 合并区间），而
- * 重连 replay 回放的是未合并单帧；被合并成员的 gateway_sequence 未在客户端登记，精确序号去重
- * 拦不住，同一文本会以「合并帧 + 单帧」各进一次缓冲。这里按帧区间去重：
- * - 区间已完全被覆盖 → 整段跳过；
- * - 区间头部与已发射部分重叠 → 剥离重复前缀（重叠段文本既是 out 后缀也是本片段前缀）再拼接。
- * 区间不重叠的相邻片段（即便文本巧合相同）照常全量拼接，不误伤合法重复文本。
- */
-export function reconstruct(frags: FragmentBuffer, ranges?: Map<number, DeltaRange>): string {
-  if (frags.size === 0) return '';
-  const seqs = Array.from(frags.keys()).sort((a, b) => a - b);
-  let out = '';
-  let emittedEnd = 0;
-  for (const s of seqs) {
-    const text = frags.get(s) ?? '';
-    const range = ranges?.get(s) ?? null;
-    if (!range) {
-      out += text;
+function splitDelta(text: string, parts: readonly DeltaPart[], range: DeltaRange | null): Fragment[] {
+  let offset = 0;
+  const contiguousRange = range && range.end - range.start + 1 === parts.length ? range : null;
+  return parts.map(([sequence, length], index) => {
+    const start = offset;
+    offset += length;
+    const position = contiguousRange ? contiguousRange.start + index : 0;
+    return { sequence, text: text.slice(start, offset), range: position ? { start: position, end: position } : null };
+  });
+}
+
+function isOpaque(range: DeltaRange | null): boolean {
+  return !!range && range.start < range.end;
+}
+
+function containsRange(outer: DeltaRange, inner: DeltaRange): boolean {
+  return outer.start <= inner.start && outer.end >= inner.end;
+}
+
+/** Legacy batches have known endpoints. Only replace or ignore a fully covered range. */
+function canCover(outer: Fragment, inner: Fragment, outerRange: DeltaRange, innerRange: DeltaRange): boolean {
+  if (!containsRange(outerRange, innerRange) || outer.text.length < inner.text.length) return false;
+  if (outerRange.start === innerRange.start && !outer.text.startsWith(inner.text)) return false;
+  if (outerRange.end === innerRange.end && !outer.text.endsWith(inner.text)) return false;
+  return outerRange.start === innerRange.start || outerRange.end === innerRange.end
+    || outer.text.includes(inner.text);
+}
+
+function insertRecent(turn: TurnBuffer, incoming: Fragment[]): Fragment[] | null {
+  const indexed = new Map(turn.bySequence);
+  let opaqueRangeEnd = turn.opaqueRangeEnd;
+  for (const fragment of incoming) {
+    const known = indexed.get(fragment.sequence);
+    const range = fragment.range;
+    const opaque = isOpaque(range);
+    if (known && !opaque && !isOpaque(known.range)) {
+      if (known.text !== fragment.text) return null;
       continue;
     }
-    if (range.end <= emittedEnd) continue;
-    if (range.start <= emittedEnd && out) {
-      out += text.slice(suffixPrefixOverlap(out, text));
-    } else {
-      out += text;
+
+    let covered = false;
+    if (range && (opaque || range.start <= opaqueRangeEnd)) {
+      for (const candidate of indexed.values()) {
+        const other = candidate.range;
+        if (!other || (!opaque && !isOpaque(other)) || other.end < range.start || range.end < other.start) continue;
+        if (canCover(candidate, fragment, other, range)) {
+          covered = true;
+          break;
+        }
+        if (!canCover(fragment, candidate, range, other)) return null;
+        indexed.delete(candidate.sequence);
+      }
     }
-    emittedEnd = Math.max(emittedEnd, range.end);
+    if (covered) continue;
+    if (indexed.has(fragment.sequence)) return null;
+    indexed.set(fragment.sequence, fragment);
+    if (opaque && range) opaqueRangeEnd = Math.max(opaqueRangeEnd, range.end);
   }
-  return out;
+  return Array.from(indexed.values()).sort((a, b) => a.sequence - b.sequence);
 }
 
-/**
- * 记录一条 delta 片段并返回重组后的完整正文。
- * 调用方（applyChunk 的 delta 分支）用它**覆盖** reducer 算出的 `cur + text`（到达顺序拼接）。
- * 幂等：同一 seq 重复写入用相同 text 覆盖（去重层已防重复帧，这里是二次防御）。
- */
+function indexFragment(turn: TurnBuffer, fragment: Fragment): void {
+  turn.bySequence.set(fragment.sequence, fragment);
+  if (fragment.range) {
+    turn.rangeEnd = Math.max(turn.rangeEnd, fragment.range.end);
+    if (isOpaque(fragment.range)) turn.opaqueRangeEnd = Math.max(turn.opaqueRangeEnd, fragment.range.end);
+  }
+}
+
+function trimRecent(turn: TurnBuffer): void {
+  if (turn.recent.length <= MAX_RECENT_FRAGMENTS) return;
+  const sealed = turn.recent.splice(0, turn.recent.length - MAX_RECENT_FRAGMENTS / 2);
+  for (const fragment of sealed) {
+    turn.prefix += fragment.text;
+    turn.sealedThrough = fragment.sequence;
+    turn.sealedRangeEnd = Math.max(turn.sealedRangeEnd, fragment.range?.end ?? 0);
+    if (fragment.range && isOpaque(fragment.range)) {
+      turn.sealedOpaqueRangeEnd = Math.max(turn.sealedOpaqueRangeEnd, fragment.range.end);
+    }
+    turn.bySequence.delete(fragment.sequence);
+  }
+}
+
+/** Tool completions can change the destination message for later deltas. */
+export function noteSessionDeltaBoundary(reassembly: SessionReassembly, sequence: number): boolean {
+  if (sequence < reassembly.latestDelta || sequence < reassembly.toolBoundary) return false;
+  reassembly.toolBoundary = sequence;
+  return true;
+}
+
+export function noteDeltaBoundary(sessionId: string, sequence: number): boolean {
+  return noteSessionDeltaBoundary(reassemblyFor(sessionId), sequence);
+}
+
 export function noteDelta(
   sessionId: string,
   assistantId: string,
-  seq: number,
+  sequence: number,
   text: string,
-  range?: DeltaRange | null,
-): string {
-  let reassembly = buffers.get(sessionId);
-  if (!reassembly) {
-    reassembly = new Map();
-    buffers.set(sessionId, reassembly);
-  }
-  return noteSessionDelta(reassembly, assistantId, seq, text, range);
+  range: DeltaRange | null = null,
+  rawParts?: unknown,
+): string | null {
+  return noteSessionDelta(reassemblyFor(sessionId), assistantId, sequence, text, range, rawParts);
 }
 
+/** Returns null when the previously accepted text cannot be reconciled exactly. */
 export function noteSessionDelta(
   reassembly: SessionReassembly,
   assistantId: string,
-  seq: number,
+  sequence: number,
   text: string,
-  range?: DeltaRange | null,
-): string {
-  let turn = reassembly.get(assistantId);
-  if (!turn) {
-    turn = { frags: new Map(), ranges: new Map() };
-    reassembly.set(assistantId, turn);
+  range: DeltaRange | null = null,
+  rawParts?: unknown,
+): string | null {
+  let incoming: Fragment[];
+  if (rawParts === undefined) {
+    if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
+    incoming = [{ sequence, text, range }];
+  } else {
+    const parts = parseDeltaParts(sequence, text, rawParts);
+    if (!parts) return null;
+    incoming = splitDelta(text, parts, range);
   }
-  turn.frags.set(seq, text);
-  if (range) turn.ranges.set(seq, range);
-  return reconstruct(turn.frags, turn.ranges);
+  if (incoming[0].sequence <= reassembly.toolBoundary) return null;
+
+  const existing = reassembly.turns.get(assistantId);
+  const turn: TurnBuffer = existing ?? {
+    prefix: '', sealedThrough: 0, sealedRangeEnd: 0, sealedOpaqueRangeEnd: 0,
+    recent: [], bySequence: new Map(),
+    rangeEnd: 0, opaqueRangeEnd: 0, text: '',
+  };
+  const first = incoming[0];
+  if (first.sequence <= turn.sealedThrough || incoming.some((fragment) => fragment.range
+    && fragment.range.start <= (isOpaque(fragment.range) ? turn.sealedRangeEnd : turn.sealedOpaqueRangeEnd))) {
+    return null;
+  }
+
+  // Gateway sequence is authoritative for raw and boundary-aware deltas. The
+  // compatibility check only matters when a legacy batch has no part offsets.
+  const mayOverlapOpaque = incoming.some((fragment) => fragment.range
+    && fragment.range.start <= (isOpaque(fragment.range) ? turn.rangeEnd : turn.opaqueRangeEnd));
+  if (first.sequence > (turn.recent.at(-1)?.sequence ?? 0) && !mayOverlapOpaque) {
+    for (const fragment of incoming) {
+      turn.recent.push(fragment);
+      indexFragment(turn, fragment);
+    }
+    turn.text += text;
+  } else {
+    const ordered = insertRecent(turn, incoming);
+    if (!ordered) return null;
+    turn.recent = ordered;
+    turn.bySequence.clear();
+    turn.rangeEnd = turn.sealedRangeEnd;
+    turn.opaqueRangeEnd = turn.sealedOpaqueRangeEnd;
+    for (const fragment of ordered) indexFragment(turn, fragment);
+    turn.text = turn.prefix + ordered.map((fragment) => fragment.text).join('');
+  }
+  trimRecent(turn);
+  reassembly.latestDelta = Math.max(reassembly.latestDelta, sequence);
+  if (!existing) reassembly.turns.set(assistantId, turn);
+  return turn.text;
 }
 
 export function installSessionReassembly(sessionId: string, reassembly: SessionReassembly): void {
   buffers.set(sessionId, reassembly);
 }
 
-/** 清除指定回合（assistantId）的片段缓冲。回合封口（finalizeTurn）时调用。 */
 export function resetAssistant(sessionId: string, assistantId: string): void {
-  buffers.get(sessionId)?.delete(assistantId);
+  buffers.get(sessionId)?.turns.delete(assistantId);
 }
 
-/** 清除指定会话的全部片段缓冲。用户停止（stopGeneration）/ 会话删除（removeSessionState）时调用。 */
 export function resetSession(sessionId: string): void {
   buffers.delete(sessionId);
 }
 
-/**
- * 清除指定会话中「不在 keepIds 里」的回合缓冲。历史替换（loadBackendHistory）时调用——
- * 保留仍在 live 流式的尾巴（其 assistantId 在新消息列表里），清掉被替换掉的旧回合。
- */
 export function resetSessionExcept(sessionId: string, keepIds: Set<string>): void {
-  const byAid = buffers.get(sessionId);
-  if (!byAid) return;
-  for (const aid of Array.from(byAid.keys())) {
-    if (!keepIds.has(aid)) byAid.delete(aid);
+  const turns = buffers.get(sessionId)?.turns;
+  if (!turns) return;
+  for (const id of turns.keys()) {
+    if (!keepIds.has(id)) turns.delete(id);
   }
 }
 
-/** 单测 / 诊断：读取某回合当前片段缓冲的拷贝。 */
+/** Diagnostic view of the bounded replay window. */
 export function peekFrags(sessionId: string, assistantId: string): Map<number, string> {
-  return new Map(buffers.get(sessionId)?.get(assistantId)?.frags ?? []);
+  const recent = buffers.get(sessionId)?.turns.get(assistantId)?.recent ?? [];
+  return new Map(recent.map(({ sequence, text }) => [sequence, text]));
 }

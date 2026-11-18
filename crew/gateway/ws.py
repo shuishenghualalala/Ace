@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import suppress
 from typing import Any
 
@@ -42,6 +43,8 @@ from crew.state.logging import get_logger
 from crew.core.followup import get_followup_waiter
 
 log = get_logger("gateway.ws")
+_MAX_FORCED_SNAPSHOT_SESSIONS = 16
+_REPAIR_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def normalize_team_execution_profile(raw: object) -> dict[str, object] | None:
@@ -671,6 +674,17 @@ def create_ws_router(
                     cursors = raw_cursors if isinstance(raw_cursors, dict) else {}
                     supports_snapshots = data.get("gateway_snapshots") is True
                     snapshot_request = getattr(dispatcher, "snapshot_request_id", None)
+                    repair_id = data.get("repair_id")
+                    raw_forced = data.get("force_snapshot_sessions")
+                    forced_sessions = set()
+                    if (
+                        supports_snapshots and isinstance(repair_id, str) and _REPAIR_ID.fullmatch(repair_id)
+                        and isinstance(raw_forced, list)
+                    ):
+                        forced_sessions = {
+                            raw_sid.strip() for raw_sid in raw_forced[:_MAX_FORCED_SNAPSHOT_SESSIONS]
+                            if isinstance(raw_sid, str) and raw_sid.strip()
+                        }
                     last_seqs: dict[str, int] = {}
                     if isinstance(raw_seqs, dict):
                         for k, v in raw_seqs.items():
@@ -708,6 +722,9 @@ def create_ws_router(
                             cursor_arg = {"resume_cursor": cursors[sid]} if sid in cursors else {}
                             if supports_snapshots and callable(snapshot_request):
                                 cursor_arg["snapshot_request_id"] = lambda session=sid: snapshot_request(session, owner)
+                            if sid in forced_sessions:
+                                forced_sessions.remove(sid)
+                                cursor_arg["repair_id"] = repair_id
                             if not await connections.replay(
                                 sid,
                                 socket,

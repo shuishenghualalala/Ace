@@ -15,7 +15,7 @@
 
 import type { Attachment, InspirationSurface, TeamArtifactCard, WikiPage } from './backend-client';
 import type { FileChange, TodoItem } from './state';
-import { renderMarkdownHtml, renderMarkdownHtmlStreaming } from './markdown';
+import { renderMarkdownHtml } from './markdown';
 import { escapeHtml } from '../shared/html';
 import { getToolFold, toolFoldKey } from './features/fold-state';
 import { toolDisplayTitle } from './tool-labels';
@@ -1295,11 +1295,10 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
     // 时间线上旁白不占图标位（ghost 占位，对齐 web NarrationTimelineItem）。
     // 空白旁白（工具 loop 之间的分隔换行）跳过：渲染出来是看不见的占位行。
     if (m.content?.trim() && isIntermediate) {
-      const md = (useStreamingMd ? renderMarkdownHtmlStreaming : renderMarkdownHtml)(m.content);
       const div = document.createElement('div');
       div.className = 'process-timeline__narration msg__text md-body chat-markdown';
       if (m.streaming && i === lastTextIdx) div.dataset.textFor = m.id;
-      div.appendChild(createTrustedFragment(md));
+      patchTranscriptMarkdown(div, m.content, useStreamingMd);
       // 旁白不占图标列：通栏渲染，文字左缘与折叠区外正文顶格对齐（ghost 图标列空白会显得悬空）。
       const item = renderTimelineItem('', 'process-timeline__icon--ghost', div);
       item.classList.add('process-timeline__item--narration');
@@ -1331,11 +1330,10 @@ export function renderAgentTurn(messages: ChatMessage[], options: AgentTurnOptio
       textParts.push(renderWikiCardsPanel(m.wikiCards));
     }
     if (m.content?.trim() && !isIntermediate) {
-      const md = (useStreamingMd ? renderMarkdownHtmlStreaming : renderMarkdownHtml)(m.content);
       const div = document.createElement('div');
       div.className = 'msg__text md-body chat-markdown';
       div.dataset.textFor = m.id;
-      div.appendChild(createTrustedFragment(md));
+      patchTranscriptMarkdown(div, m.content, useStreamingMd);
       textParts.push(div);
       textRaw.push(m.content);
     } else if (!m.content && m.streaming && !options.isStreaming) {

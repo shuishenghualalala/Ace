@@ -234,8 +234,15 @@ async def test_active_snapshot_preserves_frozen_history_and_evicted_frames(monke
     assert [(f["kind"], f["gateway_sequence"]) for f in compacted] == [
         ("delta", 2), ("tool", 3), ("tool", 4), ("thinking", 5), ("delta", 6),
     ]
-    assert compacted[0]["body"] == {"text": "first second", "delta_start": 1, "delta_end": 2}
+    assert compacted[0]["body"] == {
+        "text": "first second", "delta_start": 1, "delta_end": 2, "delta_parts": [[1, 6], [2, 6]],
+    }
     assert {f["gateway_epoch"] for f in compacted} == {epoch}
+
+    cold = _FakeWS()
+    assert await conn.replay("s1", cold, owner_account_id="owner", snapshot_request_id=lambda: "req")
+    cold_reset, = cold.sent
+    assert cold_reset == reset
 
     for owner, request in (("owner", None), ("other-owner", "req"), ("owner", "old-req")):
         observer = _FakeWS()
@@ -250,6 +257,46 @@ async def test_active_snapshot_preserves_frozen_history_and_evicted_frames(monke
     after = _FakeWS()
     await conn.replay("s1", after, owner_account_id="owner", resume_cursor=cursor, snapshot_request_id=lambda: "req")
     assert "turn_snapshot" not in after.sent[0]["body"]
+
+
+@pytest.mark.asyncio
+async def test_forced_repair_reports_current_snapshot_and_settled_fallback(conn):
+    owner, sid = "owner", "s1"
+    history = {"items": [{"role": "user", "content": "question"}], "has_more": False}
+    await conn.capture_turn_history(owner, sid, "req", 1.0, lambda: True, lambda: history)
+    frame = {"kind": "delta", "request_id": "req", "body": {"text": "prefix"}}
+    await conn.push_payload(sid, frame, owner_account_id=owner)
+    cursor = {"epoch": frame["gateway_epoch"], "sequence": frame["gateway_sequence"]}
+
+    observers = []
+    for cursor_options in ({}, {"resume_cursor": cursor}):
+        socket = _FakeWS()
+        observers.append(socket)
+        assert await conn.replay(
+            sid, socket, owner_account_id=owner, snapshot_request_id=lambda: "req",
+            register_for_live=True, repair_id="attempt_01", **cursor_options,
+        )
+        reset, = socket.sent
+        assert (reset["kind"], reset["gateway_epoch"], reset["gateway_sequence"]) == (
+            "gateway_resync", cursor["epoch"], cursor["sequence"],
+        )
+        assert reset["body"] == {
+            "reason": "client_stream_gap", "floor": 0, "repair_id": "attempt_01",
+            "turn_snapshot": {"request_id": "req", "started_at": 1.0, "history": history, "frames": [frame]},
+        }
+
+    foreign = _FakeWS()
+    await conn.replay(sid, foreign, owner_account_id="other-owner", repair_id="other", snapshot_request_id=lambda: "req")
+    assert foreign.sent[0]["body"] == {"reason": "client_stream_gap", "floor": 0, "repair_id": "other"}
+
+    await conn.push_payload(sid, {"kind": "final", "request_id": "req", "is_final": True}, owner_account_id=owner)
+    for observer in observers:
+        assert [event["kind"] for event in observer.sent] == ["gateway_resync", "final"]
+    settled = _FakeWS()
+    await conn.replay(sid, settled, owner_account_id=owner, repair_id="settled", snapshot_request_id=lambda: "req")
+    reset, = settled.sent
+    assert reset["gateway_sequence"] == cursor["sequence"] + 1
+    assert reset["body"] == {"reason": "client_stream_gap", "floor": 0, "repair_id": "settled"}
 
 
 @pytest.mark.asyncio
@@ -645,6 +692,33 @@ def test_merge_pending_delta_adds_sequence_range_without_body_metadata(conn: Con
     assert merged[0]["body"]["text"] == "hello world"
     assert merged[0]["body"]["delta_start"] == 5
     assert merged[0]["body"]["delta_end"] == 6
+    assert "delta_parts" not in merged[0]["body"]
+
+
+def test_delta_parts_preserve_utf16_frame_boundaries_and_cap(conn, monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._MAX_DELTA_PARTS", 3)
+    texts = ["A", "\u4e2d\U0001f4a1", "", "tail"]
+    frames = [
+        {"kind": "delta", "gateway_sequence": seq, "body": {"text": body}}
+        for seq, body in zip((2, 5, 9, 10), texts, strict=True)
+    ]
+
+    merged, single = conn._merge_pending_payloads(frames)
+    assert merged["gateway_sequence"] == 9
+    assert merged["body"] == {"text": "".join(texts[:3]), "delta_parts": [[2, 1], [5, 3], [9, 0]]}
+    assert single == frames[-1]
+    assert all("delta_parts" not in frame["body"] for frame in frames)
+    assert conn._merge_pending_payloads([merged, single]) == [merged, single]
+
+
+@pytest.mark.parametrize("earlier", [None, True, -1, 3, 4, 2**53])
+def test_legacy_merge_stays_unannotated_with_invalid_exact_sequence(conn, earlier):
+    frames = [
+        {"kind": "delta", "gateway_sequence": earlier, "sequence": 1, "body": {"text": "first"}},
+        {"kind": "delta", "gateway_sequence": 3, "sequence": 2, "body": {"text": "second"}},
+    ]
+    merged, = conn._merge_pending_payloads(frames)
+    assert merged["body"] == {"text": "firstsecond", "delta_start": 1, "delta_end": 2}
 
 
 def test_merge_pending_thinking_keeps_latest_snapshot_per_request(conn: ConnectionManager):
@@ -722,6 +796,7 @@ async def test_final_flushes_pending_deltas_before_final():
     assert delta_payload["body"]["text"] == "AB"
     assert delta_payload["body"]["delta_start"] == 1
     assert delta_payload["body"]["delta_end"] == 2
+    assert delta_payload["body"]["delta_parts"] == [[1, 1], [2, 1]]
     assert delta_payload["gateway_sequence"] == 2
     final_payload = ws.sent[1]
     assert final_payload["kind"] == "final"

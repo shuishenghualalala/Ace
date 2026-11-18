@@ -55,6 +55,7 @@ class _ReplayConnections:
         self.registered: list[str] = []
         self.replays: list[tuple[str, int]] = []
         self.resume_cursors: list[tuple[str, object]] = []
+        self.repairs: list[tuple[str, str, object]] = []
         self.owners: list[str] = []
         self.sockets: dict[str, list] = {}
 
@@ -83,6 +84,8 @@ class _ReplayConnections:
         self.replays.append((session_id, after_gateway_sequence))
         if "resume_cursor" in _kwargs:
             self.resume_cursors.append((session_id, _kwargs["resume_cursor"]))
+        if "repair_id" in _kwargs:
+            self.repairs.append((session_id, _kwargs["owner_account_id"], _kwargs["repair_id"]))
         await socket.send_json({
             "kind": "delta",
             "body": {"text": f"replay:{session_id}:{after_gateway_sequence}"},
@@ -157,6 +160,49 @@ def test_ws_routes_modern_cursor_only_to_owned_replays():
 
     assert connections.registered == ["unowned", "s1"]
     assert connections.resume_cursors == [("s1", cursor)]
+
+
+def test_ws_forces_snapshot_only_for_owned_requested_subscriptions():
+    connections = _ReplayConnections()
+    client = _client(connections, owned_sessions={"s1", "normal", "not-subscribed"})
+
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        ws.send_json({
+            "action": "resume",
+            "sessions": ["other-owner", "s1", "normal"],
+            "gateway_snapshots": True,
+            "force_snapshot_sessions": ["s1", "other-owner", "not-subscribed"],
+            "repair_id": "repair-id_1",
+        })
+        assert [ws.receive_json()["session_id"] for _ in range(2)] == ["s1", "normal"]
+
+    assert connections.replays == [("s1", 0), ("normal", 0)]
+    assert connections.repairs == [("s1", connections.owners[0], "repair-id_1")]
+
+
+def test_ws_preserves_ordinary_replay_for_invalid_or_unnegotiated_repairs():
+    connections = _ReplayConnections()
+    client = _client(connections)
+    invalid_options = [
+        {"gateway_snapshots": False},
+        {"repair_id": "x" * 129},
+        {"repair_id": "bad token"},
+        {"force_snapshot_sessions": [None, 123, {"session_id": "s1"}]},
+        {"force_snapshot_sessions": [f"other-{index}" for index in range(16)] + ["s1"]},
+    ]
+    with client.websocket_connect("/ws", headers=AUTH_HEADERS) as ws:
+        for overrides in invalid_options:
+            ws.send_json({
+                "action": "subscribe", "sessions": ["s1"],
+                "last_gateway_sequences": {"s1": 5},
+                "gateway_snapshots": True,
+                "force_snapshot_sessions": ["s1"],
+                "repair_id": "valid",
+                **overrides,
+            })
+            assert ws.receive_json()["gateway_sequence"] == 6
+
+    assert connections.repairs == []
 
 
 def test_ws_message_forwards_structured_user_mentions_before_dispatch(monkeypatch):

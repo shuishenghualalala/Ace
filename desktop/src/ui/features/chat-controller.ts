@@ -13,7 +13,7 @@
  */
 
 import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, touchStreamActivity } from './gateway-sequence';
-import { noteDelta, resetAssistant, resetSession } from '../stream-reassembly';
+import { noteDelta, noteDeltaBoundary, resetSession } from '../stream-reassembly';
 import {
   type ChatMessage,
   type PendingMessage,
@@ -101,7 +101,9 @@ import {
   applyMessageUpserts,
   chunkRequestId,
   featureEventFrameOf,
+  hasGatewayDeltaSequence,
   isPlanControlStatus,
+  isStreamToolBoundary,
   normalizeChunk,
   reduceChunk,
   reassembleChunkDelta,
@@ -581,9 +583,10 @@ const patchedStreamingMarkdown = new WeakMap<HTMLElement, string>();
 
 function patchLiveMarkdown(element: HTMLElement, content: string): void {
   if (patchedStreamingMarkdown.get(element) === content) return;
-  patchTranscriptMarkdown(element, content, true);
-  attachCopyButtons(element);
-  void renderMermaidBlocks(element);
+  for (const root of patchTranscriptMarkdown(element, content, true)) {
+    attachCopyButtons(root);
+    void renderMermaidBlocks(root);
+  }
   patchedStreamingMarkdown.set(element, content);
 }
 
@@ -855,8 +858,8 @@ export function finalizeTurn(sessionId: string): void {
   const book = bookFor(sessionId);
   const finalizedAssistantId = book.assistantId;
   if (finalizedAssistantId) patchMessage(sessionId, finalizedAssistantId, { streaming: false });
-  // 修法3：回合封口 → 清该回合的 delta 重组缓冲（assistantId 每回合唯一，不影响后续回合；防泄漏）
-  if (finalizedAssistantId) resetAssistant(sessionId, finalizedAssistantId);
+  // Tool calls can split one turn into several assistant messages.
+  resetSession(sessionId);
   // 不可变更新 book：finalize 后清空本轮记账，触发 sessionStore 订阅
   patchBook(sessionId, {
     toolMap: new Map(),
@@ -968,9 +971,9 @@ function visibleFollowupSessionId(sessionId: string): string {
   return markerIndex > 0 ? sessionId.slice(0, markerIndex) : sessionId;
 }
 
-export function applyChunk(incomingChunk: ChatChunk): void {
+export function applyChunk(incomingChunk: ChatChunk): 'repair' | void {
   try {
-    applyChunkInner(incomingChunk);
+    return applyChunkInner(incomingChunk);
   } catch (err) {
     // 单帧处理异常不得逃逸成 uncaught（ws 事件回调里炸掉会丢帧且不可见），
     // 也不得让会话停在「执行中」：终态帧处理失败时按 finalize 语义兜底收尾。
@@ -1009,7 +1012,7 @@ function reportObservationClientEvent(payload: Record<string, unknown>): void {
   }
 }
 
-function applyChunkInner(incomingChunk: ChatChunk): void {
+function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   const sourceSid = incomingChunk.session_id || state.activeSessionId || 'default';
   const sid = incomingChunk.kind === 'followup_question'
     ? visibleFollowupSessionId(sourceSid)
@@ -1142,7 +1145,7 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
   if (isDuplicateGatewayChunk(sid, chunk)) {
     return;
   }
-  noteGatewaySequence(sid, chunk);
+  if (chunk.kind !== 'delta' && chunk.kind !== 'tool') noteGatewaySequence(sid, chunk);
   touchStreamActivity(sid);
 
   const parsed = normalizeChunk(chunk);
@@ -1187,8 +1190,15 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
     activeRequestId: book.activeRequestId,
     acceptingNewRequest: book.acceptingNewRequest,
   });
-  if (gate.action === 'drop') return;
+  if (gate.action === 'drop') {
+    if (parsed.kind === 'delta' || parsed.kind === 'tool') noteGatewaySequence(sid, chunk);
+    return;
+  }
   const bindRequestId = 'bindRequestId' in gate ? gate.bindRequestId : null;
+  const gatewaySequence = chunk.gateway_sequence;
+  if (isStreamToolBoundary(parsed) && hasGatewayDeltaSequence(gatewaySequence)
+    && !noteDeltaBoundary(sid, gatewaySequence)) return 'repair';
+  if (parsed.kind === 'tool') noteGatewaySequence(sid, chunk);
 
   handleBlueprintSurfaceToolChunk(chunk, sid);
 
@@ -1251,16 +1261,13 @@ function applyChunkInner(incomingChunk: ChatChunk): void {
     currentStatus: state.sessionStatuses[sid] ?? 'idle',
     now: Date.now(),
     sequence: typeof chunk.sequence === 'number' ? chunk.sequence : 0,
+    externallyOrderedDelta: parsed.kind === 'delta' && hasGatewayDeltaSequence(gatewaySequence),
   };
   const result = reduceChunk(parsed, snapshot);
 
-  // 修法1：delta 按 gateway_sequence 重组，覆盖 reducer 「cur + text 按到达顺序拼接」的脆弱累积。
-  // 后端在重连 replay 等场景会把旧低序号帧晚于更高序号帧投递，到达顺序 != 生成顺序 → 盲目追加会
-  // 串位/丢字。这里把本片按 gateway_sequence（会话级单调序号，见 crew/gateway/connections.py）
-  // 入缓冲，用「按 seq 升序拼接」的重组结果覆盖 upsert 的 content，与到达顺序彻底解耦。
-  // 无 gateway_sequence 的旧帧无可靠排序键，回退到 reducer 的到达顺序拼接（向后兼容）。
   if (parsed.kind === 'delta') {
-    reassembleChunkDelta(result, parsed, chunk.gateway_sequence, (...args) => noteDelta(sid, ...args));
+    if (!reassembleChunkDelta(result, parsed, gatewaySequence, (...args) => noteDelta(sid, ...args))) return 'repair';
+    noteGatewaySequence(sid, chunk);
   }
 
   // 状态 patch：book 整体替换

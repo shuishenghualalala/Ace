@@ -63,22 +63,21 @@ function loadMermaid(): Promise<MermaidAPI> {
 /**
  * 渲染 root 内所有未处理的 mermaid 占位。
  *
- * @param root 某个消息节点或 document；只扫描其内部未渲染的 [data-mermaid]。
+ * @param root 消息节点、单个 Markdown 块或 document。
  */
 export async function renderMermaidBlocks(root: HTMLElement | Document): Promise<void> {
-  const placeholders = root.querySelectorAll<HTMLElement>(
-    '[data-mermaid]:not([data-mermaid-rendered]):not([data-mermaid-error])',
-  );
-  if (placeholders.length === 0) return;
+  const selector = '[data-mermaid]:not([data-mermaid-rendered]):not([data-mermaid-error])';
+  const nodes = Array.from(root.querySelectorAll<HTMLElement>(selector));
+  if (root instanceof HTMLElement && root.matches(selector)) nodes.unshift(root);
+  if (nodes.length === 0) return;
   let mermaid: MermaidAPI;
   try {
     mermaid = await loadMermaid();
   } catch {
     // mermaid 加载失败（网络/打包问题）：标记所有占位为 error，避免反复尝试。
-    placeholders.forEach((el) => el.setAttribute('data-mermaid-error', 'load-failed'));
+    nodes.forEach((el) => el.setAttribute('data-mermaid-error', 'load-failed'));
     return;
   }
-  const nodes = Array.from(placeholders);
   // 先标记 rendered，防止下次重复处理；失败的额外回退标记。
   nodes.forEach((el) => el.setAttribute('data-mermaid-rendered', '1'));
   try {

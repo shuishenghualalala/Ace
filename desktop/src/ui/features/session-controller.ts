@@ -70,6 +70,7 @@ import {
   isDuplicateGatewayChunk,
   noteGatewaySequence,
   touchStreamActivity,
+  trimGatewayDeltaAtCut,
 } from './gateway-sequence';
 import { installSessionReassembly, resetSession, resetSessionExcept } from '../stream-reassembly';
 import { projectActiveTurnSnapshot } from './active-turn-snapshot';
@@ -78,7 +79,7 @@ import {
   cancelSessionStreamRecovery,
   getSessionStreamRecovery,
 } from './session-stream-recovery';
-import { syncSessionLiveFromBackend } from './session-busy';
+import { newTurnRequestId, syncSessionLiveFromBackend } from './session-busy';
 import { startStreamWatchdog, stopStreamWatchdog } from './stream-watchdog';
 import { isRendererLoggedIn, requireRendererLogin } from './auth-gate';
 import { logStream } from '../stream-debug';
@@ -395,7 +396,7 @@ export async function loadBackendHistory(
       setHistoryLoading(sessionId, false);
       const queued = flushPendingChunks(sessionId);
       if (queued) {
-        for (const c of queued) applyChunk(c);
+        for (const c of queued) handleGatewayChunk(c);
       }
     }
   }
@@ -584,6 +585,30 @@ const INCOMPLETE_STREAM_KINDS = new Set<ChatChunk['kind']>([
   'delta', 'thinking', 'tool', 'status', 'final', 'error', 'todo_updated', 'file_changes',
 ]);
 
+function requestStreamRepair(sessionId: string): void {
+  const repair = getSessionStreamRecovery(sessionId)?.repair;
+  const connection = recoveryConnection;
+  const socket = state.socket;
+  if (!repair || !connection?.() || !socket || repair.attempt?.connection === connection) return;
+
+  const epoch = getGatewayCursors([sessionId])[sessionId]?.epoch;
+  const id = newTurnRequestId();
+  repair.attempt = { id, connection, ...(epoch ? { epoch } : {}) };
+  void socket.requestStreamSnapshot(sessionId, id).catch(() => {});
+}
+
+function recoverStreamGap(sessionId: string): void {
+  if (getSessionStreamRecovery(sessionId) || state.suppressChunks.has(sessionId)) return;
+  beginSessionStreamRecovery(sessionId, getGatewayCursors([sessionId])[sessionId] ?? null);
+  historyLoadSeq.set(sessionId, (historyLoadSeq.get(sessionId) ?? 0) + 1);
+  olderPageInFlight.delete(sessionId);
+  flushPendingChunks(sessionId);
+  setHistoryLoading(sessionId, false);
+  requestStreamRepair(sessionId);
+  if (state.activeSessionId === sessionId) renderChat();
+  void reconcileSessionAfterResync(sessionId);
+}
+
 function applyActiveTurnSnapshot(sessionId: string, control: ChatChunk): boolean {
   let projection: ReturnType<typeof projectActiveTurnSnapshot>;
   try {
@@ -638,13 +663,24 @@ function handleGatewayChunk(chunk: ChatChunk): void {
   if (chunk.kind === 'gateway_resync') {
     if (!sessionId || (!state.subscribedSessions.has(sessionId) && state.activeSessionId !== sessionId)) return;
     const previousEpoch = getGatewayCursors([sessionId])[sessionId]?.epoch;
-    if (!acceptGatewayResync(sessionId, chunk) || state.suppressChunks.has(sessionId)) return;
+    const previousRecovery = getSessionStreamRecovery(sessionId);
+    const correlated = chunk.body?.reason === 'client_stream_gap' || chunk.body?.repair_id !== undefined;
+    if (correlated) {
+      const attempt = previousRecovery?.repair?.attempt;
+      if (chunk.body?.reason !== 'client_stream_gap' || !attempt || attempt.id !== chunk.body.repair_id
+        || attempt.connection !== recoveryConnection || !attempt.connection()
+        || (attempt.epoch !== previousEpoch && chunk.gateway_epoch !== previousEpoch)) return;
+      const minimum = previousRecovery?.repair?.minimumCut;
+      if (minimum && chunk.gateway_epoch === minimum.epoch && typeof chunk.gateway_sequence === 'number'
+        && chunk.gateway_sequence < minimum.sequence) return;
+    }
+    if (!acceptGatewayResync(sessionId, chunk, correlated) || state.suppressChunks.has(sessionId)) return;
     historyLoadSeq.set(sessionId, (historyLoadSeq.get(sessionId) ?? 0) + 1);
     olderPageInFlight.delete(sessionId);
     flushPendingChunks(sessionId);
     if (applyActiveTurnSnapshot(sessionId, chunk)) return;
-    const previousRecovery = getSessionStreamRecovery(sessionId);
     const recovery = beginSessionStreamRecovery(sessionId);
+    if (!correlated && previousRecovery?.repair) recovery.repair = previousRecovery.repair;
     if (previousEpoch === chunk.gateway_epoch && previousRecovery?.verifiedFollowupId) {
       recovery.verifiedFollowupId = previousRecovery.verifiedFollowupId;
     }
@@ -709,7 +745,9 @@ function handleGatewayChunk(chunk: ChatChunk): void {
     applyChunk(interaction);
     return;
   }
-  applyChunk(chunk);
+  const deltaSessionId = sessionId ?? state.activeSessionId;
+  const frame = deltaSessionId ? trimGatewayDeltaAtCut(deltaSessionId, chunk) : chunk;
+  if (frame && applyChunk(frame) === 'repair' && deltaSessionId) recoverStreamGap(deltaSessionId);
 }
 
 async function reconcileSessionAfterReconnect(
@@ -808,6 +846,7 @@ export function bootstrapBackend(): void {
       const active = state.activeSessionId;
       const sessions = new Set(state.subscribedSessions);
       if (active) sessions.add(active);
+      for (const sid of sessions) requestStreamRepair(sid);
       const recoveries = Array.from(sessions, (sid) =>
         reconcileSessionAfterReconnect(sid, sid === active, isCurrentConnection).then(() => {
           if (isCurrentConnection() && state.activeSessionId === sid) renderChat();

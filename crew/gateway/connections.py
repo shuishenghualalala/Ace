@@ -41,12 +41,18 @@ _MAX_FOLLOWUP_SESSIONS = 128
 _MAX_FOLLOWUP_FRAME_BYTES = 32_768
 _MAX_ACTIVE_SNAPSHOTS = 16
 _MAX_ACTIVE_SNAPSHOT_BYTES = 2 * 1024 * 1024
+_MAX_DELTA_PARTS = 256
+_MAX_WIRE_SEQUENCE = 2**53 - 1
 _SNAPSHOT_KINDS = {"delta", "thinking", "tool", "file_changes", "todo_updated", "status"}
 _LEGACY_CURSOR = object()
 
 
 def _encode_snapshot_part(payload: dict) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("ascii")
+
+
+def _utf16_length(text: str) -> int:
+    return len(text) if text.isascii() else len(text.encode("utf-16-le", errors="surrogatepass")) // 2
 
 
 @dataclass
@@ -349,29 +355,33 @@ class ConnectionManager:
         merged: list[dict] = []
         delta_buffer: dict | None = None
         delta_request_id: str | None = None
-        delta_text = ""
+        delta_text: list[str] = []
         delta_start: int | None = None
         delta_end: int | None = None
+        delta_parts: list[list[int]] | None = []
         thinking_buffer: dict | None = None
         thinking_request_id: str | None = None
 
         def flush_delta() -> None:
-            nonlocal delta_buffer, delta_request_id, delta_text, delta_start, delta_end
+            nonlocal delta_buffer, delta_request_id, delta_start, delta_end, delta_parts
             if delta_buffer is None:
                 return
             payload = dict(delta_buffer)
             body = dict(payload.get("body") or {})
-            body["text"] = delta_text
+            body["text"] = "".join(delta_text)
             if delta_start is not None and delta_end is not None:
                 body["delta_start"] = delta_start
                 body["delta_end"] = delta_end
+            if delta_parts is not None and len(delta_parts) > 1:
+                body["delta_parts"] = delta_parts
             payload["body"] = body
             merged.append(payload)
             delta_buffer = None
             delta_request_id = None
-            delta_text = ""
+            delta_text.clear()
             delta_start = None
             delta_end = None
+            delta_parts = []
 
         def flush_thinking() -> None:
             nonlocal thinking_buffer, thinking_request_id
@@ -385,11 +395,14 @@ class ConnectionManager:
             if payload.get("kind") == "delta" and not payload.get("is_final", False):
                 body = payload.get("body") or {}
                 text = body.get("text")
-                if isinstance(text, str):
+                if isinstance(text, str) and "delta_parts" not in body:
                     flush_thinking()
                     request_id = payload.get("request_id")
                     request_id = request_id if isinstance(request_id, str) else None
-                    if delta_buffer is not None and delta_request_id != request_id:
+                    if delta_buffer is not None and (
+                        delta_request_id != request_id
+                        or (delta_parts is not None and len(delta_parts) >= _MAX_DELTA_PARTS)
+                    ):
                         flush_delta()
                     start_raw = body.get("delta_start", payload.get("sequence"))
                     end_raw = body.get("delta_end", payload.get("sequence"))
@@ -401,7 +414,15 @@ class ConnectionManager:
                         end = 0
                     delta_buffer = payload
                     delta_request_id = request_id
-                    delta_text += text
+                    delta_text.append(text)
+                    if delta_parts is not None:
+                        seq = payload.get("gateway_sequence")
+                        if type(seq) is int and 0 < seq <= _MAX_WIRE_SEQUENCE and (
+                            not delta_parts or seq > delta_parts[-1][0]
+                        ):
+                            delta_parts.append([seq, _utf16_length(text)])
+                        else:
+                            delta_parts = None
                     if start > 0 and end > 0:
                         if delta_start is None or start < delta_start:
                             delta_start = start
@@ -672,6 +693,7 @@ class ConnectionManager:
     def _resync_frame(
         self, key: tuple[str, str], epoch: str, floor: int, head: int, reason: str,
         active_request_id: str | None = None,
+        *, repair_id: str | None = None,
     ) -> dict:
         waiting = get_followup_waiter().is_waiting
         prompts = self._pending_followups.get(key, {})
@@ -681,6 +703,8 @@ class ConnectionManager:
         if not prompts:
             self._pending_followups.pop(key, None)
         body: dict[str, Any] = {"reason": reason, "floor": floor}
+        if repair_id is not None:
+            body["repair_id"] = repair_id
         if prompts:
             body["pending_followups"] = list(prompts.values())
         snapshot = self._active_snapshots.get(key)
@@ -712,11 +736,12 @@ class ConnectionManager:
         register_for_live: bool = False,
         resume_cursor: object = _LEGACY_CURSOR,
         snapshot_request_id: Callable[[], str | None] | None = None,
+        repair_id: str | None = None,
     ) -> bool:
         """向指定 socket 回放该 session 缓存中 gateway_sequence > after 的帧。
 
         register_for_live 在同一个锁内接续实时订阅，避免新帧越过回放。
-        resume_cursor 提供代次和序号，失效时以当前水位发 resync，跳过残缺后缀。
+        resume_cursor 失效或客户端主动修复时，以当前水位发 resync，跳过残缺后缀。
         仅在所选帧发送成功且账号仍连接时返回 True。
         filter_fn 为可选过滤函数，返回 False 时跳过该帧（用于跳过已失效的
         临时交互帧，如已被回答的 followup_question）。
@@ -731,7 +756,9 @@ class ConnectionManager:
             floor = retained[0]["gateway_sequence"] - 1 if retained else head
             epoch = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
             reason = None
-            if resume_cursor is not _LEGACY_CURSOR:
+            if repair_id is not None:
+                reason = "client_stream_gap"
+            elif resume_cursor is not _LEGACY_CURSOR:
                 reason, after_gateway_sequence = self._check_resume_cursor(resume_cursor, epoch, floor, head)
             elif (
                 snapshot_request_id is not None
@@ -766,7 +793,9 @@ class ConnectionManager:
                     return False
                 try:
                     active_request_id = snapshot_request_id() if snapshot_request_id is not None else None
-                    await self.send_socket(ws, self._resync_frame(key, epoch, floor, head, reason, active_request_id))
+                    await self.send_socket(ws, self._resync_frame(
+                        key, epoch, floor, head, reason, active_request_id, repair_id=repair_id,
+                    ))
                 except Exception:  # noqa: BLE001
                     return False
                 sent = True

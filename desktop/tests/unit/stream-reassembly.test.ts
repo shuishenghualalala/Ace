@@ -1,44 +1,19 @@
 /**
  * stream-reassembly 单测：验证按 gateway_sequence 重组 delta（根治流式串位/丢字）。
  *
- * 核心保证：无论分片以何种顺序到达，noteDelta 返回的重组正文恒等于「按 seq 升序拼接」。
+ * 在可验证的边界内按原序重组，无法验证时保留正文并请求权威快照。
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   parseDeltaRange,
-  reconstruct,
+  noteDeltaBoundary,
   noteDelta,
   resetAssistant,
   resetSession,
   resetSessionExcept,
   peekFrags,
 } from '../../src/ui/stream-reassembly';
-
-describe('stream-reassembly / reconstruct', () => {
-  it('returns empty string for empty buffer', () => {
-    expect(reconstruct(new Map())).toBe('');
-  });
-
-  it('concatenates fragments in seq order regardless of insertion order', () => {
-    // 插入顺序故意乱序：seq 2 先于 seq 1
-    const frags = new Map<number, string>([
-      [2, 'b'],
-      [1, 'a'],
-      [3, 'c'],
-    ]);
-    expect(reconstruct(frags)).toBe('abc');
-  });
-
-  it('handles non-contiguous seqs (status/tool 帧占用中间序号)', () => {
-    const frags = new Map<number, string>([
-      [1, 'a'],
-      [5, 'b'],
-      [9, 'c'],
-    ]);
-    expect(reconstruct(frags)).toBe('abc');
-  });
-});
 
 describe('stream-reassembly / noteDelta', () => {
   beforeEach(() => {
@@ -85,6 +60,27 @@ describe('stream-reassembly / noteDelta', () => {
     expect(peekFrags('s1', 'm-1').get(1)).toBe('a');
     expect(peekFrags('s2', 'm-1').get(1)).toBe('x');
     expect(peekFrags('s1', 'm-2').get(1)).toBe('q');
+  });
+
+  it('keeps only a bounded suffix of a long exact stream and rejects old unseen text', () => {
+    const fragments = Array.from({ length: 5000 }, (_, index) => `${index}汉🙂`);
+    let content: string | null = null;
+    fragments.forEach((fragment, index) => {
+      content = noteDelta('s1', 'm-1', index * 2 + 2, fragment);
+    });
+    expect(content).toBe(fragments.join(''));
+    expect(peekFrags('s1', 'm-1').size).toBeLessThanOrEqual(512);
+    expect(noteDelta('s1', 'm-1', 5, 'old')).toBeNull();
+    expect(noteDelta('s1', 'm-1', 10001, '!')).toBe(fragments.join('') + '!');
+  });
+
+  it('rejects a late delta across a tool boundary and a retroactive tool completion', () => {
+    expect(noteDelta('s1', 'process', 8, 'before')).toBe('before');
+    expect(noteDeltaBoundary('s1', 11)).toBe(true);
+    expect(noteDelta('s1', 'answer', 14, 'after')).toBe('after');
+    expect(noteDelta('s1', 'answer', 10, 'misplaced')).toBeNull();
+    expect(noteDeltaBoundary('s1', 13)).toBe(false);
+    expect(noteDelta('s1', 'answer', 15, '!')).toBe('after!');
   });
 });
 
@@ -172,5 +168,43 @@ describe('stream-reassembly / live 合并帧 vs replay 单帧去重', () => {
   it('无区间的旧帧回退纯升序拼接（向后兼容）', () => {
     noteDelta('s1', 'm-1', 1, 'a', { start: 1, end: 1 });
     expect(noteDelta('s1', 'm-1', 2, 'b')).toBe('ab');
+  });
+
+  it('replaces covered raw fragments with a fully known legacy batch', () => {
+    noteDelta('s1', 'm-1', 1, 'A', { start: 1, end: 1 });
+    noteDelta('s1', 'm-1', 3, 'A', { start: 3, end: 3 });
+    expect(noteDelta('s1', 'm-1', 3, 'ABA', { start: 1, end: 3 })).toBe('ABA');
+    expect(noteDelta('s1', 'm-1', 2, 'B', { start: 2, end: 2 })).toBe('ABA');
+  });
+
+  it('requires a snapshot for partially overlapping opaque batches', () => {
+    expect(noteDelta('s1', 'm-1', 3, 'ABAB', { start: 1, end: 3 })).toBe('ABAB');
+    expect(noteDelta('s1', 'm-1', 5, 'ABAB', { start: 3, end: 5 })).toBeNull();
+    expect(noteDelta('s1', 'm-1', 6, '!', { start: 6, end: 6 })).toBe('ABAB!');
+  });
+});
+
+describe('stream-reassembly / exact live batches', () => {
+  beforeEach(() => resetSession('s1'));
+
+  it('merges raw replay and overlapping batches without deleting repeated text', () => {
+    expect(noteDelta('s1', 'm-1', 14, 'AB')).toBe('AB');
+    expect(noteDelta('s1', 'm-1', 14, '🙂AB', null, [[10, 2], [12, 0], [14, 2]])).toBe('🙂AB');
+    expect(noteDelta('s1', 'm-1', 15, 'ABAB', null, [[14, 2], [15, 2]])).toBe('🙂ABAB');
+    expect(noteDelta('s1', 'm-1', 10, '🙂')).toBe('🙂ABAB');
+  });
+
+  it('rejects malformed boundaries and conflicting overlapping text atomically', () => {
+    expect(noteDelta('s1', 'm-1', 2, '🙂')).toBe('🙂');
+    const malformed = [
+      [[2, 1], [3, 1]], [[2, 1], [2, 2]], [[1, 1], [2, 2]], [[1, -1], [3, 4]],
+      Array.from({ length: 257 }, (_, index) => [index + 1, 0]),
+    ];
+    for (const parts of malformed) {
+      expect(noteDelta('s1', 'm-1', 3, '🙂!', null, parts)).toBeNull();
+    }
+    expect(noteDelta('s1', 'm-1', 3, 'X!', null, [[2, 1], [3, 1]])).toBeNull();
+    expect(peekFrags('s1', 'm-1')).toEqual(new Map([[2, '🙂']]));
+    expect(noteDelta('s1', 'm-1', 3, '!')).toBe('🙂!');
   });
 });

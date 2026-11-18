@@ -3,13 +3,16 @@ import type { ChatChunk } from '../api/transport';
 import type { ChatMessage, PendingMessage, SessionStatus } from '../chat-render';
 import {
   applyMessageUpserts,
+  isStreamToolBoundary,
   normalizeChunk,
   reassembleChunkDelta,
   reduceChunk,
   type AnyChatChunk,
 } from '../reducers/chat-reducer';
 import { createSessionBook, type Bookkeeping } from '../state';
-import { noteSessionDelta, type SessionReassembly } from '../stream-reassembly';
+import {
+  createSessionReassembly, noteSessionDelta, noteSessionDeltaBoundary, type SessionReassembly,
+} from '../stream-reassembly';
 import type { HistoryPagingState } from '../stores/message-store';
 import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
 
@@ -92,7 +95,7 @@ export function projectActiveTurnSnapshot(
   };
   let status: SessionStatus = 'running';
   let queueHint = '';
-  const reassembly: SessionReassembly = new Map();
+  const reassembly = createSessionReassembly();
   let previous = 0;
   for (const rawFrame of snapshot.frames as unknown[]) {
     const frame = recordOf(rawFrame);
@@ -104,12 +107,13 @@ export function projectActiveTurnSnapshot(
     const chunk = normalizeChunk(frame);
     if (!chunk || !SNAPSHOT_KINDS.has(chunk.kind) || (chunk.kind === 'status' && chunk.body.control)) return null;
     previous = seq;
+    if (isStreamToolBoundary(chunk) && !noteSessionDeltaBoundary(reassembly, seq)) return null;
     const result = reduceChunk(chunk, {
       sessionId, messages, book, currentStatus: status, now: startedAt, sequence: chunk.sequence,
+      externallyOrderedDelta: chunk.kind === 'delta',
     });
-    if (chunk.kind === 'delta') {
-      reassembleChunkDelta(result, chunk, seq, (...args) => noteSessionDelta(reassembly, ...args));
-    }
+    if (chunk.kind === 'delta'
+      && !reassembleChunkDelta(result, chunk, seq, (...args) => noteSessionDelta(reassembly, ...args))) return null;
     if (result.replaceBook) book = result.replaceBook;
     messages = applyMessageUpserts(messages, result);
     status = result.statusHint ?? status;

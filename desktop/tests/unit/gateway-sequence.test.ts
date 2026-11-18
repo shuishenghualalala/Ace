@@ -10,6 +10,7 @@ import {
   peekGatewaySequence,
   touchStreamActivity,
   getLastStreamActivity,
+  trimGatewayDeltaAtCut,
 } from '../../src/ui/features/gateway-sequence';
 import type { ChatChunk } from '../../src/ui/backend-client';
 
@@ -90,5 +91,50 @@ describe('gateway-sequence', () => {
     noteGatewaySequence('s1', chunk({ kind: 'delta', gateway_epoch: 'epoch', gateway_sequence: 12 }));
     expect(isDuplicateGatewayChunk('s1', chunk({ kind: 'delta', gateway_epoch: 'epoch', gateway_sequence: 11 }))).toBe(false);
     expect(isDuplicateGatewayChunk('s1', chunk({ kind: 'delta', gateway_epoch: 'epoch', gateway_sequence: 12 }))).toBe(true);
+  });
+
+  it('marks constituent delta sequences and admits an aggregate with a known head and unknown member', () => {
+    const head = chunk({ kind: 'delta', gateway_epoch: 'epoch', gateway_sequence: 12, body: { text: 'b' } });
+    const aggregate = { ...head, body: { text: 'ab', delta_parts: [[9, 1], [12, 1]] } };
+    noteGatewaySequence('s1', head);
+    expect(isDuplicateGatewayChunk('s1', aggregate)).toBe(false);
+    noteGatewaySequence('s1', aggregate);
+    expect(isDuplicateGatewayChunk('s1', aggregate)).toBe(true);
+    expect(isDuplicateGatewayChunk('s1', { ...head, gateway_sequence: 9 })).toBe(true);
+    expect(isDuplicateGatewayChunk('s1', { ...head, body: { text: 'wrong', delta_parts: [[12, 1]] } })).toBe(false);
+    expect(peekGatewaySequence('s1')).toBe(12);
+  });
+
+  it('allows an opaque legacy aggregate to reach the assembler even after its outer sequence was seen', () => {
+    const raw = chunk({ kind: 'delta', gateway_epoch: 'epoch', gateway_sequence: 12, sequence: 6 });
+    const aggregate = { ...raw, body: { text: 'ab', delta_start: 4, delta_end: 6 } };
+    noteGatewaySequence('s1', raw);
+    expect(isDuplicateGatewayChunk('s1', raw)).toBe(true);
+    expect(isDuplicateGatewayChunk('s1', aggregate)).toBe(false);
+    acceptGatewayResync('s1', chunk({ kind: 'gateway_resync', gateway_epoch: 'epoch', gateway_sequence: 12 }));
+    expect(isDuplicateGatewayChunk('s1', aggregate)).toBe(true);
+  });
+
+  it('trims an exact aggregate at the authoritative cut in UTF-16 units', () => {
+    const cut = chunk({ kind: 'gateway_resync', gateway_epoch: 'epoch', gateway_sequence: 10 });
+    acceptGatewayResync('s1', cut);
+    const frame = chunk({ kind: 'delta', gateway_epoch: 'epoch', gateway_sequence: 11,
+      body: { text: '🍏中ok', delta_parts: [[8, 2], [10, 1], [11, 2]], delta_start: 3, delta_end: 7 },
+    });
+    const trimmed = trimGatewayDeltaAtCut('s1', frame);
+    expect(trimmed).toEqual({ ...frame, body: { text: 'ok', delta_parts: [[11, 2]] } });
+    expect(frame.body.text).toBe('🍏中ok');
+    expect(trimGatewayDeltaAtCut('s1', { ...frame, gateway_sequence: 10 })).toBeNull();
+  });
+
+  it('accepts a correlated resync at the same cut while fencing stale cuts and retired epochs', () => {
+    const initial = chunk({ kind: 'gateway_resync', gateway_epoch: 'epoch', gateway_sequence: 8 });
+    expect(acceptGatewayResync('s1', initial)).toBe(true);
+    expect(acceptGatewayResync('s1', initial)).toBe(false);
+    expect(acceptGatewayResync('s1', initial, true)).toBe(true);
+    expect(acceptGatewayResync('s1', { ...initial, gateway_sequence: 7 }, true)).toBe(false);
+    expect(acceptGatewayResync('s1', { ...initial, gateway_epoch: 'restarted', gateway_sequence: 1 })).toBe(true);
+    expect(acceptGatewayResync('s1', { ...initial, gateway_sequence: 100 }, true)).toBe(false);
+    expect(getGatewayCursors(['s1'])).toEqual({ s1: { epoch: 'restarted', sequence: 1 } });
   });
 });

@@ -3,7 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi } from '../../src/ui/backend-client';
-import { bootstrapBackend, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
+import { bootstrapBackend, loadBackendHistory, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
 import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
 import { appendMessage, consumePending, renderChat, stopGeneration } from '../../src/ui/features/chat-controller';
@@ -112,6 +112,94 @@ describe('conversation recovery after a socket outage', () => {
       },
     };
   }
+
+  function snapshotRequests() {
+    return vi.mocked(window.Crew!.gatewayWsSend!).mock.calls.flatMap(([frame]) => {
+      const candidate = frame as { repair_id?: string };
+      return candidate.repair_id ? [candidate as { repair_id: string }] : [];
+    });
+  }
+
+  it('holds suspect text, retries one repair on a new socket, and accepts only its matching same-cut snapshot', () => {
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: oldRequest });
+    emitSocket({ type: 'open' });
+    emitFrame('gateway_resync', 10, snapshotBody([snapshotFrame('delta', 8, { text: 'Last good text' })]));
+    emitFrame('delta', 11, { text: 'Suspect prefix', delta_parts: [[11, 2]] });
+
+    expect(snapshotRequests()).toEqual([expect.objectContaining({
+      action: 'subscribe', sessions: [sid], force_snapshot_sessions: [sid], gateway_snapshots: true,
+      gateway_cursors: { [sid]: { epoch: 'epoch-1', sequence: 10 } },
+      last_gateway_sequences: { [sid]: 10 },
+    })]);
+    expect(getSessionStreamRecovery(sid)).toBeDefined();
+    const firstRepair = snapshotRequests()[0]!.repair_id;
+    emitFrame('delta', 11, { text: 'Another suspect frame', delta_parts: [[11, 3]] });
+    expect(snapshotRequests()).toHaveLength(1);
+    expect(messageStore.get().messages[sid].at(-1)?.content).toBe('Last good text');
+
+    emitSocket({ type: 'close', code: 1012 });
+    emitSocket({ type: 'open' });
+    expect(snapshotRequests()).toHaveLength(2);
+    const secondRepair = snapshotRequests()[1]!.repair_id;
+    expect(secondRepair).not.toBe(firstRepair);
+    const reply = {
+      ...snapshotBody([snapshotFrame('delta', 8, { text: 'Authoritative prefix' })]),
+      reason: 'client_stream_gap',
+    };
+    emitFrame('gateway_resync', 10, { ...reply, repair_id: firstRepair });
+    emitFrame('gateway_resync', 9, { ...reply, repair_id: secondRepair });
+    expect(messageStore.get().messages[sid].at(-1)?.content).toBe('Last good text');
+    expect(getSessionStreamRecovery(sid)).toBeDefined();
+
+    emitFrame('gateway_resync', 10, { ...reply, repair_id: secondRepair });
+    expect(getSessionStreamRecovery(sid)).toBeUndefined();
+    emitFrame('delta', 12, { text: 'Authoritative prefix + live', delta_parts: [[8, 20], [12, 7]] });
+    expect(messageStore.get().messages[sid].at(-1)?.content).toBe('Authoritative prefix + live');
+    expect(snapshotRequests()).toHaveLength(2);
+  });
+
+  it('routes queued history chunks through repair and uses durable history if no snapshot arrives', async () => {
+    const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+      ...settledStatus, live: 'running', active_request_id: oldRequest,
+    });
+    const delayed = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.history>>>();
+    const history = vi.spyOn(backendApi, 'history').mockReturnValueOnce(delayed.promise)
+      .mockResolvedValueOnce([{ role: 'assistant', content: 'Durable completion' }]);
+    emitFrame('delta', 1, { text: 'Partial' });
+    emitSocket({ type: 'open' });
+    const loading = loadBackendHistory(sid);
+    emitFrame('delta', 2, { text: 'Broken replay', delta_parts: [[2, 1]] });
+    expect(snapshotRequests()).toHaveLength(0);
+    delayed.resolve([]);
+    await expect(loading).resolves.toBe(true);
+    expect(getSessionStreamRecovery(sid)).toBeDefined();
+    expect(snapshotRequests()).toHaveLength(1);
+    expect(messageStore.get().messages[sid].at(-1)?.content).toBe('Partial');
+    await vi.advanceTimersByTimeAsync(0);
+
+    status.mockResolvedValue(settledStatus);
+    emitFrame('final', 3, { text: 'Do not append a terminal suffix' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getSessionStreamRecovery(sid)).toBeUndefined();
+    expect(messageStore.get().messages[sid].at(-1)?.content).toBe('Durable completion');
+    expect(history).toHaveBeenCalledTimes(2);
+    expect(snapshotRequests()).toHaveLength(1);
+  });
+
+  it('rejects a matching repair cut older than the last text accepted before recovery', () => {
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: oldRequest });
+    emitSocket({ type: 'open' });
+    emitFrame('gateway_resync', 10, snapshotBody([snapshotFrame('delta', 8, { text: 'Prefix' })]));
+    emitFrame('delta', 14, { text: ' accepted' });
+    emitFrame('delta', 15, { text: 'Invalid', delta_parts: [[15, 1]] });
+    const repairId = snapshotRequests()[0]!.repair_id;
+    emitFrame('gateway_resync', 12, {
+      ...snapshotBody([snapshotFrame('delta', 8, { text: 'Stale prefix' })]), reason: 'client_stream_gap', repair_id: repairId,
+    });
+    expect(getSessionStreamRecovery(sid)).toBeDefined();
+    expect(messageStore.get().messages[sid].at(-1)?.content).toBe('Prefix accepted');
+    expect(getGatewayCursors([sid])).toEqual({ [sid]: { epoch: 'epoch-1', sequence: 14 } });
+  });
 
   it('atomically projects the active snapshot, preserves local input and queue, and extends the seeded text', async () => {
     const status = Promise.withResolvers<typeof settledStatus>();
