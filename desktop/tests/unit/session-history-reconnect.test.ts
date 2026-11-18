@@ -2,9 +2,11 @@
  * @vitest-environment happy-dom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BackendHistoryItem, BackendHistoryWindow } from '../../src/ui/api/feature-session';
 import { backendApi } from '../../src/ui/backend-client';
 import { bootstrapBackend, loadBackendHistory, loadOlderHistoryPage, shouldSkipHistoryReloadOnReconnect } from '../../src/ui/features/session-controller';
 import { createSessionHistoryView } from '../../src/ui/features/session-history-view';
+import { firstChangedMessageIndex } from '../../src/ui/conversation-message-changes';
 import { openTurnForRequest } from '../../src/ui/features/session-busy';
 import { appendMessage, consumePending, renderChat, stopGeneration } from '../../src/ui/features/chat-controller';
 import { disposeConversationRenderer, getConversationScrollAnchor } from '../../src/ui/features/conversation-renderer';
@@ -20,7 +22,7 @@ import {
 } from '../../src/ui/stores/stores';
 import {
   addSubscribedSessions, enqueuePending, ensureSessionBook, getPendingQueue, patchBook,
-  setBusy, setActiveSessionId, setHistoryPaging, state,
+  setBusy, setActiveSessionId, setEditFrom, setHistoryPaging, state,
 } from '../../src/ui/state';
 
 beforeEach(() => {
@@ -28,6 +30,10 @@ beforeEach(() => {
   document.body.innerHTML = '';
   setActiveSessionId('sid-1');
 });
+
+function historyResult(items: BackendHistoryItem[] = []): BackendHistoryWindow {
+  return { items, has_more: false, next_before: null };
+}
 
 describe('conversation recovery after a socket outage', () => {
   const sid = 'sid-1';
@@ -162,15 +168,15 @@ describe('conversation recovery after a socket outage', () => {
     const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
       ...settledStatus, live: 'running', active_request_id: oldRequest,
     });
-    const delayed = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.history>>>();
-    const history = vi.spyOn(backendApi, 'history').mockReturnValueOnce(delayed.promise)
-      .mockResolvedValueOnce([{ role: 'assistant', content: 'Durable completion' }]);
+    const delayed = Promise.withResolvers<BackendHistoryWindow>();
+    const history = vi.spyOn(backendApi, 'historyWindow').mockReturnValueOnce(delayed.promise)
+      .mockResolvedValueOnce(historyResult([{ role: 'assistant', content: 'Durable completion' }]));
     emitFrame('delta', 1, { text: 'Partial' });
     emitSocket({ type: 'open' });
     const loading = loadBackendHistory(sid);
     emitFrame('delta', 2, { text: 'Broken replay', delta_parts: [[2, 1]] });
     expect(snapshotRequests()).toHaveLength(0);
-    delayed.resolve([]);
+    delayed.resolve(historyResult());
     await expect(loading).resolves.toBe(true);
     expect(getSessionStreamRecovery(sid)).toBeDefined();
     expect(snapshotRequests()).toHaveLength(1);
@@ -204,7 +210,8 @@ describe('conversation recovery after a socket outage', () => {
   it('atomically projects the active snapshot, preserves local input and queue, and extends the seeded text', async () => {
     const status = Promise.withResolvers<typeof settledStatus>();
     vi.spyOn(backendApi, 'sessionStatus').mockReturnValue(status.promise);
-    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([{ role: 'assistant', content: 'Stale terminal response' }]);
+    const history = vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValue(historyResult([{ role: 'assistant', content: 'Stale terminal response' }]));
     const attachment = { id: 'file', name: 'notes.txt', path: '/fixture/notes.txt', type: 'file' as const };
     const prompt = appendMessage(sid, 'user', 'Local display', { requestId: oldRequest, attachments: [attachment] });
     const queuedPrompt = appendMessage(sid, 'user', 'Queued change');
@@ -296,7 +303,7 @@ describe('conversation recovery after a socket outage', () => {
         ...settledStatus, live: 'running',
         active_request_id: scenario === 'different active request' ? newerRequest : oldRequest,
       });
-      const history = vi.spyOn(backendApi, 'history').mockResolvedValue([]);
+      const history = vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult());
       emitSocket({ type: 'open' });
       const frame = scenario === 'nonprojection event'
         ? snapshotFrame('feature_event', 8, { feature: 'wiki', event: 'changed' })
@@ -314,7 +321,8 @@ describe('conversation recovery after a socket outage', () => {
 
   it('rebuilds settled history after an epoch reset and rejects frames from the retired epoch', async () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
-    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([{ role: 'assistant', content: 'Canonical answer' }]);
+    const history = vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValue(historyResult([{ role: 'assistant', content: 'Canonical answer' }]));
     emitFrame('delta', 15, { text: 'Old partial' });
     disconnectAndReconnect();
     emitFrame('gateway_resync', 0, { reason: 'epoch_changed', floor: 0 }, 'epoch-2');
@@ -330,8 +338,8 @@ describe('conversation recovery after a socket outage', () => {
   it('keeps the partial and local queue until history replaces an incomplete active stream', async () => {
     const running = { ...settledStatus, live: 'running', active_request_id: oldRequest };
     const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(running);
-    const historyResponse = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.history>>>();
-    const history = vi.spyOn(backendApi, 'history').mockReturnValue(historyResponse.promise);
+    const historyResponse = Promise.withResolvers<BackendHistoryWindow>();
+    const history = vi.spyOn(backendApi, 'historyWindow').mockReturnValue(historyResponse.promise);
     emitFrame('delta', 1, { text: 'Prefix' });
     emitSocket({ type: 'open' });
     emitFrame('gateway_resync', 10, { reason: 'cursor_expired', floor: 6 });
@@ -354,7 +362,7 @@ describe('conversation recovery after a socket outage', () => {
     expect(getPendingQueue(sid)).toEqual([queued]);
     expect(messageStore.get().messages[sid][0].content).toBe('Prefix');
 
-    historyResponse.resolve([{ role: 'assistant', content: 'Canonical complete response' }]);
+    historyResponse.resolve(historyResult([{ role: 'assistant', content: 'Canonical complete response' }]));
     await vi.advanceTimersByTimeAsync(0);
     expect(messageStore.get().messages[sid][0].content).toBe('Canonical complete response');
     expect(getSessionStreamRecovery(sid)).toBeUndefined();
@@ -385,7 +393,8 @@ describe('conversation recovery after a socket outage', () => {
     const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
       ...settledStatus, live: 'running', active_request_id: oldRequest,
     });
-    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([{ role: 'assistant', content: 'Completed followup' }]);
+    const history = vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValue(historyResult([{ role: 'assistant', content: 'Completed followup' }]));
     emitFrame('delta', 1, { text: 'Prefix' });
     emitSocket({ type: 'open' });
     emitFrame('gateway_resync', 10, {
@@ -409,7 +418,8 @@ describe('conversation recovery after a socket outage', () => {
 
   it('preserves a verified pending followup over an idle durable history read', async () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
-    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([{ role: 'assistant', content: 'Previously completed' }]);
+    const history = vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValue(historyResult([{ role: 'assistant', content: 'Previously completed' }]));
     emitFrame('delta', 1, { text: 'Prefix' });
     emitSocket({ type: 'open' });
     const queued = { id: 'queued', query: 'next', attachments: [] };
@@ -436,8 +446,8 @@ describe('conversation recovery after a socket outage', () => {
 
   it('discards a terminal history read when post-cut progress describes a new backend request', async () => {
     const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
-    const response = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.history>>>();
-    const history = vi.spyOn(backendApi, 'history').mockReturnValue(response.promise);
+    const response = Promise.withResolvers<BackendHistoryWindow>();
+    const history = vi.spyOn(backendApi, 'historyWindow').mockReturnValue(response.promise);
     emitFrame('delta', 1, { text: 'Keep the partial during recovery' });
     emitSocket({ type: 'open' });
     emitFrame('gateway_resync', 10, { reason: 'cursor_expired', floor: 6 });
@@ -446,7 +456,7 @@ describe('conversation recovery after a socket outage', () => {
 
     status.mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: 'external-new-request' });
     emitFrame('status', 11, { message: 'Started' }, 'epoch-1', 'external-new-request');
-    response.resolve([{ role: 'assistant', content: 'Outdated terminal history' }]);
+    response.resolve(historyResult([{ role: 'assistant', content: 'Outdated terminal history' }]));
     await vi.advanceTimersByTimeAsync(0);
     expect(messageStore.get().messages[sid][0].content).toBe('Keep the partial during recovery');
     expect(getSessionStreamRecovery(sid)).toBeDefined();
@@ -454,10 +464,10 @@ describe('conversation recovery after a socket outage', () => {
 
   it('refetches after a second disconnect and discards the stale first connection history', async () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
-    const oldHistory = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.history>>>();
-    const history = vi.spyOn(backendApi, 'history')
+    const oldHistory = Promise.withResolvers<BackendHistoryWindow>();
+    const history = vi.spyOn(backendApi, 'historyWindow')
       .mockReturnValueOnce(oldHistory.promise)
-      .mockResolvedValueOnce([{ role: 'assistant', content: 'New connection history' }]);
+      .mockResolvedValueOnce(historyResult([{ role: 'assistant', content: 'New connection history' }]));
     emitFrame('delta', 1, { text: 'Prefix' });
     emitSocket({ type: 'open' });
     emitFrame('gateway_resync', 10, { reason: 'cursor_expired', floor: 6 });
@@ -469,15 +479,15 @@ describe('conversation recovery after a socket outage', () => {
     expect(history).toHaveBeenCalledTimes(2);
     expect(messageStore.get().messages[sid][0].content).toBe('New connection history');
 
-    oldHistory.resolve([{ role: 'assistant', content: 'Outdated first connection history' }]);
+    oldHistory.resolve(historyResult([{ role: 'assistant', content: 'Outdated first connection history' }]));
     await vi.advanceTimersByTimeAsync(0);
     expect(messageStore.get().messages[sid][0].content).toBe('New connection history');
   });
 
   it('discards a delayed resync history after a user stops the affected request', async () => {
     vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
-    const response = Promise.withResolvers<Awaited<ReturnType<typeof backendApi.history>>>();
-    const history = vi.spyOn(backendApi, 'history').mockReturnValue(response.promise);
+    const response = Promise.withResolvers<BackendHistoryWindow>();
+    const history = vi.spyOn(backendApi, 'historyWindow').mockReturnValue(response.promise);
     emitFrame('delta', 1, { text: 'Keep this partial' });
     emitSocket({ type: 'open' });
     emitFrame('gateway_resync', 10, { reason: 'cursor_expired', floor: 6 });
@@ -485,7 +495,7 @@ describe('conversation recovery after a socket outage', () => {
     expect(history).toHaveBeenCalledOnce();
 
     stopGeneration(sid);
-    response.resolve([{ role: 'assistant', content: 'Stale recovery result' }]);
+    response.resolve(historyResult([{ role: 'assistant', content: 'Stale recovery result' }]));
     await vi.advanceTimersByTimeAsync(0);
     expect(messageStore.get().messages[sid][0].content).toBe('Keep this partial');
     expect(getSessionStreamRecovery(sid)).toBeUndefined();
@@ -494,10 +504,10 @@ describe('conversation recovery after a socket outage', () => {
   it.each([true, false])('recovers durable history when the interrupted request finished offline (foreground=%s)', async (active) => {
     if (!active) setActiveSessionId(null);
     const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue(settledStatus);
-    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([
+    const history = vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult([
       { role: 'user', content: 'Prompt' },
       { role: 'assistant', content: 'Completed while offline' },
-    ]);
+    ]));
 
     disconnectAndReconnect();
     await vi.advanceTimersByTimeAsync(0);
@@ -522,7 +532,7 @@ describe('conversation recovery after a socket outage', () => {
   it('discards a reconnect status response after a new request starts', async () => {
     const delayed = Promise.withResolvers<typeof settledStatus>();
     vi.spyOn(backendApi, 'sessionStatus').mockReturnValue(delayed.promise);
-    const history = vi.spyOn(backendApi, 'history').mockResolvedValue([]);
+    const history = vi.spyOn(backendApi, 'historyWindow').mockResolvedValue(historyResult());
     disconnectAndReconnect();
     openTurnForRequest(sid, 'req-new');
     delayed.resolve(settledStatus);
@@ -552,6 +562,7 @@ describe('older history page viewport', () => {
   let container: HTMLElement;
 
   beforeEach(() => {
+    authStore.set({ isLoggedIn: true });
     document.body.innerHTML = '<div id="welcome-panel"></div><div id="chat-panel"><div id="chat-messages"></div></div>';
     container = document.getElementById('chat-messages')!;
     appendMessage(sid, 'user', 'First current row');
@@ -567,6 +578,7 @@ describe('older history page viewport', () => {
 
   afterEach(() => {
     disposeConversationRenderer('chat-messages');
+    authStore.set({ isLoggedIn: false });
     vi.restoreAllMocks();
   });
 
@@ -606,6 +618,149 @@ describe('older history page viewport', () => {
     expect(anchor.isStickyBottom()).toBe(true);
     // The renderer will pin to bottom on its usual next frame.
     expect(container.scrollTop).toBe(700);
+  });
+});
+
+describe('versioned history windows', () => {
+  const sid = 'sid-1';
+  const initial: BackendHistoryWindow = {
+    mode: 'snapshot', revision: 'rev-1', head: 'head-1', has_more: true, next_before: 'before-1',
+    items: [
+      { role: 'user', content: 'same question', history_id: 'q2' },
+      { role: 'assistant', content: 'same answer', history_id: 'a2' },
+    ],
+  };
+  const older: BackendHistoryWindow = {
+    mode: 'page', revision: 'rev-1', head: 'head-ahead', has_more: false, next_before: null,
+    items: [
+      { role: 'user', content: 'same question', history_id: 'q1' },
+      { role: 'assistant', content: 'same answer', history_id: 'a1' },
+    ],
+  };
+
+  beforeEach(() => {
+    authStore.set({ isLoggedIn: true });
+    vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+      session_id: sid, live: 'idle', queue_depth: 0, last_status: 'completed', last_error: '',
+    });
+    vi.spyOn(backendApi, 'sessionPlan').mockRejectedValue(new Error('plan endpoint unavailable'));
+    vi.spyOn(backendApi, 'sessionTodos').mockResolvedValue({ todos: [] });
+  });
+
+  afterEach(() => {
+    authStore.set({ isLoggedIn: false });
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the loaded prefix and append checkpoint when a page observes a newer head', async () => {
+    const fullHistory = vi.spyOn(backendApi, 'history');
+    const readWindow = vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(older)
+      .mockResolvedValueOnce({
+        ...historyResult([
+          { role: 'user', content: 'new question', history_id: 'q3' },
+          { role: 'assistant', content: 'new answer', history_id: 'a3' },
+        ]),
+        mode: 'append', revision: 'rev-1', head: 'head-3',
+      });
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    const initialRows = messageStore.get().messages[sid];
+    await expect(loadOlderHistoryPage(sid)).resolves.toBe(true);
+    expect(readWindow).toHaveBeenLastCalledWith(sid, { limit: 100, before: 'before-1', revision: 'rev-1' });
+    expect(messageStore.get().historyPaging[sid].head).toBe('head-1');
+    const sent = appendMessage(sid, 'user', 'new question');
+    appendMessage(sid, 'assistant', 'Locally replayed');
+    const pending = appendMessage(sid, 'user', 'still queued', { requestId: 'queued-request' });
+    enqueuePending(sid, { id: 'queued', query: pending.content, attachments: [], optimisticUserMessageId: pending.id });
+    const beforeAppend = messageStore.get().messages[sid];
+
+    const seen: Array<string | undefined> = [];
+    const unsubscribe = messageStore.subscribe((next, previous) => {
+      if (next.historyPaging[sid] !== previous.historyPaging[sid]) {
+        seen.push(next.messages[sid].find((row) => row.historyId === next.historyPaging[sid].lastHistoryId)?.content);
+      }
+    });
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    unsubscribe();
+
+    expect(readWindow).toHaveBeenLastCalledWith(sid, { limit: 100, after: 'head-1', revision: 'rev-1' });
+    expect(fullHistory).not.toHaveBeenCalled();
+    const rows = messageStore.get().messages[sid];
+    expect(rows.map((row) => row.historyId)).toEqual(['q1', 'a1', 'q2', 'a2', 'q3', 'a3', undefined]);
+    expect(rows[2]).toBe(initialRows[0]);
+    expect(firstChangedMessageIndex(beforeAppend, rows)).toBe(4);
+    expect(rows.some((row) => row.id === sent.id)).toBe(false);
+    expect(rows.at(-1)).toBe(pending);
+    expect(seen).toEqual(['new answer']);
+  });
+
+  it('discards an old page after a replacement and accepts the latest version atomically', async () => {
+    const stale = Promise.withResolvers<BackendHistoryWindow>();
+    const readWindow = vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValueOnce(initial)
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce({
+        ...historyResult([{ role: 'assistant', content: 'new fork', history_id: 'forked' }]),
+        mode: 'snapshot', revision: 'rev-2', head: 'head-2', has_more: true, next_before: 'before-2',
+      });
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    const oldPage = loadOlderHistoryPage(sid);
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    stale.resolve(older);
+    await expect(oldPage).resolves.toBe(false);
+    expect(readWindow).toHaveBeenLastCalledWith(sid, { limit: 100, after: 'head-1', revision: 'rev-1' });
+    expect(messageStore.get().messages[sid].map((row) => row.historyId)).toEqual(['forked']);
+    expect(messageStore.get().historyPaging[sid]).toEqual({
+      hasMore: true, nextBefore: 'before-2', revision: 'rev-2', head: 'head-2', lastHistoryId: 'forked',
+    });
+  });
+
+  it('applies a replacement returned by a stale server cursor without another history request', async () => {
+    const readWindow = vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce({
+        ...historyResult([{ role: 'user', content: 'rewound prompt', history_id: 'root' }]),
+        mode: 'snapshot', revision: 'rev-2', head: 'head-2',
+      });
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    await expect(loadOlderHistoryPage(sid)).resolves.toBe(true);
+    expect(readWindow).toHaveBeenCalledTimes(2);
+    expect(messageStore.get().messages[sid].map((row) => row.content)).toEqual(['rewound prompt']);
+    expect(messageStore.get().historyPaging[sid].revision).toBe('rev-2');
+  });
+
+  it('rejects responses after an A → B → A navigation or a replaced cursor', async () => {
+    const switched = Promise.withResolvers<BackendHistoryWindow>();
+    const replaced = Promise.withResolvers<BackendHistoryWindow>();
+    vi.spyOn(backendApi, 'historyWindow')
+      .mockResolvedValueOnce(initial)
+      .mockReturnValueOnce(switched.promise)
+      .mockReturnValueOnce(replaced.promise);
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    const afterSwitch = loadOlderHistoryPage(sid);
+    setActiveSessionId('sid-2');
+    setActiveSessionId(sid);
+    switched.resolve(older);
+    await expect(afterSwitch).resolves.toBe(false);
+
+    const afterCursor = loadOlderHistoryPage(sid);
+    setHistoryPaging(sid, { ...messageStore.get().historyPaging[sid], nextBefore: 'different-before' });
+    replaced.resolve(older);
+    await expect(afterCursor).resolves.toBe(false);
+    expect(messageStore.get().messages[sid].map((row) => row.historyId)).toEqual(['q2', 'a2']);
+    expect(messageStore.get().historyPaging[sid].nextBefore).toBe('different-before');
+  });
+
+  it('keeps an edit attached to the same user message when a page is prepended', async () => {
+    vi.spyOn(backendApi, 'historyWindow').mockResolvedValueOnce(initial).mockResolvedValueOnce(older);
+    await expect(loadBackendHistory(sid)).resolves.toBe(true);
+    const edit = messageStore.get().messages[sid][0];
+    setEditFrom(sid, 0);
+    await expect(loadOlderHistoryPage(sid)).resolves.toBe(true);
+    const newIndex = sessionStore.get().editFromIdx[sid];
+    expect(newIndex).toBe(2);
+    expect(messageStore.get().messages[sid][newIndex!]).toBe(edit);
   });
 });
 

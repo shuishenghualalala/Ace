@@ -9,9 +9,12 @@
  */
 
 import { BackendChatSocket, backendApi } from '../backend-client';
+import type { BackendHistoryWindow } from '../api/feature-session';
 import type { ChatChunk } from '../api/transport';
 import { batchStoreUpdates } from '../reducers/store-bus';
-import type { PlanReviewStatus } from '../chat-render';
+import { recordMessageChange } from '../conversation-message-changes';
+import type { ChatMessage, PlanReviewStatus } from '../chat-render';
+import type { HistoryPagingState } from '../stores/message-store';
 import { renderWorkspaceHistory } from './workspaces';
 import { refreshKanbanBoard } from './board-hooks';
 import { refreshCronJobs } from './cron-page';
@@ -24,21 +27,19 @@ import { loadSessionModel, syncSessionModelUi } from './session-model';
 import { loadInspectorContext, refreshInspector } from './inspector';
 import { syncCraftLabel } from './composer-toolbar';
 import {
-  clearHistoryLoadError,
   ensureSessionMessages,
   getPendingQueue,
+  getSessionNavigationVersion,
   isBusySession,
   markHistoryLoadError,
   newMessageId,
   notify,
-  replaceSessionMessages,
   resetBook,
   patchBook,
   setBookTodos,
   setActiveSessionId,
   setCurrentWorkspaceId,
   setEditFrom,
-  setHistoryPaging,
   state,
   type PendingFollowup,
   type TabKey,
@@ -57,9 +58,13 @@ import {
   subscribeSessions,
   updateGatewayDot,
 } from './chat-controller';
-import { getConversationScrollAnchor } from './conversation-renderer';
+import {
+  getConversationScrollAnchor, preserveConversationHistoryViewport, restoreConversationViewport,
+} from './conversation-renderer';
 import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
-import { mergeBackendHistory, prependHistoryWindow } from './history-merge';
+import {
+  mergeBackendHistory, prependDurableHistoryPage, prependHistoryWindow, reconcileHistoryWindow,
+} from './history-merge';
 import { resolveChatRenderTargetId, isStudioView } from './studio-chrome-state';
 import { hydrateMissingTurnFileCounts } from './turn-file-counts';
 import {
@@ -91,6 +96,7 @@ import { restoreRendererCheckpointNavigation } from './renderer-checkpoint';
 
 // setTab 由 index.ts 注入（避免 session-controller → index.ts 循环）
 let setTabFn: (tab: TabKey) => void = () => {};
+let openSessionGeneration = 0;
 export function setSessionControllerSetTab(fn: (tab: TabKey) => void): void {
   setTabFn = fn;
 }
@@ -101,38 +107,53 @@ export async function openSession(
   options: { activateChat?: boolean } = {},
 ): Promise<void> {
   if (!requireRendererLogin()) return;
+  const generation = ++openSessionGeneration;
   discardDraft();
   // 重新打开会话会重载消息，清掉可能残留的编辑态（避免 editFromIdx 指向失效下标）
   setEditFrom(sessionId, null);
   ensureSessionMessages(sessionId);
   setActiveSessionId(sessionId);
+  const navigation = getSessionNavigationVersion();
+  const isCurrent = () => isRendererLoggedIn() && generation === openSessionGeneration
+    && navigation === getSessionNavigationVersion() && state.activeSessionId === sessionId;
   subscribeSessions([sessionId]);
   const row = state.sessions.find((s) => s.id === sessionId) ?? findChannelSession(sessionId);
   if (row) setCurrentWorkspaceId(row.workspaceId);
   window.dispatchEvent(new CustomEvent('workspace:context-changed'));
   // P1-6：订阅后立即渲染首屏（空消息 + historyLoading → 骨架占位），不等历史返回——
   // 首屏可交互时间与历史总量解耦；下方原序列在骨架之上继续执行。
-  if (getMessages(sessionId).length === 0 && !getSessionStreamRecovery(sessionId)) {
-    setHistoryLoading(sessionId, true);
-  }
+  const showingSkeleton = getMessages(sessionId).length === 0 && !getSessionStreamRecovery(sessionId);
+  const beforeModelLoad = historyLoadSeq.get(sessionId);
+  if (showingSkeleton) setHistoryLoading(sessionId, true);
+  const releaseInitialSkeleton = () => {
+    if (showingSkeleton && historyLoadSeq.get(sessionId) === beforeModelLoad) finishHistoryLoading(sessionId);
+  };
   renderChat();
-  jumpChatToBottom();
+  const restoredViewport = restoreConversationViewport(resolveChatRenderTargetId(isStudioView()), sessionId);
+  if (!restoredViewport) jumpChatToBottom();
   // 历史消息优先读取逐消息 model；旧消息缺失时回退当前 Session 模型，
   // 因此需先恢复绑定再做历史映射，避免外部 Session 回退成 Crew 默认模型。
   try {
     await loadSessionModel(sessionId);
   } catch (err) {
-    setHistoryLoading(sessionId, false);
+    if (isCurrent() || state.activeSessionId !== sessionId) releaseInitialSkeleton();
+    if (!isCurrent()) return;
     throw err;
   }
+  if (!isCurrent()) {
+    // Another open of the same session owns the current skeleton.
+    if (state.activeSessionId !== sessionId) releaseInitialSkeleton();
+    return;
+  }
   if (getMessages(sessionId).length === 0) {
-    await loadBackendHistory(sessionId);
+    await loadBackendHistory(sessionId, { canApply: isCurrent });
   } else {
     // 内存里已有消息（含修复前落库的幽灵路径）：仍做一次磁盘对账，清掉对话「已编辑」卡里的临时文件。
     void hydrateMissingTurnFileCounts(sessionId).then((changed) => {
       if (changed && state.activeSessionId === sessionId) renderChat();
     });
   }
+  if (!isCurrent()) return;
   // 打开已有会话：默认 agent 模式（专家/专家团功能已随旧品牌残留移除）
   state.mode = 'agent';
   state.taskBoardOpen = false;
@@ -141,10 +162,10 @@ export async function openSession(
   renderWorkspaceHistory(openSession);
   void refreshKanbanBoard(sessionId);
   renderChat();
-  // 会话切换：强制跳到底部（重置 stickyBottom）。对齐 hermes 的「session change → jumpToBottom」。
-  jumpChatToBottom();
+  if (!restoredViewport) jumpChatToBottom();
   void refreshCronJobs();
   await loadSessionTodos(sessionId);
+  if (!isCurrent()) return;
   renderChat();
   void loadInspectorContext(sessionId);
   refreshInspector();
@@ -179,7 +200,7 @@ async function loadSessionTodos(sessionId: string): Promise<void> {
 }
 
 /**
- * WS 重连后：若本地仍有在途回合或 streaming 助手消息，跳过全量 history 替换，
+ * WS 重连后：若本地仍有在途回合或 streaming 助手消息，跳过 history 替换，
  * 避免把内存里正在累积的流式正文 wipe 掉。
  */
 export function shouldSkipHistoryReloadOnReconnect(sessionId: string): boolean {
@@ -199,40 +220,71 @@ const historyLoadSeq = new Map<string, number>();
 const HISTORY_WINDOW_SIZE = 100;
 type BackendSessionStatus = Awaited<ReturnType<typeof backendApi.sessionStatus>>;
 
+function finishHistoryLoading(sessionId: string): void {
+  setHistoryLoading(sessionId, false);
+  for (const chunk of flushPendingChunks(sessionId) ?? []) handleGatewayChunk(chunk);
+}
+
+function recordHistoryChange(previous: ChatMessage[] | undefined, messages: ChatMessage[]): void {
+  if (!previous || previous === messages) return;
+  const limit = Math.min(previous.length, messages.length);
+  let firstChanged = 0;
+  while (firstChanged < limit && previous[firstChanged] === messages[firstChanged]) firstChanged += 1;
+  recordMessageChange(previous, messages, firstChanged);
+}
+
+function commitHistory(sessionId: string, messages: ChatMessage[], paging: HistoryPagingState): void {
+  const current = messageStore.get();
+  const previous = current.messages[sessionId];
+  recordHistoryChange(previous, messages);
+  const historyLoadErrors = new Set(current.historyLoadErrors);
+  historyLoadErrors.delete(sessionId);
+  batchStoreUpdates(() => {
+    const editing = state.editFromIdx[sessionId];
+    if (editing != null) {
+      const target = previous?.[editing];
+      const next = target ? messages.findIndex((row) => row.id === target.id) : -1;
+      if (next !== editing) setEditFrom(sessionId, next >= 0 ? next : null);
+    }
+    messageStore.set({
+      messages: { ...current.messages, [sessionId]: messages },
+      historyPaging: { ...current.historyPaging, [sessionId]: paging },
+      historyLoadErrors,
+    });
+  });
+}
+
 export async function loadBackendHistory(
   sessionId: string,
   options: {
     canApply?: () => boolean;
     terminalStatus?: BackendSessionStatus;
     pendingFollowup?: PendingFollowup;
+    snapshot?: BackendHistoryWindow;
   } = {},
 ): Promise<boolean> {
   if (!isRendererLoggedIn() || (getSessionStreamRecovery(sessionId) && !options.terminalStatus)) return false;
   const loadSeq = (historyLoadSeq.get(sessionId) ?? 0) + 1;
   historyLoadSeq.set(sessionId, loadSeq);
   const isLatestLoad = () => historyLoadSeq.get(sessionId) === loadSeq;
-  const canApply = () => isLatestLoad() && (options.canApply?.() ?? true);
+  const owner = authStore.get().userInfo?.staffCode;
+  const canApply = () => isLatestLoad() && isRendererLoggedIn()
+    && authStore.get().userInfo?.staffCode === owner && state.historyLoading.has(sessionId)
+    && (options.canApply?.() ?? true);
+  const previousPaging = options.snapshot ? undefined : state.historyPaging[sessionId];
   setHistoryLoading(sessionId, true);
-  // 首开（store 为空）走窗口端点：首屏延迟与历史总量解耦，游标存入 historyPaging。
-  // 非空重载（重连/watchdog 恢复）仍走全量端点：保留用户已向上翻页加载的更早历史。
-  const firstWindow = (state.messages[sessionId] ?? []).length === 0;
   try {
-    const [windowOrFull, st, planState, todoState] = await Promise.all([
-      firstWindow
-        ? backendApi.historyWindow(sessionId, { limit: HISTORY_WINDOW_SIZE })
-        : backendApi.history(sessionId).then((items) => ({ items, has_more: false, next_before: null })),
+    const [window, st, planState, todoState] = await Promise.all([
+      options.snapshot ?? backendApi.historyWindow(sessionId, {
+        limit: HISTORY_WINDOW_SIZE,
+        ...(previousPaging?.revision && previousPaging.head
+          ? { after: previousPaging.head, revision: previousPaging.revision } : {}),
+      }),
       options.terminalStatus ?? backendApi.sessionStatus(sessionId).catch(() => null),
       backendApi.sessionPlan(sessionId).catch(() => null),
       backendApi.sessionTodos(sessionId).catch(() => ({ todos: [] })),
     ]);
     if (!canApply()) return false;
-    if (firstWindow) {
-      setHistoryPaging(sessionId, {
-        hasMore: windowOrFull.has_more,
-        nextBefore: windowOrFull.next_before,
-      });
-    }
-    const items = windowOrFull.items;
     const localMsgs = state.messages[sessionId] ?? [];
     const hasStreamingAssistant = localMsgs.some((m) => m.role === 'assistant' && m.streaming);
     const hasStreamingTeamTurn = localMsgs.some((m) => m.role === 'team_internal' && m.streaming);
@@ -245,7 +297,20 @@ export async function loadBackendHistory(
       renderWorkspaceHistory(openSession);
       return true;
     }
-    const history = mergeTeamInternalMessages(mapBackendHistoryItems(items, sessionId));
+    const project = (result: BackendHistoryWindow) => reconcileHistoryWindow(
+      state.messages[sessionId] ?? [],
+      mergeTeamInternalMessages(mapBackendHistoryItems(result.items, sessionId)),
+      result,
+      previousPaging,
+    );
+    let projection = project(window);
+    if (!projection) {
+      const snapshot = await backendApi.historyWindow(sessionId, { limit: HISTORY_WINDOW_SIZE });
+      if (!canApply()) return false;
+      projection = project(snapshot);
+      if (!projection) return false;
+    }
+    const history = projection.messages;
     if (st?.last_status === 'failed' && st.last_error) {
       history.push({
         id: newMessageId('error'),
@@ -320,9 +385,23 @@ export async function loadBackendHistory(
         merged[todoIdx] = { ...merged[todoIdx], todoSnapshot: todos };
       }
     }
+    // A locally queued user is still owned by the outbox until its receipt
+    // arrives. History reconciliation confirms durable rows, not pending sends.
+    const queuedIds = new Set(getPendingQueue(sessionId).map((entry) => entry.optimisticUserMessageId));
+    if (queuedIds.size > 0) {
+      const requests = new Set(merged.map((message) => message.requestId).filter(Boolean));
+      for (const message of state.messages[sessionId] ?? []) {
+        if (message.role === 'user' && queuedIds.has(message.id)
+          && (!message.requestId || !requests.has(message.requestId)) && !merged.some((row) => row.id === message.id)) {
+          merged.push(message);
+        }
+      }
+    }
     if (todos.length > 0) setBookTodos(sessionId, todos);
-    replaceSessionMessages(sessionId, merged);
-    clearHistoryLoadError(sessionId);
+    if (state.activeSessionId === sessionId) {
+      preserveConversationHistoryViewport(resolveChatRenderTargetId(isStudioView()), sessionId);
+    }
+    commitHistory(sessionId, merged, projection.paging);
     // 修法3：历史替换后清掉已被替换掉的旧回合 delta 重组缓冲；保留仍在 live 流式的尾巴
     // （其 assistantId 在 merged 里）。避免旧回合缓冲残留导致泄漏 / 串轮。
     resetSessionExcept(sessionId, new Set(merged.map((m) => m.id)));
@@ -392,13 +471,7 @@ export async function loadBackendHistory(
   } finally {
     // history 写回完成：flush 期间排队的迟到分片（P2-2），再清 loading 标记。
     // 仅最新请求收尾：旧请求不得清 loading（新请求仍在排队窗口内）也不得 flush。
-    if (isLatestLoad()) {
-      setHistoryLoading(sessionId, false);
-      const queued = flushPendingChunks(sessionId);
-      if (queued) {
-        for (const c of queued) handleGatewayChunk(c);
-      }
-    }
+    if (isLatestLoad() && state.historyLoading.has(sessionId)) finishHistoryLoading(sessionId);
   }
 }
 
@@ -454,17 +527,35 @@ function restoreHistoryViewport(container: HTMLElement, { height, top, anchor }:
 export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> {
   const paging = state.historyPaging[sessionId];
   if (!paging?.hasMore || !paging.nextBefore) return false;
-  if (olderPageInFlight.has(sessionId) || getSessionStreamRecovery(sessionId)) return false;
+  if (!isRendererLoggedIn() || state.activeSessionId !== sessionId || state.historyLoading.has(sessionId)
+    || olderPageInFlight.has(sessionId) || getSessionStreamRecovery(sessionId)) return false;
   const historyVersion = historyLoadSeq.get(sessionId);
+  const owner = authStore.get().userInfo?.staffCode;
+  const navigation = getSessionNavigationVersion();
   const pageLoad = {};
   olderPageInFlight.set(sessionId, pageLoad);
+  const canApply = () => isRendererLoggedIn() && authStore.get().userInfo?.staffCode === owner
+    && navigation === getSessionNavigationVersion() && state.activeSessionId === sessionId
+    && paging === state.historyPaging[sessionId]
+    && historyVersion === historyLoadSeq.get(sessionId) && olderPageInFlight.get(sessionId) === pageLoad;
   logStream('history', 'load-older-start', { sessionId, before: paging.nextBefore });
   try {
     const res = await backendApi.historyWindow(sessionId, {
       limit: HISTORY_WINDOW_SIZE,
       before: paging.nextBefore,
+      ...(paging.revision ? { revision: paging.revision } : {}),
     });
-    if (historyVersion !== historyLoadSeq.get(sessionId) || olderPageInFlight.get(sessionId) !== pageLoad) return false;
+    if (!canApply()) return false;
+    if (res.mode === 'snapshot') {
+      const applied = await loadBackendHistory(sessionId, {
+        snapshot: res,
+        canApply: () => navigation === getSessionNavigationVersion() && state.activeSessionId === sessionId,
+      });
+      if (applied && state.activeSessionId === sessionId) renderChat();
+      return applied;
+    }
+    if ((paging.revision && res.revision !== paging.revision) || res.mode === 'append'
+      || (res.has_more && res.next_before === paging.nextBefore)) return false;
     const current = state.messages[sessionId] ?? [];
     if (current.length === 0) {
       // 会话已被清空（删除/重开首窗）：迟到的旧页直接丢弃
@@ -474,10 +565,13 @@ export async function loadOlderHistoryPage(sessionId: string): Promise<boolean> 
     const containerId = resolveChatRenderTargetId(isStudioView());
     const container = state.activeSessionId === sessionId ? document.getElementById(containerId) : null;
     const scrollAnchor = container ? getConversationScrollAnchor(containerId) : null;
-    const viewport = container?.clientHeight && !scrollAnchor?.isStickyBottom()
+    const rendererPreservesViewport = container && preserveConversationHistoryViewport(containerId, sessionId);
+    const viewport = !rendererPreservesViewport && container?.clientHeight && !scrollAnchor?.isStickyBottom()
       ? captureHistoryViewport(container) : undefined;
-    setHistoryPaging(sessionId, { hasMore: res.has_more, nextBefore: res.next_before });
-    replaceSessionMessages(sessionId, prependHistoryWindow(current, older));
+    const messages = res.revision
+      ? prependDurableHistoryPage(current, older)
+      : prependHistoryWindow(current, older);
+    commitHistory(sessionId, messages, { ...paging, hasMore: res.has_more, nextBefore: res.next_before });
     window.dispatchEvent(new CustomEvent('messages:changed', { detail: { sessionId } }));
     if (state.activeSessionId === sessionId) {
       renderChat();
@@ -616,6 +710,7 @@ function applyActiveTurnSnapshot(sessionId: string, control: ChatChunk): boolean
       messages: getMessages(sessionId),
       book: sessionStore.get().books[sessionId],
       queue: getPendingQueue(sessionId),
+      paging: state.historyPaging[sessionId],
     });
   } catch (error) {
     logStream('history', 'active-snapshot-invalid', { sessionId, error: String(error) });
@@ -624,11 +719,15 @@ function applyActiveTurnSnapshot(sessionId: string, control: ChatChunk): boolean
   if (!projection) return false;
 
   const { messages, book, paging, status, busy, queueHint, reassembly } = projection;
+  if (state.activeSessionId === sessionId) {
+    preserveConversationHistoryViewport(resolveChatRenderTargetId(isStudioView()), sessionId);
+  }
   installSessionReassembly(sessionId, reassembly);
   cancelSessionStreamRecovery(sessionId);
   touchStreamActivity(sessionId);
   batchStoreUpdates(() => {
     const currentMessages = messageStore.get();
+    recordHistoryChange(currentMessages.messages[sessionId], messages);
     const historyLoading = new Set(currentMessages.historyLoading);
     const historyLoadErrors = new Set(currentMessages.historyLoadErrors);
     historyLoading.delete(sessionId);
@@ -783,7 +882,7 @@ async function reconcileSessionAfterReconnect(
     if (chatOutbox.hasUnsettledTurn(sessionId)) return;
     // A turn may have settled while disconnected. Read history after observing
     // the terminal state so a replay gap cannot leave a permanently partial turn.
-    await loadBackendHistory(sessionId, { canApply });
+    await loadBackendHistory(sessionId, { canApply, terminalStatus: status });
     return;
   }
   syncSessionLiveFromBackend(sessionId, status.live, status.last_status, status.active_request_id);

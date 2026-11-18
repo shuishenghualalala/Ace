@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+from contextlib import closing
+
 import pytest
 
-from crew.core.types import Message
+from crew.core.types import Message, ToolCall
 from crew.state.session_store import SessionEventLogError, SQLiteSessionStore
 
 OWNER = "A:uid-a"
@@ -292,28 +294,162 @@ async def test_history_window_endpoint_envelope_and_parity(tmp_path, auth_header
         first = await client.get("/api/session/s1/history", params={"limit": 5})
         assert first.status_code == 200
         body = first.json()
-        assert set(body.keys()) == {"items", "has_more", "next_before"}
-        # 16 条消息（seq 1..16），尾窗 5 条 = seq 12..16
-        assert [item["content"] for item in body["items"]] == ["a5", "q6", "a6", "q7", "a7"]
+        assert set(body.keys()) == {"items", "has_more", "next_before", "mode", "revision", "head"}
+        assert body["mode"] == "snapshot"
+        # Move the requested five-row cut back to the start of its oldest turn.
+        assert [item["content"] for item in body["items"]] == ["q5", "a5", "q6", "a6", "q7", "a7"]
         assert body["has_more"] is True
-        assert body["next_before"] == "s1:12"
+        assert body["next_before"].endswith(":s1:11")
 
         second = await client.get(
-            "/api/session/s1/history", params={"limit": 50, "before": body["next_before"]}
+            "/api/session/s1/history", params={"limit": 50, "before": body["next_before"], "revision": body["revision"]}
         )
         assert second.status_code == 200
         body2 = second.json()
         assert [item["content"] for item in body2["items"]] == [
-            "q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4", "q5",
+            "q0", "a0", "q1", "a1", "q2", "a2", "q3", "a3", "q4", "a4",
         ]
+        assert body2["mode"] == "page"
+        assert (body2["revision"], body2["head"]) == (body["revision"], body["head"])
         assert body2["has_more"] is False
         assert body2["next_before"] is None
 
         # 与旧全量端点的 items 全等（含顺序）
         legacy = await client.get("/api/session/s1")
         assert legacy.status_code == 200
-        assert body2["items"] + body["items"] == legacy.json()
+        projected = body2["items"] + body["items"]
+        assert len({item["history_id"] for item in projected}) == len(projected)
+        assert [{k: v for k, v in item.items() if k != "history_id"} for item in projected] == legacy.json()
 
         bad = await client.get("/api/session/s1/history", params={"before": "oops"})
         assert bad.status_code == 400
+
+        crew.session_store.save("s1", [*msgs, Message.user("q8"), Message.assistant("a8")], owner_account_id=OWNER)
+        suffix = await client.get("/api/session/s1/history", params={"after": body["head"], "revision": body["revision"]})
+        assert suffix.status_code == 200
+        assert suffix.json()["mode"] == "append"
+        assert [item["content"] for item in suffix.json()["items"]] == ["q8", "a8"]
     crew.session_store.close()
+
+
+def _versioned(store, sid="s1", limit=2, **options):
+    from crew.gateway.routers.sessions import read_session_history_window
+
+    return read_session_history_window(store, sid, OWNER, limit, **options)
+
+
+def test_versioned_history_replays_complete_append_then_preserves_older_cursor(tmp_path):
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        _save_turns(store, "s1", 4)
+        first = _versioned(store)
+        previous_ids = [item["history_id"] for item in first["items"]]
+        _save_turns(store, "s1", 5)
+        added = _versioned(store, after=first["head"], revision=first["revision"])
+        assert added["mode"] == "append"
+        assert added["revision"] == first["revision"] and added["head"] != first["head"]
+        assert [item["content"] for item in added["items"]] == ["q4", "a4"]
+        assert not added["has_more"] and added["next_before"] is None
+        current_page = _versioned(store, limit=4)
+        assert [item["history_id"] for item in current_page["items"][:2]] == previous_ids
+        quiet = _versioned(store, after=added["head"], revision=added["revision"])
+        assert quiet["mode"] == "append" and quiet["items"] == []
+        older = _versioned(store, before=first["next_before"], revision=first["revision"])
+        assert older["mode"] == "page"
+        assert [item["content"] for item in older["items"]] == ["q2", "a2"]
+
+        _save_turns(store, "s1", 8)
+        overflow = _versioned(store, after=first["head"], revision=first["revision"])
+        assert overflow["mode"] == "snapshot"
+        assert [item["content"] for item in overflow["items"]] == ["q7", "a7"]
+
+
+def test_versioned_history_rejects_old_incarnation_and_rewound_cursor(tmp_path):
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        _save_turns(store, "s1", 4)
+        old = _versioned(store)
+        store.rewind("s1", 4, owner_account_id=OWNER)
+        _save_turns(store, "s1", 3)  # Append an alternative tail after the rewind.
+        for options in ({"before": old["next_before"]}, {"after": old["head"]}):
+            fresh = _versioned(store, revision=old["revision"], **options)
+            assert fresh["mode"] == "snapshot" and fresh["revision"] != old["revision"]
+            assert [item["content"] for item in fresh["items"]] == ["q2", "a2"]
+        store.clear("s1", owner_account_id=OWNER)
+        _save_turns(store, "s1", 4)
+        new = _versioned(store)
+        assert old["revision"] != new["revision"]
+        assert {item["history_id"] for item in old["items"]}.isdisjoint(item["history_id"] for item in new["items"])
+
+
+def test_versioned_fork_retains_frozen_ancestor_after_rewind_but_not_rewrite(tmp_path):
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        _save_turns(store, "src", 5)
+        forked = store.fork("src", 6, owner_account_id=OWNER)
+        first = _versioned(store, forked)
+        store.rewind("src", 2, owner_account_id=OWNER)
+        older = _versioned(store, forked, before=first["next_before"], revision=first["revision"])
+        assert older["mode"] == "page" and older["revision"] == first["revision"]
+        assert [(item["source_session_id"], item["content"]) for item in older["items"]] == [("src", "q1"), ("src", "a1")]
+        rewritten = [Message.user(f"replacement {index}") for index in range(8)]
+        store.save("src", rewritten, owner_account_id=OWNER)
+        newer = _versioned(store, forked, before=first["next_before"], revision=first["revision"])
+        assert newer["mode"] == "snapshot" and newer["revision"] != first["revision"]
+
+
+def test_history_window_pairs_tools_at_a_page_boundary_and_reprojects_unsafe_append(tmp_path):
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        path = "/tmp/.crew/accounts/acct_0123456789abcdef/task_workspaces/default/downloads/browser/shot.png"
+        partial = [Message.user("Capture"), Message.assistant("", [ToolCall("shot", "browser_use", {"action": "screenshot"})])]
+        store.save("s1", partial, owner_account_id=OWNER)
+        before_tool = _versioned(store)
+        full = [*partial, Message.tool("shot", path, name="browser_use"), Message.assistant("Captured")]
+        store.save("s1", full, owner_account_id=OWNER)
+        recovered = _versioned(store, limit=5, after=before_tool["head"], revision=before_tool["revision"])
+        assert recovered["mode"] == "snapshot" and recovered["items"][1]["tool_calls"][0]["result"] == path
+
+        store.save("s1", [*full, Message.assistant("Summary")], owner_account_id=OWNER)
+        adjacent = _versioned(store, limit=5, after=recovered["head"], revision=recovered["revision"])
+        assert adjacent["mode"] == "snapshot"
+        store.save("s1", [*full, Message.assistant("Summary"), Message.user("Next"), Message.assistant("Done")], owner_account_id=OWNER)
+        latest = _versioned(store)
+        older = _versioned(store, limit=3, before=latest["next_before"], revision=latest["revision"])
+        assert [item["content"] for item in older["items"]] == ["Capture", "", "Captured", "Summary"]
+        assert older["items"][1]["tool_calls"][0]["result"] == path
+
+
+def test_versioned_history_keeps_rows_and_revision_in_one_wal_read_snapshot(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "crew.db")
+    with closing(SQLiteSessionStore(db_path)) as writer, closing(SQLiteSessionStore(db_path)) as reader:
+        _save_turns(writer, "s1", 4)
+        prior = _versioned(reader)
+        fetch = reader._fetch_rows_desc
+
+        def rewrite_during_fetch(*args):
+            writer.save("s1", [Message.user("new"), Message.assistant("answer")], owner_account_id=OWNER)
+            monkeypatch.setattr(reader, "_fetch_rows_desc", fetch)
+            return fetch(*args)
+
+        monkeypatch.setattr(reader, "_fetch_rows_desc", rewrite_during_fetch)
+        assert _versioned(reader) == prior
+        later = _versioned(reader)
+        assert later["revision"] != prior["revision"]
+        assert [item["content"] for item in later["items"]] == ["new", "answer"]
+
+
+def test_versioned_history_reads_legacy_blob_before_backfill_and_invalidates_its_cursors(tmp_path, monkeypatch):
+    monkeypatch.setattr(SQLiteSessionStore, "_start_legacy_backfill", lambda _store: None)
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        legacy = [Message.user("old prompt"), Message.assistant("old answer"), Message.user("latest"), Message.assistant("reply")]
+        store.transaction(lambda conn: conn.execute(
+            "INSERT INTO sessions(session_id, owner_account_id, messages, updated_at) VALUES (?, ?, ?, ?)",
+            ("s1", OWNER, store._dump(legacy), 1.0),
+        ))
+        first = _versioned(store)
+        assert [item["content"] for item in first["items"]] == ["latest", "reply"]
+        older = _versioned(store, before=first["next_before"], revision=first["revision"])
+        assert [item["content"] for item in older["items"]] == ["old prompt", "old answer"]
+
+        assert store.transaction(store._backfill_legacy_blobs) == 1
+        modern = _versioned(store, before=first["next_before"], revision=first["revision"])
+        assert modern["mode"] == "snapshot" and modern["revision"] != first["revision"]
+        assert [item["content"] for item in modern["items"]] == ["latest", "reply"]
+        assert {item["history_id"] for item in first["items"]}.isdisjoint(item["history_id"] for item in modern["items"])

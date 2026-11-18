@@ -103,6 +103,7 @@ def _session_messages_to_history_items(
     msgs: list[Message],
     *,
     source_session_id: str = "",
+    history_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """把存储消息转换成前端历史回放格式。"""
     items: list[dict[str, Any]] = []
@@ -115,7 +116,7 @@ def _session_messages_to_history_items(
         for message in msgs
         if message.role == "tool" and message.tool_call_id and message.content
     }
-    for message in msgs:
+    for index, message in enumerate(msgs):
         if message.is_meta:
             continue  # 跳过元信息消息
         if message.role == "user" and message.content:
@@ -124,6 +125,8 @@ def _session_messages_to_history_items(
                 item["request_id"] = message.request_id
             if source_session_id:
                 item["source_session_id"] = source_session_id
+            if history_ids is not None:
+                item["history_id"] = history_ids[index]
             if message.timestamp is not None:
                 item["timestamp"] = message.timestamp
             items.append(item)
@@ -133,6 +136,8 @@ def _session_messages_to_history_items(
                 item["request_id"] = message.request_id
             if source_session_id:
                 item["source_session_id"] = source_session_id
+            if history_ids is not None:
+                item["history_id"] = history_ids[index]
             if message.timestamp is not None:
                 item["timestamp"] = message.timestamp
             if message.turn_started_at is not None:
@@ -168,23 +173,41 @@ def _session_messages_to_history_items(
     return items
 
 
-def read_session_history_window(store, session_id: str, owner: str, limit: int, before: str | None = None) -> dict:
-    messages, has_more, next_before = store.load_window(
-        session_id, owner_account_id=owner, limit=limit, before=before,
-    )
+def read_session_history_window(
+    store, session_id: str, owner: str, limit: int, before: str | None = None,
+    *, after: str | None = None, revision: str | None = None,
+) -> dict:
+    read_page = getattr(store, "read_history_page", None)
+    if callable(read_page):
+        page = read_page(session_id, owner_account_id=owner, limit=limit, before=before, after=after, revision=revision)
+        messages = page.rows
+        next_before = page.next_before
+        has_more = next_before is not None
+        metadata = {"mode": page.mode, "revision": page.revision, "head": page.head}
+        sources = page.sources
+    else:
+        messages, has_more, next_before = store.load_window(
+            session_id, owner_account_id=owner, limit=limit, before=before,
+        )
+        metadata = {}
+        sources = {}
     # Forked windows can include rows from different source sessions.
-    groups: list[tuple[str, list[Message]]] = []
-    for sid, _seq, message in messages:
+    groups: list[tuple[str, list[Message], list[str]]] = []
+    for sid, seq, message in messages:
         if groups and groups[-1][0] == sid:
-            groups[-1][1].append(message)
+            group = groups[-1]
         else:
-            groups.append((sid, [message]))
+            group = (sid, [], [])
+            groups.append(group)
+        group[1].append(message)
+        if sources:
+            group[2].append(f"h:{sources[sid]}:{seq}")
     items = [
         item
-        for sid, rows in groups
-        for item in _session_messages_to_history_items(rows, source_session_id=sid)
+        for sid, rows, ids in groups
+        for item in _session_messages_to_history_items(rows, source_session_id=sid, history_ids=ids or None)
     ]
-    return {"items": items, "has_more": has_more, "next_before": next_before}
+    return {"items": items, "has_more": has_more, "next_before": next_before, **metadata}
 
 
 def _history_sort_key(item: dict[str, Any], index: int) -> tuple[float, int]:
@@ -662,15 +685,10 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         session_id: str,
         limit: int = 100,
         before: str | None = None,
+        after: str | None = None,
+        revision: str | None = None,
     ) -> JSONResponse:
-        """窗口化历史（P1-1）：首屏尾部窗口 + 游标翻页，读取成本与历史总量解耦。
-
-        - query: limit（默认 100，钳制 1..500）、before（上一页返回的 next_before 原样回传）
-        - envelope: {items, has_more, next_before}；items 元素结构与全量端点一致
-        - fork 透明续接：窗口触底后自动读源会话前缀，游标 "sid:seq" 对客户端不透明
-        - Team 会话回退全量聚合（has_more=false）：其内容聚合自多个子会话，
-          逐子会话窗口化会破坏去重语义，窗口化暂只覆盖普通会话
-        """
+        """Read a bounded tail, an older page, or a verified durable append."""
         from crew.state.session_store import SessionEventLogError
 
         owner = _owner(request)
@@ -678,25 +696,29 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             return _not_found(session_id)
         load_window = getattr(crew.session_store, "load_window", None)
         parse_cursor = getattr(crew.session_store, "parse_window_cursor", None)
-        if not callable(load_window) or not callable(parse_cursor):
+        modern = callable(getattr(crew.session_store, "read_history_page", None))
+        if not modern and (not callable(load_window) or not callable(parse_cursor)):
             return JSONResponse(
                 {"ok": False, "error": "会话存储不支持窗口读取"}, status_code=503
             )
-        try:
-            parse_cursor(before)
-        except ValueError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        if before and after:
+            return JSONResponse({"ok": False, "error": "不能同时指定 before 和 after"}, status_code=400)
         limit = max(1, min(int(limit or 100), 500))
 
         getter = getattr(crew.session_store, "get_agent_config", None)
         config = getter(session_id, owner_account_id=owner) if callable(getter) else None
         if str((config or {}).get("executor") or "").lower() == "team":
             items, _ = await _aggregate_history_items(crew, session_id, owner)
-            return JSONResponse({"items": items, "has_more": False, "next_before": None})
+            return JSONResponse({"items": items, "has_more": False, "next_before": None, "mode": "snapshot"})
 
         try:
-            window = await asyncio.to_thread(read_session_history_window, crew.session_store, session_id, owner, limit, before)
-        except SessionEventLogError as exc:
+            if not modern:
+                parse_cursor(before)
+            window = await asyncio.to_thread(
+                read_session_history_window, crew.session_store, session_id, owner, limit, before,
+                after=after, revision=revision,
+            )
+        except (SessionEventLogError, ValueError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return JSONResponse(window)
 

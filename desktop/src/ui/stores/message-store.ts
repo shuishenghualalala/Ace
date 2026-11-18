@@ -10,6 +10,9 @@ export interface HistoryPagingState {
   hasMore: boolean;
   /** 下一页游标（后端 next_before 原样保存，对客户端不透明）。 */
   nextBefore: string | null;
+  revision?: string;
+  head?: string;
+  lastHistoryId?: string;
 }
 
 export interface MessageStoreState {

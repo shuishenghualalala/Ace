@@ -20,6 +20,7 @@ import type {
   Workspace,
 } from './backend-client';
 import type { ChatMessage, PendingMessage, PlanReviewStatus, SessionStatus } from './chat-render';
+import type { HistoryPagingState } from './stores/message-store';
 import { recordMessageChange } from './conversation-message-changes';
 import {
   sessionStore,
@@ -471,6 +472,11 @@ export function isDynamicKanbanSession(sessionId: string | null | undefined): bo
 }
 
 const LAST_ACTIVE_SESSION_KEY = 'crew.lastActiveSession';
+let sessionNavigationVersion = 0;
+
+export function getSessionNavigationVersion(): number {
+  return sessionNavigationVersion;
+}
 
 /**
  * 设置当前活跃 session。
@@ -479,6 +485,7 @@ const LAST_ACTIVE_SESSION_KEY = 'crew.lastActiveSession';
  */
 export function setActiveSessionId(id: string | null): void {
   const previousId = sessionStore.get().activeSessionId;
+  if (previousId !== id) sessionNavigationVersion += 1;
   if (previousId !== id && typeof window !== 'undefined') {
     // Give session-scoped native surfaces a synchronous chance to detach while
     // the old session is still current. `session:changed` is intentionally a
@@ -891,7 +898,7 @@ export function clearHistoryLoadError(sessionId: string): void {
 /** 标记某 session 的历史窗口分页游标（loadBackendHistory / loadOlderHistoryPage 写入）。 */
 export function setHistoryPaging(
   sessionId: string,
-  paging: { hasMore: boolean; nextBefore: string | null } | null,
+  paging: HistoryPagingState | null,
 ): void {
   const next = { ...messageStore.get().historyPaging };
   if (paging) next[sessionId] = paging;

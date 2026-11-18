@@ -21,6 +21,9 @@ import {
   disposeConversationRenderer,
   getConversationScrollAnchor,
   invalidateConversationFold,
+  preserveConversationHistoryViewport,
+  restoreConversationViewport,
+  revealConversationMessage,
   renderConversation,
 } from '../../src/ui/features/conversation-renderer';
 import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
@@ -577,25 +580,181 @@ describe('conversation-renderer tracked history and live changes', () => {
     expect(panel.querySelector('.msg[data-message-id="later-user"]')).not.toBeNull();
   });
 
-  it('enables offscreen layout skipping for long settled history without replacing its nodes', () => {
-    const history = Array.from({ length: 199 }, (_, index) => row(
-      `history-${index}`, index % 2 === 0 ? 'user' : 'assistant',
+  function longHistory(count: number): ChatMessage[] {
+    return Array.from({ length: count }, (_, index) => row(
+      'history-' + index, index % 2 === 0 ? 'user' : 'assistant',
     ));
-    replaceSessionMessages(sessionId, history);
-    render();
-    const oldest = panel.querySelector<HTMLElement>('[data-message-id="history-0"]');
-    expect(oldest?.dataset.chatHistoryRow).toBe('user');
-    expect(panel.querySelector('.messages__inner--long')).toBeNull();
+  }
 
+  function mountedRows(): number {
+    return panel.querySelectorAll('.messages__inner > [data-chat-history-row]').length;
+  }
+
+  function simulateViewportGeometry(): void {
+    const wrapper = panel.querySelector<HTMLElement>('.messages__inner')!;
+    wrapper.getBoundingClientRect = () => new DOMRect(0, -panel.scrollTop, 800, 0);
+  }
+
+  it('keeps a bounded window and the live tail, and preserves selected/focused rows through a distant reveal', () => {
+    Object.defineProperty(panel, 'clientHeight', { configurable: true, value: 480 });
+    replaceSessionMessages(sessionId, longHistory(400));
+    render();
+    simulateViewportGeometry();
+    expect(panel.classList.contains('conversation-viewport--active')).toBe(true);
+    expect(panel.querySelector('[data-message-id="history-0"]')).toBeNull();
+    const newest = panel.querySelector('[data-message-id="history-398"]');
+    expect(newest).not.toBeNull();
+    expect(mountedRows()).toBeLessThan(45);
+
+    appendSessionMessage(sessionId, row('new-user', 'user'));
     appendSessionMessage(sessionId, { ...row('live', 'assistant'), streaming: true });
     render();
-
-    const longHistory = panel.querySelector('.messages__inner--long');
-    expect(longHistory?.querySelector('[data-message-id="history-0"]')).toBe(oldest);
-    expect(longHistory?.querySelector<HTMLElement>('[data-message-id="history-1"]')?.dataset.chatHistoryRow).toBe('agent');
-    const live = longHistory?.querySelector<HTMLElement>('[data-message-id="live"]');
+    expect(panel.querySelector('[data-message-id="history-398"]')).toBe(newest);
+    const live = panel.querySelector<HTMLElement>('[data-message-id="live"]');
     expect(live?.dataset.streaming).toBe('true');
     expect(live?.dataset.chatHistoryRow).toBeUndefined();
+
+    const oldest = revealConversationMessage(containerId, sessionId, 'history-0')!;
+    expect(oldest.dataset.chatHistoryRow).toBe('user');
+    const text = oldest.querySelector('.msg__text')!;
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const selection = document.getSelection()!;
+    selection.addRange(range);
+    oldest.tabIndex = 0;
+    oldest.focus();
+
+    expect(revealConversationMessage(containerId, sessionId, 'history-200')?.dataset.messageId).toBe('history-200');
+    expect(panel.querySelector('[data-message-id="history-0"]')).toBe(oldest);
+    expect(selection.getRangeAt(0).startContainer).toBe(text);
+    expect(document.activeElement).toBe(oldest);
+    expect(panel.querySelector('[data-message-id="live"]')).toBe(live);
+    expect(mountedRows()).toBeLessThan(45);
+
+    oldest.blur();
+    selection.removeAllRanges();
+    render();
+    expect(panel.querySelector('[data-message-id="history-0"]')).toBeNull();
+    expect(revealConversationMessage(containerId, 'different-session', 'history-200')).toBeNull();
+  });
+
+  it('remounts an evicted thinking fold in the last user-selected state', () => {
+    Object.defineProperty(panel, 'clientHeight', { configurable: true, value: 480 });
+    const history = longHistory(220);
+    history[1] = { ...history[1], thinking: 'Read this older analysis.' };
+    replaceSessionMessages(sessionId, history);
+    render();
+    simulateViewportGeometry();
+
+    const row = revealConversationMessage(containerId, sessionId, 'history-1')!;
+    const detail = row.querySelector<HTMLDetailsElement>('details.process-timeline__details:not([data-fold-key])')!;
+    expect(detail.open).toBe(false);
+    detail.open = true;
+    detail.dataset.userFoldIntent = '1';
+    detail.dispatchEvent(new Event('toggle'));
+    revealConversationMessage(containerId, sessionId, 'history-180');
+    expect(row.isConnected).toBe(false);
+    const revealed = revealConversationMessage(containerId, sessionId, 'history-1')!;
+    expect(revealed).not.toBe(row);
+    expect(revealed.querySelector<HTMLDetailsElement>('details.process-timeline__details:not([data-fold-key])')?.open).toBe(true);
+  });
+
+  it('does not replay a pre-jump geometry anchor or discard the next correction on its scroll acknowledgment', () => {
+    const paint = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    const observers: TestResizeObserver[] = [];
+    class TestResizeObserver {
+      readonly watched = new Set<Element>();
+      constructor(private readonly receive: ResizeObserverCallback) { observers.push(this); }
+      observe(target: Element): void { this.watched.add(target); }
+      unobserve(target: Element): void { this.watched.delete(target); }
+      disconnect(): void { this.watched.clear(); }
+      measure(target: Element, blockSize: number): void {
+        this.receive([{ target, borderBoxSize: [{ blockSize, inlineSize: 800 }] } as ResizeObserverEntry],
+          this as unknown as ResizeObserver);
+      }
+    }
+    function flushFrame(): void {
+      const work = Array.from(paint.entries());
+      for (const [id, callback] of work) {
+        if (paint.delete(id)) callback(0);
+      }
+    }
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      paint.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => { paint.delete(id); });
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    try {
+      Object.defineProperty(panel, 'clientHeight', { configurable: true, value: 480 });
+      replaceSessionMessages(sessionId, longHistory(240));
+      render();
+      simulateViewportGeometry();
+      flushFrame();
+
+      revealConversationMessage(containerId, sessionId, 'history-50');
+      const wrapper = panel.querySelector('.messages__inner')!;
+      const observer = observers.find((candidate) => candidate.watched.has(wrapper))!;
+      observer.measure(panel.querySelector('[data-message-id="history-44"]')!, 222);
+
+      revealConversationMessage(containerId, sessionId, 'history-150');
+      const revealedTop = panel.scrollTop;
+      flushFrame();
+      expect(panel.scrollTop).toBe(revealedTop);
+
+      observer.measure(panel.querySelector('[data-message-id="history-144"]')!, 222);
+      // The delayed native event for the viewport's own scroll write can arrive
+      // after a resize callback has queued an anchor correction.
+      panel.dispatchEvent(new Event('scroll'));
+      flushFrame();
+      expect(panel.scrollTop).toBe(revealedTop + 150);
+
+      // A genuinely new user position supersedes a queued geometry correction.
+      observer.measure(panel.querySelector('[data-message-id="history-144"]')!, 300);
+      panel.scrollTop -= 55;
+      const userTop = panel.scrollTop;
+      panel.dispatchEvent(new Event('scroll'));
+      flushFrame();
+      expect(panel.scrollTop).toBe(userTop);
+    } finally {
+      disposeConversationRenderer(containerId);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('anchors the reading row across repeated prepends and restores it on a session switch', () => {
+    Object.defineProperty(panel, 'clientHeight', { configurable: true, value: 480 });
+    let history = longHistory(240);
+    replaceSessionMessages(sessionId, history);
+    render();
+    simulateViewportGeometry();
+    const reading = revealConversationMessage(containerId, sessionId, 'history-50');
+    expect(reading).not.toBeNull();
+    const initialTop = panel.scrollTop;
+
+    for (let page = 1; page <= 5; page += 1) {
+      expect(preserveConversationHistoryViewport(containerId, sessionId)).toBe(true);
+      const older = Array.from({ length: 40 }, (_, index) => row(
+        'older-' + page + '-' + index, index % 2 === 0 ? 'user' : 'assistant',
+      ));
+      history = [...older, ...history];
+      replaceSessionMessages(sessionId, history);
+      render();
+      expect(panel.scrollTop).toBe(initialTop + page * 20 * (72 + 132));
+      expect(panel.querySelector('[data-message-id="history-50"]')).toBe(reading);
+      expect(mountedRows()).toBeLessThan(45);
+    }
+
+    const readingTop = panel.scrollTop;
+    replaceSessionMessages('other-session', [row('other-user', 'user')]);
+    renderConversation(panel, containerId, 'other-session');
+    expect(panel.querySelector('[data-message-id="history-50"]')).toBeNull();
+    render();
+    simulateViewportGeometry();
+    expect(restoreConversationViewport(containerId, sessionId)).toBe(true);
+    expect(panel.scrollTop).toBe(readingTop);
+    expect(panel.querySelector('[data-message-id="history-50"]')).not.toBeNull();
   });
 });
 

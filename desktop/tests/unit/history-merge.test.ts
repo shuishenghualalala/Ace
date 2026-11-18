@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeBackendHistory, prependHistoryWindow } from '../../src/ui/features/history-merge';
+import { mergeBackendHistory, prependHistoryWindow, reconcileHistoryWindow } from '../../src/ui/features/history-merge';
 import type { ChatMessage } from '../../src/ui/chat-render';
 
 function msg(partial: Partial<ChatMessage> & Pick<ChatMessage, 'role' | 'content'>): ChatMessage {
@@ -97,5 +97,31 @@ describe('prependHistoryWindow（P1-6 触顶翻页前缀拼接）', () => {
     const current = [msg({ role: 'user', content: 'q' })];
     expect(prependHistoryWindow(current, [])).toBe(current);
     expect(prependHistoryWindow([], current)).toBe(current);
+  });
+});
+
+describe('reconcileHistoryWindow', () => {
+  it('keeps earlier pages only when the replacement shares a durable row and revision', () => {
+    const loaded = [
+      msg({ role: 'user', content: 'Repeated question', historyId: 'one' }),
+      msg({ role: 'user', content: 'Repeated question', historyId: 'two' }),
+      msg({ role: 'assistant', content: 'old', historyId: 'three' }),
+    ];
+    const tail = [loaded[1], msg({ role: 'assistant', content: 'new', historyId: 'four' })];
+    const previous = { hasMore: true, nextBefore: 'oldest', revision: 'same', head: 'head-old' };
+    const response = { items: [], has_more: true, next_before: 'new-start', revision: 'same', head: 'head-new' };
+    const patched = reconcileHistoryWindow(loaded, tail, response, previous);
+    expect(patched?.messages).toEqual([loaded[0], ...tail]);
+    expect(patched?.paging).toEqual({ ...previous, head: 'head-new', lastHistoryId: 'four' });
+    expect(reconcileHistoryWindow(loaded, tail, { ...response, revision: 'different' }, previous)?.messages).toBe(tail);
+  });
+
+  it('requires a fresh bounded snapshot when an append cannot locate its preceding durable row', () => {
+    const previous = {
+      hasMore: true, nextBefore: 'oldest', revision: 'same', head: 'head-1', lastHistoryId: 'missing',
+    };
+    expect(reconcileHistoryWindow([], [], {
+      mode: 'append', items: [], has_more: false, next_before: null, revision: 'same', head: 'head-2',
+    }, previous)).toBeNull();
   });
 });

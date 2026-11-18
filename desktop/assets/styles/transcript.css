@@ -11,6 +11,16 @@
   contain-intrinsic-block-size: auto 64px;
 }
 
+.conversation-viewport--active {
+  overflow-anchor: none;
+}
+
+.conversation-viewport-spacer {
+  flex: none;
+  pointer-events: none;
+}
+
+
 .chat-messages.web-flow .mw-transcript {
   box-sizing: border-box;
   display: flex;

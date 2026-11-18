@@ -69,6 +69,8 @@ export interface BackendHistoryFileChange {
 export interface BackendHistoryItem {
   role: string;
   content: string;
+  /** Stable identity from the durable event projection. */
+  history_id?: string;
   timestamp?: number;
   turn_started_at?: number;
   turn_duration?: number;
@@ -107,6 +109,15 @@ export interface BackendHistoryItem {
     started_at?: number;
     duration?: number;
   }>;
+}
+
+export interface BackendHistoryWindow {
+  items: BackendHistoryItem[];
+  has_more: boolean;
+  next_before: string | null;
+  mode?: 'snapshot' | 'append' | 'page';
+  revision?: string;
+  head?: string;
 }
 
 export interface TeamArtifactCard {
@@ -1290,17 +1301,20 @@ export const sessionApi = {
     }>('/api/channel-sessions'),
   sessionsStatus: () => getJSON<Record<string, string>>('/api/sessions/status'),
   history: (id: string) => getJSON<BackendHistoryItem[]>(`/api/session/${encodeURIComponent(id)}`),
-  /** 窗口化历史（P1-1）：首屏尾部窗口 + 游标翻页；before 为上一页 next_before 原样回传。 */
-  historyWindow: (id: string, options: { limit?: number; before?: string | null } = {}) => {
+  /** Read the tail, an older page, or new durable rows from a previous head. */
+  historyWindow: (id: string, options: {
+    limit?: number;
+    before?: string | null;
+    after?: string;
+    revision?: string;
+  } = {}) => {
     const params = new URLSearchParams();
     if (options.limit) params.set('limit', String(options.limit));
     if (options.before) params.set('before', options.before);
+    if (options.after) params.set('after', options.after);
+    if (options.revision) params.set('revision', options.revision);
     const query = params.toString();
-    return getJSON<{
-      items: BackendHistoryItem[];
-      has_more: boolean;
-      next_before: string | null;
-    }>(
+    return getJSON<BackendHistoryWindow>(
       `/api/session/${encodeURIComponent(id)}/history${query ? `?${query}` : ''}`,
     );
   },

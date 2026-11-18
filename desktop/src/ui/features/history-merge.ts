@@ -3,6 +3,8 @@
  */
 
 import type { ChatMessage } from '../chat-render';
+import type { BackendHistoryWindow } from '../api/feature-session';
+import type { HistoryPagingState } from '../stores/message-store';
 
 export interface HistoryMergeOptions {
   live?: string;
@@ -87,4 +89,76 @@ export function prependHistoryWindow(current: ChatMessage[], older: ChatMessage[
   }
   if (overlap === 0) return [...older, ...current];
   return [...older.slice(0, older.length - overlap), ...current];
+}
+
+export function pagingForHistoryWindow(
+  window: Pick<BackendHistoryWindow, 'has_more' | 'next_before' | 'revision' | 'head'>,
+  lastHistoryId?: string,
+): HistoryPagingState {
+  return {
+    hasMore: window.has_more,
+    nextBefore: window.next_before,
+    ...(window.revision ? { revision: window.revision } : {}),
+    ...(window.head ? { head: window.head } : {}),
+    ...(lastHistoryId ? { lastHistoryId } : {}),
+  };
+}
+
+export function retainEarlierHistory(
+  local: ChatMessage[],
+  incoming: ChatMessage[],
+  paging: HistoryPagingState,
+  previous?: HistoryPagingState,
+): { messages: ChatMessage[]; paging: HistoryPagingState } {
+  if (!paging.revision || previous?.revision !== paging.revision || !incoming[0]?.historyId) {
+    return { messages: incoming, paging };
+  }
+  const first = local.findIndex((message) => message.historyId === incoming[0]?.historyId);
+  if (first < 0) return { messages: incoming, paging };
+  return {
+    messages: first ? [...local.slice(0, first), ...incoming] : incoming,
+    paging: { ...paging, hasMore: previous.hasMore, nextBefore: previous.nextBefore },
+  };
+}
+
+/** Merge only across a server-confirmed revision and a durable row boundary. */
+export function reconcileHistoryWindow(
+  local: ChatMessage[],
+  incoming: ChatMessage[],
+  window: BackendHistoryWindow,
+  previous?: HistoryPagingState,
+): { messages: ChatMessage[]; paging: HistoryPagingState } | null {
+  if (window.mode === 'page') return null;
+  const lastHistoryId = incoming.findLast((message) => message.historyId)?.historyId;
+  if (window.mode === 'append') {
+    if (!previous || !window.revision || window.revision !== previous.revision || !window.head) return null;
+    const boundary = previous.lastHistoryId
+      ? local.findLastIndex((message) => message.historyId === previous.lastHistoryId)
+      : -1;
+    if (previous.lastHistoryId && boundary < 0) return null;
+    return {
+      messages: [...local.slice(0, boundary + 1), ...incoming],
+      paging: { ...previous, head: window.head, ...(lastHistoryId ? { lastHistoryId } : {}) },
+    };
+  }
+  return retainEarlierHistory(local, incoming, pagingForHistoryWindow(window, lastHistoryId), previous);
+}
+
+/** The new page cannot remove any local row merely because its text repeats. */
+export function prependDurableHistoryPage(current: ChatMessage[], older: ChatMessage[]): ChatMessage[] {
+  const requested = new Set(older.flatMap((message) => message.historyId ? [message.historyId] : []));
+  const known = new Set<string>();
+  for (const message of current) {
+    const id = message.historyId;
+    if (id && requested.has(id)) known.add(id);
+    if (known.size === requested.size) break;
+  }
+  const additions = older.filter((message) => {
+    const id = message.historyId;
+    if (!id) return true;
+    if (known.has(id)) return false;
+    known.add(id);
+    return true;
+  });
+  return additions.length ? [...additions, ...current] : current;
 }

@@ -1,3 +1,4 @@
+import { isStudioView, resolveChatRenderTargetId } from './studio-chrome-state';
 /**
  * 外部 Team Session 的「协作」看板。
  *
@@ -1203,15 +1204,16 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
     button.addEventListener('click', () => {
       const messageId = button.dataset.teamLocateMessage;
       if (!messageId) return;
-      const target = Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]'))
-        .find((element) => element.dataset.messageId === messageId);
-      if (!target) {
-        notify('暂时找不到对应的团队消息');
-        return;
-      }
-      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      target.classList.add('msg--located');
-      window.setTimeout(() => target.classList.remove('msg--located'), 1_400);
+      void import('./conversation-renderer').then(({ revealConversationMessage }) => {
+        if (state.activeSessionId !== sessionId) return;
+        const target = revealConversationMessage(resolveChatRenderTargetId(isStudioView()), sessionId, messageId);
+        if (!target) {
+          notify('暂时找不到对应的团队消息');
+          return;
+        }
+        target.classList.add('msg--located');
+        window.setTimeout(() => target.classList.remove('msg--located'), 1_400);
+      });
     });
   });
   document.querySelectorAll<HTMLButtonElement>('[data-team-open-path]').forEach((button) => {

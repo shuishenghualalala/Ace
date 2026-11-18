@@ -24,6 +24,7 @@ export interface ScrollAnchor {
   pinToBottomIfSticky(): void;
   /** 当前是否处于 stickyBottom（停在底部）。 */
   isStickyBottom(): boolean;
+  restoreReadingTop(top: number): void;
   /** 显式 disarm（外部知道用户开始操作时调用）。 */
   disarm(): void;
   /** 销毁：移除所有监听。 */
@@ -60,6 +61,9 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
 
   const scrollToBottom = (): void => {
     container.scrollTop = container.scrollHeight;
+    lastTop = container.scrollTop;
+    lastHeight = container.scrollHeight;
+    lastClientHeight = container.clientHeight;
   };
 
   // ---------- 事件处理 ----------
@@ -184,9 +188,6 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
     // 跨 scroll 事件保持 guard：设 1 而非累加，避免多次合并写入导致 guard 永不递减。
     programmaticScrollPending = 1;
     scrollToBottom();
-    lastTop = container.scrollTop;
-    lastHeight = container.scrollHeight;
-    lastClientHeight = container.clientHeight;
   };
 
   const isStickyBottom = (): boolean => stickyBottom;
@@ -195,6 +196,14 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
     stickyBottom = false;
     browsingHistory = true;
     programmaticScrollPending = 0;
+  };
+
+  const restoreReadingTop = (top: number): void => {
+    disarm();
+    container.scrollTop = top;
+    lastTop = container.scrollTop;
+    lastHeight = container.scrollHeight;
+    lastClientHeight = container.clientHeight;
   };
 
   // ResizeObserver 在对外接口定义之后创建，确保 onResize 引用的 pinToBottomIfSticky 已就绪。
@@ -211,5 +220,5 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
     resizeObserver?.disconnect();
   };
 
-  return { jumpToBottom, pinToBottomIfSticky, isStickyBottom, disarm, dispose };
+  return { jumpToBottom, pinToBottomIfSticky, isStickyBottom, restoreReadingTop, disarm, dispose };
 }

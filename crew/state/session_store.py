@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -15,7 +16,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
@@ -30,6 +31,17 @@ from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 log = get_logger("state.session_store")
 
 T = TypeVar("T")
+HistoryRow = tuple[str, int, Message]
+
+
+@dataclass(slots=True)
+class SessionHistoryPage:
+    rows: list[HistoryRow]
+    mode: str
+    revision: str
+    head: str
+    next_before: str | None
+    sources: dict[str, str]
 
 # sessions 域 schema 版本：v1 = 单表 blob 基线；v2 = 增量事件表（ADR-0042 W4）；
 # v3 = 事件 parent_seq 链 + 会话树（rewind/fork，ADR-0042 W5）。
@@ -498,6 +510,8 @@ class SQLiteSessionStore(SessionStore):
             "events_generation": "ALTER TABLE sessions ADD COLUMN events_generation INTEGER NOT NULL DEFAULT 0",
             "source_session_id": "ALTER TABLE sessions ADD COLUMN source_session_id TEXT NOT NULL DEFAULT ''",
             "source_parent_seq": "ALTER TABLE sessions ADD COLUMN source_parent_seq INTEGER",
+            "history_incarnation": "ALTER TABLE sessions ADD COLUMN history_incarnation TEXT NOT NULL DEFAULT ''",
+            "history_rewinds": "ALTER TABLE sessions ADD COLUMN history_rewinds INTEGER NOT NULL DEFAULT 0",
         }
         for col, ddl in migrations.items():
             if col not in cols:
@@ -511,6 +525,16 @@ class SQLiteSessionStore(SessionStore):
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''")
         self._migrate_owned_aux_tables(conn)
         self._migrate_sessions_pk(conn)
+        if "history_incarnation" not in cols:
+            conn.execute("UPDATE sessions SET history_incarnation = lower(hex(randomblob(16))) WHERE history_incarnation = ''")
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS sessions_assign_history_incarnation
+            AFTER INSERT ON sessions WHEN NEW.history_incarnation = ''
+            BEGIN
+                UPDATE sessions SET history_incarnation = lower(hex(randomblob(16)))
+                WHERE owner_account_id = NEW.owner_account_id AND session_id = NEW.session_id;
+            END
+        """)
         # 历史 owner='' 行归属本机 local（owner 统一后不存在无主会话）。
         # channel_session_routes 已归位 channels 库（P2-7 + ADR-0038 拆库），
         # 由 channels 侧 store 自管建表与回填；主库若还留着拆库前的旧表，
@@ -554,6 +578,8 @@ class SQLiteSessionStore(SessionStore):
                     events_generation INTEGER NOT NULL DEFAULT 0,
                     source_session_id TEXT NOT NULL DEFAULT '',
                     source_parent_seq INTEGER,
+                    history_incarnation TEXT NOT NULL DEFAULT '',
+                    history_rewinds INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (owner_account_id, session_id)
                 )
             """,
@@ -561,13 +587,14 @@ class SQLiteSessionStore(SessionStore):
                 INSERT OR IGNORE INTO sessions_new (
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
-                    archived, pinned, leaf_seq, events_generation, source_session_id, source_parent_seq
+                    archived, pinned, leaf_seq, events_generation, source_session_id, source_parent_seq,
+                    history_incarnation, history_rewinds
                 )
                 SELECT
                     session_id, owner_account_id, messages, updated_at, created_at,
                     workspace_id, title, message_count, token_count, last_prompt_tokens, last_prompt_tokens_source, last_status, last_error,
                     COALESCE(archived, 0), COALESCE(pinned, 0), COALESCE(leaf_seq, 0), COALESCE(events_generation, 0),
-                    COALESCE(source_session_id, ''), source_parent_seq
+                    COALESCE(source_session_id, ''), source_parent_seq, history_incarnation, history_rewinds
                 FROM sessions
             """,
         )
@@ -897,7 +924,7 @@ class SQLiteSessionStore(SessionStore):
         with self._lock:
             row = self._conn.execute(
                 "SELECT payload FROM session_events "
-                "WHERE owner_account_id = ? AND session_id = ? AND type = ? LIMIT 1",
+                "WHERE owner_account_id = ? AND session_id = ? AND seq = 1 AND type = ?",
                 (owner, session_id, SessionEventType.END_SEED.value),
             ).fetchone()
         if row is None:
@@ -955,6 +982,8 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         head_seq: int,
         exclusive_below: int | None,
+        *,
+        stop_before: Callable[[str, int], bool] | None = None,
     ):
         """沿活链从 head_seq 向旧走，产出角色事件 (sid, seq, Message)，从新到旧。
 
@@ -978,6 +1007,8 @@ class SQLiteSessionStore(SessionStore):
                         f"事件链断裂：{cur_sid}#{cur} 缺失，拒绝窗口读取"
                     )
             parent, etype, payload = batch[cur]
+            if stop_before is not None and stop_before(cur_sid, cur):
+                return
             if etype == SessionEventType.END_SEED.value:
                 try:
                     meta = json.loads(payload)
@@ -998,6 +1029,8 @@ class SQLiteSessionStore(SessionStore):
                 continue
             if etype in _ROLE_EVENT_TYPES_SET and (skip_above is None or cur < skip_above):
                 yield cur_sid, cur, SQLiteSessionStore._message_from_dict(json.loads(payload))
+            if parent is not None and parent >= cur:
+                raise SessionEventLogError(f"事件父链无效：{cur_sid}#{cur}")
             cur = parent if parent is not None else (cur - 1 if cur > 1 else None)
 
     @staticmethod
@@ -1068,6 +1101,198 @@ class SQLiteSessionStore(SessionStore):
             return messages, False, None
         oldest_sid, oldest_seq, _ = collected[-1]
         return messages, True, f"{oldest_sid}:{oldest_seq}"
+
+    def read_history_page(
+        self,
+        session_id: str,
+        *,
+        owner_account_id: str,
+        limit: int,
+        before: str | None = None,
+        after: str | None = None,
+        revision: str | None = None,
+    ) -> SessionHistoryPage:
+        """Read a versioned transcript page and its cursor from one SQLite snapshot."""
+        if before and after:
+            raise ValueError("不能同时指定 before 和 after")
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                return self._read_history_page(owner_account_id, session_id, limit, before, after, revision)
+            finally:
+                self._conn.rollback()
+
+    def _history_identity(self, owner: str, sid: str):
+        row = self._conn.execute(
+            "SELECT leaf_seq, events_generation, history_incarnation, history_rewinds, "
+            "CASE WHEN leaf_seq = 0 THEN messages != '[]' ELSE 0 END "
+            "FROM sessions WHERE owner_account_id = ? AND session_id = ?",
+            (owner, sid),
+        ).fetchone()
+        if row is None:
+            raise SessionEventLogError(f"会话不存在：{sid}")
+        return row
+
+    def _read_history_page(
+        self, owner: str, sid: str, limit: int, before: str | None, after: str | None, revision: str | None,
+    ) -> SessionHistoryPage:
+        limit = max(1, min(int(limit), self.WINDOW_MAX_LIMIT))
+        chain = self._fork_chain(owner, sid)
+        leaf, generation, incarnation, rewinds, has_blob = self._history_identity(owner, sid)
+        legacy = leaf == 0 and bool(has_blob)
+        sources = {sid: f"{incarnation}:{generation}{':blob' if legacy else ''}"}
+        for ancestor, _ in chain[1:]:
+            _, old_generation, old_incarnation, _, _ = self._history_identity(owner, ancestor)
+            sources[ancestor] = f"{old_incarnation}:{old_generation}"
+        snapshot_identity = [self.desktop_send_store_id, owner, sid, rewinds, legacy, chain, sources]
+        current = hashlib.sha256(json.dumps(snapshot_identity, separators=(",", ":")).encode()).hexdigest()
+        head = f"h1:{current}:{leaf}"
+
+        if after and revision == current and not legacy:
+            prefix = f"h1:{current}:"
+            point = after.removeprefix(prefix)
+            if after.startswith(prefix) and point.isascii() and point.isdecimal() and len(point) <= 19:
+                checkpoint = int(point)
+                if checkpoint <= leaf:
+                    rows = self._read_history_suffix(owner, sid, leaf, checkpoint, limit)
+                    if rows is not None:
+                        return SessionHistoryPage(rows, "append", current, head, None, sources)
+
+        bounds = dict(chain)
+        start_sid, start_seq = sid, None
+        if before and revision in (None, current):
+            prefix = f"p1:{current}:"
+            raw = before.removeprefix(prefix)
+            # A legacy sid:seq cursor is still accepted. A versioned cursor from
+            # another projection can only request a new bounded tail snapshot.
+            if before.startswith(prefix) or not (before.startswith("p1:") and len(before.split(":", 2)[1]) == 64):
+                target, point = self.parse_window_cursor(raw)
+                bound = bounds.get(target)
+                if target not in bounds:
+                    raise SessionEventLogError(f"游标会话不在 {sid} 的 fork 前缀链上")
+                if point and (bound is None or point <= bound) and (target != sid or legacy or point <= leaf):
+                    start_sid, start_seq = target, point
+        mode = "page" if start_seq is not None else "snapshot"
+        if legacy:
+            rows, older = self._read_legacy_history_tail(owner, sid, start_seq, limit)
+        else:
+            rows, older = self._read_history_tail(owner, start_sid, start_seq or leaf, start_seq, limit)
+        next_before = f"p1:{current}:{older[0]}:{older[1]}" if older else None
+        return SessionHistoryPage(rows, mode, current, head, next_before, sources)
+
+    @staticmethod
+    def _visible_history_role(message: Message) -> bool:
+        return not message.is_meta and (message.role == "assistant" or (message.role == "user" and bool(message.content)))
+
+    def _read_history_suffix(self, owner: str, sid: str, leaf: int, checkpoint: int, limit: int) -> list[HistoryRow] | None:
+        if checkpoint == leaf:
+            return []
+        found = False
+        walked = 0
+        budget = max(self.WINDOW_FETCH_BATCH, limit * 16)
+
+        def stop(source: str, seq: int) -> bool:
+            nonlocal found, walked
+            found = source == sid and seq == checkpoint
+            walked += 1
+            return found or walked > budget
+
+        rows = []
+        visible = 0
+        for row in self._walk_chain_window(owner, sid, leaf, None, stop_before=stop):
+            rows.append(row)
+            visible += self._visible_history_role(row[2])
+            if visible > limit:
+                return None
+        if found or (checkpoint == 0 and walked <= budget):
+            # Tool results that belong to an older assistant alter an already
+            # materialized row. Sending a bare append would silently lose them.
+            calls = {call.id for _, _, message in rows if message.role == "assistant" for call in message.tool_calls}
+            if any(
+                message.role == "tool" and message.content and message.tool_call_id not in calls
+                for _, _, message in rows
+            ):
+                return None
+            rows.reverse()
+            first = next((message for _, _, message in rows if self._visible_history_role(message)), None)
+            if checkpoint > 0 and first is not None and first.role == "assistant":
+                # Adjacent assistant content may change the process/answer role
+                # of a previously visible segment. Reproject that join together.
+                boundary_walked = 0
+
+                def limit_boundary(source: str, seq: int) -> bool:
+                    nonlocal boundary_walked
+                    boundary_walked += 1
+                    return boundary_walked > self.WINDOW_FETCH_BATCH
+
+                prior = next((
+                    message for _, _, message in self._walk_chain_window(
+                        owner, sid, checkpoint, None, stop_before=limit_boundary,
+                    ) if self._visible_history_role(message)
+                ), None)
+                if (prior is not None and prior.role == "assistant") or boundary_walked > self.WINDOW_FETCH_BATCH:
+                    return None
+            return rows
+        return None
+
+    def _read_history_tail(
+        self, owner: str, sid: str, leaf: int, before: int | None, limit: int,
+    ) -> tuple[list[HistoryRow], tuple[str, int] | None]:
+        if leaf <= 0:
+            return [], None
+        budget = max(self.WINDOW_FETCH_BATCH, limit * 16)
+        walked = 0
+        last: tuple[str, int] | None = None
+
+        def stop(source: str, seq: int) -> bool:
+            nonlocal walked, last
+            walked += 1
+            if walked > budget:
+                return True
+            last = (source, seq)
+            return False
+
+        walker = self._walk_chain_window(owner, sid, leaf, before, stop_before=stop)
+        rows = []
+        visible = 0
+        aligned_limit = limit + min(limit, 32)
+        older = None
+        for row in walker:
+            rows.append(row)
+            message = row[2]
+            visible += self._visible_history_role(message)
+            if visible >= limit and (message.role == "user" and not message.is_meta or visible >= aligned_limit):
+                older = row[:2] if next(walker, None) is not None or walked > budget else None
+                break
+        else:
+            if walked > budget:
+                # Continue from the oldest displayed row to keep its preceding
+                # tool events available, or the raw boundary if none was visible.
+                older = next((row[:2] for row in reversed(rows) if self._visible_history_role(row[2])), last)
+        rows.reverse()
+        return rows, older
+
+    def _read_legacy_history_tail(
+        self, owner: str, sid: str, before: int | None, limit: int,
+    ) -> tuple[list[HistoryRow], tuple[str, int] | None]:
+        raw = self._conn.execute(
+            "SELECT messages FROM sessions WHERE owner_account_id = ? AND session_id = ?", (owner, sid),
+        ).fetchone()[0]
+        try:
+            messages = self._load(raw)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SessionEventLogError(f"旧会话历史无法解析：{sid}") from exc
+        end = min(len(messages), before - 1) if before is not None else len(messages)
+        start = end
+        visible = 0
+        aligned_limit = limit + min(limit, 32)
+        while start > 0:
+            start -= 1
+            message = messages[start]
+            visible += self._visible_history_role(message)
+            if visible >= limit and (message.role == "user" and not message.is_meta or visible >= aligned_limit):
+                break
+        return [(sid, index + 1, messages[index]) for index in range(start, end)], (sid, start + 1) if start else None
 
     def _build_projection(self, owner: str, session_id: str) -> _SessionProjection:
         """全量构建投影：事件链优先，无事件的旧会话回退读 blob。"""
@@ -1635,7 +1860,7 @@ class SQLiteSessionStore(SessionStore):
         cursor = self._read_event_cursor(owner_account_id, session_id)
         if cursor is None:
             raise ValueError(f"会话不存在: {session_id}")
-        expected_leaf = cursor[0]
+        expected_leaf, cursor_before_generation = cursor
         self._validate_cut(owner_account_id, session_id, target_seq)
         messages = self._chain_messages_upto(owner_account_id, session_id, target_seq)
 
@@ -1643,16 +1868,18 @@ class SQLiteSessionStore(SessionStore):
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             cursor = conn.execute(
                 "UPDATE sessions SET leaf_seq = ?, message_count = ?, "
-                "token_count = ?, updated_at = ? "
-                "WHERE owner_account_id = ? AND session_id = ? AND leaf_seq = ?",
+                "token_count = ?, updated_at = ?, history_rewinds = history_rewinds + (leaf_seq != ?) "
+                "WHERE owner_account_id = ? AND session_id = ? AND leaf_seq = ? AND events_generation = ?",
                 (
                     target_seq,
                     len(messages),
                     self._estimate_tokens(messages),
                     now,
+                    target_seq,
                     owner_account_id,
                     session_id,
                     expected_leaf,
+                    cursor_before_generation,
                 ),
             )
             if cursor.rowcount != 1:

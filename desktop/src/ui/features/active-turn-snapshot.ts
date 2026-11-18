@@ -14,6 +14,7 @@ import {
   createSessionReassembly, noteSessionDelta, noteSessionDeltaBoundary, type SessionReassembly,
 } from '../stream-reassembly';
 import type { HistoryPagingState } from '../stores/message-store';
+import { pagingForHistoryWindow, retainEarlierHistory } from './history-merge';
 import { mapBackendHistoryItems, mergeTeamInternalMessages } from './history-mapping';
 
 const SNAPSHOT_KINDS = new Set<AnyChatChunk['kind']>([
@@ -39,7 +40,12 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
 export function projectActiveTurnSnapshot(
   sessionId: string,
   control: ChatChunk,
-  local: { messages: ChatMessage[]; book: Bookkeeping | undefined; queue: PendingMessage[] },
+  local: {
+    messages: ChatMessage[];
+    book: Bookkeeping | undefined;
+    queue: PendingMessage[];
+    paging?: HistoryPagingState | undefined;
+  },
 ): ActiveTurnProjection | null {
   const snapshot = recordOf(control.body?.turn_snapshot);
   if (!snapshot) return null;
@@ -69,7 +75,7 @@ export function projectActiveTurnSnapshot(
   const currentUser = durable.at(-1);
   if (currentUser?.role !== 'user') return null;
   const localUser = local.messages.find((message) => message.role === 'user' && message.requestId === requestId);
-  const prompt = { ...(localUser ?? currentUser), requestId };
+  const prompt = { ...(localUser ?? currentUser), requestId, historyId: currentUser.historyId };
   const optimisticIds = new Set(local.queue.map((item) => item.optimisticUserMessageId));
   const queuedUsers = local.messages.filter((message) =>
     message.role === 'user' && message.id !== prompt.id && optimisticIds.has(message.id));
@@ -143,8 +149,12 @@ export function projectActiveTurnSnapshot(
     queueHint = '';
   }
   if (local.book?.activeRequestId === requestId) book.firstChunkAt = local.book.firstChunkAt;
-  return {
-    messages: [...messages, ...queuedUsers], book, reassembly, status, queueHint, busy: !waiting,
-    paging: { hasMore: history.has_more, nextBefore: history.next_before },
-  };
+  const paging = pagingForHistoryWindow({
+    has_more: history.has_more,
+    next_before: history.next_before,
+    ...(typeof history.revision === 'string' ? { revision: history.revision } : {}),
+    ...(typeof history.head === 'string' ? { head: history.head } : {}),
+  }, currentUser.historyId);
+  const retained = retainEarlierHistory(local.messages, [...messages, ...queuedUsers], paging, local.paging);
+  return { ...retained, book, reassembly, status, queueHint, busy: !waiting };
 }

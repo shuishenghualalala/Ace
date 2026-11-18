@@ -26,7 +26,9 @@ import {
   resolveTurnDurationMs,
 } from '../chat-render';
 import { reportRendererError, safeStringify } from '../renderer-error-report';
-import { diffRenderUnits, type RenderUnit } from '../chat-diff';
+import { diffRenderUnits } from '../chat-diff';
+import { setRuntimeStyle } from '../components/runtime-style';
+import { ConversationViewport, type ConversationViewportAnchor, type ConversationViewportRow } from './conversation-viewport';
 import { firstChangedMessageIndex } from '../conversation-message-changes';
 import { attachScrollAnchor, type ScrollAnchor } from './scroll-anchor';
 import { getSessionStreamRecovery } from './session-stream-recovery';
@@ -76,6 +78,7 @@ const noOpScrollAnchor: ScrollAnchor = {
   jumpToBottom: () => {},
   pinToBottomIfSticky: () => {},
   isStickyBottom: () => true,
+  restoreReadingTop: () => {},
   disarm: () => {},
   dispose: () => {},
 };
@@ -97,8 +100,18 @@ export function getConversationScrollAnchor(containerId: string): ScrollAnchor {
 
 /** 用户提交新消息 / 切会话 / 空→非空 时调用：强制跳到底部并重置 sticky。 */
 export function jumpConversationToBottom(containerId: string): void {
+  const requestedTarget = renderTargets.get(containerId);
   requestAnimationFrame(() => {
-    getConversationScrollAnchor(containerId).jumpToBottom();
+    if (requestedTarget && renderTargets.get(containerId) !== requestedTarget) return;
+    const anchor = getConversationScrollAnchor(containerId);
+    anchor.jumpToBottom();
+    const target = renderTargets.get(containerId);
+    const container = target?.wrapper?.parentElement;
+    if (target && container && target.viewport.enabled) {
+      target.pendingRestore = undefined;
+      applyConversationWindow(container, containerId, target);
+      anchor.pinToBottomIfSticky();
+    }
   });
 }
 
@@ -302,7 +315,7 @@ function ensureFoldDelegation(container: HTMLElement, getSessionId: () => string
 
   const markUserFoldIntent = (target: EventTarget | null): void => {
     const el = target instanceof Element
-      ? target.closest<HTMLDetailsElement>('details.msg__foldable, details.process-timeline__details')
+      ? target.closest<HTMLDetailsElement>('details.msg__foldable, details.process-timeline__details, details.rich-reply__history')
       : null;
     if (!el) return;
     el.dataset.userFoldIntent = '1';
@@ -372,13 +385,13 @@ function ensureFoldDelegation(container: HTMLElement, getSessionId: () => string
       }
       // 时间线工具项折叠（无 data-fold-key 的项不持久化）
       const toolDetails = e.target as HTMLDetailsElement | null;
-      if (toolDetails && toolDetails.matches('details.process-timeline__details')) {
+      if (toolDetails && toolDetails.matches('details.process-timeline__details, details.rich-reply__history')) {
         const userInitiated = toolDetails.dataset.userFoldIntent === '1';
         delete toolDetails.dataset.userFoldIntent;
         if (!userInitiated) return;
         const foldKey = toolDetails.getAttribute('data-fold-key');
-        if (!foldKey) return;
-        setToolFold(foldKey, toolDetails.open);
+        if (foldKey) setToolFold(foldKey, toolDetails.open);
+        else rememberTransientDetail(container, toolDetails);
       }
     },
     true,
@@ -391,14 +404,13 @@ function ensureFoldDelegation(container: HTMLElement, getSessionId: () => string
  * 模块级缓存：按容器 id 维护独立 ChatRenderTarget（主对话 / 工作室 / Wiki 面板多轨）。
  * 多面板共存时各自的 diff 缓存与 scroll anchor 互不干扰。
  */
-interface UnitPlan {
-  meta: RenderUnit;
+interface UnitPlan extends ConversationViewportRow {
   build: () => HTMLElement | null;
 }
 
 interface ProjectedSpan {
   start: number;
-  units: RenderUnit[];
+  planStart: number;
   hasVisibleAgent: boolean;
   emptyTyping: boolean;
   teamRows: boolean;
@@ -407,8 +419,22 @@ interface ProjectedSpan {
 interface ChatRenderTarget {
   wrapper: HTMLElement | null;
   lastUnits: Map<string, HTMLElement>;
+  mounted: UnitPlan[];
+  viewport: ConversationViewport<UnitPlan>;
   spans: ProjectedSpan[];
-  extras: RenderUnit[];
+  extras: UnitPlan[];
+  spacers: Map<string, HTMLElement>;
+  transientDetails: Map<string, { sig: string; open: Map<number, boolean> }>;
+  followupHandlers: ConversationRenderHooks['followupHandlers'];
+  stopViewport: (() => void) | null;
+  viewportObserver: ResizeObserver | null;
+  viewportFrame: number | null;
+  cancelViewportFrame: (() => void) | null;
+  restoredViewportTop: number | undefined;
+  scheduleViewport: ((preferred?: ConversationViewportAnchor) => void) | null;
+  readingAnchor: ConversationViewportAnchor | undefined;
+  pendingPrepend: ConversationViewportAnchor | undefined;
+  pendingRestore: ConversationViewportAnchor | undefined;
   source: ChatMessage[] | null;
   visibleLength: number;
   displayKey: string;
@@ -431,8 +457,22 @@ function getChatRenderTarget(containerId: string): ChatRenderTarget {
     target = {
       wrapper: null,
       lastUnits: new Map(),
+      mounted: [],
+      viewport: new ConversationViewport(),
       spans: [],
       extras: [],
+      spacers: new Map(),
+      transientDetails: new Map(),
+      followupHandlers: undefined,
+      stopViewport: null,
+      viewportObserver: null,
+      viewportFrame: null,
+      cancelViewportFrame: null,
+      restoredViewportTop: undefined,
+      scheduleViewport: null,
+      readingAnchor: undefined,
+      pendingPrepend: undefined,
+      pendingRestore: undefined,
       source: null,
       visibleLength: 0,
       displayKey: '',
@@ -629,6 +669,311 @@ function sessionTurnIdentity(display: ReturnType<typeof getSessionAgentDisplay>)
   return { kind: 'external', name, badge };
 }
 
+const savedViewports = new Map<string, { owner: string; anchor: ConversationViewportAnchor }>();
+
+function viewportMemoryKey(containerId: string, sessionId: string): string {
+  return JSON.stringify([containerId, sessionId]);
+}
+
+function viewportCoordinates(container: HTMLElement, wrapper: HTMLElement): { top: number; origin: number } {
+  const top = container.getBoundingClientRect().top + container.clientTop;
+  return { top, origin: container.scrollTop + wrapper.getBoundingClientRect().top - top };
+}
+
+function captureConversationAnchor(
+  container: HTMLElement,
+  target: ChatRenderTarget,
+): ConversationViewportAnchor | undefined {
+  const wrapper = target.wrapper;
+  if (!wrapper || container.clientHeight <= 0 || !target.viewport.rows.length) return undefined;
+  const { top, origin } = viewportCoordinates(container, wrapper);
+  for (const child of wrapper.children) {
+    if (!(child instanceof HTMLElement)) continue;
+    const key = child.dataset.conversationUnit;
+    if (key === undefined || target.viewport.topOf(key) === undefined) continue;
+    const rect = child.getBoundingClientRect();
+    if (rect.bottom > top && rect.top < top + container.clientHeight) return { key, offset: rect.top - top };
+  }
+  return target.viewport.anchorAt(container.scrollTop - origin);
+}
+
+const transientDetailsSelector = 'details.process-timeline__details:not([data-fold-key]), details.rich-reply__history';
+
+function rememberTransientDetail(container: HTMLElement, detail: HTMLDetailsElement): void {
+  const target = renderTargets.get(container.id);
+  const row = detail.closest<HTMLElement>('[data-conversation-unit]');
+  const key = row?.dataset.conversationUnit;
+  if (!target || !row || key === undefined || target.lastUnits.get(key) !== row) return;
+  const plan = target.viewport.rowForKey(key);
+  if (!plan) return;
+  const index = Array.from(row.querySelectorAll(transientDetailsSelector)).indexOf(detail);
+  if (index < 0) return;
+  const previous = target.transientDetails.get(key);
+  const saved = previous?.sig === plan.sig ? previous : { sig: plan.sig, open: new Map<number, boolean>() };
+  saved.open.set(index, detail.open);
+  target.transientDetails.delete(key);
+  target.transientDetails.set(key, saved);
+  if (target.transientDetails.size > 256) target.transientDetails.delete(target.transientDetails.keys().next().value!);
+}
+
+function restoreTransientDetails(target: ChatRenderTarget, plan: UnitPlan, row: HTMLElement): void {
+  const saved = target.transientDetails.get(plan.key);
+  if (!saved) return;
+  if (saved.sig !== plan.sig) {
+    target.transientDetails.delete(plan.key);
+    return;
+  }
+  row.querySelectorAll<HTMLDetailsElement>(transientDetailsSelector).forEach((detail, index) => {
+    const open = saved.open.get(index);
+    if (open !== undefined) detail.open = open;
+  });
+}
+
+function preservedDomKeys(target: ChatRenderTarget): Set<string> {
+  const keys = new Set<string>();
+  const wrapper = target.wrapper!;
+  const owner = wrapper.ownerDocument;
+  const focused = owner.activeElement?.closest<HTMLElement>('[data-conversation-unit]');
+  if (focused && wrapper.contains(focused) && focused.dataset.conversationUnit !== undefined) {
+    keys.add(focused.dataset.conversationUnit);
+  }
+  const selection = owner.getSelection();
+  if (selection && !selection.isCollapsed && selection.rangeCount > 0
+    && (wrapper.contains(selection.anchorNode) || wrapper.contains(selection.focusNode))) {
+    const range = selection.getRangeAt(0);
+    for (const [key, node] of target.lastUnits) {
+      if (range.intersectsNode(node)) keys.add(key);
+    }
+  }
+  return keys;
+}
+
+function applyConversationWindow(
+  container: HTMLElement,
+  containerId: string,
+  target: ChatRenderTarget,
+  preferred?: ConversationViewportAnchor,
+  replacedWrapper?: HTMLElement | null,
+  resetDom = false,
+): void {
+  const wrapper = target.wrapper;
+  if (!wrapper || wrapper.parentElement !== container) return;
+  target.cancelViewportFrame?.();
+  const viewport = target.viewport;
+  const anchor = getConversationScrollAnchor(containerId);
+  const { top, origin } = viewport.enabled || preferred ? viewportCoordinates(container, wrapper) : { top: 0, origin: 0 };
+  const preferredTop = preferred && viewport.topOf(preferred.key);
+  const offset = preferredTop !== undefined
+    ? preferredTop - preferred!.offset
+    : container.scrollTop - origin;
+  const keep = viewport.enabled ? preservedDomKeys(target) : new Set<string>();
+  if (preferred) keep.add(preferred.key);
+  const selected = viewport.select(offset, container.clientHeight || 600, !preferred && anchor.isStickyBottom(), keep);
+  const desired = selected.map((index) => viewport.rows[index]).concat(target.extras);
+  const previous = target.mounted;
+  const nodes = target.lastUnits;
+  const ops = diffRenderUnits(previous, desired);
+  let missingRows = false;
+  const builders = new Map(desired.map((plan) => [plan.key, plan]));
+  const added: HTMLElement[] = [];
+  const removed: HTMLElement[] = replacedWrapper ? [replacedWrapper] : [];
+
+  for (const op of ops) {
+    if (op.type === 'reuse') continue;
+    const old = nodes.get(op.key);
+    if (old) {
+      target.viewportObserver?.unobserve(old);
+      removed.push(old);
+    }
+    const plan = builders.get(op.key);
+    const fresh = plan ? buildConversationUnit(plan) : null;
+    if (plan && isPresent(fresh)) {
+      restoreTransientDetails(target, plan, fresh);
+      markSettledHistory(fresh);
+      fresh.dataset.conversationUnit = op.key;
+      if (old?.parentNode === wrapper) {
+        const spinner = old.querySelector('.msg__fold-spinner');
+        const replacement = fresh.querySelector('.msg__fold-spinner');
+        if (spinner && replacement) replacement.replaceWith(spinner);
+        old.replaceWith(fresh);
+      }
+      nodes.set(op.key, fresh);
+      added.push(fresh);
+    } else {
+      old?.remove();
+      nodes.delete(op.key);
+      if (plan) missingRows = viewport.measure(plan.key, plan.sig, 0) || missingRows;
+    }
+  }
+
+  const layout: HTMLElement[] = [];
+  const retainedSpacers = new Map<string, HTMLElement>();
+  const appendSpacer = (start: number, end: number, nextKey: string): void => {
+    if (start >= end) return;
+    const height = viewport.spacerHeight(start, end);
+    if (height <= 0) return;
+    const spacer = target.spacers.get(nextKey) ?? wrapper.ownerDocument.createElement('div');
+    spacer.className = 'conversation-viewport-spacer mw-runtime-style';
+    spacer.setAttribute('aria-hidden', 'true');
+    const cssHeight = height + 'px';
+    if (spacer.style.getPropertyValue('--mw-runtime-height') !== cssHeight) setRuntimeStyle(spacer, 'height', cssHeight);
+    retainedSpacers.set(nextKey, spacer);
+    layout.push(spacer);
+  };
+
+  let next = 0;
+  for (const index of selected) {
+    const row = viewport.rows[index];
+    const node = nodes.get(row.key);
+    if (!node) continue;
+    appendSpacer(next, index, row.key);
+    layout.push(node);
+    next = index + 1;
+  }
+  appendSpacer(next, viewport.rows.length, '__history_end');
+  for (const extra of target.extras) {
+    const node = nodes.get(extra.key);
+    if (node) layout.push(node);
+  }
+  for (const [key, spacer] of target.spacers) {
+    if (!retainedSpacers.has(key)) spacer.remove();
+  }
+  target.spacers = retainedSpacers;
+
+  let cursor = wrapper.firstChild;
+  let reordered = false;
+  for (const node of layout) {
+    if (node !== cursor) {
+      if (node.parentNode === wrapper && !node.classList.contains('conversation-viewport-spacer')) reordered = true;
+      wrapper.insertBefore(node, cursor);
+    }
+    cursor = node.nextSibling;
+  }
+
+  if (resetDom || added.length || removed.length || reordered) {
+    syncConversationDom(container, target.lastSessionId, { added, removed, reset: resetDom, reordered });
+    for (const root of removed) {
+      if (root === replacedWrapper || root.classList.contains('native-visual')) disposeNativeVisuals(root);
+      if (root.classList.contains('followup-card-wrap--permission')) disposePermissionCardPosition(root);
+    }
+    for (const root of resetDom ? [wrapper] : added) {
+      attachCopyButtons(root);
+      void renderMermaidBlocks(root);
+      if (resetDom || root.classList.contains('native-visual')) hydrateNativeVisuals(root);
+    }
+  }
+  for (const node of added) {
+    if (node.dataset.conversationUnit && viewport.topOf(node.dataset.conversationUnit) !== undefined) {
+      target.viewportObserver?.observe(node);
+    }
+  }
+  const followup = nodes.get('__followup');
+  if (followup) {
+    syncPermissionCardPositions(followup);
+    bindFollowupCard(followup, target.followupHandlers ?? noopFollowupHandlers);
+  }
+
+  target.mounted = desired;
+  if (preferred && preferredTop !== undefined) {
+    const node = nodes.get(preferred.key);
+    const rect = node?.getBoundingClientRect();
+    const scrollTop = rect && rect.height > 0
+      ? container.scrollTop + rect.top - top - preferred.offset
+      : origin + preferredTop - preferred.offset;
+    const previousTop = container.scrollTop;
+    if (anchor.isStickyBottom() || Math.abs(scrollTop - previousTop) > 0.25) {
+      anchor.restoreReadingTop(scrollTop);
+      if (viewport.enabled && Math.abs(container.scrollTop - previousTop) > 0.25) {
+        target.restoredViewportTop = container.scrollTop;
+      }
+    }
+  }
+  target.readingAnchor = viewport.enabled && !anchor.isStickyBottom() ? captureConversationAnchor(container, target) : undefined;
+  if (viewport.enabled && missingRows) target.scheduleViewport?.(target.readingAnchor);
+}
+
+function buildConversationUnit(plan: UnitPlan): HTMLElement | null {
+  try {
+    return plan.build();
+  } catch (error) {
+    reportRendererError('render', error, { unitKey: plan.key });
+    return renderUnitErrorCard();
+  }
+}
+
+function bindConversationViewport(container: HTMLElement, containerId: string, target: ChatRenderTarget): void {
+  const wrapper = target.wrapper!;
+  const anchor = getConversationScrollAnchor(containerId);
+  const syncGeometry = (): boolean => {
+    const style = getComputedStyle(wrapper);
+    const gap = Number.parseFloat(style.rowGap);
+    return target.viewport.setGeometry(wrapper.clientWidth, Number.isFinite(gap) ? gap : 0);
+  };
+  syncGeometry();
+  let nextAnchor: ConversationViewportAnchor | undefined;
+  const schedule = (preferred?: ConversationViewportAnchor): void => {
+    nextAnchor = preferred;
+    if (target.viewportFrame !== null) return;
+    target.viewportFrame = requestAnimationFrame(() => {
+      target.viewportFrame = null;
+      if (renderTargets.get(containerId) !== target) return;
+      const measuredAnchor = nextAnchor;
+      applyConversationWindow(container, containerId, target, measuredAnchor);
+      anchor.pinToBottomIfSticky();
+    });
+  };
+  target.scheduleViewport = schedule;
+  target.cancelViewportFrame = () => {
+    nextAnchor = undefined;
+    if (target.viewportFrame !== null) cancelAnimationFrame(target.viewportFrame);
+    target.viewportFrame = null;
+  };
+  const onScroll = (): void => {
+    if (!target.viewport.enabled) return;
+    const restoredTop = target.restoredViewportTop;
+    target.restoredViewportTop = undefined;
+    // Acknowledging a layout scroll must not overwrite a newer measurement.
+    if (restoredTop !== undefined && Math.abs(container.scrollTop - restoredTop) <= 0.25) return;
+    target.readingAnchor = anchor.isStickyBottom() ? undefined : captureConversationAnchor(container, target);
+    schedule();
+  };
+  const onSelectionOrFocus = (): void => {
+    if (target.viewport.enabled) schedule(nextAnchor);
+  };
+  container.addEventListener('scroll', onScroll, { passive: true });
+  container.addEventListener('focusout', onSelectionOrFocus);
+  container.ownerDocument.addEventListener('selectionchange', onSelectionOrFocus);
+  if (typeof ResizeObserver !== 'undefined') {
+    target.viewportObserver = new ResizeObserver((entries) => {
+      const reading = !anchor.isStickyBottom() ? target.readingAnchor : undefined;
+      let updated = entries.some((entry) => entry.target === wrapper) && syncGeometry();
+      for (const entry of entries) {
+        if (!(entry.target instanceof HTMLElement)) continue;
+        const row = entry.target;
+        const key = row.dataset.conversationUnit;
+        if (key === undefined || target.lastUnits.get(key) !== row) continue;
+        const plan = target.viewport.rowForKey(key);
+        const box = entry.borderBoxSize?.[0]?.blockSize ?? row.getBoundingClientRect().height;
+        if (!plan || !box) continue;
+        const style = getComputedStyle(row);
+        const margin = (Number.parseFloat(style.marginBlockStart) || 0) + (Number.parseFloat(style.marginBlockEnd) || 0);
+        updated = target.viewport.measure(key, plan.sig, Math.max(1, box + margin)) || updated;
+      }
+      if (target.viewport.enabled && (updated || entries.some((entry) => entry.target === container))) schedule(reading);
+    });
+    target.viewportObserver.observe(wrapper);
+    target.viewportObserver.observe(container);
+  }
+  target.stopViewport = () => {
+    target.cancelViewportFrame?.();
+    target.viewportObserver?.disconnect();
+    container.removeEventListener('scroll', onScroll);
+    container.removeEventListener('focusout', onSelectionOrFocus);
+    container.ownerDocument.removeEventListener('selectionchange', onSelectionOrFocus);
+    container.classList.remove('conversation-viewport--active');
+  };
+}
+
 // ---------- renderConversation：渲染主体 ----------
 
 export interface ConversationRenderHooks {
@@ -684,13 +1029,23 @@ export function renderConversation(
     ? target.wrapper : null;
   const replacedFollowup = replacedWrapper ? target.lastUnits.get('__followup') : undefined;
   if (replacedWrapper) {
+    const previousSession = target.lastSessionId;
+    const previousContainer = replacedWrapper.parentElement;
+    const scroll = getConversationScrollAnchor(containerId);
+    if (previousSession && previousContainer === container && target.ownerKey === ownerKey) {
+      const key = viewportMemoryKey(containerId, previousSession);
+      const previousAnchor = !scroll.isStickyBottom() ? captureConversationAnchor(previousContainer, target) : undefined;
+      savedViewports.delete(key);
+      if (previousAnchor) savedViewports.set(key, { owner: ownerKey, anchor: previousAnchor });
+      if (savedViewports.size > 64) savedViewports.delete(savedViewports.keys().next().value!);
+    }
+    target.stopViewport?.();
+    scroll.jumpToBottom();
     renderTargets.delete(containerId);
     target = getChatRenderTarget(containerId);
   }
   target.ownerKey = ownerKey;
   target.lastSessionId = sessionId;
-  const { lastUnits } = target;
-  let { wrapper: chatWrapper } = target;
 
   const modelLabel = state.configModel;
   const identitySig = turnIdentity ? JSON.stringify(turnIdentity) : 'crew';
@@ -722,6 +1077,7 @@ export function renderConversation(
     : reusableSpanCount(target.spans, Math.min(messageChange, target.visibleLength, visibleLength));
   const previousSpan = target.spans[reused - 1];
   const start = target.spans[reused]?.start ?? target.visibleLength;
+  const historyFrom = target.spans[reused]?.planStart ?? target.viewport.rows.length;
   const spans: ProjectedSpan[] = [];
   const plans: UnitPlan[] = [];
   let hasVisibleAgent = previousSpan?.hasVisibleAgent ?? false;
@@ -731,21 +1087,13 @@ export function renderConversation(
     hasVisibleAgent ||= visibleAgent;
     trailingEmptyTyping = emptyTyping;
     teamRows ||= messages[index].role === 'team_internal';
-    spans.push({ start: index, units: plans.slice(firstPlan).map(({ meta }) => meta), hasVisibleAgent, emptyTyping, teamRows });
+    spans.push({ start: index, planStart: historyFrom + firstPlan, hasVisibleAgent, emptyTyping, teamRows });
   };
   let extrasStart = 0;
-  const pushPlan = (key: string, sig: string, build: () => HTMLElement | null): void => {
-    plans.push({ meta: { key, sig }, build });
-  };
-  // 单元构建异常隔离：一条坏消息只损失自己（降级错误占位卡），整轮渲染不被拖垮。
-  // sig 未变 → reuse 不会重试 build；数据变化（流式继续）→ sig 变化 → patch 自然重试。
-  const buildUnitSafely = (key: string, build: () => HTMLElement | null): HTMLElement | null => {
-    try {
-      return build();
-    } catch (err) {
-      reportRendererError('render', err, { unitKey: key });
-      return renderUnitErrorCard();
-    }
+  const pushPlan = (
+    key: string, sig: string, build: () => HTMLElement | null, estimatedHeight = 132, live = false,
+  ): void => {
+    plans.push({ key, sig, build, estimatedHeight, live });
   };
   // sig 计算异常隔离：sig 与 build 读同一批消息字段，字段形状异常（非数组等）必须同样
   // 只损失自己——否则在 diff 之前就抛错，整轮渲染失败、会话界面冻结在旧 DOM。
@@ -828,7 +1176,7 @@ export function renderConversation(
           pushPlan(msg.id, sig, () => renderTeamInternalMessage(captured, isStreaming, {
             canRetry: !busy,
             canCancel: busy,
-          }));
+          }), 144, isStreaming);
           finishSpan(i, firstPlan, true);
           i += 1;
           continue;
@@ -839,7 +1187,8 @@ export function renderConversation(
         } else {
           sig = safeSig(msg.id, () => sigUserMessage(msg, modelLabel), msg);
         }
-        pushPlan(msg.id, sig, () => renderMessageHtml(msg, modelLabel));
+        pushPlan(msg.id, sig, () => renderMessageHtml(msg, modelLabel),
+          msg.role === 'user' ? 72 : 132, msg.streaming === true);
         finishSpan(i, firstPlan, msg.role === 'assistant' || msg.role === 'status');
         i += 1;
         continue;
@@ -895,7 +1244,7 @@ export function renderConversation(
       const surfaces = sessionId ? inlineSurfaces(batch, sessionId) : null;
       for (const visual of surfaces?.visuals ?? []) {
         const readOnly = (target.latestVisualRevisions.get(visual.spec.id) ?? visual.spec.revision) > visual.spec.revision;
-        pushPlan(visual.key, JSON.stringify([visual.spec, readOnly]), () => renderNativeVisual({ ...visual, readOnly }));
+        pushPlan(visual.key, JSON.stringify([visual.spec, readOnly]), () => renderNativeVisual({ ...visual, readOnly }), 280, isLiveTurn);
       }
       pushPlan(turnId, sig, () =>
         renderAgentTurn(capturedBatch, {
@@ -903,7 +1252,7 @@ export function renderConversation(
           userPinnedOpen,
           turnDurationMs,
           ...(turnIdentity ? { identity: turnIdentity } : {}),
-        }),
+        }), 132, isStreaming,
       );
       finishSpan(i, firstPlan, true);
       i = j;
@@ -931,130 +1280,21 @@ export function renderConversation(
   // __anchor：scroll-anchor 永远是最后一个单元，sig 恒定 → 跨帧复用同一节点
   pushPlan('__anchor', 'anchor', () => getScrollAnchorNode(target, containerId));
 
-  // ---- diff + apply ----
-  const nextMetas = plans.map((p) => p.meta);
-  const previousTail = target.spans.slice(reused).flatMap(({ units }) => units).concat(target.extras);
-  const ops = diffRenderUnits(previousTail, nextMetas);
+  const scroll = getConversationScrollAnchor(containerId);
+  const localAnchor = target.pendingPrepend
+    ?? (target.viewport.enabled && !scroll.isStickyBottom() ? captureConversationAnchor(container, target) : undefined);
+  target.pendingPrepend = undefined;
 
-  // 持久 wrapper：首次 / 会话切换时新建，之后跨帧复用
-  const resetDom = !chatWrapper;
-  if (!chatWrapper) {
-    chatWrapper = document.createElement('div');
-    chatWrapper.className = 'messages__inner';
-    container.replaceChildren(chatWrapper);
+  const resetDom = !target.wrapper;
+  if (!target.wrapper) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'messages__inner';
+    container.replaceChildren(wrapper);
+    target.wrapper = wrapper;
+    bindConversationViewport(container, containerId, target);
   }
-  const wrapper = chatWrapper;
-  wrapper.classList.toggle('messages__inner--long', visibleLength >= 200);
-  const added: HTMLElement[] = [];
-  const removed: HTMLElement[] = replacedWrapper ? [replacedWrapper] : [];
-
-  // The preserved prefix is already ordered and mounted. Start after its last
-  // present unit, including when the last logical span is a typing placeholder.
-  let prefixEnd: Node | undefined;
-  for (let index = reused - 1; index >= 0 && !prefixEnd; index -= 1) {
-    const prefixUnits = target.spans[index].units;
-    for (let item = prefixUnits.length - 1; item >= 0; item -= 1) {
-      const node = lastUnits.get(prefixUnits[item].key);
-      if (node?.parentNode !== wrapper) continue;
-      prefixEnd = node;
-      break;
-    }
-  }
-
-  const buildByPlan = new Map<string, () => HTMLElement | null>();
-  for (const p of plans) buildByPlan.set(p.meta.key, p.build);
-
-  // 1) 处理 remove：从 Map 删 + 节点移除（anchor 复用，不删）
-  for (const op of ops) {
-    if (op.type !== 'remove') continue;
-    const node = lastUnits.get(op.key);
-    if (node) {
-      if (op.key !== '__anchor') node.remove();
-      lastUnits.delete(op.key);
-      removed.push(node);
-    }
-  }
-
-  // 2) 处理 patch：重建该单元节点（调 build → 若 present 则替换旧节点；若 absent 则视作 remove）
-  for (const op of ops) {
-    if (op.type !== 'patch') continue;
-    const build = buildByPlan.get(op.key)!;
-    const fresh = buildUnitSafely(op.key, build);
-    const old = lastUnits.get(op.key);
-    if (isPresent(fresh)) {
-      markSettledHistory(fresh);
-      if (old && old.parentNode === wrapper) {
-        const oldSpinner = old.querySelector('.msg__fold-spinner');
-        const freshSpinner = fresh.querySelector('.msg__fold-spinner');
-        if (oldSpinner && freshSpinner) freshSpinner.replaceWith(oldSpinner);
-        wrapper.replaceChild(fresh, old);
-      }
-      if (old) removed.push(old);
-      added.push(fresh);
-      lastUnits.set(op.key, fresh);
-    } else {
-      // build 产出 null/data-empty → 该单元缺席：移除旧节点并清出 Map
-      if (old) {
-        if (op.key !== '__anchor') old.remove();
-        lastUnits.delete(op.key);
-        removed.push(old);
-      }
-    }
-  }
-
-  // 3) 处理 append：新建节点进 Map（present 才进；absent 则跳过，留个 absent 标记）
-  const absentKeys = new Set<string>();
-  for (const op of ops) {
-    if (op.type !== 'append') continue;
-    const build = buildByPlan.get(op.key)!;
-    const fresh = buildUnitSafely(op.key, build);
-    if (isPresent(fresh)) {
-      markSettledHistory(fresh);
-      lastUnits.set(op.key, fresh);
-      added.push(fresh);
-    } else {
-      absentKeys.add(op.key);
-    }
-  }
-
-  // 只移动位置确实变化的节点，保留历史消息的浏览器滚动锚点与选区。
-  // 每帧把全部节点 append 到末尾会暂时拆散整个列表，即使最终顺序相同。
-  let cursor = prefixEnd ? prefixEnd.nextSibling : wrapper.firstChild;
-  let reordered = false;
-  for (const meta of nextMetas) {
-    if (absentKeys.has(meta.key)) continue;
-    const node = lastUnits.get(meta.key);
-    if (!node) continue;
-    if (node !== cursor) {
-      reordered ||= node.parentNode === wrapper;
-      wrapper.insertBefore(node, cursor);
-    }
-    cursor = node.nextSibling;
-  }
-
-  // ---- 副作用：全部与主对话 renderChat 保持一致 ----
-  ensureFoldDelegation(container, getSessionId);
-  ensureFileChangesDelegation(container);
-  ensureHistoryRetryDelegation(container, getSessionId);
-  ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
-  syncConversationDom(container, sessionId, { added, removed, reset: resetDom, reordered });
-  if (replacedFollowup) disposePermissionCardPosition(replacedFollowup);
-  for (const root of removed) {
-    if (root === replacedWrapper || root.classList.contains('native-visual')) disposeNativeVisuals(root);
-    if (root.classList.contains('followup-card-wrap--permission')) disposePermissionCardPosition(root);
-  }
-  for (const root of resetDom ? [wrapper] : added) {
-    attachCopyButtons(root);
-    void renderMermaidBlocks(root);
-    if (resetDom || root.classList.contains('native-visual')) hydrateNativeVisuals(root);
-  }
-  const followup = lastUnits.get('__followup');
-  if (followup) {
-    syncPermissionCardPositions(followup);
-    bindFollowupCard(followup, hooks.followupHandlers ?? noopFollowupHandlers);
-  }
-
-  target.wrapper = wrapper;
+  target.viewport.replaceFrom(historyFrom, plans.slice(0, extrasStart));
+  target.extras = plans.slice(extrasStart);
   target.source = messages;
   target.visibleLength = visibleLength;
   target.displayKey = displayKey;
@@ -1065,17 +1305,95 @@ export function renderConversation(
   target.teamBusy = busy;
   target.spans.length = reused;
   for (const span of spans) target.spans.push(span);
-  target.extras = nextMetas.slice(extrasStart);
+  target.followupHandlers = hooks.followupHandlers;
+
+  container.classList.toggle('conversation-viewport--active', target.viewport.enabled);
+  target.wrapper.classList.toggle('messages__inner--long', !target.viewport.enabled && visibleLength >= 200);
+  ensureFoldDelegation(container, getSessionId);
+  ensureFileChangesDelegation(container);
+  ensureHistoryRetryDelegation(container, getSessionId);
+  ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
+  if (replacedFollowup) disposePermissionCardPosition(replacedFollowup);
+
+  let preferred = localAnchor;
+  if (target.pendingRestore && target.viewport.rows.length > 0) {
+    preferred = target.pendingRestore;
+    target.pendingRestore = undefined;
+    if (target.viewport.topOf(preferred.key) === undefined) {
+      preferred = undefined;
+      scroll.jumpToBottom();
+    }
+  }
+  applyConversationWindow(container, containerId, target, preferred, replacedWrapper, resetDom);
   hooks.afterRender?.(sessionId);
   requestAnimationFrame(() => {
-    getConversationScrollAnchor(containerId).pinToBottomIfSticky();
+    if (renderTargets.get(containerId) === target) scroll.pinToBottomIfSticky();
   });
+}
+export function preserveConversationHistoryViewport(containerId: string, sessionId: string): boolean {
+  const target = renderTargets.get(containerId);
+  const container = target?.wrapper?.parentElement;
+  if (!target || !container || target.lastSessionId !== sessionId || target.ownerKey !== interactiveOwnerKey()
+    || getConversationScrollAnchor(containerId).isStickyBottom()) return false;
+  const anchor = captureConversationAnchor(container, target);
+  if (!anchor) return false;
+  target.pendingPrepend = anchor;
+  return true;
+}
+
+export function restoreConversationViewport(containerId: string, sessionId: string): boolean {
+  const key = viewportMemoryKey(containerId, sessionId);
+  const saved = savedViewports.get(key);
+  const target = renderTargets.get(containerId);
+  const container = target?.wrapper?.parentElement;
+  if (!saved || saved.owner !== interactiveOwnerKey() || !target || !container || target.lastSessionId !== sessionId) return false;
+  if (!target.viewport.rows.length) {
+    getConversationScrollAnchor(containerId).disarm();
+    target.pendingRestore = saved.anchor;
+    return true;
+  }
+  if (target.viewport.topOf(saved.anchor.key) === undefined) {
+    savedViewports.delete(key);
+    return false;
+  }
+  applyConversationWindow(container, containerId, target, saved.anchor);
+  return true;
+}
+
+export function revealConversationMessage(containerId: string, sessionId: string, messageId: string): HTMLElement | null {
+  const target = renderTargets.get(containerId);
+  const container = target?.wrapper?.parentElement;
+  if (!target || !container || target.lastSessionId !== sessionId || target.ownerKey !== interactiveOwnerKey()) return null;
+  let key = messageId;
+  if (target.viewport.topOf(key) === undefined) {
+    const index = target.source?.findIndex((message) => message.id === messageId) ?? -1;
+    if (index < 0 || index >= target.visibleLength) return null;
+    let low = 0;
+    let high = target.spans.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (target.spans[middle].start <= index) low = middle + 1;
+      else high = middle;
+    }
+    const start = target.spans[low - 1]?.planStart;
+    const end = target.spans[low]?.planStart ?? target.viewport.rows.length;
+    if (start === undefined || end <= start) return null;
+    key = target.viewport.rows[end - 1].key;
+  }
+  const offset = Math.max(0, container.clientHeight / 3);
+  target.pendingRestore = undefined;
+  applyConversationWindow(container, containerId, target, { key, offset });
+  const node = target.lastUnits.get(key);
+  if (!node) return null;
+  return Array.from(node.querySelectorAll<HTMLElement>('[data-message-id]'))
+    .find((child) => child.dataset.messageId === messageId) ?? node;
 }
 
 /** 面板卸载：释放滚动锚定监听 + diff 缓存（主对话容器随应用存活，无需调用）。 */
 export function disposeConversationRenderer(containerId: string): void {
   const target = renderTargets.get(containerId);
   const wrapper = target?.wrapper;
+  target?.stopViewport?.();
   if (wrapper) disposeNativeVisuals(wrapper);
   if (wrapper?.parentElement) disposeConversationDom(wrapper.parentElement);
   const followup = target?.lastUnits.get('__followup');

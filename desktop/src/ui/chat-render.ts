@@ -120,6 +120,7 @@ export interface ChatMessage {
   agentName?: string | undefined;
   agentAvatar?: string | undefined;
   sourceSessionId?: string | undefined;
+  historyId?: string | undefined;
   agentId?: string | undefined;
   agentRole?: string | undefined;
   agentTone?: number | undefined;

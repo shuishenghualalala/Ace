@@ -294,6 +294,11 @@ describe('sendMessage', () => {
     const nextAttachment = { ...attachment, id: 'second-file' };
     appendAttachment(nextAttachment);
     const earlyResponse = appendMessage(sid, 'assistant', '已收到回复');
+    // An older history page arrived while the edit's send was in flight.
+    const current = messageStore.get().messages;
+    const oldest = { id: 'older', role: 'user' as const, content: '更早的问题', timestamp: 1 };
+    messageStore.set({ messages: { ...current, [sid]: [oldest, ...current[sid]] } });
+    setEditFrom(sid, 1);
     resolveSend(true);
 
     await vi.waitFor(() => expect(send.getAttribute('aria-busy')).toBe('false'));
@@ -302,7 +307,7 @@ describe('sendMessage', () => {
     expect(sessionStore.get().editFromIdx[sid]).toBeFalsy();
     expect(state.messages[sid]).toContain(earlyResponse);
     expect(state.messages[sid].filter(({ role }) => role === 'user').map(({ content }) => content))
-      .toEqual(['修改后的问题']);
+      .toEqual(['更早的问题', '修改后的问题']);
   });
 
   it('transfers attachment-only drafts to the queue while the current turn is busy', async () => {

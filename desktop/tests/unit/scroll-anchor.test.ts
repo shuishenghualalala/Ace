@@ -2,7 +2,7 @@
  * scroll-anchor 单测：stickyBottom / wheel disarm / 程序滚动 guard。
  * @vitest-environment happy-dom
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { attachScrollAnchor } from '../../src/ui/features/scroll-anchor';
 
 function makeContainer(): HTMLElement {
@@ -76,6 +76,25 @@ describe('attachScrollAnchor', () => {
     expect(anchor.isStickyBottom()).toBe(true);
     expect(el.scrollTop).toBe(el.scrollHeight);
     expect(() => anchor.dispose()).not.toThrow();
+  });
+
+  it('an immediate Home or scrollbar move after a forced jump cancels the next-frame follow', () => {
+    const el = makeContainer();
+    const queued: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => queued.push(callback));
+    const anchor = attachScrollAnchor(el);
+    try {
+      anchor.jumpToBottom();
+      expect(el.scrollTop).toBe(1200);
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event('scroll'));
+      expect(anchor.isStickyBottom()).toBe(false);
+      queued.forEach((callback) => callback(0));
+      expect(el.scrollTop).toBe(0);
+    } finally {
+      anchor.dispose();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('touchmove 手指下滑（clientY 增大）disarm，手指上滑不 disarm', () => {

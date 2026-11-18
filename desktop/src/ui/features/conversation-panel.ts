@@ -101,17 +101,23 @@ export function createMainComposerActions(
       if (!requireRendererLogin()) return false;
       const sessionId = state.activeSessionId;
       const editFrom = sessionId ? state.editFromIdx[sessionId] : null;
+      const editedMessageId = sessionId && editFrom != null
+        ? (state.messages[sessionId] ?? [])[editFrom]?.id : undefined;
       const replaced = sessionId && editFrom != null
         ? new Set((state.messages[sessionId] ?? []).slice(editFrom).map(({ id }) => id))
         : null;
       if (!await sendMessage(text, userMentions, composerCheckpoint)) return false;
       if (sessionId && replaced) {
-        replaceSessionMessages(sessionId, (state.messages[sessionId] ?? []).filter(({ id }) => !replaced.has(id)));
+        const messages = state.messages[sessionId] ?? [];
+        const currentEdit = state.editFromIdx[sessionId];
+        const isSameEdit = currentEdit != null && editedMessageId != null
+          && messages[currentEdit]?.id === editedMessageId;
+        replaceSessionMessages(sessionId, messages.filter(({ id }) => !replaced.has(id)));
         for (const id of replaced) {
           state.userFoldedTurns.delete(id);
           state.userUnfoldedTurns.delete(id);
         }
-        if (state.editFromIdx[sessionId] === editFrom) setEditFrom(sessionId, null);
+        if (isSameEdit && state.editFromIdx[sessionId] === currentEdit) setEditFrom(sessionId, null);
         renderChat();
       }
       return true;

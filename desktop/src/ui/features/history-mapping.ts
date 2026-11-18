@@ -226,7 +226,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
       ? item.role
       : item.role === 'error' ? 'error' : 'status';
   const base: ChatMessage = {
-    id: newMessageId(role),
+    id: item.history_id ? `history-${encodeURIComponent(item.history_id)}` : newMessageId(role),
     role,
     content: item.content,
     timestamp: item.timestamp != null ? item.timestamp * 1000 : Date.now(),
@@ -237,6 +237,7 @@ export function mapBackendHistoryItem(item: BackendHistoryItem, sessionId: strin
     turnDurationMs: item.turn_duration != null ? Math.round(item.turn_duration * 1000) : undefined,
     thinking: item.thinking,
     sourceSessionId: item.source_session_id,
+    historyId: item.history_id,
     agentId: item.agent_id,
     agentName: item.agent_name,
     agentRole: item.agent_role,
@@ -581,6 +582,7 @@ export function mergeTeamInternalMessage(
 }
 
 export function mergeTeamInternalMessages(messages: ChatMessage[]): ChatMessage[] {
+  if (!messages.some((message) => message.role === 'team_internal')) return messages.slice();
   return messages.reduce(
     (result, message) => message.role === 'team_internal'
       ? mergeTeamInternalMessage(result, message, { append: message.eventType === 'team_stream' })
