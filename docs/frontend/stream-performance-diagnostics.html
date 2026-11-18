@@ -28,14 +28,17 @@ main{max-width:900px;margin:0 auto;padding:48px 24px 80px}h1{font-size:28px;marg
 <li><code>llm_first_text</code>：provider 首个正文增量。</li>
 <li><code>gateway_first_push</code>：网关完成首帧 WS 推送。</li>
 <li><code>ws-renderer / proxy-event-message</code>：桌面端收到 WS 帧。</li>
-<li><code>ttft-first-visible-text</code>：前端收到首个有效正文。</li>
-<li><code>ttft-first-dom-patch</code>：前端首次将正文 patch 到 DOM。</li>
+<li><code>ttft-first-text-received</code> 记录该请求的首个非空文本增量抵达 Renderer，包括随后被回合门控或分片重组拒绝的帧。</li>
+<li><code>ttft-first-text-accepted</code> 表示首个可显示文本已通过回合校验及顺序重组，并实际更新了对应助手消息的正文。<code>foreground</code> 记录此时对话面板是否处于前台。</li>
+<li><code>ttft-first-text-mounted</code> 表示已从当前前台对话找到同一助手段落的正文元素。此时该元素已挂载、可显示且包含文本。<code>source=patch</code> 对应增量写入，<code>source=render</code> 对应会话重绘后的观察。</li>
+<li><code>ttft-first-paint-opportunity</code> 表示连续两次动画帧回调均确认同一会话和正文元素仍在可显示的文档中。这个时间点衡量浏览器的绘制机会，实际屏幕像素时间需要合成器或显示设备侧测量。</li>
 </ul>
+<p>四个阶段共用本地发送时刻计算 <code>elapsedMs</code>。按 <code>send-ws</code> 中的 <code>requestId</code> 与各阶段的 <code>request_id</code> 关联。建议在发送前开启诊断。每个会话仅跟踪本地最近发送的一轮，保留最多 80 个会话；缺少可关联请求 ID 的旧协议帧可从普通接收日志查看。账号或回合切换后会重新校验归属。后台收到正文时先记录接纳，切回并成功渲染后才能记录前台阶段。</p>
 <h2>判读</h2>
 <ul>
 <li><code>llm_first_event</code> 本身很慢：主要是模型/上游服务或请求负载问题。</li>
 <li>provider 首事件很快、<code>gateway_first_push</code> 明显变慢：检查网关发送限流或连接状态。</li>
-<li>网关已 push、前端收到很快但 DOM patch 变慢：检查渲染主线程或 Markdown 增量渲染。</li>
+<li>网关已推送、接收后迟迟未接纳时，检查回合门控与分片重组。接纳后挂载较慢时，检查前后台切换、Markdown 渲染和主线程占用。</li>
 </ul>
 </main>
 </body>

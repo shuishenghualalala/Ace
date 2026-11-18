@@ -253,6 +253,12 @@
 <p><strong>修复</strong> 在 D3 的恢复契约明确后，为每个订阅独立排队，按帧、字节、活跃会话和队列年龄设限。小文本可合并，关键状态保留序列语义。超过水位切换到重新同步。验证同时连接两个页面、慢连接不阻塞正常连接、断连后内存回落、终态可靠且未重复。</p>
 <p class="evidence">Ace <code>crew/gateway/connections.py:249</code>、<code>:438</code>、<code>:538</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:224</code>、<code>:908</code>。</p>
 </article>
+<article id="first-text-timing">
+<h3>F8 · 桌面首字诊断区分接收、接纳和呈现</h3>
+<p>旧版本在回合门控前记录“首个可见正文”，局部 patch 也会在尚未检查正文元素时记录。回退到整轮渲染时则缺少对应事件。Windows Electron 运行旧版时，正文已可见，只记录了 956 ms 的接收事件。</p>
+<p><strong>修复与实测</strong> 当前账号、会话和请求共用本地发送时刻。接收先独立记录，重组成功且正文实际写入后记录接纳，增量与整轮渲染从同一助手消息的已挂载正文确认呈现。连续两个动画帧回调校验前台和同一元素，记录绘制机会。最终 Windows Electron 接实际 Gateway 和可暂停的回环 SSE，正常窗口分别在 879、882、917、926 ms 达到这四个阶段。另一轮窗口隐藏时只记录 513、515 ms 的接收、接纳，重显后在 619、657 ms 观察到挂载和绘制机会。第二个文本片段未重复计数。10 个定向套件共 180 项通过，TypeScript 与 ESLint 检查通过。</p>
+<p class="evidence">Ace <code>desktop/src/ui/first-text-timing.ts</code>、<code>desktop/src/ui/features/chat-controller.ts</code>。ZCode <code>packages/ui/src/lib/conversationTelemetryLegacyParityE2E.ts:191</code>、<code>:275</code> 和 <code>packages/ui/src/v4/telemetry/conversationTelemetrySupervisor.ts:785</code> 按已接纳命令及会话前台归属记录。</p>
+</article>
 </section>
 
 <section id="handoff">

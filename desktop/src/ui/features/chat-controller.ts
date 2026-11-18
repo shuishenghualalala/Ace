@@ -168,6 +168,9 @@ import type { ComposerCheckpointRef } from '../../shared/renderer-checkpoint';
 import type { TabKey } from '../state';
 import { resolveChatRenderTargetId, openStudioChatPanel, isStudioView } from './studio-chrome-state';
 import { isStreamDebugEnabled, logStream } from '../stream-debug';
+import {
+  acceptFirstText, beginFirstText, discardFirstText, endFirstText, observeFirstText, receiveFirstText,
+} from '../first-text-timing';
 import { reportRendererError } from '../renderer-error-report';
 import { setDisabledWorkPreferenceIdsForTurn, takeDisabledWorkPreferenceIds, type UserAgentMention } from './composer-mention';
 import { productModeStore } from '../stores/product-mode-store';
@@ -178,9 +181,7 @@ let openSessionFn: OpenSessionFn = async () => {};
 let setTabFn: (tab: TabKey) => void = () => {};
 let queueEditDraft: { sessionId: string } | null = null;
 let teamIdentityRefreshBound = false;
-const ttftVisibleLoggedRequests = new Set<string>();
-const ttftRenderLoggedRequests = new Set<string>();
-const ttftRequestStartedAt = new Map<string, number>();
+
 
 interface DispatchOptions {
   requestId?: string;
@@ -387,7 +388,9 @@ const scheduleChatRender = createChatRenderCoalescer(
 );
 
 const streamingPatchCoalescer = createStreamingPatchCoalescer(
-  ({ sid, assistantId }) => { void patchStreamingTurn(sid, assistantId); },
+  ({ sid, assistantId }) => {
+    if (sid === state.activeSessionId && !patchStreamingTurn(sid, assistantId)) scheduleChatRender();
+  },
   (cb) => requestAnimationFrame(cb),
 );
 
@@ -539,7 +542,8 @@ function resolveStreamingTurnTarget(sid: string, assistantId: string): Streaming
 }
 
 function scheduleStreamingTurnPatch(sid: string, assistantId: string): boolean {
-  if (!resolveStreamingTurnTarget(sid, assistantId)) return false;
+  const target = resolveStreamingTurnTarget(sid, assistantId);
+  if (!target?.dom.text || !target.dom.root.contains(target.dom.text)) return false;
   streamingPatchCoalescer.schedule({ sid, assistantId });
   return true;
 }
@@ -608,26 +612,22 @@ function patchLiveMarkdown(element: HTMLElement, content: string): void {
   patchedStreamingMarkdown.set(element, content);
 }
 
+function foregroundChatContainer(sid: string): HTMLElement | null {
+  if (sid !== state.activeSessionId || document.visibilityState === 'hidden') return null;
+  const container = document.getElementById(resolveChatRenderTargetId(isStudioView()));
+  return container && (!container.checkVisibility || container.checkVisibility()) ? container : null;
+}
+
 function patchStreamingTurn(sid: string, assistantId: string): boolean {
   const target = resolveStreamingTurnTarget(sid, assistantId);
   if (!target) return false;
   const { dom, msg } = target;
-  const book = bookFor(sid);
-  const requestId = book.activeRequestId;
-  if (requestId && msg.content && !ttftRenderLoggedRequests.has(requestId)) {
-    ttftRenderLoggedRequests.add(requestId);
-    logStream('render', 'ttft-first-dom-patch', {
-      sid,
-      request_id: requestId,
-      assistantId,
-      contentLen: msg.content.length,
-      elapsedMs: msg.turnStartedAt != null ? Math.max(0, Date.now() - msg.turnStartedAt) : undefined,
-    });
-  }
   const { text: textEl, thinking: thinkingEl } = dom;
+  if (msg.content && (!textEl || !dom.root.contains(textEl))) return false;
   if (textEl) {
     textEl.classList.remove('typing-inline');
     patchLiveMarkdown(textEl, msg.content);
+    observeFirstText(sid, 'patch', () => foregroundChatContainer(sid));
   }
   if (thinkingEl && msg.thinking != null && patchedStreamingMarkdown.get(thinkingEl) !== msg.thinking) {
     const followThinkingOutput = (
@@ -715,6 +715,7 @@ export function renderChat(): void {
       },
     },
     afterRender: (renderedSessionId) => {
+      if (renderedSessionId) observeFirstText(renderedSessionId, 'render', () => foregroundChatContainer(renderedSessionId));
       renderTodoSlot();
       updateComposerControls();
       syncRunningIntroSlot();
@@ -1124,6 +1125,10 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   // feature_event 原生管线：业务事件以 (feature, event, version) 寻址，入口解析一次，
   // 供 wiki.changed 早期分支、回合 gate、kanban 刷新白名单、team.internal_message 渲染
   // 副作用四个行为点复用，避免各分支重复解 body。
+  if (chunk.kind === 'delta' && typeof chunk.body.text === 'string') {
+    const requestId = chunk.request_id || (typeof chunk.body.request_id === 'string' ? chunk.body.request_id : undefined);
+    receiveFirstText(sid, requestId, chunk.body.text.length);
+  }
   const featureEvent = featureEventFrameOf(chunk);
   // 撤回/中断后忽略该会话的迟到分片，避免重建已被删除的幽灵助手消息。
   if (applyLocalStopFrame(sid, chunk)) return;
@@ -1248,25 +1253,6 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
     return;
   }
 
-  const requestIdForPerf = chunk.request_id || bookFor(sid).activeRequestId;
-  if (
-    requestIdForPerf
-    && parsed.kind === 'delta'
-    && typeof parsed.body.text === 'string'
-    && parsed.body.text.length > 0
-    && !ttftVisibleLoggedRequests.has(requestIdForPerf)
-  ) {
-    ttftVisibleLoggedRequests.add(requestIdForPerf);
-    logStream('apply-chunk', 'ttft-first-visible-text', {
-      sid,
-      request_id: requestIdForPerf,
-      textLen: parsed.body.text.length,
-      elapsedMs: ttftRequestStartedAt.has(requestIdForPerf)
-        ? Math.max(0, Date.now() - (ttftRequestStartedAt.get(requestIdForPerf) as number))
-        : undefined,
-    });
-  }
-
   const book = bookFor(sid);
   const reqId = chunkRequestId(parsed, chunk.request_id);
   const gate = resolveTurnGate(parsed, reqId, {
@@ -1380,6 +1366,10 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   const hasMessageChanges = nextMessages !== beforeMessages;
   if (hasMessageChanges) {
     replaceSessionMessages(sid, nextMessages);
+    const assistantId = result.replaceBook?.assistantId;
+    if (parsed.kind === 'delta' && assistantId) {
+      acceptFirstText(sid, reqId, assistantId, beforeMessages, nextMessages, () => !!foregroundChatContainer(sid));
+    }
     if (parsed.kind === 'delta' || parsed.kind === 'thinking') {
       pendingMessageSignals.add(sid);
       flushMessageSignals();
@@ -1501,11 +1491,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   if (result.finalize) {
     retireTerminalFollowup(sid, sourceSid, reqId);
     logStream('apply-chunk', 'finalize-turn', { sid, kind: parsed.kind });
-    if (reqId) {
-      ttftVisibleLoggedRequests.delete(reqId);
-      ttftRenderLoggedRequests.delete(reqId);
-      ttftRequestStartedAt.delete(reqId);
-    }
+    endFirstText(sid, reqId);
     streamingPatchCoalescer.clear();
     if (result.turn) {
       recordUsageTurn(
@@ -1967,7 +1953,7 @@ async function dispatchQuery(
   syncTurnDurationTicker();
   jumpChatToBottom();
   const clientTs = Date.now();
-  ttftRequestStartedAt.set(requestId, clientTs);
+  beginFirstText(sessionId, requestId);
   logStream('dispatch', 'send-ws', {
     sessionId,
     requestId,
@@ -2000,7 +1986,7 @@ async function dispatchQuery(
   }
   if (!ok) {
     logStream('dispatch', 'send-ws-failed', { sessionId, requestId });
-    ttftRequestStartedAt.delete(requestId);
+    discardFirstText(sessionId, requestId);
     const book = bookFor(sessionId);
     if (book.activeRequestId === requestId && book.firstChunkAt == null) {
       if (optimisticUserMessage) {
