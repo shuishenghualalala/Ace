@@ -11,12 +11,14 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from crew.core.envelope import ResponseChunk, TurnOutcome
+from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
+from crew.core.runctx import current_turn_execution_incarnation, current_turn_session_incarnation
+from crew.core.types import Message
 from crew.gateway.connections import ConnectionManager
 from crew.gateway.dispatcher import SessionDispatcher
-from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey
+from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey, current_send_execution
 from crew.gateway.ws import create_ws_router
-from crew.state.session_store import SQLiteSessionStore
+from crew.state.session_store import SQLiteSessionStore, SessionWriteConflict
 from crew.tasks.runtime import TaskRuntime
 
 
@@ -24,6 +26,112 @@ def _new_inbox(store):
     return DesktopSendInbox(
         store.transaction, store.read_query, store.ensure_session_in_transaction, store.desktop_send_store_id,
     )
+
+
+@pytest.mark.parametrize("boundary", ["provisional", "convergence_retry", "outcome"])
+async def test_replaced_foreground_history_settles_only_original_receipt(tmp_path, monkeypatch, boundary):
+    store = SQLiteSessionStore(tmp_path / "sessions.db")
+    runtime = TaskRuntime(str(tmp_path / "tasks.db"))
+    inbox = _new_inbox(store)
+    owner, sid, rid = "local", "session", "request"
+    key = SendKey(owner, sid, rid)
+    await inbox.accept(key, _payload(rid, sid))
+    original = store.get_history_incarnation(sid, owner)
+    save = store.save
+    record = store.record_turn_outcome
+    parent_saves = 0
+    seen_binding = []
+
+    def new_session():
+        store.clear(sid, owner_account_id=owner)
+        store.ensure_session(sid, owner_account_id=owner)
+        save(sid, [Message.user("New conversation")], owner_account_id=owner)
+        store.set_status(sid, "running", owner_account_id=owner)
+
+    def save_at_boundary(session_id, *args, **kwargs):
+        nonlocal parent_saves
+        if session_id == sid:
+            parent_saves += 1
+            if boundary == "convergence_retry" and parent_saves == 2:
+                raise SessionWriteConflict("Concurrent answer write")
+            if (boundary, parent_saves) in {("provisional", 1), ("convergence_retry", 3)}:
+                new_session()
+        return save(session_id, *args, **kwargs)
+
+    def record_at_boundary(*args, **kwargs):
+        if boundary == "outcome":
+            new_session()
+        return record(*args, **kwargs)
+
+    async def inner(envelope):
+        seen_binding.append(current_turn_session_incarnation.get())
+        assert current_turn_execution_incarnation.get() == (
+            owner, envelope.session_id, store.get_history_incarnation(envelope.session_id, owner),
+        )
+        save(envelope.session_id, [Message.user("Old conversation"), Message.assistant("Old reply")],
+             owner_account_id=owner)
+        yield ResponseChunk.final(rid, "Old reply")
+
+    monkeypatch.setattr(store, "save", save_at_boundary)
+    monkeypatch.setattr(store, "record_turn_outcome", record_at_boundary)
+    dispatcher = SessionDispatcher(inner, store, task_runtime=runtime)
+    parent_binding = ("another-owner", "another-session", "another-incarnation")
+    binding_token = current_turn_session_incarnation.set(parent_binding)
+    execution_token = current_turn_execution_incarnation.set(parent_binding)
+    send_token = current_send_execution.set(SendExecution(inbox, key))
+    try:
+        envelope = Envelope.of("Old conversation", session_id=sid, user_id=owner, request_id=rid)
+        frames = [frame async for frame in dispatcher.run(envelope)]
+        assert current_turn_session_incarnation.get() == parent_binding
+        assert current_turn_execution_incarnation.get() == parent_binding
+        assert seen_binding == ([] if boundary == "provisional" else [(owner, sid, original)])
+        assert store.get_history_incarnation(sid, owner) != original
+        assert [m.content for m in store.load(sid, owner_account_id=owner)] == ["New conversation"]
+        assert store.get_status_details(sid, owner_account_id=owner) == ("running", "", None)
+        assert not store.session_belongs_to(f"{sid}::turn::{rid}", owner)
+        terminal, = [frame for frame in frames if frame.is_final]
+        assert terminal.body["outcome"]["code"] == "session_replaced"
+        receipt = await inbox.query(key)
+        assert (receipt.status, receipt.code) == ("cancelled", "session_replaced")
+        assert receipt.outcome and receipt.outcome.status == "stopped"
+        assert dispatcher.live_status(sid, owner) == "idle"
+    finally:
+        current_send_execution.reset(send_token)
+        current_turn_execution_incarnation.reset(execution_token)
+        current_turn_session_incarnation.reset(binding_token)
+        await dispatcher.shutdown()
+        runtime.close()
+        store.close()
+
+
+async def test_sidechain_cleanup_keeps_replacement_transcript(tmp_path, monkeypatch):
+    store = SQLiteSessionStore(tmp_path / "sessions.db")
+    runtime = TaskRuntime(str(tmp_path / "tasks.db"))
+    sid, rid, owner = "session", "request", "local"
+    child = f"{sid}::turn::{rid}"
+    clear = store.clear
+
+    def replace_before_clear(session_id, **kwargs):
+        if session_id == child:
+            clear(child, owner_account_id=owner)
+            store.save(child, [Message.user("Separate transcript")], owner_account_id=owner)
+        return clear(session_id, **kwargs)
+
+    async def inner(envelope):
+        store.save(envelope.session_id, [Message.assistant("Old reply")], owner_account_id=owner)
+        yield ResponseChunk.final(rid, "Old reply")
+
+    monkeypatch.setattr(store, "clear", replace_before_clear)
+    dispatcher = SessionDispatcher(inner, store, task_runtime=runtime)
+    try:
+        envelope = Envelope.of("Hello", session_id=sid, request_id=rid, user_id=owner)
+        frames = [frame async for frame in dispatcher.run(envelope)]
+        assert frames[-1].body["outcome"]["status"] == "completed"
+        assert [message.content for message in store.load(child, owner)] == ["Separate transcript"]
+    finally:
+        await dispatcher.shutdown()
+        runtime.close()
+        store.close()
 
 
 def _payload(rid, sid="chat"):

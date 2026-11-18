@@ -29,7 +29,12 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
 from crew.core.errors import CrewError, ProviderError, ToolError, category_for_kind
-from crew.core.runctx import current_owner_account_id, normalize_owner_account_id
+from crew.core.runctx import (
+    current_owner_account_id,
+    current_turn_execution_incarnation,
+    current_turn_session_incarnation,
+    normalize_owner_account_id,
+)
 from crew.core.interfaces import MessageHandler, SessionStore
 from crew.core.types import Message
 from crew.features.hooks import hook_registry
@@ -37,12 +42,23 @@ from crew.features.outbound import enrich_error_chunk
 from crew.features.response_filters import redact_secrets
 from crew.gateway.send_inbox import SendExecution, current_send_execution
 from crew.state.logging import get_logger
+from crew.state.session_store import SessionIncarnationChanged, SessionWriteConflict
 
 log = get_logger("gateway.dispatcher")
 SessionKey = tuple[str, str]
 _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS = 1.0
 _SHUTDOWN_REASON = "已停止：Gateway 正在关闭"
+_REPLACED_OUTCOME = TurnOutcome(
+    "stopped", reason="session_replaced", code="session_replaced", message="原会话已删除。",
+)
 _INCOMPLETE_OUTCOMES = frozenset({"partial", "failed", "stopped"})
+
+
+def _history_fence(owner: str, session_id: str) -> dict[str, str]:
+    binding = current_turn_session_incarnation.get()
+    if binding is not None and binding[:2] == (owner, session_id):
+        return {"expected_incarnation": binding[2]}
+    return {}
 
 
 def _terminal_outcome(chunk: ResponseChunk) -> TurnOutcome:
@@ -596,11 +612,15 @@ class SessionDispatcher:
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         """Run one turn under the causally verified Owner logging context."""
         token = current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
+        history_token = current_turn_session_incarnation.set(None)
+        execution_token = current_turn_execution_incarnation.set(None)
         try:
             async with aclosing(self._run_owned(envelope)) as stream:
                 async for chunk in stream:
                     yield chunk
         finally:
+            current_turn_execution_incarnation.reset(execution_token)
+            current_turn_session_incarnation.reset(history_token)
             current_owner_account_id.reset(token)
 
     async def _run_owned(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
@@ -619,6 +639,11 @@ class SessionDispatcher:
             return
         owner_epoch = self._owner_epochs.get(owner, 0)
         key = self._key(sid, owner)
+        read_incarnation = getattr(self._store, "get_history_incarnation", None)
+        if callable(read_incarnation):
+            incarnation = await asyncio.to_thread(read_incarnation, sid, owner_account_id=owner)
+            if incarnation is not None:
+                current_turn_session_incarnation.set((owner, sid, incarnation))
         lock = self._lock_for(key)
         current_task = asyncio.current_task()
 
@@ -758,6 +783,12 @@ class SessionDispatcher:
                         if send is not None and current_task is not None:
                             self._settling_tasks.add(current_task)
                         allowed = await _claim_send()
+                        ensure = getattr(self._store, "ensure_session_incarnation", None)
+                        if allowed and callable(ensure) and current_turn_session_incarnation.get() is None:
+                            incarnation = await asyncio.to_thread(
+                                ensure, sid, envelope.workspace_id, owner_account_id=owner,
+                            )
+                            current_turn_session_incarnation.set((owner, sid, incarnation))
                     except (asyncio.CancelledError, Exception):
                         # 等槽期间被取消：回滚已受理标记，行为与「进入 running 前取消」一致。
                         self._release_global_slot(key, global_slot)
@@ -884,32 +915,6 @@ class SessionDispatcher:
                         except Exception:
                             log.exception("注册 agent_turn 任务失败 session=%s", sid)
 
-                    # 标记会话进入 running，同时刷新 updated_at 防止被后台过期清理误删
-                    try:
-                        await self._store_set_status(sid, "running", owner=owner, error="")
-                    except Exception:
-                        log.exception("写入 running 状态失败 session=%s", sid)
-
-                    steer_text = self._steer_texts.pop(key, "")
-                    if steer_text:
-                        envelope.params["steer_text"] = steer_text
-
-                    # session:start：每个会话生命周期内只发一次（新会话首次运行）。
-                    if key not in self._sessions_started:
-                        self._sessions_started.add(key)
-                        await hook_registry.emit("session:start", {
-                            "session_id": sid,
-                            "channel": envelope.channel,
-                        })
-
-                    # 触发 agent:start hook
-                    await hook_registry.emit("agent:start", {
-                        "session_id": sid,
-                        "message": envelope.query[:500],
-                        "channel": envelope.channel,
-                        "owner_account_id": owner,
-                    })
-
                     failed = False
                     err = ""
                     final_text = ""
@@ -930,62 +935,98 @@ class SessionDispatcher:
                     if current_task is not None:
                         self._exec_session_for_task[current_task] = exec_session_id
                     sidechain_output_ref = ""
-                    if runtime_task_id and self._task_runtime is not None:
-                        sidechain_output_ref = str(
-                            (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("output_ref") or ""
-                        )
-                    # Run every turn in an isolated transcript. This makes a
-                    # mid-turn background transition safe: new foreground
-                    # messages never share the same Agent/history object.
-                    exec_envelope = envelope
                     sidechain_base_len = 0
-                    if sidechain_id:
-                        # 回合起点的 load + 两次 save 与会话历史成正比（blob 双写 + 事件
-                        # 批次 + busy-retry sleep），异步门面离开事件循环。
-                        base_history = await self._store_load(sid, owner)
-                        sidechain_base_len = len(base_history)
-                        await self._store_save(
-                            sidechain_id,
-                            list(base_history),
-                            workspace_id=self._store.get_workspace_id(sid, owner_account_id=owner) or envelope.workspace_id,
-                            owner=owner,
-                            title_fallback=self._convergence_title_fallback(),
-                        )
-                        parent_history = list(base_history)
-                        user_message = Message.user(
-                            envelope.query,
-                            is_meta=bool(envelope.params.get("internal_task_resume")),
-                        )
-                        user_message.request_id = rid
-                        parent_history.append(user_message)
-                        await self._store_save(
-                            sid,
-                            parent_history,
-                            workspace_id=(
-                                self._store.get_workspace_id(sid, owner_account_id=owner)
-                                or envelope.workspace_id
-                            ),
-                            owner=owner,
-                            title_fallback=self._convergence_title_fallback(),
-                        )
-                        exec_envelope = Envelope(
-                            session_id=sidechain_id,
-                            params={
-                                **envelope.params,
-                                "task_session_id": sid,
-                                "sidechain_task_id": runtime_task_id,
-                            },
-                            request_id=envelope.request_id,
-                            channel=envelope.channel,
-                            user_id=envelope.user_id,
-                            user_type=envelope.user_type,
-                            workspace_id=envelope.workspace_id,
-                            mode=envelope.mode,
-                            is_stream=envelope.is_stream,
-                            attachments=list(envelope.attachments),
-                        )
+                    sidechain_owned = False
+                    sidechain_incarnation = None
+                    sidechain_prepared = False
+                    session_replaced = False
+                    exec_envelope = envelope
                     stream = None
                     try:
+                        # 标记会话进入 running，同时刷新 updated_at 防止被后台过期清理误删
+                        try:
+                            await self._store_set_status(sid, "running", owner=owner, error="")
+                        except SessionIncarnationChanged:
+                            raise
+                        except Exception:
+                            log.exception("写入 running 状态失败 session=%s", sid)
+
+                        steer_text = self._steer_texts.pop(key, "")
+                        if steer_text:
+                            envelope.params["steer_text"] = steer_text
+
+                        # session:start：每个会话生命周期内只发一次（新会话首次运行）。
+                        if key not in self._sessions_started:
+                            self._sessions_started.add(key)
+                            await hook_registry.emit("session:start", {
+                                "session_id": sid,
+                                "channel": envelope.channel,
+                            })
+
+                        # 触发 agent:start hook
+                        await hook_registry.emit("agent:start", {
+                            "session_id": sid,
+                            "message": envelope.query[:500],
+                            "channel": envelope.channel,
+                            "owner_account_id": owner,
+                        })
+
+                        if runtime_task_id and self._task_runtime is not None:
+                            sidechain_output_ref = str(
+                                (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("output_ref") or ""
+                            )
+                        if sidechain_id:
+                            # 回合起点的 load + 两次 save 与会话历史成正比（blob 双写 + 事件
+                            # 批次 + busy-retry sleep），异步门面离开事件循环。
+                            base_history = await self._store_load(sid, owner)
+                            sidechain_base_len = len(base_history)
+                            workspace_id = self._store.get_workspace_id(sid, owner_account_id=owner) or envelope.workspace_id
+                            if callable(ensure):
+                                sidechain_incarnation = await asyncio.to_thread(
+                                    ensure, sidechain_id, workspace_id, owner_account_id=owner,
+                                )
+                                sidechain_owned = True
+                                current_turn_execution_incarnation.set((owner, sidechain_id, sidechain_incarnation))
+                            await self._store_save(
+                                sidechain_id, list(base_history), workspace_id=workspace_id, owner=owner,
+                                title_fallback=self._convergence_title_fallback(),
+                                expected_incarnation=sidechain_incarnation,
+                            )
+                            sidechain_owned = True
+                            parent_history = list(base_history)
+                            user_message = Message.user(
+                                envelope.query,
+                                is_meta=bool(envelope.params.get("internal_task_resume")),
+                            )
+                            user_message.request_id = rid
+                            parent_history.append(user_message)
+                            await self._store_save(
+                                sid,
+                                parent_history,
+                                workspace_id=(
+                                    self._store.get_workspace_id(sid, owner_account_id=owner)
+                                    or envelope.workspace_id
+                                ),
+                                owner=owner,
+                                title_fallback=self._convergence_title_fallback(),
+                            )
+                            sidechain_prepared = True
+                            exec_envelope = Envelope(
+                                session_id=sidechain_id,
+                                params={
+                                    **envelope.params,
+                                    "task_session_id": sid,
+                                    "sidechain_task_id": runtime_task_id,
+                                },
+                                request_id=envelope.request_id,
+                                channel=envelope.channel,
+                                user_id=envelope.user_id,
+                                user_type=envelope.user_type,
+                                workspace_id=envelope.workspace_id,
+                                mode=envelope.mode,
+                                is_stream=envelope.is_stream,
+                                attachments=list(envelope.attachments),
+                            )
                         if self._closed:
                             raise asyncio.CancelledError
                         if current_task is not None:
@@ -1019,6 +1060,8 @@ class SessionDispatcher:
                             is_terminal = chunk.is_final or chunk.kind in {"final", "error"}
                             if is_terminal:
                                 outcome = _terminal_outcome(chunk)
+                                if outcome.code == "session_replaced":
+                                    session_replaced = True
                                 if isinstance(chunk.body.get("text"), str):
                                     final_text = chunk.body["text"]
                                 failed = outcome.status in _INCOMPLETE_OUTCOMES
@@ -1043,6 +1086,8 @@ class SessionDispatcher:
                         err = self._stop_reasons.get(key, "已停止当前回复")
                         deferred_terminal = None
                         raise
+                    except SessionIncarnationChanged:
+                        session_replaced = True
                     except ProviderError as exc:
                         failed, err = True, str(exc)
                         log.exception("Provider 异常 session=%s", sid)
@@ -1086,24 +1131,17 @@ class SessionDispatcher:
                         if callable(close):
                             try:
                                 await close()
+                            except SessionIncarnationChanged:
+                                session_replaced = True
                             except Exception:
                                 log.exception("收尾时关闭回合流失败 session=%s", sid)
                         activity_live = False
                         history_settled = True
-                        if sidechain_id:
+                        if sidechain_prepared and not session_replaced:
                             try:
-                                sidechain_history = await self._store_load(sidechain_id, owner)
-                                if sidechain_output_ref:
-                                    path = Path(sidechain_output_ref)
-                                    path.parent.mkdir(parents=True, exist_ok=True)
-                                    path.write_text(
-                                        json.dumps(
-                                            [message.to_openai() for message in sidechain_history],
-                                            ensure_ascii=False,
-                                            indent=2,
-                                        ),
-                                        encoding="utf-8",
-                                    )
+                                sidechain_history = await self._store_load(
+                                    sidechain_id, owner, expected_incarnation=sidechain_incarnation,
+                                )
                                 if runtime_task_id and self._task_runtime is not None:
                                     backgrounded = bool(
                                         (await self._task_runtime.get_async(runtime_task_id, owner_account_id=owner)).get("backgrounded")
@@ -1125,9 +1163,19 @@ class SessionDispatcher:
                                     # via task_session_id. Sidechain sessions are intentionally
                                     # excluded from list_sessions, so copying their title here is
                                     # both ineffective and risks racing a manual parent rename.
-                                await asyncio.to_thread(
-                                    self._store.clear, sidechain_id, owner_account_id=owner
-                                )
+                                if sidechain_output_ref:
+                                    path = Path(sidechain_output_ref)
+                                    path.parent.mkdir(parents=True, exist_ok=True)
+                                    path.write_text(
+                                        json.dumps(
+                                            [message.to_openai() for message in sidechain_history],
+                                            ensure_ascii=False,
+                                            indent=2,
+                                        ),
+                                        encoding="utf-8",
+                                    )
+                            except SessionIncarnationChanged:
+                                session_replaced = True
                             except Exception:
                                 history_settled = False
                                 log.exception(
@@ -1135,6 +1183,21 @@ class SessionDispatcher:
                                     sid,
                                     sidechain_id,
                                 )
+                        if sidechain_owned and (history_settled or session_replaced):
+                            try:
+                                await asyncio.to_thread(
+                                    self._store.clear, sidechain_id, owner_account_id=owner,
+                                    **({"expected_incarnation": sidechain_incarnation} if sidechain_incarnation else {}),
+                                )
+                            except SessionIncarnationChanged:
+                                pass  # The private transcript has already been removed or replaced.
+                            except Exception:
+                                history_settled = False
+                                log.exception("未能清理回合会话 %s", sidechain_id)
+                        if session_replaced:
+                            deferred_terminal = ResponseChunk.error(
+                                rid, _REPLACED_OUTCOME.message, code="session_replaced", outcome=_REPLACED_OUTCOME,
+                            )
                         if deferred_terminal is not None:
                             outcome = _terminal_outcome(deferred_terminal)
                         elif not stream_abandoned:
@@ -1236,23 +1299,30 @@ class SessionDispatcher:
                                 }.get(outcome.status, outcome.status)
                                 default_code = {"failed": "turn_failed", "stopped": "turn_stopped"}.get(outcome.status, "")
                                 receipt_code = outcome.code or default_code
-                                if not backgrounded and history_settled:
+                                if not backgrounded and history_settled and not session_replaced:
                                     try:
                                         await self._store_turn_outcome(
                                             sid, rid, outcome, owner=owner, error=err,
                                             send=send, receipt_status=receipt_status, receipt_code=receipt_code,
                                         )
                                         outcome_persisted = True
+                                    except SessionIncarnationChanged:
+                                        session_replaced = True
                                     except Exception:
                                         history_settled = False
                                         failed = True
                                         log.exception("写入持久回合结局失败 session=%s request=%s", sid, rid)
-                                if not history_settled:
+                                if session_replaced:
+                                    outcome = _REPLACED_OUTCOME
+                                    failed, err = True, outcome.message
+                                    deferred_terminal = ResponseChunk.error(rid, err, code="session_replaced", outcome=outcome)
+                                    receipt_status, receipt_code = "cancelled", "session_replaced"
+                                elif not history_settled:
                                     err = "回合记录未能确认保存。"
                                     outcome = TurnOutcome("failed", reason="history_commit_unverified", message=err)
                                 if send is not None and not send.finished:
                                     try:
-                                        if history_settled:
+                                        if history_settled or session_replaced:
                                             await send.finish(receipt_status, receipt_code, outcome=outcome)
                                         else:
                                             await send.finish("uncertain", "history_commit_unverified")
@@ -1263,7 +1333,7 @@ class SessionDispatcher:
                                     body={**deferred_terminal.body, "outcome": outcome.to_body()},
                                 )
                             notify_completion = getattr(self._task_runtime, "notify_completion", None)
-                            if deferred_task_completion is not None and callable(notify_completion):
+                            if deferred_task_completion is not None and not session_replaced and callable(notify_completion):
                                 if not history_settled and outcome is not None:
                                     deferred_task_completion = {
                                         **deferred_task_completion,
@@ -1317,25 +1387,30 @@ class SessionDispatcher:
                                     or err.startswith("被新消息中断")
                                     else ("failed" if failed else "completed")
                                 )
-                                if not outcome_persisted and not backgrounded:
+                                if not outcome_persisted and not backgrounded and not session_replaced:
                                     await self._store_set_status(sid, status, owner=owner, error=err)
+                            except SessionIncarnationChanged:
+                                session_replaced = True
+                                if send is not None and not send.finished:
+                                    await send.finish("cancelled", "session_replaced", outcome=_REPLACED_OUTCOME)
                             except Exception:  # noqa: BLE001 — 抽象 SessionStore 写状态失败面未声明，finally 中不得掩盖主流程结果
                                 log.exception("写入会话状态失败 session=%s", sid)
-                            # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
-                            # 监听者收到通知后拉到的才是终态。
-                            await hook_registry.emit("agent:end", {
-                                "session_id": sid,
-                                "message": envelope.query[:500],
-                                "response": final_text[:500],
-                                "channel": envelope.channel,
-                                "failed": failed,
-                                "error": err,
-                                "request_id": rid,
-                                "outcome": outcome.to_body() if outcome is not None else None,
-                                "owner_account_id": owner,
-                                "queue_depth": queue_depth,
-                                "running_depth": remaining,
-                            })
+                            if not session_replaced:
+                                # 触发 agent:end hook：必须在 running 计数与落库状态清理之后，
+                                # 监听者收到通知后拉到的才是终态。
+                                await hook_registry.emit("agent:end", {
+                                    "session_id": sid,
+                                    "message": envelope.query[:500],
+                                    "response": final_text[:500],
+                                    "channel": envelope.channel,
+                                    "failed": failed,
+                                    "error": err,
+                                    "request_id": rid,
+                                    "outcome": outcome.to_body() if outcome is not None else None,
+                                    "owner_account_id": owner,
+                                    "queue_depth": queue_depth,
+                                    "running_depth": remaining,
+                                })
             except asyncio.CancelledError:
                 if self._closed:
                     deferred_terminal = self._shutdown_error(rid)
@@ -1344,6 +1419,8 @@ class SessionDispatcher:
                     log.info("排队中的会话请求已停止 session=%s", sid)
                     try:
                         await self._store_set_status(sid, "stopped", owner=owner, error=err)
+                    except SessionIncarnationChanged:
+                        err = _REPLACED_OUTCOME.message
                     except Exception:  # noqa: BLE001 — 会话状态写入失败不应覆盖停止错误。
                         log.exception("写入会话状态失败 session=%s", sid)
                     deferred_terminal = ResponseChunk.error(rid, err)
@@ -1428,8 +1505,17 @@ class SessionDispatcher:
             if callable(close):
                 await close()
 
-    async def _store_load(self, session_id: str, owner: str) -> list[Message]:
-        return await asyncio.to_thread(self._store.load, session_id, owner_account_id=owner)
+    async def _store_load(
+        self, session_id: str, owner: str, *, expected_incarnation: str | None = None,
+    ) -> list[Message]:
+        def load() -> list[Message]:
+            messages = self._store.load(session_id, owner_account_id=owner)
+            if expected_incarnation is not None:
+                if self._store.get_history_incarnation(session_id, owner) != expected_incarnation:
+                    raise SessionIncarnationChanged(f"回合会话已删除或重建：{session_id}")
+            return messages
+
+        return await asyncio.to_thread(load)
 
     async def _store_save(
         self,
@@ -1440,7 +1526,12 @@ class SessionDispatcher:
         owner: str,
         title_fallback: str | None = None,
         expected_cursor: tuple[int, int] | None = None,
+        expected_incarnation: str | None = None,
     ) -> None:
+        fence = (
+            {"expected_incarnation": expected_incarnation} if expected_incarnation
+            else _history_fence(owner, session_id)
+        )
         await asyncio.to_thread(
             self._store.save,
             session_id,
@@ -1449,6 +1540,7 @@ class SessionDispatcher:
             owner_account_id=owner,
             title_fallback=title_fallback,
             **({"expected_cursor": expected_cursor} if expected_cursor is not None else {}),
+            **fence,
         )
 
     async def _store_converged_history(
@@ -1461,10 +1553,10 @@ class SessionDispatcher:
                 session_id, messages, workspace_id=workspace_id, owner=owner, title_fallback=title_fallback,
             )
             return
-        from crew.state.session_store import SessionWriteConflict
-
         for attempt in range(3):
-            answers, cursor = await asyncio.to_thread(snapshot, session_id, request_id, owner_account_id=owner)
+            answers, cursor = await asyncio.to_thread(
+                snapshot, session_id, request_id, owner_account_id=owner, **_history_fence(owner, session_id),
+            )
             recorded = {message.followup_history_id for message in messages}
             complete = [*messages, *(answer for answer in answers if answer.followup_history_id not in recorded)]
             try:
@@ -1473,6 +1565,8 @@ class SessionDispatcher:
                     title_fallback=title_fallback, expected_cursor=cursor,
                 )
                 return
+            except SessionIncarnationChanged:
+                raise
             except SessionWriteConflict:
                 if attempt == 2:
                     raise
@@ -1481,7 +1575,8 @@ class SessionDispatcher:
         self, session_id: str, status: str, *, owner: str, error: str = ""
     ) -> None:
         await asyncio.to_thread(
-            self._store.set_status, session_id, status, owner_account_id=owner, error=error
+            self._store.set_status, session_id, status, owner_account_id=owner, error=error,
+            **_history_fence(owner, session_id),
         )
 
     async def _store_turn_outcome(
@@ -1497,6 +1592,7 @@ class SessionDispatcher:
             await asyncio.to_thread(
                 save, session_id, request_id, outcome.to_body(),
                 owner_account_id=owner, last_status=outcome.status, error=error,
+                **_history_fence(owner, session_id),
                 **({"settle_receipt": settle_receipt} if send is not None else {}),
             )
             if send is not None:

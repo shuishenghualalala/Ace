@@ -10,6 +10,14 @@ from contextvars import ContextVar
 from typing import Any, Callable, Coroutine
 
 current_session_id: ContextVar[str] = ContextVar("current_session_id", default="")
+# 上层运行时设置的持久身份（owner、主会话 ID、SQLite 代次）。
+current_turn_session_incarnation: ContextVar[tuple[str, str, str] | None] = ContextVar(
+    "current_turn_session_incarnation", default=None,
+)
+# Dispatcher 创建的私有执行会话有自己的持久代次。
+current_turn_execution_incarnation: ContextVar[tuple[str, str, str] | None] = ContextVar(
+    "current_turn_execution_incarnation", default=None,
+)
 # 用户当前可见的会话 id。sidechain/Team Leader 的工具仍按 current_session_id
 # 隔离执行历史，但权限确认等 side-channel 交互必须投递到这个可见会话。
 current_display_session_id: ContextVar[str] = ContextVar(

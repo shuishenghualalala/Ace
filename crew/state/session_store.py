@@ -54,6 +54,10 @@ class SessionWriteConflict(RuntimeError):
     """另一进程持有该会话的有效 writer 租约，本进程写入被拒绝。"""
 
 
+class SessionIncarnationChanged(SessionWriteConflict):
+    """原会话已删除或重建，持有旧实例标识的写入不能重试到新会话。"""
+
+
 def _lease_holder_pid_alive(holder: str) -> bool:
     """探测租约持有者进程是否存活。可在 SQLite 写事务内调用，必须快、无子进程。
 
@@ -217,6 +221,10 @@ class _SessionWriteQueue:
                 continue
             try:
                 result = await self._writer.execute_async(fn)
+            except SessionIncarnationChanged as exc:
+                if not fut.done():
+                    fut.set_exception(exc)
+                continue
             except Exception:  # noqa: BLE001
                 try:
                     result = await self._writer.execute_async(fn)
@@ -874,9 +882,12 @@ class SQLiteSessionStore(SessionStore):
             self._projections.move_to_end(key)
         return proj
 
-    def _read_event_cursor(self, owner: str, session_id: str) -> tuple[int, int] | None:
+    def _read_event_cursor(
+        self, owner: str, session_id: str, expected_incarnation: str | None = None,
+    ) -> tuple[int, int] | None:
         """读 (leaf_seq, events_generation) 快照；会话行不存在返回 None。"""
         with self._lock:
+            self._check_history_incarnation(self._conn, session_id, owner, expected_incarnation)
             row = self._conn.execute(
                 "SELECT leaf_seq, events_generation FROM sessions "
                 "WHERE owner_account_id = ? AND session_id = ?",
@@ -1528,6 +1539,7 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens: int | None,
         last_prompt_tokens_source: str | None,
         expected_cursor: tuple[int, int] | None = None,
+        expected_incarnation: str | None = None,
         branch_from: tuple[int, int] | None = None,
     ) -> Callable[[Any], tuple[int, int, int]]:
         now = time.time()
@@ -1568,6 +1580,7 @@ class SQLiteSessionStore(SessionStore):
             )
 
         def _write(conn) -> tuple[int, int, int]:
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             base_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0), "
@@ -1704,6 +1717,7 @@ class SQLiteSessionStore(SessionStore):
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
         expected_cursor: tuple[int, int] | None = None,
+        expected_incarnation: str | None = None,
     ) -> None:
         new_leaf, _, new_generation = self._writer.execute(
             self._save_write(
@@ -1715,6 +1729,7 @@ class SQLiteSessionStore(SessionStore):
                 last_prompt_tokens=last_prompt_tokens,
                 last_prompt_tokens_source=last_prompt_tokens_source,
                 expected_cursor=expected_cursor,
+                expected_incarnation=expected_incarnation,
             )
         )
         self._apply_saved_projection(owner_account_id, session_id, messages, new_leaf, new_generation)
@@ -1729,11 +1744,13 @@ class SQLiteSessionStore(SessionStore):
         title_fallback: str | None = None,
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
+        expected_incarnation: str | None = None,
     ) -> None:
         await self._save_history_async(
             session_id, messages, workspace_id, owner_account_id=owner_account_id,
             title_fallback=title_fallback, last_prompt_tokens=last_prompt_tokens,
-            last_prompt_tokens_source=last_prompt_tokens_source, after_write=lambda _: None,
+            last_prompt_tokens_source=last_prompt_tokens_source, expected_incarnation=expected_incarnation,
+            after_write=lambda _: None,
         )
 
     async def save_with_incarnation_async(
@@ -1746,18 +1763,17 @@ class SQLiteSessionStore(SessionStore):
         title_fallback: str | None = None,
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
+        expected_incarnation: str | None = None,
     ) -> str:
         """保存消息并返回本次写入的会话实例。删除并重建同名会话会更换实例。"""
         def capture(conn: sqlite3.Connection) -> str:
-            incarnation = self._read_history_incarnation(conn, session_id, owner_account_id)
-            if incarnation is None:
-                raise SessionEventLogError(f"写入后缺少会话实例：{session_id}")
-            return incarnation
+            return self._require_history_incarnation(conn, session_id, owner_account_id)
 
         return await self._save_history_async(
             session_id, messages, workspace_id, owner_account_id=owner_account_id,
             title_fallback=title_fallback, last_prompt_tokens=last_prompt_tokens,
-            last_prompt_tokens_source=last_prompt_tokens_source, after_write=capture,
+            last_prompt_tokens_source=last_prompt_tokens_source, expected_incarnation=expected_incarnation,
+            after_write=capture,
         )
 
     async def _save_history_async(
@@ -1770,6 +1786,7 @@ class SQLiteSessionStore(SessionStore):
         title_fallback: str | None,
         last_prompt_tokens: int | None,
         last_prompt_tokens_source: str | None,
+        expected_incarnation: str | None,
         after_write: Callable[[sqlite3.Connection], T],
     ) -> T:
         queue = self._get_write_queue((owner_account_id, session_id))
@@ -1784,6 +1801,7 @@ class SQLiteSessionStore(SessionStore):
                 title_fallback=title_fallback,
                 last_prompt_tokens=last_prompt_tokens,
                 last_prompt_tokens_source=last_prompt_tokens_source,
+                expected_incarnation=expected_incarnation,
             )
             def write(conn: sqlite3.Connection) -> tuple[int, int, T]:
                 leaf, _, generation = fn(conn)
@@ -1799,16 +1817,21 @@ class SQLiteSessionStore(SessionStore):
         return await asyncio.to_thread(self.load, session_id, owner_account_id=owner_account_id)
 
     async def set_status_async(
-        self, session_id: str, status: str, error: str = "", *, owner_account_id: str
+        self, session_id: str, status: str, error: str = "", *, owner_account_id: str,
+        expected_incarnation: str | None = None,
     ) -> None:
         """set_status 的异步门面：写路径（BEGIN IMMEDIATE + busy-retry sleep）离开事件循环。"""
         await asyncio.to_thread(
-            self.set_status, session_id, status, error, owner_account_id=owner_account_id
+            self.set_status, session_id, status, error, owner_account_id=owner_account_id,
+            **({"expected_incarnation": expected_incarnation} if expected_incarnation is not None else {}),
         )
 
-    def clear_prompt_usage(self, session_id: str, owner_account_id: str) -> None:
+    def clear_prompt_usage(
+        self, session_id: str, owner_account_id: str, *, expected_incarnation: str | None = None
+    ) -> None:
         """清除上一轮 Provider usage，避免新回合暂未返回 usage 时显示旧值。"""
         def _write(conn):
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             conn.execute(
                 "UPDATE sessions SET last_prompt_tokens = NULL, last_prompt_tokens_source = NULL "
                 "WHERE session_id = ? AND owner_account_id = ?",
@@ -1849,6 +1872,10 @@ class SQLiteSessionStore(SessionStore):
         """压缩落库时内联一条自包含 compaction 事件：replacement 摘要 + 重锚定
         token 估算。事件表只增不改，旧 checkpoint 永不覆盖；恢复 = 定位最近
         compaction 事件后正序重放（load_compaction_checkpoint）。"""
+        from crew.core.runctx import current_turn_session_incarnation
+
+        bound = current_turn_session_incarnation.get()
+        expected_incarnation = bound[2] if bound and bound[:2] == (owner_account_id, session_id) else None
         now = time.time()
         payload = json.dumps(
             {
@@ -1861,6 +1888,7 @@ class SQLiteSessionStore(SessionStore):
         )
 
         def _write(conn) -> None:
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             base_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0), "
@@ -1920,6 +1948,7 @@ class SQLiteSessionStore(SessionStore):
         source: str = "provider",
         fingerprint: str = "",
         baseline_estimate: int | None = None,
+        expected_incarnation: str | None = None,
     ) -> None:
         """追加带完整请求信封信息的 meter_checkpoint 事件（增量计量重锚定）。"""
         now = time.time()
@@ -1937,6 +1966,7 @@ class SQLiteSessionStore(SessionStore):
         )
 
         def _write(conn):
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             base_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0), "
@@ -2218,6 +2248,7 @@ class SQLiteSessionStore(SessionStore):
         owner_account_id: str,
         kind: SessionEventType,
         status: str = "",
+        expected_incarnation: str | None = None,
     ) -> None:
         """追加回合边界事件（turn_start/turn_end，D3/D4 断点扫描的判据）。"""
         if kind not in (SessionEventType.TURN_START, SessionEventType.TURN_END):
@@ -2227,6 +2258,7 @@ class SQLiteSessionStore(SessionStore):
             owner_account_id=owner_account_id,
             kind=kind,
             payload={"status": status} if status else {},
+            **({"expected_incarnation": expected_incarnation} if expected_incarnation is not None else {}),
         )
 
     def record_durable_event(
@@ -2236,6 +2268,7 @@ class SQLiteSessionStore(SessionStore):
         owner_account_id: str,
         kind: SessionEventType,
         payload: dict[str, Any] | None = None,
+        expected_incarnation: str | None = None,
     ) -> None:
         """追加一个不参与消息投影的 durable 边界事件。
 
@@ -2252,6 +2285,7 @@ class SQLiteSessionStore(SessionStore):
         )
 
         def _write(conn) -> None:
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             base_row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0), "
@@ -2283,6 +2317,7 @@ class SQLiteSessionStore(SessionStore):
         owner_account_id: str,
         kind: SessionEventType,
         payload: dict[str, Any] | None = None,
+        expected_incarnation: str | None = None,
     ) -> None:
         await asyncio.to_thread(
             self.record_durable_event,
@@ -2290,6 +2325,7 @@ class SQLiteSessionStore(SessionStore):
             owner_account_id=owner_account_id,
             kind=kind,
             payload=payload,
+            **({"expected_incarnation": expected_incarnation} if expected_incarnation is not None else {}),
         )
 
     def recover_interrupted_tool_checkpoints(self) -> int:
@@ -2378,13 +2414,14 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         *,
         owner_account_id: str,
+        expected_incarnation: str | None = None,
     ) -> list[dict[str, Any]]:
         """把上次进程退出时没有结果的工具 intent 标记为 interrupted。
 
         这里只追加审计事件，不重放工具，也不伪造 Provider 消息；副作用状态保持
         ``unknown``，由下一轮模型或用户决定是否重新发起新调用。
         """
-        cursor = self._read_event_cursor(owner_account_id, session_id)
+        cursor = self._read_event_cursor(owner_account_id, session_id, expected_incarnation)
         if cursor is None:
             return []
         rows = self._resolve_chain(owner_account_id, session_id, cursor[0])
@@ -2413,6 +2450,7 @@ class SQLiteSessionStore(SessionStore):
                 session_id,
                 owner_account_id=owner_account_id,
                 kind=SessionEventType.TOOL_RESULT_COMMIT,
+                **({"expected_incarnation": expected_incarnation} if expected_incarnation is not None else {}),
                 payload={
                     "tool_call_id": str(payload.get("tool_call_id") or ""),
                     "name": str(payload.get("name") or ""),
@@ -2429,13 +2467,14 @@ class SQLiteSessionStore(SessionStore):
         *,
         owner_account_id: str,
         status: str = "interrupted",
+        expected_incarnation: str | None = None,
     ) -> bool:
         """若会话链上最后一个回合边界是 turn_start，追加 turn_end 闭合它。
 
         崩溃恢复（D3）在冷读配平后用 interrupted 状态闭合悬挂回合；
         返回是否实际闭合了一个开放回合。
         """
-        leaf = self._read_event_cursor(owner_account_id, session_id)
+        leaf = self._read_event_cursor(owner_account_id, session_id, expected_incarnation)
         if leaf is None:
             return False
         last_turn = self._last_turn_event(owner_account_id, session_id, leaf[0])
@@ -2446,6 +2485,7 @@ class SQLiteSessionStore(SessionStore):
             owner_account_id=owner_account_id,
             kind=SessionEventType.TURN_END,
             status=status,
+            **({"expected_incarnation": expected_incarnation} if expected_incarnation is not None else {}),
         )
         return True
 
@@ -2557,6 +2597,34 @@ class SQLiteSessionStore(SessionStore):
         with self._lock:
             return self._read_history_incarnation(self._conn, session_id, owner_account_id)
 
+    def _require_history_incarnation(
+        self, conn: sqlite3.Connection, session_id: str, owner_account_id: str
+    ) -> str:
+        incarnation = self._read_history_incarnation(conn, session_id, owner_account_id)
+        if incarnation is None:
+            raise SessionEventLogError(f"写入后缺少会话实例：{session_id}")
+        return incarnation
+
+    def _check_history_incarnation(
+        self, conn: sqlite3.Connection, session_id: str, owner_account_id: str, expected: str | None
+    ) -> None:
+        if expected is not None and self._read_history_incarnation(conn, session_id, owner_account_id) != expected:
+            raise SessionIncarnationChanged(f"会话已删除或重建：{session_id}")
+
+    def ensure_session_incarnation(
+        self, session_id: str, workspace_id: str = "default", title: str = "", *, owner_account_id: str
+    ) -> str:
+        """读取现存会话身份；首次创建时，在插入它的事务内取得身份。"""
+        current = self.get_history_incarnation(session_id, owner_account_id)
+        if current is not None:
+            return current
+
+        def ensure(conn: sqlite3.Connection) -> str:
+            self.ensure_session_in_transaction(conn, session_id, workspace_id, title, owner_account_id)
+            return self._require_history_incarnation(conn, session_id, owner_account_id)
+
+        return self._writer.execute(ensure)
+
     def session_belongs_to(self, session_id: str, owner_account_id: str) -> bool:
         """Return whether a session row belongs to the given owner."""
         with self._lock:
@@ -2571,8 +2639,14 @@ class SQLiteSessionStore(SessionStore):
         existing.extend(messages)
         self.save(session_id, existing, owner_account_id=owner_account_id)
 
-    def clear(self, session_id: str, owner_account_id: str) -> None:
-        self._writer.execute(lambda conn: self._delete_session_rows(conn, session_id, owner_account_id))
+    def clear(
+        self, session_id: str, owner_account_id: str, *, expected_incarnation: str | None = None
+    ) -> None:
+        def delete(conn: sqlite3.Connection) -> None:
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
+            self._delete_session_rows(conn, session_id, owner_account_id)
+
+        self._writer.execute(delete)
         self._projections.pop((owner_account_id, session_id), None)
 
     @staticmethod
@@ -2635,8 +2709,11 @@ class SQLiteSessionStore(SessionStore):
             self._projections.pop((owner_account_id, sid), None)
         return ids
 
-    def set_title(self, session_id: str, title: str, owner_account_id: str) -> None:
+    def set_title(
+        self, session_id: str, title: str, owner_account_id: str, *, expected_incarnation: str | None = None
+    ) -> None:
         def _write(conn):
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             conn.execute(
                 "UPDATE sessions SET title = ? WHERE session_id = ? AND owner_account_id = ?",
                 (title, session_id, owner_account_id),
@@ -2674,7 +2751,10 @@ class SQLiteSessionStore(SessionStore):
             )
         self._writer.execute(_write)
 
-    def set_status(self, session_id: str, status: str, error: str = "", *, owner_account_id: str) -> None:
+    def set_status(
+        self, session_id: str, status: str, error: str = "", *, owner_account_id: str,
+        expected_incarnation: str | None = None,
+    ) -> None:
         """记录上一轮运行的 terminal 结果（completed / failed / running）。
 
         与 save() 解耦：save() 不碰 last_status/last_error，由 gateway 调度器单独写，
@@ -2685,6 +2765,7 @@ class SQLiteSessionStore(SessionStore):
         now = time.time()
 
         def _write(conn):
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             if status == "running":
                 conn.execute(
                     "UPDATE sessions SET last_status = ?, last_error = ?, updated_at = ? "
@@ -2738,11 +2819,13 @@ class SQLiteSessionStore(SessionStore):
         last_status: str,
         error: str = "",
         settle_receipt: Callable[[Any], None] | None = None,
+        expected_incarnation: str | None = None,
     ) -> None:
         """Commit the transcript marker and last-turn summary in the same write."""
         self._writer.execute(self._turn_outcome_write(
             session_id, request_id, outcome, owner_account_id=owner_account_id,
             last_status=last_status, error=error, settle_receipt=settle_receipt,
+            expected_incarnation=expected_incarnation,
         ))
 
     def _turn_outcome_write(
@@ -2755,11 +2838,13 @@ class SQLiteSessionStore(SessionStore):
         last_status: str,
         error: str = "",
         settle_receipt: Callable[[Any], None] | None = None,
+        expected_incarnation: str | None = None,
     ) -> Callable[[Any], None]:
         now = time.time()
         encoded = json.dumps({**outcome, "request_id": request_id, "timestamp": now}, ensure_ascii=False)
 
         def write(conn) -> None:
+            self._check_history_incarnation(conn, session_id, owner_account_id, expected_incarnation)
             self._ensure_writer_lease(conn, owner_account_id, session_id, now)
             session = conn.execute(
                 "SELECT leaf_seq, last_outcome_json FROM sessions WHERE owner_account_id=? AND session_id=?",
@@ -2848,12 +2933,13 @@ class SQLiteSessionStore(SessionStore):
 
     def accepted_followup_snapshot(
         self, session_id: str, request_id: str, *, owner_account_id: str,
+        expected_incarnation: str | None = None,
     ) -> tuple[list[Message], tuple[int, int]]:
         """Pair accepted input with the exact parent-history cut for convergence."""
         with self._lock:
             self._conn.execute("BEGIN")
             try:
-                cursor = self._read_event_cursor(owner_account_id, session_id)
+                cursor = self._read_event_cursor(owner_account_id, session_id, expected_incarnation)
                 if cursor is None:
                     raise SessionWriteConflict(f"会话已删除：{session_id}")
                 rows = self._conn.execute(

@@ -165,6 +165,12 @@
 <p>可见模式通过真实同步轨迹提取、优化和生成，依次收到提取、优化、生成三个进度状态，再收到正常终态并读回所属账号的轨迹。两组最终打包测试使用相同的五份覆盖文件。Windows 后端组合 220 项通过、8 项跳过。最终队列四项通过，覆盖同 ID 跨账号、同账号重建、迟到任务、校验等待取消后的结果重取和空闲回收。SQLite 存储两项新增回归验证同 ID 的不同账号分别持有代次，以及旧提交回执返回前重建时仍能取得旧写事务实际保存的代次。</p>
 <p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>crew/evolution/queue.py</code>、<code>crew/agent/runtime.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime-task/registry.ts:140</code> 在任务登记时取分支代次，<code>apps/zcode-cli/packages/core/src/runtime/methods/background-notifications.ts:32</code> 在发送后台通知前核对代次。</p>
 </article>
+<article id="foreground-turn-incarnation">
+<h3>旧前台回合覆盖重建会话的历史</h3>
+<p>冻结版本中，迟到的前台回合能覆盖重建后的历史。Gateway 的私有转录归并和 CLI 的直连会话写入均有独立证据。ZCode 在分支变更时更新 <code>branchGeneration</code>，后台命令入队携带原代次并在消费时核对。Ace 复用 SQLite <code>history_incarnation</code> 绑定前台回合，在提交事件与历史的事务中核对。归并可以因同一实例的游标变化重试，实例变化则以 <code>session_replaced</code> 停止旧请求。状态、计量、标题和私有会话清理同样使用原实例。</p>
+<p><strong>验收</strong> Windows 存储与计量回归 97 项通过，Gateway 回执、归并及历史组合 115 项通过，最终 Agent 和异步存储 73 项通过。专项校验同游标的不同实例、同实例的正常写入和重新合并、只结清原请求的回执、旧私有会话清理、冲突后的单个停止终态，以及正常终态交付后才调度标题。官方 Windows Gateway 副本加载最终四份源文件，以回环模型完成正常聊天。重连后读回同账号的一问一答和同请求的完成回执，退出码为 0，双端口释放。独立 Windows CLI 正常发送后，通过新进程读回同一问答。</p>
+<p class="evidence">Ace <code>crew/gateway/dispatcher.py</code>、<code>crew/state/session_store.py</code>、<code>crew/agent/runtime.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/rewind-message.ts:529</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/subagent-messages.ts:29</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/runtime-command-queue.ts:214</code>。</p>
+</article>
 </section>
 
 <section id="desktop">

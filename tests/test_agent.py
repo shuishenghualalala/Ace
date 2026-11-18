@@ -68,6 +68,61 @@ async def test_agent_plain_answer_no_tools():
     assert "你好" in final
 
 
+@pytest.mark.parametrize("reject_write", [False, True])
+async def test_durable_turn_checks_incarnation_before_reporting_its_final(tmp_path, monkeypatch, reject_write):
+    from crew.core.envelope import TurnOutcome
+    from crew.core.runctx import current_turn_session_incarnation
+    from crew.state.session_store import SessionIncarnationChanged, SQLiteSessionStore
+
+    store = SQLiteSessionStore(str(tmp_path / "session.sqlite"))
+    owner = "local"
+    sid = "scoped-turn"
+    captured = store.ensure_session_incarnation(sid, owner_account_id=owner)
+    save = store.save_async
+    writes = []
+
+    async def fenced_save(session_id, messages, *args, **kwargs):
+        assert (session_id, kwargs["owner_account_id"], kwargs["expected_incarnation"]) == (sid, owner, captured)
+        assert current_turn_session_incarnation.get() == (owner, sid, captured)
+        has_answer = any(message.role == "assistant" for message in messages)
+        writes.append(has_answer)
+        if has_answer and reject_write:
+            raise SessionIncarnationChanged("synthetic persistence conflict")
+        await save(session_id, messages, *args, **kwargs)
+
+    monkeypatch.setattr(store, "save_async", fenced_save)
+    agent = _agent(FakeProvider(script=[ChatResponse(text="Verified answer")]), session_store=store, enable_title=True)
+    previous_scope = current_turn_session_incarnation.get()
+    terminal = []
+    titles = []
+
+    def schedule_title(_sid, _owner, _history, _push_fn, *, expected_incarnation):
+        assert len(terminal) == 1
+        titles.append(expected_incarnation)
+
+    monkeypatch.setattr(agent, "_spawn_title_task", schedule_title)
+    try:
+        async for chunk in agent.run(Envelope.of("Ordinary turn", session_id=sid, user_id=owner)):
+            if chunk.is_final:
+                terminal.append(chunk)
+                actual = [message.content for message in store.load(sid, owner) if message.role == "assistant"]
+                assert actual == ([] if reject_write else ["Verified answer"])
+        assert writes == [False, True]
+        (result,) = terminal
+        if reject_write:
+            outcome = TurnOutcome.from_body(result.body["outcome"])
+            assert outcome is not None
+            assert (outcome.status, outcome.code) == ("stopped", "session_replaced")
+            assert result.body["text"] == ""
+        else:
+            assert result.body["text"] == "Verified answer"
+        assert titles == ([] if reject_write else [captured])
+        assert current_turn_session_incarnation.get() == previous_scope
+    finally:
+        await agent.aclose()
+        store.close()
+
+
 async def test_custom_role_and_common_prompt_reach_real_executor_request(tmp_path):
     profile = tmp_path / "reviewer.md"
     profile.write_text("角色表达：用英文报告。", encoding="utf-8")

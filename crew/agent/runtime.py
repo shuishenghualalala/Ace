@@ -30,6 +30,8 @@ from crew.core.runctx import (
     current_session_source,
     current_skill_scope,
     current_subagent_notify_session,
+    current_turn_execution_incarnation,
+    current_turn_session_incarnation,
     current_user_type,
     current_workspace_id,
     normalize_owner_account_id,
@@ -780,8 +782,72 @@ class SingleAgent(Agent):
     async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
         if self._closed:
             raise RuntimeError("SingleAgent 已关闭，不能继续执行")
+
+        from crew.state.session_store import SessionIncarnationChanged
+
         sid = envelope.session_id
         task_sid = str(envelope.params.get("task_session_id") or sid)
+        owner = envelope.user_id
+        inherited = current_turn_session_incarnation.get()
+        turn_incarnation = execution_incarnation = None
+        ensure_incarnation = getattr(self.session_store, "ensure_session_incarnation", None)
+        if not self.lightweight and callable(ensure_incarnation):
+            if inherited is not None and inherited[:2] == (owner, task_sid):
+                turn_incarnation = inherited[2]
+            else:
+                turn_incarnation = await asyncio.to_thread(
+                    ensure_incarnation, task_sid, envelope.workspace_id, owner_account_id=owner,
+                )
+            execution_incarnation = turn_incarnation
+            if sid != task_sid:
+                execution = current_turn_execution_incarnation.get()
+                if execution is not None and execution[:2] == (owner, sid):
+                    execution_incarnation = execution[2]
+                else:
+                    execution_incarnation = await asyncio.to_thread(
+                        ensure_incarnation, sid, envelope.workspace_id, owner_account_id=owner,
+                    )
+
+        scope = (owner, task_sid, turn_incarnation) if turn_incarnation is not None else inherited
+        stream = self._run_turn(
+            envelope, turn_incarnation=turn_incarnation, execution_incarnation=execution_incarnation,
+        )
+        try:
+            while True:
+                token = current_turn_session_incarnation.set(scope)
+                try:
+                    chunk = await anext(stream)
+                finally:
+                    current_turn_session_incarnation.reset(token)
+                yield chunk
+        except StopAsyncIteration:
+            pass
+        except SessionIncarnationChanged:
+            yield ResponseChunk.final(
+                envelope.request_id, "", replace_content=True,
+                outcome=TurnOutcome(
+                    status="stopped", reason="session_replaced", code="session_replaced",
+                    message="会话已经重建，旧回合已停止。",
+                ),
+            )
+        finally:
+            token = current_turn_session_incarnation.set(scope)
+            try:
+                await stream.aclose()
+            except SessionIncarnationChanged:
+                pass
+            finally:
+                current_turn_session_incarnation.reset(token)
+
+    async def _run_turn(
+        self, envelope: Envelope, *, turn_incarnation: str | None, execution_incarnation: str | None,
+    ) -> AsyncIterator[ResponseChunk]:
+        from crew.state.session_store import SessionIncarnationChanged
+
+        sid = envelope.session_id
+        task_sid = str(envelope.params.get("task_session_id") or sid)
+        turn_write = {"expected_incarnation": turn_incarnation} if turn_incarnation is not None else {}
+        execution_write = {"expected_incarnation": execution_incarnation} if execution_incarnation is not None else {}
         display_sid = str(envelope.params.get("display_session_id") or task_sid).strip()
         if "::turn::" in display_sid:
             display_sid = display_sid.split("::turn::", 1)[0]
@@ -879,7 +945,7 @@ class SingleAgent(Agent):
             # 崩溃恢复：上轮被 kill -9 留下的开放回合补 turn_end{interrupted} 闭合
             # （断点报告在 D4 会话列表扫描，不自动续跑），再为本轮记 turn_start。
             close_open_turn = getattr(self.session_store, "close_open_turn", None)
-            if callable(close_open_turn) and close_open_turn(sid, owner_account_id=owner):
+            if callable(close_open_turn) and close_open_turn(sid, owner_account_id=owner, **execution_write):
                 log.warning("上轮会话被中断：已闭合悬挂回合 session=%s", sid)
             record_turn = getattr(self.session_store, "record_turn_event", None)
             if callable(record_turn):
@@ -889,10 +955,11 @@ class SingleAgent(Agent):
                     sid,
                     owner_account_id=owner,
                     kind=SessionEventType.TURN_START,
+                    **execution_write,
                 )
             reconcile_tools = getattr(self.session_store, "reconcile_open_tool_events", None)
             if callable(reconcile_tools):
-                pending_tools = reconcile_tools(task_sid, owner_account_id=owner)
+                pending_tools = reconcile_tools(task_sid, owner_account_id=owner, **turn_write)
                 if pending_tools:
                     log.warning(
                         "恢复会话时关闭未完成工具边界 session=%s count=%d",
@@ -909,7 +976,7 @@ class SingleAgent(Agent):
         # 否则在本回合尚未收到 usage 时，UI 会把上一回合的真实值误认为当前值。
         clear_prompt_usage = getattr(self.session_store, "clear_prompt_usage", None)
         if callable(clear_prompt_usage):
-            clear_prompt_usage(sid, owner_account_id=owner)
+            clear_prompt_usage(sid, owner_account_id=owner, **execution_write)
         log.info("[PERF] history_load       %.3fs  (msgs=%d)", time.perf_counter() - t, len(history))
         is_new = not history
         if is_new:
@@ -951,6 +1018,7 @@ class SingleAgent(Agent):
                 workspace_id=envelope.workspace_id,
                 owner_account_id=owner,
                 title_fallback="" if self.enable_title else None,
+                **turn_write,
             )
 
         # Skill 展开内容写入 canonical history（is_meta=True，前端不渲染但模型可见）
@@ -1048,6 +1116,7 @@ class SingleAgent(Agent):
                 owner_account_id=owner,
                 kind=event_kind,
                 payload={**payload, "request_id": envelope.request_id, "execution_session_id": sid},
+                **turn_write,
             )
 
         ctx = ExecutionContext(
@@ -1084,10 +1153,16 @@ class SingleAgent(Agent):
         delivered_terminal = False
         last_prompt_tokens: int | None = None
         last_prompt_tokens_source: str | None = None
-        # 拦截 final 帧：进化 visible 模式下需在 final 之前 yield evolution_footer，
-        # 因此先把 final 暂存，等进化流程跑完再投递。
+        # 持久会话的终态在落库核对通过后发送。进化进度也在终态前交付。
         _held_final = None
+        title_ready = False
         executor_stream = None
+
+        def schedule_title() -> None:
+            from crew.core.runctx import current_push_fn
+
+            self._spawn_title_task(task_sid, owner, history, current_push_fn.get(), **turn_write)
+
         try:
             executor_stream = self.executor.execute(ctx)
             async for chunk in executor_stream:
@@ -1115,10 +1190,11 @@ class SingleAgent(Agent):
                 elif chunk.kind == "final" or (chunk.is_final and chunk.status == "succeeded"):
                     terminal_outcome = "completed"
                     terminal_error_summary = ""
-                    if self.evolution_visible and self.evolution_manager:
-                        _held_final = chunk
-                        continue
-                delivered_terminal = delivered_terminal or chunk.is_final or chunk.kind in {"final", "error"}
+                is_terminal = chunk.is_final or chunk.kind in {"final", "error"}
+                if is_terminal and (execution_incarnation is not None or self.evolution_manager is not None):
+                    _held_final = chunk
+                    continue
+                delivered_terminal = delivered_terminal or is_terminal
                 yield chunk
             if self.control.interrupted:
                 interrupted = True
@@ -1160,8 +1236,9 @@ class SingleAgent(Agent):
                     task_sid=task_sid,
                     last_prompt_tokens=last_prompt_tokens,
                     last_prompt_tokens_source=last_prompt_tokens_source,
+                    turn_incarnation=turn_incarnation,
+                    execution_incarnation=execution_incarnation,
                 )
-                persisted = True
                 if not self.lightweight:
                     record_turn = getattr(self.session_store, "record_turn_event", None)
                     if callable(record_turn):
@@ -1172,6 +1249,7 @@ class SingleAgent(Agent):
                             owner_account_id=owner,
                             kind=SessionEventType.TURN_END,
                             status=terminal_outcome,
+                            **execution_write,
                         )
                 if last_prompt_tokens is not None:
                     await self._record_meter_checkpoint(
@@ -1180,7 +1258,13 @@ class SingleAgent(Agent):
                         llm_messages,
                         last_prompt_tokens,
                         last_prompt_tokens_source,
+                        expected_incarnation=turn_incarnation,
                     )
+                persisted = True
+            except SessionIncarnationChanged:
+                terminal_outcome = "interrupted"
+                terminal_error_summary = "会话已经重建，旧回合已停止。"
+                raise
             finally:
                 try:
                     await self.plugins.on_session_end(
@@ -1189,26 +1273,16 @@ class SingleAgent(Agent):
                         error_summary=terminal_error_summary,
                     )
                 finally:
-                    # final 是流式协议终态，合法消费者可能收到后立即 break/aclose。
-                    # 标题调度必须在受保护的 finally 内，且位于持久化成功之后；这样既不
-                    # 进入主响应关键窗口，也不会因生成器关闭而跳过。这里只创建后台任务，
-                    # 不等待标题 LLM，所以 final 的交付仍不受辅助请求阻塞。
-                    if (
+                    title_ready = (
                         persisted
                         and terminal_outcome == "completed"
                         and not interrupted
                         and self.enable_title
                         and not self.lightweight
                         and self._session_needs_title(task_sid, owner)
-                    ):
-                        from crew.core.runctx import current_push_fn
-
-                        self._spawn_title_task(
-                            task_sid,
-                            owner,
-                            history,
-                            current_push_fn.get(),
-                        )
+                    )
+                    if title_ready and _held_final is None:
+                        schedule_title()
         log.info("[PERF] run_total          %.3fs", time.perf_counter() - t0)
 
         # ── Skill 自进化 ──────────────────────────────────────────
@@ -1267,7 +1341,11 @@ class SingleAgent(Agent):
         # 放行拦截的 final chunk；evolution_footer（如有）已在 final 之前 yield，
         # 前端收到 final 后解除 busy。异步模式下 evolution 在后台进行，不阻塞前端。
         if _held_final is not None:
-            yield _held_final
+            try:
+                yield _held_final
+            finally:
+                if title_ready:
+                    schedule_title()
 
     def _trigger_evolution(self, session_id: str, owner_account_id: str, conversation_id: str = "") -> None:
         """在后台 fire-and-forget 触发 evolution 轨迹提取（或完整周期）。
@@ -1512,6 +1590,8 @@ class SingleAgent(Agent):
         owner: str,
         history: list[Message],
         push_fn,
+        *,
+        expected_incarnation: str | None = None,
     ) -> None:
         """后台生成会话标题并推送，不阻塞主推理或 final 帧发送。
 
@@ -1538,7 +1618,8 @@ class SingleAgent(Agent):
                 try:
                     if not self._session_needs_title(title_sid, owner):
                         return
-                    self.session_store.set_title(title_sid, title, owner_account_id=owner)
+                    write = {"expected_incarnation": expected_incarnation} if expected_incarnation is not None else {}
+                    self.session_store.set_title(title_sid, title, owner_account_id=owner, **write)
                 except Exception as exc:  # noqa: BLE001
                     log.debug("写入会话标题失败：%s", exc)
                     return
@@ -1583,6 +1664,8 @@ class SingleAgent(Agent):
         llm_messages: list[Message],
         last_prompt_tokens: int,
         last_prompt_tokens_source: str | None,
+        *,
+        expected_incarnation: str | None = None,
     ) -> None:
         """本轮真实 usage 喂给压缩器计量锚点，并以 meter_checkpoint 事件落库。
 
@@ -1591,11 +1674,30 @@ class SingleAgent(Agent):
         TokenMeter 跨重启按最新一行重锚定。
         """
         from crew.agent.compact.tokens import estimate_tokens
+        from crew.state.session_store import SessionIncarnationChanged
 
         owner = envelope.user_id
         fingerprint = f"{type(self.provider).__name__}:{getattr(self.provider, 'model', '')}"
         view_estimate = estimate_tokens(llm_messages)
         source = last_prompt_tokens_source or "provider"
+        record = getattr(self.session_store, "record_meter_checkpoint", None)
+        if callable(record):
+            write = {"expected_incarnation": expected_incarnation} if expected_incarnation is not None else {}
+            try:
+                await asyncio.to_thread(
+                    record,
+                    task_sid,
+                    owner_account_id=owner,
+                    prompt_tokens=last_prompt_tokens,
+                    source=source,
+                    fingerprint=fingerprint,
+                    baseline_estimate=view_estimate,
+                    **write,
+                )
+            except SessionIncarnationChanged:
+                raise
+            except Exception:  # noqa: BLE001
+                log.debug("meter_checkpoint 落库失败 session=%s", task_sid)
         if self.compactor is not None:
             self.compactor.record_meter_usage(
                 task_sid,
@@ -1605,21 +1707,6 @@ class SingleAgent(Agent):
                 fingerprint=fingerprint,
                 view_estimate=view_estimate,
             )
-        record = getattr(self.session_store, "record_meter_checkpoint", None)
-        if not callable(record):
-            return
-        try:
-            await asyncio.to_thread(
-                record,
-                task_sid,
-                owner_account_id=owner,
-                prompt_tokens=last_prompt_tokens,
-                source=source,
-                fingerprint=fingerprint,
-                baseline_estimate=view_estimate,
-            )
-        except Exception:  # noqa: BLE001
-            log.debug("meter_checkpoint 落库失败 session=%s", task_sid)
 
     async def _persist_turn(
         self,
@@ -1633,6 +1720,8 @@ class SingleAgent(Agent):
         task_sid: str | None = None,
         last_prompt_tokens: int | None = None,
         last_prompt_tokens_source: str | None = None,
+        turn_incarnation: str | None = None,
+        execution_incarnation: str | None = None,
     ) -> None:
         """把 executor 本轮新增消息回灌 canonical 历史并持久化。
 
@@ -1646,6 +1735,7 @@ class SingleAgent(Agent):
         sid = envelope.session_id
         mem_sid = task_sid or sid
         from crew.core.followup import drain_followup_answer_records
+        from crew.state.session_store import SessionIncarnationChanged
 
         recorded = {message.followup_history_id for message in ctx.messages if message.followup_history_id}
         for answer in drain_followup_answer_records(
@@ -1716,6 +1806,7 @@ class SingleAgent(Agent):
         # 一次性 uuid 会话（对照 Hermes 子 agent 的 ephemeral 会话）。
         if not self.lightweight:
             t = time.perf_counter()
+            write = {"expected_incarnation": execution_incarnation} if execution_incarnation is not None else {}
             try:
                 # title_fallback：enable_title=True 时留空占位，等下方 generate_session_title
                 # 生成摘要后由 set_title 写入；否则保留旧行为（首条 user 消息截断作标题）。
@@ -1728,10 +1819,19 @@ class SingleAgent(Agent):
                     title_fallback="" if self.enable_title else None,
                     last_prompt_tokens=last_prompt_tokens,
                     last_prompt_tokens_source=last_prompt_tokens_source,
+                    **write,
                 )
+            except SessionIncarnationChanged:
+                raise
             except Exception:  # noqa: BLE001
                 log.exception("会话落库失败 session=%s", sid)
             log.info("[PERF] session_save       %.3fs", time.perf_counter() - t)
+            if turn_incarnation is not None and mem_sid != sid:
+                current = await asyncio.to_thread(
+                    self.session_store.get_history_incarnation, mem_sid, envelope.user_id,
+                )
+                if current != turn_incarnation:
+                    raise SessionIncarnationChanged("主会话代次已更换")
 
             t = time.perf_counter()
             try:
