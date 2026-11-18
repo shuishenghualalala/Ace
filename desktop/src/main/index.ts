@@ -2013,6 +2013,7 @@ function recordCoreReadiness(
 }
 
 const GATEWAY_COLD_START_TIMEOUT_MS = 180_000;
+const GATEWAY_HEALTH_PORT_UNAVAILABLE = 'GATEWAY_HEALTH_PORT_UNAVAILABLE';
 const GATEWAY_REUSE_WAIT_TIMEOUT_MS = 60_000;
 
 async function waitForGatewayReady(
@@ -2041,6 +2042,9 @@ async function waitForGatewayReady(
     if (readiness !== undefined) {
       const status = readiness?.status ?? 'ready';
       const errorCode = status === 'failed' ? readiness?.errorCode ?? 'GATEWAY_STARTUP_FAILED' : undefined;
+      if (child && errorCode === GATEWAY_HEALTH_PORT_UNAVAILABLE) {
+        throw new GatewayStartupError(errorCode);
+      }
       recordCoreReadiness(generation, status, probe, errorCode);
       if (status === 'ready') {
         console.log(`[gateway] Core ready after ${Date.now() - started}ms (${attempts} attempts)`);
@@ -2195,11 +2199,11 @@ function canReuseExternalGateway(): boolean {
 
 async function launchGateway(generation: number): Promise<GatewayBinding> {
   assertGatewayGeneration(generation);
-  if (managedGateway) {
-    const child = managedGateway;
+  const existing = managedGateway;
+  if (existing) {
     const baseUrl = resolvedGatewayBaseUrl;
-    logSupervisorDecision('reuse-alive-instance', { pid: child.pid ?? -1, generation });
-    return waitForGatewayReady(baseUrl, child, generation, GATEWAY_REUSE_WAIT_TIMEOUT_MS);
+    logSupervisorDecision('reuse-alive-instance', { pid: existing.pid ?? -1, generation });
+    return waitForGatewayReady(baseUrl, existing, generation, GATEWAY_REUSE_WAIT_TIMEOUT_MS);
   }
 
   const platform = app.isPackaged ? process.platform : null;
@@ -2216,24 +2220,40 @@ async function launchGateway(generation: number): Promise<GatewayBinding> {
   }
 
   const firstPort = starter ? GATEWAY_PORT_MIN : MANAGED_GATEWAY_PORT;
-  let port = firstPort;
   const end = Math.min(firstPort + GATEWAY_PORT_RANGE_SIZE, 65535);
-  for (; port < end; port++) {
+  const deadline = Date.now() + GATEWAY_COLD_START_TIMEOUT_MS;
+  let portFailure: GatewayStartupError | undefined;
+  for (let port = firstPort; port < end; port++) {
     const [gatewayAvailable, healthAvailable] = await Promise.all([
       isPortAvailable(port), isPortAvailable(port + 1),
     ]);
     assertGatewayGeneration(generation);
-    if (gatewayAvailable && healthAvailable) break;
+    if (!gatewayAvailable || !healthAvailable) continue;
+    if (Date.now() >= deadline) throw new GatewayStartupError('GATEWAY_STARTUP_TIMEOUT');
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    backendHealthMonitor.markRestart();
+    resolvedGatewayBaseUrl = baseUrl;
+    if (IS_DEV_LAUNCH) process.env.GATEWAY_PORT = String(port);
+    if (starter) starter(port);
+    else startManagedGateway(port);
+    const child = managedGateway;
+    if (!child) throw new GatewayStartupError('GATEWAY_LAUNCH_FAILED');
+
+    try {
+      return await waitForGatewayReady(baseUrl, child, generation, deadline - Date.now());
+    } catch (error) {
+      if (!(error instanceof GatewayStartupError) || error.code !== GATEWAY_HEALTH_PORT_UNAVAILABLE) throw error;
+      assertGatewayGeneration(generation);
+      if (managedGateway !== child) throw new GatewaySupersededError();
+      logSupervisorDecision('health-port-unavailable', { port: port + 1, generation });
+      await stopManagedGateway('health-port-unavailable');
+      assertGatewayGeneration(generation);
+      portFailure = error;
+    }
   }
-  if (port === end) throw new Error(`No available Gateway port in ${firstPort}–${end - 1}`);
-  const baseUrl = `http://127.0.0.1:${port}`;
-  backendHealthMonitor.markRestart();
-  resolvedGatewayBaseUrl = baseUrl;
-  if (IS_DEV_LAUNCH) process.env.GATEWAY_PORT = String(port);
-  if (starter) starter(port);
-  else startManagedGateway(port);
-  if (!managedGateway) throw new GatewayStartupError('GATEWAY_LAUNCH_FAILED');
-  return waitForGatewayReady(baseUrl, managedGateway, generation, GATEWAY_COLD_START_TIMEOUT_MS);
+  if (portFailure) throw portFailure;
+  throw new Error(`No available Gateway port in ${firstPort}–${end - 1}`);
 }
 
 async function ensureGateway(): Promise<GatewayBinding> {

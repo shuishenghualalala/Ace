@@ -856,6 +856,7 @@
   <h2>后端状态拆分与发送能力门控（2026-09-18）</h2>
   <p><code>backend:status</code> 保留兼容字段 <code>connected</code>，同时下发 <code>processState</code>、<code>healthState</code>、<code>transportState</code> 和 <code>loopLagMs</code>。主进程从 Gateway 子进程 spawn/exit/error 与 supervisor 重启流程维护进程状态；独立 health 线程的 loop lag 使用连续样本迟滞判定 <code>healthy/degraded/stalled</code>；WS open/close/reconnect 只维护 transport 状态。</p>
   <p>renderer 的 <code>uiStore</code> 增加 <code>backendCanSend</code> 能力字段：进程未 ready、health stalled 或 WS 不可用时仅禁用聊天发送，历史、设置、日志和会话浏览保持可用。非阻断顶部横幅按“身份异常 → 进程重启 → loop stalled → loop degraded → 组件告警”优先级展示，不再把任意连接变化渲染为全屏门禁。</p>
+  <p>进程启动前检查业务和健康端口。若另一进程随后抢占健康端口，受管 Gateway 在主端口报告可验签的 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>。主进程保持启动状态，等待该受管进程退出，再在同一启动时限内检查后续端口。完成启动以实际受管实例的核心就绪为准。独立 Gateway 沿用原兼容探测。</p>
   <p>验证覆盖：健康探针不重叠、loop lag 连续样本和恢复迟滞、状态横幅文案、legacy connected 兼容，以及发送能力在 transport 断开时的隔离。</p>
 </section>
 

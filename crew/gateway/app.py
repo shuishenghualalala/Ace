@@ -112,7 +112,7 @@ def make_route_gate(route_registry: Any, contribution_id: str) -> Any:
     return _gate
 
 
-def create_app(crew: CrewApp | None = None) -> FastAPI:
+def create_app(crew: CrewApp | None = None, *, desktop_managed: bool = False) -> FastAPI:
     crew = crew or build_app()
     gateway_is_loopback = is_loopback_host(crew.config.gateway_host)
     compatibility_dev_bind = crew.config.gateway_dev_mode and not strict_security_enabled()
@@ -236,23 +236,16 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
                 _app.state.gateway_readiness["error_code"] = error_code
             return True
 
-        # health 独立线程服务：与业务事件循环隔离，循环卡顿时桌面端仍能探测进程
-        # 活性。端口默认主端口+1（runtime.health_port 可显式覆盖），绑定失败仅
-        # 告警并降级为「仅主端口 /api/health」，不阻止启动。
-        health_port = int(getattr(crew.config, "health_port", 0) or 0) or (
-            int(crew.config.gateway_port) + 1
-        )
+        health_port = int(crew.config.gateway_port) + 1
+        if not desktop_managed:
+            health_port = int(getattr(crew.config, "health_port", 0) or 0) or health_port
         health_server = GatewayHealthServer(port=health_port)
-        health_server.start()
+        bound_health_port = health_server.start()
 
         def components() -> dict:
             return build_app_health_components(_read_startup_status(), crew)
 
-        health_sentinel = asyncio.create_task(_health_loop_sentinel(components))
-
-        core = asyncio.create_task(_startup_core(), name="gateway-startup-core")
-
-        async def _deferred_startup() -> None:
+        async def _deferred_startup(core: asyncio.Task[None]) -> None:
             completed, _ = await asyncio.wait({core}, timeout=_CORE_STARTUP_TIMEOUT_SECONDS)
             if not completed:
                 publish("failed", "GATEWAY_STARTUP_TIMEOUT")
@@ -285,18 +278,23 @@ def create_app(crew: CrewApp | None = None) -> FastAPI:
             except Exception:
                 log.exception("Gateway 可选服务启动失败 generation=%s", generation)
 
-        startup_task = asyncio.create_task(_deferred_startup(), name="gateway-startup")
+        startup_tasks = {asyncio.create_task(_health_loop_sentinel(components), name="gateway-health-sentinel")}
+        if desktop_managed and bound_health_port is None:
+            # Only the authenticated health endpoint serves this failed launch.
+            # Desktop will retire it before trying another pair.
+            publish("failed", "GATEWAY_HEALTH_PORT_UNAVAILABLE")
+        else:
+            core = asyncio.create_task(_startup_core(), name="gateway-startup-core")
+            startup_tasks.update((asyncio.create_task(_deferred_startup(core), name="gateway-startup"), core))
         try:
             yield
         finally:
             stopping = True
             dispatcher.begin_shutdown()
-            health_sentinel.cancel()
-            await asyncio.gather(health_sentinel, return_exceptions=True)
-            for task in (startup_task, core):
+            for task in startup_tasks:
                 if not task.done() and not task.cancelling():
                     task.cancel()
-            completed, pending = await asyncio.wait({startup_task, core}, timeout=2.0)
+            completed, pending = await asyncio.wait(startup_tasks, timeout=2.0)
             for task in completed:
                 if not task.cancelled():
                     task.exception()
@@ -633,7 +631,7 @@ def run(*, parent_lease: DesktopParentLease | None = None) -> None:
     if parent_lease is not None and parent_lease.closed:
         asyncio.run(crew.shutdown())
         return
-    api = create_app(crew)
+    api = create_app(crew, desktop_managed=parent_lease is not None)
     cfg = crew.config
 
     # 直接绑定 cfg.gateway_port（Linux 打包态由 desktop 子进程托管：desktop 先扫描

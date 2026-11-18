@@ -84,7 +84,7 @@
       <tr><td>Session Source Contributor（<code>session_context.py</code>）</td><td>拥有渠道来源数据和 formatter，通过 Feature Runtime 输出规范化 source 与动态模型上下文。</td><td>已落地</td></tr>
       <tr><td>Wiki Knowledge Consumer（<code>routers/wiki.py</code> / <code>routers/misc.py</code>）</td><td>REST 与附件捕获按请求解析 Knowledge Service 并持有 Generation Lease；能力停用统一返回 503 或跳过后台捕获。</td><td>已落地</td></tr>
       <tr><td>Feature Event Dispatch（<code>ws.py</code>）</td><td>回合结束只调度中立 Event Contributor Registry；事件来源与 Generation 属于各 Feature，Gateway 提供标准帧 sink。</td><td>已落地</td></tr>
-      <tr><td>独立线程 Health 服务（<code>health_server.py</code>）</td><td>与业务事件循环隔离的极简 HTTP health（stdlib <code>ThreadingHTTPServer</code> 跑在独立线程）：业务循环卡顿时桌面端仍能探测进程活性。端口 <code>runtime.health_port</code>（默认主端口+1），绑定失败仅告警并降级为仅主端口 <code>/api/health</code>，不阻止启动；生命周期挂在 FastAPI lifespan 内，shutdown 最后停止。响应复用主端点同一份 instance-proof 校验（<code>build_gateway_health_payload</code>）与 components 快照（<code>build_health_components</code>），并附带 <code>loop_lag_ms</code> 循环活性哨兵。</td><td>已落地</td></tr>
+      <tr><td>独立线程 Health 服务（<code>health_server.py</code>）</td><td>与业务事件循环隔离的极简 HTTP health（stdlib <code>ThreadingHTTPServer</code> 跑在独立线程）：业务循环卡顿时桌面端仍能探测进程活性。独立启动使用 <code>runtime.health_port</code>（默认主端口+1），绑定失败时继续使用主端口。桌面受管实例必须绑定实际业务端口 +1；生命周期挂在 FastAPI lifespan 内，shutdown 最后停止。响应复用主端点同一份 instance-proof 校验（<code>build_gateway_health_payload</code>）与 components 快照（<code>build_health_components</code>），并附带 <code>loop_lag_ms</code> 循环活性哨兵。</td><td>已落地</td></tr>
       <tr><td>循环活性哨兵（<code>loop_lag_ms</code>）</td><td>业务循环上的哨兵 task 每秒把 <code>loop.time()</code> 与 components 快照戳到模块级变量（跨线程单值快照，锁开销可忽略）；health 线程读取时间戳算出滞后毫秒写进响应，桌面端据此区分「进程活但循环忙」与「进程死」。</td><td>已落地</td></tr>
     </tbody>
   </table>
@@ -149,12 +149,15 @@ async with lease:
   <p>主 <code>/api/health</code> 与所有 agent 业务共用 uvicorn 的 asyncio 事件循环，业务卡顿时健康探测随之超时。健康端点因此拆成两层：</p>
   <pre><code>GET /api/health（主端口）          FastAPI 路由；components 由 build_health_components 计算
 health 线程服务（默认主端口+1）     stdlib ThreadingHTTPServer 独立线程，仅 /api/health
-  runtime.health_port: 0 = 自动（主端口+1）；显式端口覆盖；绑定失败降级仅主端口，不阻止启动
+  独立 Gateway 可以用 runtime.health_port 覆盖端口，绑定失败后继续使用主端口
+  桌面受管 Gateway 必须获取主端口 +1，绑定失败时主端口返回可验签的启动失败
 响应语义                            与主端点完全对齐：复用 build_gateway_health_payload
                                     （instance proof fail closed）+ components 快照
 loop_lag_ms                         业务循环滞后毫秒：哨兵 task 每秒 note_loop_tick(loop.time())，
                                     health 线程读时间戳差值；区分「进程活但循环忙」与「进程死」</code></pre>
   <p>components 快照（startup / cron 状态）由业务循环上的哨兵 task 每秒戳到模块级变量，主端点与线程服务共用同一份 <code>build_health_components</code> 逻辑，两处响应不会出现语义分叉。线程服务生命周期挂在 FastAPI lifespan 内：启动早期拉起，shutdown 的最后一步停止——shutdown 期间桌面端仍能看到进程活性与循环滞后。桌面端探测优先打 health 线程端口（主端口 +1，<code>backend-health-probe.ts</code> 推导），验证失败（旧 gateway 无独立 health 线程）再回退主端口。</p>
+
+  <p>桌面受管启动通过父进程租约辨认。若独立健康端口无法绑定，lifespan 跳过核心任务及可选服务的启动，主端口健康响应返回 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>。REST 和 WebSocket 的业务入口继续受启动状态约束。桌面验签并确认这是本次启动的子进程后，关闭该进程的父管道并等待退出，再继续选择端口。</p>
 
   <h2>7. 变更记录</h2>
   <table>

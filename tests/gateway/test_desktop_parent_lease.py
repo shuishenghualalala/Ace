@@ -116,7 +116,11 @@ def test_standalone_gateway_runs_without_managed_lease(monkeypatch):
     gateway = object()
     calls = []
     monkeypatch.setattr(gateway_app, "build_app", lambda: SimpleNamespace(config=config))
-    monkeypatch.setattr(gateway_app, "create_app", lambda _crew: gateway)
+    def create_app(_crew, *, desktop_managed):
+        assert not desktop_managed
+        return gateway
+
+    monkeypatch.setattr(gateway_app, "create_app", create_app)
     monkeypatch.setattr(gateway_app, "_write_gateway_discovery_file", lambda _host, _port: None)
     monkeypatch.setattr(gateway_app.uvicorn, "run", lambda api, **kwargs: calls.append((api, kwargs)))
 
@@ -136,7 +140,11 @@ def test_managed_exit_code_reflects_dispatcher_drain_after_server_returns(monkey
         dispatcher.shutdown_timed_out = drain_timed_out
 
     monkeypatch.setattr(gateway_app, "build_app", lambda: SimpleNamespace(config=config, dispatcher=dispatcher))
-    monkeypatch.setattr(gateway_app, "create_app", lambda _crew: lambda: None)
+    def create_app(_crew, *, desktop_managed):
+        assert desktop_managed
+        return lambda: None
+
+    monkeypatch.setattr(gateway_app, "create_app", create_app)
     monkeypatch.setattr(gateway_app, "_write_gateway_discovery_file", lambda _host, _port: None)
     monkeypatch.setattr(gateway_app._DesktopLeaseServer, "run", run_server)
     lease = SimpleNamespace(closed=False)

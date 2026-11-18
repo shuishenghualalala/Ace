@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -55,7 +57,7 @@ def _feishu_webhook_app(channel, *, dev_mode: bool = False) -> FastAPI:
 
 
 @pytest.fixture
-def api(tmp_path, monkeypatch):
+def api(tmp_path, monkeypatch, request):
     old_entries = list(platform_registry.all_entries())
     platform_registry._entries.clear()
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
@@ -67,7 +69,7 @@ def api(tmp_path, monkeypatch):
     try:
         crew = build_app(config=cfg, enable_team=False)
         platform_registry._entries.clear()
-        app = create_app(crew)
+        app = create_app(crew, desktop_managed=getattr(request, "param", False))
         app.state.crew = crew
         yield app
     finally:
@@ -102,6 +104,29 @@ async def test_api_rejects_non_loopback_request(api):
         resp = await client.get("/api/sessions")
 
     assert resp.status_code == 401
+
+
+@pytest.mark.parametrize(("api", "managed"), [(True, True), (False, False)], indirect=["api"])
+def test_health_port_conflict_only_blocks_managed_startup(api, managed, monkeypatch):
+    core = AsyncMock()
+    monkeypatch.setattr(api.state.crew, "startup_core", core)
+    with socket.socket() as occupant:
+        occupant.bind(("127.0.0.1", 0))
+        occupant.listen()
+        busy_port = occupant.getsockname()[1]
+        api.state.crew.config.gateway_port = busy_port - 1
+        # Managed launches own the pair picked by Desktop, irrespective of a
+        # standalone override. Standalone launches may continue on their main port.
+        api.state.crew.config.health_port = 1 if managed else busy_port
+        with TestClient(api, client=("127.0.0.1", 4000)) as client:
+            health = _wait_readiness(client, "failed" if managed else "ready")
+            if managed:
+                assert health["error_code"] == "GATEWAY_HEALTH_PORT_UNAVAILABLE"
+                assert client.get("/api/sessions").status_code == 503
+                core.assert_not_awaited()
+            else:
+                core.assert_awaited_once()
+        assert occupant.getsockname()[1] == busy_port
 
 
 def test_legacy_gateway_auth_config_is_ignored(tmp_path, monkeypatch):
