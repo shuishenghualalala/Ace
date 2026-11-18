@@ -162,6 +162,7 @@
 <p><strong>Windows 宿主完全冻结</strong> 从 <code>56eb6de6</code> 真实 EXE 的同一内嵌 Python 启动两个 Gateway，共用一个临时 Crew Home。每端通过正常的后台终端注册表启动 PowerShell 和独立 Python 子进程。暂停第一端全部线程，以原来每 50 毫秒写一次的心跳连续 700 毫秒不变确认冻结，再用操作系统终止该 Gateway。其绑定的 Job Object 在 0.172 秒内回收 shell 与子进程，业务和健康端口可重新绑定。第二端的两个进程仍存活，HTTP 仍就绪；关闭其桌面父管道后，第二端返回 0，子进程和双端口均已释放。</p>
 <p><strong>健康端口在启动期间被占用</strong> Linux 共享回环压测的第 4 轮中，Python 后端回归与桌面共用默认健康端口。Gateway 打印了 <code>EADDRINUSE</code>，桌面仍报告可用，九阶段脚本在第二端口验签失败。改用独立回环网络后继续测量。修复后的桌面受管 Gateway 必须绑定主端口 +1。绑定失败时主端口返回可验签的 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>，业务仍受启动门控。主进程确认子进程身份，关闭父管道，等旧进程退出，再在原启动时限内选择后续端口。独立 Gateway 仍支持显式健康端口和单端口运行。</p>
 <p>定向回归在真实占用的端口上验证受管业务返回 503、核心任务未执行及独立模式仍可用。后端 106 项和桌面 45 项通过，TypeScript 通过。将候选主进程和 Python 改动应用到 <code>56eb6de6</code> Windows 发行副本，独立监听器在子进程启动后抢占 8001。两轮从 8000 换至 8002/8003，在 28.130 和 27.499 秒内恢复到可发送状态，旧子进程均返回 0，首聊落盘且占用方仍响应。另两轮分别观察到桌面提前收到退出和新 Gateway 已连接后 UI 等待超时，这两轮未计为通过。</p>
+<p>Linux 用 UOS 发行版中的 Python 复现同一个端口竞争。旧程序的主端口验签通过，但副端口被占用时仍报 <code>ready</code>，会话接口返回 200。替换后的 Gateway 在同条件下验签通过，报告 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>，会话接口返回 503。两次分别关闭受管父管道，进程均返回 0，测试占用方继续服务。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1396</code>、<code>:1404</code>、<code>:2012</code>，<code>crew/gateway/desktop_parent_lease.py:30</code>，<code>crew/gateway/app.py:527</code>。ZCode <code>packages/desktop/src/main/desktopHostProcess.ts:669</code>、<code>:714</code>，<code>packages/server/src/stdio-lifecycle.ts:103</code> 和 <code>packages/services/src/session/offPeakMockGateway.ts:564</code>。</p>
 </article>
 <article id="replay">
@@ -357,6 +358,23 @@
 <tr><td>发行与工作集</td><td>Windows、macOS、Linux 的支持矩阵，干净 profile 与已有会话升级。记录 30 分钟空闲和长会话连续输出 RSS、队列驻留字节、退出残留，以及恢复后的历史。</td><td>零数据丢失和自有子进程残留；队列和 DOM 规模在稳定工作集下收敛。绝对内存门槛用各平台同条件首轮结果设定。</td></tr>
 </tbody>
 </table></div>
+<h3>Linux 发行包的重复故障恢复</h3>
+<p>对 <code>56eb6de6</code> UOS amd64 发行包顺序执行 30 次完整九阶段桌面测试。每轮从独立用户配置启动，共核对 90 个受管 Gateway 代次的主端口和健康端口签名。正式组使用只启用回环的独立网络、只读 <code>/opt</code>、普通用户和原 Chromium 沙箱。30 轮全部通过。共享网络的先导组完成 10 轮，其中 9 轮通过，另一次触发 D2 的健康端口冲突。正式组运行 18 分 35 秒，同一 WSL 虚拟机也在执行后端回归，CPU 使用中位数 7.8%，P95 为 14.6%。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">阶段</th><th scope="col">P50（毫秒）</th><th scope="col">P95（毫秒）</th></tr></thead>
+<tbody>
+<tr><td>冷启动</td><td>8,320.5</td><td>9,966</td></tr>
+<tr><td>首次聊天</td><td>1,107.5</td><td>1,498</td></tr>
+<tr><td>精确停止及后续回合</td><td>2,009</td><td>2,114</td></tr>
+<tr><td>Renderer 恢复</td><td>1,796.5</td><td>2,231</td></tr>
+<tr><td>Gateway 重启及历史检查</td><td>7,268.5</td><td>9,004</td></tr>
+<tr><td>首次退出</td><td>1,521</td><td>2,131</td></tr>
+<tr><td>重开</td><td>8,251.5</td><td>9,157</td></tr>
+<tr><td>重开后历史</td><td>485.5</td><td>674</td></tr>
+<tr><td>末次退出</td><td>4,937.5</td><td>5,440</td></tr>
+</tbody>
+</table></div>
+<p>P95 取第 29 个升序样本。恢复阶段从注入故障开始，覆盖桌面的历史恢复检查。故障由固定的本地 SSE 模型、真实进程退出和 Chromium 渲染进程崩溃触发。</p>
 <h3>Windows 会话目录的重复启动时间</h3>
 <p>用相同的 Electron 开发构建、真实 Gateway 和预先创建的 SQLite 样本，在 100、1,000、10,000 个会话间交替运行 30 轮。每次从独立新配置启动，再关闭进程并用原配置重开；共启动 180 次，全部取得就绪结果，且每次退出后均检查 Gateway 及双端口已释放。时间从创建 Electron 进程算起，单位为秒，每格为 P50 / P95（P95 取 30 次中的第 29 个顺序统计量）。运行期间机器也在执行其他回归。</p>
 <div class="table"><table>
