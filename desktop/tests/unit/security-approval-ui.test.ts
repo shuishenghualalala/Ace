@@ -18,16 +18,21 @@ vi.mock('../../src/ui/state', () => ({
   notify: vi.fn(),
   state: {
     activeSessionId: 's1',
+    isLoggedIn: true,
+    userInfo: { uid: 'owner-a' },
     sessions: [{ id: 's1', workspaceId: 'default' }],
     currentWorkspaceId: 'default',
   },
 }));
 
+import { appendMessage } from '../../src/ui/features/chat-controller';
+import { state } from '../../src/ui/state';
 import { bindSecurityApprovalUi } from '../../src/ui/features/security-approval';
 
 type MockCrew = {
   securityPending: ReturnType<typeof vi.fn>;
   securityDecide: ReturnType<typeof vi.fn>;
+  securityDecisionReceipt?: ReturnType<typeof vi.fn>;
 };
 
 function setupDom(): void {
@@ -248,4 +253,52 @@ describe('security approval always-confirm (U2)', () => {
     state.sessions.pop();
     cleanup();
   });
+  it('recovers only the captured receipt after a lost response and rebind', async () => {
+    localStorage.clear();
+    const mw = mockCrew();
+    const request = { request_id: 'r1', session_id: 's1', workspace_id: 'default', task_id: 't1', decision_receipts: 1 };
+    mw.securityPending.mockResolvedValue({ ok: true, body: { requests: [request] } });
+    mw.securityDecide.mockRejectedValue(new Error('response lost'));
+    mw.securityDecisionReceipt = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+    let cleanup = bindSecurityApprovalUi();
+    await vi.advanceTimersByTimeAsync(1000);
+    document.querySelector<HTMLButtonElement>('[data-security-decision="reject"]')!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mw.securityDecide).toHaveBeenCalledTimes(1);
+    const command = mw.securityDecide.mock.calls[0]![0];
+    expect(command.submissionId).toMatch(/^[a-f0-9]{32}$/);
+    const savedKey = Object.keys(localStorage).find(key => key.startsWith('crew.security.decision.'));
+    expect(savedKey).toBeTruthy();
+    expect(mw.securityDecisionReceipt).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'r1', submissionId: command.submissionId, decision: 'reject',
+    }));
+    cleanup();
+    setupDom();
+    mw.securityPending.mockResolvedValue({ ok: true, body: { requests: [] } });
+    const originalUser = state.userInfo;
+    try {
+      state.userInfo = { ...originalUser!, uid: 'other-owner' };
+      mw.securityDecisionReceipt.mockClear();
+      cleanup = bindSecurityApprovalUi();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mw.securityDecisionReceipt).not.toHaveBeenCalled();
+      vi.mocked(appendMessage).mockClear();
+      state.userInfo = originalUser;
+      const receipt = { request_id: 'r1', decision: 'reject', submission_id: command.submissionId, status: 'recorded' };
+      mw.securityDecisionReceipt.mockResolvedValue({ ok: true, body: { ...receipt, submission_id: 'mismatch' } });
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(appendMessage).not.toHaveBeenCalled();
+      expect(localStorage.getItem(savedKey!)).toBeTruthy();
+      mw.securityDecisionReceipt.mockResolvedValue({ ok: true, body: receipt });
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(appendMessage).toHaveBeenCalledExactlyOnceWith('s1', 'status', '✕ 已拒绝本次请求');
+      expect(localStorage.getItem(savedKey!)).toBeNull();
+      expect(mw.securityDecide).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+      state.userInfo = originalUser;
+      localStorage.clear();
+    }
+  });
+
 });

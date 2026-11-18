@@ -29,6 +29,7 @@ class SQLiteRuleStore:
 
     def __init__(self, db_path: str | Path, *, wal_enabled: bool = True) -> None:
         self._lock = threading.Lock()
+        self.db_path = Path(db_path).resolve()
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
@@ -105,6 +106,14 @@ class SQLiteRuleStore:
         workspace_id: str,
     ) -> ActionRule:
         """Insert one immutable always rule; widening requires another rule ID."""
+        self._writer.execute(lambda conn: self.insert_rule(
+            conn, rule, os_user=os_user, owner_account_id=owner_account_id, workspace_id=workspace_id,
+        ))
+        return rule
+
+    @staticmethod
+    def insert_rule(conn, rule: ActionRule, *, os_user: str, owner_account_id: str, workspace_id: str) -> None:
+        """Insert on the caller's SQLite transaction."""
         if rule.scope is not RuleScope.ALWAYS:
             raise ValueError("只有 always 规则可以持久化")
         identity = _identity(os_user, owner_account_id, workspace_id)
@@ -137,16 +146,12 @@ class SQLiteRuleStore:
             separators=(",", ":"),
         )
 
-        def _write(conn) -> None:
-            conn.execute(
-                "INSERT INTO security_rules "
-                "(rule_id, os_user, owner_account_id, workspace_id, schema_version, "
-                "payload_json, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-                (rule.rule_id, *identity, _SCHEMA_VERSION, payload, time.time()),
-            )
-
-        self._writer.execute(_write)
-        return rule
+        conn.execute(
+            "INSERT INTO security_rules "
+            "(rule_id, os_user, owner_account_id, workspace_id, schema_version, "
+            "payload_json, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+            (rule.rule_id, *identity, _SCHEMA_VERSION, payload, time.time()),
+        )
 
     def list(
         self,

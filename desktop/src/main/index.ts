@@ -114,6 +114,7 @@ import {
   UpdateStartDownloadArgs,
   SecurityPendingArgs,
   SecurityDecisionArgs,
+  SecurityDecisionReceiptArgs,
   SecurityModeArgs,
   SecurityWorkspaceArgs,
   SecurityRuleMutationArgs,
@@ -2415,9 +2416,14 @@ async function securityGatewayRequest(
     ...(body ? { 'content-type': 'application/json' } : {}),
     ...(usesRemoteAuth ? { Authorization: `Bearer ${jwt}`, ...identityHeaders } : {}),
   };
-  const response = await fetchGatewayWithStartupRetry(`${baseUrl}${pathname}`, {
+  // A lost decision response can only be reconciled by reading its receipt.
+  const isDecision = method === 'POST' && pathname.endsWith('/decision');
+  const request = isDecision ? fetch : fetchGatewayWithStartupRetry;
+  const response = await request(`${baseUrl}${pathname}`, {
     method,
     headers,
+    redirect: 'error',
+    ...(isDecision || pathname.endsWith('/decision-receipt') ? { signal: AbortSignal.timeout(10_000) } : {}),
     ...(body ? { body } : {}),
   });
   const responseBody = await response.json().catch(() => ({ detail: response.statusText }));
@@ -3752,6 +3758,7 @@ function registerIpc() {
       task_id: args.taskId ?? '',
       nonce,
       decision: args.decision,
+      ...(args.submissionId ? { submission_id: args.submissionId } : {}),
       ...(args.alwaysArgvPrefix ? { always_argv_prefix: args.alwaysArgvPrefix } : {}),
     });
     // 仅成功才删 nonce：409 可能是瞬时（task_id 时空不一致等），若删掉会让后续所有点击
@@ -3759,6 +3766,15 @@ function registerIpc() {
     // 轮询与渲染层错误处理去对账（请求真死了轮询不再返回，overlay 自然撤掉）。
     if (result.ok) securityApprovalNonces.delete(args.requestId);
     return result;
+  });
+
+  trustedHandle('security:decision-receipt', async (_e, raw: unknown) => {
+    const args = parseOrThrow(SecurityDecisionReceiptArgs.parse(raw), 'security:decision-receipt');
+    const pathname = `/api/security/requests/${encodeURIComponent(args.requestId)}/decision-receipt`;
+    return securityGatewayRequest('POST', pathname, {
+      workspace_id: args.workspaceId, session_id: args.sessionId, task_id: args.taskId ?? '',
+      submission_id: args.submissionId, decision: args.decision, prefix_hash: args.prefixHash ?? '',
+    });
   });
 
   trustedHandle('security:capabilities', async () => securityGatewayRequest('GET', '/api/security/capabilities'));

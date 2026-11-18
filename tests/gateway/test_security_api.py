@@ -377,6 +377,29 @@ async def test_decision_is_bound_to_nonce_and_owner(api):
 
 
 @pytest.mark.asyncio
+async def test_exact_read_only_decision_receipt_is_scoped_to_account_and_desktop_proof(api):
+    api.state.crew.config.auth_mode = "remote"
+    api.state.crew.config.auth_provider_id = "test"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with (
+        AsyncClient(transport=transport, base_url="http://test", cookies=_remote_cookies("user-a")) as owner,
+        AsyncClient(transport=transport, base_url="http://test", cookies=_remote_cookies("user-b")) as other,
+    ):
+        created = await _post_json(owner, "/api/security/fake-executions", {"session_id": "s1", "argv": ["echo", "fixture"]})
+        request = created.json()
+        base = f"/api/security/requests/{request['request_id']}"
+        probe = {"session_id": "s1", "decision": "once", "submission_id": "e" * 32}
+        query = f"{base}/decision-receipt"
+        assert (await owner.post(query, json=probe)).status_code == 403
+        assert (await _post_json(owner, query, probe)).json()["status"] == "pending"
+        decision = await _post_json(owner, f"{base}/decision", {**probe, "nonce": request["nonce"]})
+        assert decision.status_code == 200
+        assert decision.json()["receipt"] == (await _post_json(owner, query, probe)).json()
+        assert (await _post_json(other, query, probe)).json()["status"] == "unknown"
+        assert (await _post_json(owner, query, {**probe, "decision": "reject"})).json()["status"] == "unknown"
+
+
+@pytest.mark.asyncio
 async def test_fake_execution_cannot_create_reusable_authority(api):
     transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
     async with AsyncClient(transport=transport, base_url="http://test") as client:

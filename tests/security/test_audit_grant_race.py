@@ -22,8 +22,8 @@ from crew.security.actions import (
     normalize_file_action,
     normalize_network_action,
 )
-from crew.security.approvals import ApprovalDecision, ApprovalManager
-from crew.security.audit import SQLiteSecurityAudit
+from crew.security.approvals import ApprovalDecision, ApprovalError, ApprovalManager, ApprovalSubmission
+from crew.security.audit import AuditWriteError, SQLiteSecurityAudit
 from crew.security.context import SecurityContext
 from crew.security.grants import GrantRegistry
 from crew.security.models import (
@@ -844,3 +844,76 @@ def test_always_rule_keeps_approved_action_in_rule_and_creation_audit(tmp_path: 
                    if event.action_type == "rule_created")
     assert created.action_summary == "执行命令：git status"
     assert "工作目录" in created.action_detail
+
+@pytest.mark.parametrize("winning", [ApprovalDecision.ONCE, ApprovalDecision.REJECT])
+def test_decision_receipt_is_bound_and_repeated_submissions_never_wake_again(tmp_path, monkeypatch, winning):
+    approvals, grants, audit, service = _service(tmp_path)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["git", "status"], tmp_path)
+    request = approvals.create(context, action, "terminal")
+    wakes = []
+    monkeypatch.setattr(service._waiters, "resolve", lambda rid, outcome: wakes.append((rid, outcome)))
+    submission = ApprovalSubmission(request.request_id, "a" * 32, winning)
+    command = dict(request_id=request.request_id, nonce=request.nonce, decision=winning, submission_id=submission.submission_id)
+
+    assert service.decision_receipt(context, submission)["status"] == "pending"
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        receipts = list(pool.map(lambda _: service.decide(context, **command)["receipt"], range(16)))
+    assert receipts == [submission.receipt("recorded")] * 16
+    assert len(wakes) == 1
+    losing = ApprovalDecision.REJECT if winning is ApprovalDecision.ONCE else ApprovalDecision.ONCE
+    with pytest.raises(ApprovalError):
+        service.decide(context, **{**command, "decision": losing})
+    with pytest.raises(ApprovalError):
+        service.decide(context, **{**command, "submission_id": "b" * 32})
+    assert len(wakes) == 1
+    for key in ["os_user", "owner_account_id", "workspace_id", "session_id", "task_id"]:
+        assert service.decision_receipt(replace(context, **{key: "unrelated"}), submission)["status"] == "unknown"
+    assert service.decision_receipt(context, replace(submission, decision=losing))["status"] == "unknown"
+    assert service.decision_receipt(context, replace(submission, prefix_hash="d" * 64))["status"] == "unknown"
+    assert service.decision_receipt(context, replace(submission, submission_id="c" * 32))["status"] == "unknown"
+    assert len([event for event in audit.query(owner_account_id=context.owner_account_id) if event.action_type == "approval_decision"]) == 1
+    if winning is ApprovalDecision.ONCE:
+        assert grants.authorize_action(context, action, tool_name="terminal")
+    assert grants.authorize_action(context, action, tool_name="terminal") is None
+
+    # A replacement service opens the durable audit with empty grant, request, and waiter registries.
+    _, fresh_grants, _, replacement = _service(tmp_path)
+    assert replacement.decision_receipt(context, submission) == receipts[0]
+    assert replacement.decide(context, **command) == {"receipt": receipts[0]}
+    assert fresh_grants.authorize_action(context, action, tool_name="terminal") is None
+
+
+def test_persistent_rule_and_decision_receipt_commit_together(tmp_path, monkeypatch):
+    import crew.security.audit as audit_module
+
+    db = tmp_path / "shared.sqlite"
+    grants = GrantRegistry()
+    approvals = ApprovalManager(grants)
+    audit = SQLiteSecurityAudit(db)
+    rules = SQLiteRuleStore(db)
+    service = SecurityApprovalService(approvals, grants, rules, audit, db_path=db)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["git", "status"], tmp_path)
+    request = approvals.create(context, action, "terminal")
+    submission = ApprovalSubmission(request.request_id, "c" * 32, ApprovalDecision.ALWAYS)
+    original_insert = audit_module._insert_event
+    def fail_last_insert(conn, event, stamp):
+        if event.action_type == "approval_decision":
+            raise RuntimeError("simulated write failure")
+        original_insert(conn, event, stamp)
+    with monkeypatch.context() as patch:
+        patch.setattr(audit_module, "_insert_event", fail_last_insert)
+        with pytest.raises(AuditWriteError):
+            service.decide(context, request_id=request.request_id, nonce=request.nonce,
+                           decision=submission.decision, submission_id=submission.submission_id)
+    assert service.decision_receipt(context, submission)["status"] == "unknown"
+    assert not rules.list(os_user=context.os_user, owner_account_id=context.owner_account_id, workspace_id=context.workspace_id)
+    assert not audit.query(owner_account_id=context.owner_account_id)
+    assert grants.authorize_action(context, action, tool_name="terminal") is None
+    fresh = approvals.create(context, action, "terminal")
+    submission = replace(submission, request_id=fresh.request_id)
+    result = service.decide(context, request_id=fresh.request_id, nonce=fresh.nonce, decision=submission.decision,
+                            submission_id=submission.submission_id)
+    assert service.decision_receipt(context, submission) == result["receipt"]
+    assert len(rules.list(os_user=context.os_user, owner_account_id=context.owner_account_id, workspace_id=context.workspace_id)) == 1

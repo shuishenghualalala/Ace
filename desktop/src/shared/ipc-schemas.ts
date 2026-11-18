@@ -185,6 +185,7 @@ export interface SecurityDecisionArgs extends SecurityPendingArgs {
   requestId: string;
   decision: SecurityApprovalDecision;
   alwaysArgvPrefix?: string[];
+  submissionId?: string;
 }
 
 export const SecurityDecisionArgs = {
@@ -194,6 +195,10 @@ export const SecurityDecisionArgs = {
     if (!base.ok) return base;
     const requestId = StringSchema.parse(raw['requestId'], 'requestId');
     if (!requestId.ok) return requestId;
+    const submissionId = raw['submissionId'];
+    if (submissionId !== undefined && (typeof submissionId !== 'string' || !/^[a-f0-9]{32}$/.test(submissionId))) {
+      return fail('submissionId', 'invalid submission id');
+    }
     const decision = raw['decision'];
     if (!['once', 'session', 'always', 'reject'].includes(String(decision))) {
       return fail('decision', 'must be once, session, always, or reject');
@@ -215,10 +220,30 @@ export const SecurityDecisionArgs = {
       value: {
         ...base.value,
         requestId: requestId.value,
+        ...(submissionId ? { submissionId } : {}),
         decision: decision as SecurityApprovalDecision,
         ...(alwaysArgvPrefix ? { alwaysArgvPrefix } : {}),
       },
     };
+  },
+};
+
+export interface SecurityDecisionReceiptArgs extends Omit<SecurityDecisionArgs, 'alwaysArgvPrefix'> {
+  submissionId: string;
+  prefixHash?: string;
+}
+
+export const SecurityDecisionReceiptArgs = {
+  parse(raw: unknown): ParseResult<SecurityDecisionReceiptArgs> {
+    const command = SecurityDecisionArgs.parse(raw);
+    if (!command.ok) return command;
+    const { submissionId, ...scope } = command.value;
+    if (!submissionId || !isPlainObject(raw)) return fail('submissionId', 'required');
+    const hash = raw['prefixHash'];
+    if (hash !== undefined && (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))) {
+      return fail('prefixHash', 'invalid prefix hash');
+    }
+    return { ok: true, value: { ...scope, submissionId, ...(hash ? { prefixHash: hash } : {}) } };
   },
 };
 

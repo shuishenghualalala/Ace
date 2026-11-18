@@ -6,6 +6,9 @@
  * 对话流。模式选择器已从 header 下拉迁到对话框 toolbar chip。
  */
 
+import type { SecurityDecisionArgs } from '../../shared/ipc-schemas';
+import { interactiveOwnerKey } from './interactive-owner';
+import { finishDecision, pendingDecisions, receiptStatus, rememberDecision, type PendingDecision } from './security-decision-receipts';
 import { $, notify, state } from '../state';
 import { sessionStore } from '../stores/session-store';
 import { appendMessage, renderChat } from './chat-controller';
@@ -452,15 +455,55 @@ export function bindSecurityApprovalUi(): () => void {
     panel?.setAttribute('aria-hidden', 'true');
   };
 
+  let disposed = false;
+  let nextReceiptCheck = 0;
+  let checkingReceipts = false;
+  let visibleOwner = '';
+  const publishDecision = (sessionId: string, decision: SecurityApprovalChoice, boundary?: string): void => {
+    const note = decision === 'reject' ? '✕ 已拒绝本次请求' : `✔ 已批准${decisionLabel(decision)}${boundary ? ' · ' + boundary : ''}`;
+    appendMessage(sessionId, 'status', note);
+    renderChat();
+  };
+  const settleReceipt = (entry: PendingDecision, receipt: unknown): boolean => {
+    if (disposed || receiptStatus(receipt, entry) !== 'recorded' || !finishDecision(entry)) return false;
+    publishDecision(entry.args.sessionId, entry.args.decision);
+    return true;
+  };
+  const checkReceipt = async (entry: PendingDecision): Promise<void> => {
+    if (entry.owner !== interactiveOwnerKey() || disposed) return;
+    const reply = await window.Crew.securityDecisionReceipt(entry.args).catch(() => null);
+    if (reply?.ok && entry.owner === interactiveOwnerKey()) settleReceipt(entry, reply.body);
+  };
+
+  const recoverDecisions = async (owner: string): Promise<void> => {
+    if (!owner || checkingReceipts || Date.now() < nextReceiptCheck
+        || typeof window.Crew?.securityDecisionReceipt !== 'function') return;
+    checkingReceipts = true;
+    try {
+      const entries = pendingDecisions(owner);
+      await Promise.all(entries.map(checkReceipt));
+      nextReceiptCheck = Date.now() + (entries.length ? 15_000 : REFETCH_INTERVAL_MS);
+    } finally {
+      checkingReceipts = false;
+    }
+  };
+
   const poll = async (): Promise<void> => {
-    if (polling || submitting || !window.Crew?.securityPending) return;
+    if (disposed || polling || submitting || !window.Crew?.securityPending) return;
+    const owner = interactiveOwnerKey();
+    if (visibleOwner !== owner && visibleRequest) {
+      visibleRequest = null;
+      nextReceiptCheck = 0;
+      hideOverlay();
+    }
     // 已有可见请求时，节流到 5s 重拉一次以检测后端作废；无可见请求时每秒轮询照旧。
     if (visibleRequest && Date.now() - lastPollAt < REFETCH_INTERVAL_MS) return;
     const candidates = approvalPollCandidates();
-    if (!candidates.length) return;
     polling = true;
     lastPollAt = Date.now();
     try {
+      void recoverDecisions(owner).catch(() => {});
+      if (!candidates.length) return;
       // 后端 pending 按 (owner, workspace, session) 过滤，必须逐会话查询。
       const results = await Promise.all(
         candidates.map((candidate) =>
@@ -469,6 +512,7 @@ export function bindSecurityApprovalUi(): () => void {
             sessionId: candidate.sessionId,
           }).catch(() => null)),
       );
+      if (disposed || submitting || owner !== interactiveOwnerKey()) return;
       let request: Record<string, unknown> | null = null;
       for (const result of results) {
         const body = result?.body as { requests?: Array<Record<string, unknown>> } | undefined;
@@ -487,6 +531,7 @@ export function bindSecurityApprovalUi(): () => void {
         return;
       }
       visibleRequest = request;
+      visibleOwner = owner;
       if (summary) summary.textContent = formatApprovalSummary(request);
       showOverlay(request);
     } catch {
@@ -498,7 +543,9 @@ export function bindSecurityApprovalUi(): () => void {
 
   decisionButtons.forEach((button) => {
     button.addEventListener('click', async () => {
-      if (submitting || !visibleRequest) return;
+      if (disposed || submitting || !visibleRequest || visibleOwner !== interactiveOwnerKey()) return;
+      const captured = visibleRequest;
+      const owner = visibleOwner;
       const decision = button.dataset['securityDecision'] as SecurityApprovalChoice;
       if (!SECURITY_APPROVAL_CHOICES.includes(decision)) return;
       const proposedPrefix = Array.isArray(visibleRequest['proposed_argv_prefix'])
@@ -517,47 +564,43 @@ export function bindSecurityApprovalUi(): () => void {
       // 不能用主聊天活跃会话——Wiki 会话的审批用 activeSessionId 会被后端判为上下文不匹配。
       const sessionId = String(visibleRequest['session_id'] ?? '').trim() || state.activeSessionId;
       if (!sessionId) return;
+      const command: SecurityDecisionArgs = {
+        workspaceId, sessionId, requestId, taskId, decision,
+        ...(decision === 'always' && proposedPrefix.length ? { alwaysArgvPrefix: proposedPrefix } : {}),
+      };
       submitting = true;
       decisionButtons.forEach((item) => { item.disabled = true; });
+      let entry: PendingDecision | undefined;
       try {
-        // task_id 必须回传：Gateway decide 校验 request.task_id == ctx.task_id，
-        // 缺失会被判为上下文不匹配返回 409，并触发 main 侧删除 nonce，之后所有按钮都报"已过期"。
-        const result = await window.Crew.securityDecide({
-          workspaceId,
-          sessionId,
-          requestId,
-          taskId,
-          decision,
-          ...(decision === 'always' && proposedPrefix.length
-            ? { alwaysArgvPrefix: proposedPrefix }
-            : {}),
-        });
-        if (!result?.ok) {
-          notify(`审批失败：${String((result?.body as { detail?: string })?.detail ?? '未知错误')}`);
-          // 失败时必须撤掉 overlay 并清空 visibleRequest，否则它会一直停在屏幕上，
-          // 且后续每次点击都拿同一个陈旧 request_id 再失败（用户反馈的"框一直在 + 点啥都报已过期"）。
-          visibleRequest = null;
-          hideOverlay();
-          lastPollAt = 0;
-          return;
+        if (captured['decision_receipts'] === 1 && typeof window.Crew.securityDecisionReceipt === 'function') {
+          entry = await rememberDecision(command, owner);
+          command.submissionId = entry.args.submissionId;
         }
-        // 写回对话流：不带 activity 的 status 消息会持久保留（带 activity 的才被回合折叠/清掉）。
-        const note = decision === 'reject'
-          ? `✕ 已拒绝，命令未执行`
-          : `✔ 已批准${decisionLabel(decision)} · ${approvalBoundaryLabel(visibleRequest)}`;
-        appendMessage(sessionId, 'status', note);
-        renderChat();
-        visibleRequest = null;
-        hideOverlay();
+        if (owner !== interactiveOwnerKey() || disposed) return;
+        const result = await window.Crew.securityDecide(command);
+        if (owner !== interactiveOwnerKey() || disposed) return;
+        if (entry) {
+          if (!result?.ok || !settleReceipt(entry, result.body?.receipt)) {
+            await checkReceipt(entry);
+          }
+        } else if (result?.ok) {
+          publishDecision(sessionId, decision, approvalBoundaryLabel(captured));
+        } else {
+          notify(`审批失败：${String(result?.body?.detail ?? '未知错误')}`);
+        }
       } catch (err) {
-        // securityDecide 走 Electron IPC：参数校验失败或桥接异常会让 invoke reject。
-        // 此前回调无 try/catch，reject 会中断整个处理——decision 从未送达后端、overlay 不关、
-        // visibleRequest 不清，工具一直挂到 300s 超时。兜底：提示 + 撤 overlay + 强制下次立即重拉。
-        notify(`审批失败：${String((err as Error)?.message ?? err)}`);
+        if (owner === interactiveOwnerKey() && !disposed) {
+          if (entry) await checkReceipt(entry);
+          else notify(`审批失败：${String((err as Error)?.message ?? err)}`);
+        }
+      } finally {
+        if (entry && !disposed && owner === interactiveOwnerKey()
+            && pendingDecisions(owner).some(row => row.args.submissionId === entry?.args.submissionId)) {
+          notify('审批结果尚未确认，正在核对记录。');
+        }
         visibleRequest = null;
         hideOverlay();
         lastPollAt = 0;
-      } finally {
         submitting = false;
         decisionButtons.forEach((item) => { item.disabled = false; });
       }
@@ -578,6 +621,7 @@ export function bindSecurityApprovalUi(): () => void {
 
   const timer = window.setInterval(() => void poll(), 1000);
   return () => {
+    disposed = true;
     window.clearInterval(timer);
     window.removeEventListener('session:changed', onSessionChanged);
     window.removeEventListener('security:approval-pending', onApprovalPending);

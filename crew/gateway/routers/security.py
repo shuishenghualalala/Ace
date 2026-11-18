@@ -18,7 +18,7 @@ from crew.gateway.auth import account_from_request
 from crew.gateway.instance_auth import verify_desktop_security_proof
 from crew.security.actions import normalize_exec_action, normalize_file_action
 from crew.security.audit import AuditEvent, format_action_for_audit
-from crew.security.approvals import ApprovalDecision, ApprovalError
+from crew.security.approvals import ApprovalDecision, ApprovalError, ApprovalSubmission
 from crew.security.context import (
     SecurityContext,
     SecurityContextError,
@@ -84,13 +84,22 @@ class FakeExecutionInput(BaseModel):
     cwd: str | None = None
 
 
-class DecisionInput(BaseModel):
+class ApprovalIntentInput(BaseModel):
     workspace_id: str = "default"
     session_id: str = Field(min_length=1)
     task_id: str = ""
-    nonce: str = Field(min_length=1)
     decision: Literal["once", "session", "always", "reject"]
+
+
+class DecisionInput(ApprovalIntentInput):
+    nonce: str = Field(min_length=1)
     always_argv_prefix: list[str] | None = None
+    submission_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class DecisionReceiptInput(ApprovalIntentInput):
+    prefix_hash: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    submission_id: str = Field(pattern=r"^[a-f0-9]{32}$")
 
 
 class RuleMutationInput(BaseModel):
@@ -510,9 +519,20 @@ def create_security_router(crew) -> APIRouter:
                 nonce=payload.nonce,
                 decision=ApprovalDecision(payload.decision),
                 always_argv_prefix=payload.always_argv_prefix,
+                submission_id=payload.submission_id or "",
             )
         except ApprovalError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.post("/requests/{request_id}/decision-receipt")
+    async def decision_receipt(request_id: str, request: Request, payload: DecisionReceiptInput):
+        await _require_desktop_proof(request)
+        ctx = context(request, payload.workspace_id, payload.session_id, payload.task_id)
+        submission = ApprovalSubmission(
+            request_id, payload.submission_id, ApprovalDecision(payload.decision),
+            payload.prefix_hash,
+        )
+        return crew.security_service.decision_receipt(ctx, submission)
 
     @router.get("/rules")
     async def list_rules(request: Request, workspace_id: str = Query("default")):

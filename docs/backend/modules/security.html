@@ -489,6 +489,8 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     <p>证明默认只在 30 秒窗口内有效，并且 nonce 单次消费。POSIX 上密钥目录/文件要求 0700/0600、当前用户所有，读取时拒绝符号链接并核对打开前后的 inode。密钥强制绑定当前绝对 <code>CREW_HOME</code>，不同开发/账号实例不能隐式共享安全权限。</p>
 
     <h3 id="audit">2.8 状态持久化、审计与并发</h3>
+    <p>新版审批请求带 <code>decision_receipts: 1</code>。用户点击后，桌面先保存本次的提交 ID、所选决定、工作区、会话和任务。持久前缀只保存 SHA-256 摘要，审批 nonce 留在主进程。Gateway 把这些字段、请求 ID、操作系统用户和认证账号绑定到对应的 <code>approval_decision</code> 审计事件。相同提交再次到达时读取原回执，首次有效决定才会发放权限并唤醒等待的工具。</p>
+    <p>服务端确认丢失时，桌面持有同一提交 ID，仅查询审计记录。账号切换会隔离待核对项，重启后可继续查询。匹配的 <code>recorded</code> 表明决定已经持久化，工具是否实际执行由对应的工具结果和回合终态记录。<code>pending</code> 表明请求仍待处理，<code>unknown</code> 表明当前存储中没有这次提交的确认。已有待核对项在客户端最多保留 24 小时，服务端沿用审计保留周期。产品内置 SQLite 库用同一事务写入持久规则、规则审计和审批回执。</p>
 
     <h4>2.8.1 哪些状态持久化</h4>
     <table>
@@ -654,7 +656,7 @@ helper 响应
     <thead><tr><th scope="col">接口</th><th scope="col">职责</th></tr></thead>
     <tbody>
       <tr><td><code>PUT /mode</code></td><td>确认指定对话的实际权限模式。</td></tr>
-      <tr><td><code>GET /pending</code><br><code>POST /requests/{request_id}/decision</code></td><td>查询待审批，提交绑定请求的用户决定。</td></tr>
+      <tr><td><code>GET /pending</code><br><code>POST /requests/{request_id}/decision</code><br><code>POST /requests/{request_id}/decision-receipt</code></td><td>查询待审批、提交决定、按提交身份和意图只读核对回执。三个入口均校验桌面证明。</td></tr>
       <tr><td><code>GET /rules</code><br><code>PATCH /rules/{rule_id}</code><br><code>DELETE /rules/{rule_id}</code></td><td>查询、启停、删除已保存的规则。</td></tr>
       <tr><td><code>GET /capabilities</code></td><td>查询原生组件与实时沙箱能力。</td></tr>
       <tr><td><code>GET /audit</code><br><code>GET /audit/export</code><br><code>POST /audit/purge-expired</code></td><td>查找、导出账号审计，以及清理超过保留阈值的记录。</td></tr>
@@ -696,6 +698,7 @@ helper 响应
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
       <tr><td>2026-09-02</td><td>将 Terminal Guard 与 Workspace Guard 收归安全内核，并建立声明式架构依赖门禁。</td><td>Agent、Tools、CLI、Team/External 测试、CI</td></tr>
+      <tr><td>2026-11-18</td><td>安全审批支持丢回执和重启后的精确查询，持久规则与审批审计同事务提交。</td><td>安全服务、Gateway 和桌面审批面板</td></tr>
       <tr><td>2026-11-18</td><td>把模式对照、自动审批、授权执行链、三平台沙箱、控制面、审计和验证流程整合进模块文档。</td><td>桌面端、Gateway、内置工具、原生运行组件与外援</td></tr>
     </tbody>
   </table>

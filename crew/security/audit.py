@@ -15,6 +15,8 @@ from uuid import uuid4
 
 from crew.security.actions import ActionKind, NormalizedAction
 from crew.security.context import SecurityContext
+from crew.security.rule_store import SQLiteRuleStore
+from crew.security.rules import ActionRule
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.tools.redact import redact_sensitive_display_text, redact_sensitive_text
 
@@ -212,6 +214,7 @@ class SQLiteSecurityAudit:
         self._buffer_lock = threading.Lock()
         self._max_buffer = max_buffer
         self._buffer: list[tuple[AuditEvent, float]] = []
+        self.db_path = Path(db_path).resolve()
         self._conn = connect_sqlite(db_path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
@@ -288,6 +291,35 @@ class SQLiteSecurityAudit:
             # the successful record above; the buffer stays for the next attempt.
             self._flush_best_effort()
         return safe_event.event_id
+
+    def record_rule_decision(
+        self, context: SecurityContext, rule: ActionRule, rule_event: AuditEvent, decision_event: AuditEvent,
+    ) -> None:
+        """Commit persistent authority and its two audit records together in the shared database."""
+        events = (_sanitize_event(rule_event), _sanitize_event(decision_event))
+        timestamp = time.time()
+
+        def write(conn):
+            SQLiteRuleStore.insert_rule(
+                conn, rule, os_user=context.os_user, owner_account_id=context.owner_account_id,
+                workspace_id=context.workspace_id,
+            )
+            for event in events:
+                _insert_event(conn, event, timestamp)
+
+        try:
+            self._writer.execute(write)
+        except Exception as exc:
+            raise AuditWriteError("审批规则和审计记录未能持久化") from exc
+
+    def has_approval_receipt(self, event_id: str) -> bool:
+        """The key includes the authenticated context and exact decision payload."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT 1 FROM security_audit_events WHERE event_id = ? "
+                "AND action_type = 'approval_decision' AND decision_source = 'desktop_user'",
+                (event_id,),
+            ).fetchone() is not None
 
     def record_batch(self, items: Sequence[tuple[AuditEvent, float]]) -> int:
         """Insert a batch of ordinary events in one write; retain in buffer on failure.

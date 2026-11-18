@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 import threading
 import time
@@ -43,6 +45,41 @@ class ApprovalDecision(StrEnum):
     SESSION = "session"
     ALWAYS = "always"
     REJECT = "reject"
+
+
+@dataclass(frozen=True)
+class ApprovalSubmission:
+    request_id: str
+    submission_id: str
+    decision: ApprovalDecision
+    prefix_hash: str = ""
+
+    @classmethod
+    def from_decision(
+        cls, request_id: str, submission_id: str, decision: ApprovalDecision, prefix: Sequence[str] | None,
+    ) -> ApprovalSubmission:
+        prefix_hash = ""
+        if prefix:
+            encoded = json.dumps(prefix, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            prefix_hash = hashlib.sha256(encoded).hexdigest()
+        return cls(request_id, submission_id, decision, prefix_hash)
+
+    def event_id(self, context: SecurityContext) -> str:
+        """Bind the durable decision event to exactly one submitted intent and identity."""
+        fields = [
+            context.os_user, context.owner_account_id, context.workspace_id, context.session_id,
+            context.task_id, self.request_id, self.submission_id, self.decision, self.prefix_hash,
+        ]
+        encoded = json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def receipt(self, status: str) -> dict[str, str]:
+        return {
+            "status": status,
+            "request_id": self.request_id,
+            "submission_id": self.submission_id,
+            "decision": self.decision.value,
+        }
 
 
 @dataclass(frozen=True)
@@ -220,15 +257,15 @@ class ApprovalManager:
             request = self._requests.get(request_id)
             if request is None:
                 raise ApprovalError("批准请求不存在", terminal=True)
-            if request_id in self._handled:
-                raise ApprovalError("批准请求已处理", terminal=True)
             if not secrets.compare_digest(request.nonce, str(nonce)):
                 raise ApprovalError("批准请求 nonce 不匹配")
+            if not _request_context_matches(request, context):
+                raise ApprovalError("批准请求上下文不匹配")
+            if request_id in self._handled:
+                raise ApprovalError("批准请求已处理")
             if self._clock() > request.expires_monotonic:
                 self._handled.add(request_id)
                 raise ApprovalError("批准请求已过期", terminal=True)
-            if not _request_context_matches(request, context):
-                raise ApprovalError("批准请求上下文不匹配")
             if request.action.digest != request.action_digest:
                 raise ApprovalError("批准请求动作完整性校验失败")
             if always_argv_prefix is not None and tuple(always_argv_prefix) != request.proposed_argv_prefix:

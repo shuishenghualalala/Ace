@@ -13,7 +13,7 @@ import type {
   TrayNotificationSummary,
   TrayStatus,
 } from '../shared/types';
-import type { SecurityAuditArgs } from '../shared/ipc-schemas';
+import type { SecurityAuditArgs, SecurityDecisionArgs, SecurityDecisionReceiptArgs } from '../shared/ipc-schemas';
 import type { DesktopChatOutboxEntry, DesktopChatOutboxSnapshot } from '../shared/chat-outbox';
 import type { RendererCheckpoint, RendererCheckpointSnapshot } from '../shared/renderer-checkpoint';
 import type { DesktopGatewayReadiness } from './gateway-readiness';
@@ -203,14 +203,8 @@ const api = {
     sessionId: string;
     mode: 'request_approval' | 'auto_review' | 'full_access';
   }) => ipcRenderer.invoke('security:set-mode', args),
-  securityDecide: (args: {
-    workspaceId: string;
-    sessionId: string;
-    taskId?: string;
-    requestId: string;
-    decision: 'once' | 'session' | 'always' | 'reject';
-    alwaysArgvPrefix?: string[];
-  }) => ipcRenderer.invoke('security:decide', args),
+  securityDecide: (args: SecurityDecisionArgs) => ipcRenderer.invoke('security:decide', args),
+  securityDecisionReceipt: (args: SecurityDecisionReceiptArgs) => ipcRenderer.invoke('security:decision-receipt', args),
   securityCapabilities: () => ipcRenderer.invoke('security:capabilities', {}),
   securityRules: (args: { workspaceId: string }) => ipcRenderer.invoke('security:rules', args),
   securitySetRule: (args: { workspaceId: string; ruleId: string; enabled: boolean }) =>

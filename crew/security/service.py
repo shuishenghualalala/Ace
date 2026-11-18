@@ -19,6 +19,7 @@ from crew.security.approvals import (
     ApprovalError,
     ApprovalManager,
     ApprovalOutcome,
+    ApprovalSubmission,
 )
 from crew.security.audit import (
     _DURABLE_ACTION_TYPES,
@@ -763,6 +764,13 @@ class SecurityApprovalService:
         """
         return await self._waiters.wait(request_id)
 
+    def decision_receipt(self, context: SecurityContext, submission: ApprovalSubmission) -> dict:
+        with self._decision_lock:
+            if self.audit.has_approval_receipt(submission.event_id(context)):
+                return submission.receipt("recorded")
+            pending = self.approvals.get_pending(submission.request_id, context)
+            return submission.receipt("pending" if pending and pending.task_id == context.task_id else "unknown")
+
     def decide(
         self,
         context: SecurityContext,
@@ -771,6 +779,7 @@ class SecurityApprovalService:
         nonce: str,
         decision: ApprovalDecision,
         always_argv_prefix: Sequence[str] | None = None,
+        submission_id: str = "",
     ) -> dict:
         """Apply one decision under the decision lock.
 
@@ -786,7 +795,12 @@ class SecurityApprovalService:
             and decision in {ApprovalDecision.SESSION, ApprovalDecision.ALWAYS}
         ):
             raise ApprovalError("fake execution 只允许 once 或 reject")
+        submission = ApprovalSubmission.from_decision(
+            request_id, submission_id, decision, always_argv_prefix
+        ) if submission_id else None
         with self._decision_lock:
+            if submission and self.audit.has_approval_receipt(submission.event_id(context)):
+                return {"receipt": submission.receipt("recorded")}
             try:
                 return self._decide_locked(
                     context,
@@ -794,6 +808,7 @@ class SecurityApprovalService:
                     nonce=nonce,
                     decision=decision,
                     always_argv_prefix=always_argv_prefix,
+                    submission=submission,
                 )
             except ApprovalError as exc:
                 # 只有不存在/已处理/过期这类终态才唤醒等待方。nonce/context/prefix
@@ -810,6 +825,7 @@ class SecurityApprovalService:
         nonce: str,
         decision: ApprovalDecision,
         always_argv_prefix: Sequence[str] | None = None,
+        submission: ApprovalSubmission | None = None,
     ) -> dict:
         """Apply one decision and compensate grants/rules if durable audit fails."""
         outcome = self.approvals.decide(
@@ -829,46 +845,46 @@ class SecurityApprovalService:
                     action_summary=action_summary,
                     action_detail=action_detail,
                 )
-                self.rules.create(
-                    persisted_rule,
-                    os_user=context.os_user,
-                    owner_account_id=context.owner_account_id,
-                    workspace_id=context.workspace_id,
-                )
-                stored_rule = True
-                # 先持久化 → 再改内存：规则创建成功后失效快照，下一次 authorize 重建。
-                self._invalidate_rule_cache(context)
             event_context = replace(context, request_id=outcome.request.request_id)
-            self.audit.record(
-                AuditEvent.for_action(
-                    event_context,
-                    outcome.request.action,
-                    action_type="approval_decision",
-                    decision=outcome.decision.value,
-                    decision_source="desktop_user",
-                    rule_id=persisted_rule.rule_id if persisted_rule else "",
-                    rule_scope=(
-                        persisted_rule.scope.value
-                        if persisted_rule
-                        else outcome.grant.scope.value if outcome.grant else ""
-                    ),
-                    approval_mode=self.mode_for(context).value,
-                    tool_name=outcome.request.tool_name,
-                    additional_permissions_summary=_permissions_summary(
-                        outcome.request.additional_permissions
-                    ),
-                )
+            decision_event = AuditEvent.for_action(
+                event_context,
+                outcome.request.action,
+                action_type="approval_decision",
+                decision=outcome.decision.value,
+                decision_source="desktop_user",
+                rule_id=persisted_rule.rule_id if persisted_rule else "",
+                rule_scope=(
+                    persisted_rule.scope.value
+                    if persisted_rule
+                    else outcome.grant.scope.value if outcome.grant else ""
+                ),
+                approval_mode=self.mode_for(context).value,
+                tool_name=outcome.request.tool_name,
+                additional_permissions_summary=_permissions_summary(
+                    outcome.request.additional_permissions
+                ),
             )
-            if persisted_rule is not None:
-                self.audit.record(
-                    AuditEvent.for_rule(
-                        event_context,
-                        rule_id=persisted_rule.rule_id,
-                        action_type="rule_created",
-                        decision="allow",
-                        action=outcome.request.action,
-                    )
+            if submission:
+                decision_event = replace(decision_event, event_id=submission.event_id(context))
+            if persisted_rule is None:
+                self.audit.record(decision_event)
+            else:
+                rule_event = AuditEvent.for_rule(
+                    event_context, rule_id=persisted_rule.rule_id, action_type="rule_created",
+                    decision="allow", action=outcome.request.action,
                 )
+                if self.audit.db_path == self.rules.db_path and self.audit.db_path.name != ":memory:":
+                    self.audit.record_rule_decision(context, persisted_rule, rule_event, decision_event)
+                else:
+                    # Embedders may keep the rule and audit stores in separate files.
+                    self.rules.create(
+                        persisted_rule, os_user=context.os_user, owner_account_id=context.owner_account_id,
+                        workspace_id=context.workspace_id,
+                    )
+                    stored_rule = True
+                    self.audit.record(rule_event)
+                    self.audit.record(decision_event)
+                self._invalidate_rule_cache(context)
         except Exception:
             if stored_rule and outcome.persistent_rule is not None:
                 self.rules.delete(
@@ -880,6 +896,7 @@ class SecurityApprovalService:
                 self._invalidate_rule_cache(context)
             if outcome.grant is not None:
                 self.grants.revoke(outcome.grant.grant_id)
+            self._waiters.resolve(request_id, None)
             raise
         if outcome.decision is ApprovalDecision.REJECT:
             self._recent_rejections[_rejection_key(context, outcome.request.action)] = (
@@ -889,12 +906,16 @@ class SecurityApprovalService:
         self._waiters.resolve(outcome.request.request_id, outcome)
         self._notify_request_decided(context.owner_account_id, outcome.request.request_id)
         if outcome.request.tool_name == "security_fake_exec":
-            return self._fake_result(context, outcome)
-        return {
-            "status": "authorized" if outcome.grant is not None else "rejected",
-            "started_process": False,
-            "decision": outcome.decision.value,
-        }
+            result = self._fake_result(context, outcome)
+        else:
+            result = {
+                "status": "authorized" if outcome.grant is not None else "rejected",
+                "started_process": False,
+                "decision": outcome.decision.value,
+            }
+        if submission:
+            result["receipt"] = submission.receipt("recorded")
+        return result
 
     def _rejection_cooldown_active(
         self,
@@ -1192,6 +1213,7 @@ def _public_request(request, *, include_nonce: bool) -> dict:
     action = asdict(request.action)
     payload = {
         "request_id": request.request_id,
+        "decision_receipts": 1,
         "action": action,
         "action_digest": request.action_digest,
         "tool_name": request.tool_name,
