@@ -49,9 +49,9 @@ async def test_push_assigns_gateway_sequence_and_buffers(conn: ConnectionManager
     assert ws.sent[0]["gateway_sequence"] == 1
     assert ws.sent[1]["gateway_sequence"] == 2
     # 缓存中保有副本
-    assert len(conn._chunk_buffers[key]) == 2
-    assert conn._chunk_buffers[key][0]["gateway_sequence"] == 1
-    assert conn._chunk_buffers[key][1]["gateway_sequence"] == 2
+    assert conn._journal.count(key) == 2
+    assert list(conn._journal.after(key, 2, 0))[0]["gateway_sequence"] == 1
+    assert list(conn._journal.after(key, 2, 0))[1]["gateway_sequence"] == 2
 
 
 @pytest.mark.asyncio
@@ -70,7 +70,7 @@ async def test_buffer_survives_disconnect(conn: ConnectionManager):
     await conn.push_payload("s1", {"kind": "final", "body": {"text": "done"}}, owner_account_id="")
 
     # 缓存保留
-    assert len(conn._chunk_buffers[key]) == 3
+    assert conn._journal.count(key) == 3
 
 
 @pytest.mark.asyncio
@@ -464,7 +464,7 @@ async def test_logout_during_replay_does_not_restore_subscription(conn: Connecti
     await asyncio.wait_for(asyncio.gather(replay, push), timeout=1)
     assert replay.result() is False
     assert not conn.has_connection("s1", owner_account_id="owner")
-    assert ("owner", "s1") not in conn._chunk_buffers
+    assert conn._journal.count(("owner", "s1")) == 0
 
 
 @pytest.mark.asyncio
@@ -513,8 +513,8 @@ async def test_same_session_id_is_buffered_per_owner(conn: ConnectionManager):
 
     assert [p["body"]["text"] for p in ws_a.sent] == ["a"]
     assert [p["body"]["text"] for p in ws_b.sent] == ["b"]
-    assert conn._chunk_buffers[("A:uid-a", "same")][0]["gateway_sequence"] == 1
-    assert conn._chunk_buffers[("B:uid-b", "same")][0]["gateway_sequence"] == 1
+    assert next(conn._journal.after(("A:uid-a", "same"), 1, 0))["gateway_sequence"] == 1
+    assert next(conn._journal.after(("B:uid-b", "same"), 1, 0))["gateway_sequence"] == 1
 
 
 @pytest.mark.asyncio
@@ -591,9 +591,9 @@ async def test_close_owner_drops_sockets_pending_frames_and_replay_buffer(conn: 
     assert ws_a.close_code == 4401
     assert conn._owner_conns.get("A:uid-a") is None
     assert conn._conns.get(("A:uid-a", "same")) is None
-    assert conn._chunk_buffers.get(("A:uid-a", "same")) is None
+    assert conn._journal.count(("A:uid-a", "same")) == 0
     assert conn.has_connection("same", owner_account_id="B:uid-b") is True
-    assert len(conn._chunk_buffers[("B:uid-b", "same")]) == 1
+    assert conn._journal.count(("B:uid-b", "same")) == 1
 
 
 @pytest.mark.asyncio
@@ -616,7 +616,7 @@ async def test_clear_buffer_clears_payloads_but_keeps_sequence(conn: ConnectionM
     await conn.push_payload("s1", {"kind": "delta", "body": {"text": "a"}}, owner_account_id="")
     key = ("", "s1")
     assert conn._gateway_seq[key] == 1
-    assert len(conn._chunk_buffers[key]) == 1
+    assert conn._journal.count(key) == 1
 
     conn.clear_buffer("s1", owner_account_id="")
     await conn.push_payload("s1", {"kind": "delta", "body": {"text": "b"}}, owner_account_id="")
@@ -624,7 +624,7 @@ async def test_clear_buffer_clears_payloads_but_keeps_sequence(conn: ConnectionM
     # 清空缓存后 sequence 保持单调递增，不重置；缓存只保留新帧
     assert conn._gateway_seq[key] == 2
     assert ws.sent[-1]["gateway_sequence"] == 2
-    assert len(conn._chunk_buffers[key]) == 1
+    assert conn._journal.count(key) == 1
 
 
 @pytest.mark.asyncio
@@ -874,3 +874,28 @@ async def test_tool_result_remains_rate_limited():
     assert conn._pending_payloads[key][0]["body"]["phase"] == "result"
     conn.unregister_all(ws, {"s1"}, owner_account_id="")
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_replay_window_limits_preserve_contiguous_suffix_and_resync(monkeypatch):
+    monkeypatch.setattr("crew.gateway.connections._REPLAY_SESSION_BYTES", 600)
+    monkeypatch.setattr("crew.gateway.connections._REPLAY_TOTAL_BYTES", 900)
+    monkeypatch.setattr("crew.gateway.connections._REPLAY_SESSIONS", 2)
+    conn = ConnectionManager(min_interval=0)
+    first = {"kind": "delta", "body": {"text": "a"}}
+    await conn.push_payload("hot", first, owner_account_id="a")
+    epoch = first["gateway_epoch"]
+    await conn.push_payload("hot", {"kind": "delta", "body": {"text": "x" * 800}}, owner_account_id="a")
+    await conn.push_payload("hot", {"kind": "final", "is_final": True}, owner_account_id="a")
+    for cursor, expected in ((1, "gateway_resync"), (2, "final")):
+        socket = _FakeWS()
+        await conn.replay("hot", socket, owner_account_id="a", resume_cursor={"epoch": epoch, "sequence": cursor})
+        assert [f["kind"] for f in socket.sent] == [expected]
+        assert socket.sent[0]["gateway_sequence"] == 3
+    for i in range(10):
+        await conn.push_payload(str(i), {"kind": "delta", "body": {"text": "é" * 50}}, owner_account_id="b")
+        assert conn._journal.size <= 900
+    assert conn._journal.count(("a", "hot")) == 0
+    assert conn._journal.count(("b", "9")) == 1
+    await conn.close_owner("b")
+    assert conn._journal.size == 0

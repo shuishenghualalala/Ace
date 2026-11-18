@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections import OrderedDict, defaultdict, deque
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
@@ -28,6 +28,7 @@ from uuid import uuid4
 from fastapi import WebSocket
 
 from crew.core.followup import get_followup_waiter
+from crew.gateway.replay_journal import ReplayJournal
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.connections")
@@ -36,6 +37,9 @@ log = get_logger("gateway.connections")
 _MAX_CONSECUTIVE_FAILURES = 3
 # 每个 session 缓存的 WS payload 上限，用于断线重连后回放
 _CHUNK_BUFFER_SIZE = 2000
+_REPLAY_SESSION_BYTES = 2 * 1024 * 1024
+_REPLAY_TOTAL_BYTES = 16 * 1024 * 1024
+_REPLAY_SESSIONS = 128
 _MAX_PENDING_FOLLOWUPS = 8
 _MAX_FOLLOWUP_SESSIONS = 128
 _MAX_FOLLOWUP_FRAME_BYTES = 32_768
@@ -83,9 +87,7 @@ class ConnectionManager:
         self._ws_to_sessions: dict[WebSocket, set[tuple[str, str]]] = defaultdict(set)
         self._ws_to_owners: dict[WebSocket, set[str]] = defaultdict(set)
         # 断线回放：每个 session 的有界 payload 缓存 + 单调 gateway_sequence + 回放锁
-        self._chunk_buffers: dict[tuple[str, str], deque[dict]] = defaultdict(
-            lambda: deque(maxlen=_CHUNK_BUFFER_SIZE)
-        )
+        self._journal = ReplayJournal(_CHUNK_BUFFER_SIZE, _REPLAY_SESSION_BYTES, _REPLAY_TOTAL_BYTES, _REPLAY_SESSIONS)
         self._gateway_seq: dict[tuple[str, str], int] = defaultdict(int)
         self._replay_locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
         self._gateway_epoch = uuid4().hex
@@ -248,7 +250,6 @@ class ConnectionManager:
                 self._consecutive_failures,
                 self._pending_payloads,
                 self._flush_tasks,
-                self._chunk_buffers,
                 self._gateway_seq,
                 self._replay_locks,
                 self._pending_followups,
@@ -257,9 +258,9 @@ class ConnectionManager:
             for key in mapping
             if key[0] == owner
         }
+        self._journal.clear_owner(owner)
         for key in owner_keys:
             self._cleanup_session_state(key)
-            self._chunk_buffers.pop(key, None)
             self._gateway_seq.pop(key, None)
             self._replay_locks.pop(key, None)
             self._pending_followups.pop(key, None)
@@ -510,8 +511,12 @@ class ConnectionManager:
             self._gateway_seq[key] += 1
             payload["gateway_sequence"] = self._gateway_seq[key]
             payload["gateway_epoch"] = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
-            self._chunk_buffers[key].append(dict(payload))
-            self._record_snapshot_frame(key, payload)
+            try:
+                encoded = _encode_snapshot_part(payload)
+            except (TypeError, ValueError):
+                encoded = None
+            self._journal.append(key, encoded)
+            self._record_snapshot_frame(key, payload, encoded)
             if payload.get("kind") == "followup_question":
                 self._remember_followup(key, payload)
 
@@ -622,7 +627,7 @@ class ConnectionManager:
                 request_id, started_at, history_bytes, _MAX_ACTIVE_SNAPSHOT_BYTES - len(history_bytes),
             )
 
-    def _record_snapshot_frame(self, key: tuple[str, str], payload: dict) -> None:
+    def _record_snapshot_frame(self, key: tuple[str, str], payload: dict, encoded: bytes | None) -> None:
         snapshot = self._active_snapshots.get(key)
         if snapshot is None or payload.get("request_id") != snapshot.request_id:
             return
@@ -637,12 +642,7 @@ class ConnectionManager:
             return
         if kind not in _SNAPSHOT_KINDS or (kind == "status" and (payload.get("body") or {}).get("control")):
             return
-        try:
-            encoded = _encode_snapshot_part(payload)
-        except (ValueError, TypeError):
-            self._active_snapshots.pop(key, None)
-            return
-        if len(encoded) > snapshot.remaining:
+        if encoded is None or len(encoded) > snapshot.remaining:
             self._active_snapshots.pop(key, None)
             return
         snapshot.remaining -= len(encoded)
@@ -756,9 +756,8 @@ class ConnectionManager:
         async with lock:
             if self._replay_locks.get(key) is not lock:
                 return False
-            retained = self._chunk_buffers.get(key)
             head = self._gateway_seq.get(key, 0)
-            floor = retained[0]["gateway_sequence"] - 1 if retained else head
+            floor = head - self._journal.count(key)
             epoch = self._owner_replay_epochs.get(key[0], self._gateway_epoch)
             reason = None
             if repair_id is not None:
@@ -774,8 +773,7 @@ class ConnectionManager:
                 # full prefix when the log starts partway through this turn.
                 reason = "cursor_expired"
             frames = {} if reason else {
-                payload["gateway_sequence"]: payload for payload in retained or ()
-                if payload["gateway_sequence"] > after_gateway_sequence
+                payload["gateway_sequence"]: payload for payload in self._journal.after(key, head, after_gateway_sequence)
             }
             pending = self._pending_payloads.get(key)
             live_sequences: set[int] = set()
@@ -831,7 +829,7 @@ class ConnectionManager:
         todo_updated / plan 状态帧丢失。
         """
         key = self._key(session_id, owner_account_id)
-        self._chunk_buffers.pop(key, None)
+        self._journal.clear(key)
 
     async def _delayed_flush(self, key: tuple[str, str], delay: float) -> None:
         """等待 delay 秒后刷新缓存的帧。"""
