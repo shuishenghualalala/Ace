@@ -17,9 +17,18 @@ from crew.state.config import Config
 from crew.dynamickanban.feature import (
     DYNAMIC_KANBAN_FEATURE_ID,
     DYNAMIC_KANBAN_SERVICE_KEY,
+    DynamicKanbanConsumer,
     build_dynamic_kanban_feature,
 )
-from crew.features import FeatureLeaseUnavailableError, FeatureRuntime, FeatureState
+from crew.dynamickanban.store import SQLiteKanbanStore
+from crew.features import (
+    FeatureGeneration,
+    FeatureLeaseUnavailableError,
+    FeatureRuntime,
+    FeatureScope,
+    FeatureState,
+    FeatureStopPolicy,
+)
 from crew.tools.registry import Registry
 
 
@@ -65,6 +74,60 @@ async def test_dynamic_kanban_activation_publishes_consumer_and_deactivation_cle
     assert host.dynamic_kanban_consumer is None
     with pytest.raises(FeatureLeaseUnavailableError):
         consumer.get_workflow(workflow.id, owner_account_id="owner-1")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_history_read_keeps_generation_alive_until_sqlite_finishes(tmp_path):
+    loop = asyncio.get_running_loop()
+    read_started = asyncio.Event()
+    read_finished = asyncio.Event()
+    draining = asyncio.Event()
+    completed_ids = []
+
+    class ObservedStore(SQLiteKanbanStore):
+        def list_session_events(self, *args, **kwargs):
+            loop.call_soon_threadsafe(read_started.set)
+            try:
+                events = super().list_session_events(*args, **kwargs)
+                completed_ids.extend(event.id for event in events)
+                return events
+            finally:
+                loop.call_soon_threadsafe(read_finished.set)
+
+    store = ObservedStore(tmp_path / "kanban.db")
+    scope = FeatureScope(FeatureGeneration(DYNAMIC_KANBAN_FEATURE_ID, 1))
+    scope.observe_state(lambda state: draining.set() if state is FeatureState.DRAINING else None)
+    scope.activate()
+    consumer = DynamicKanbanConsumer(store, scope).for_owner("owner-1")
+    context = {"source": "team", "owner_account_id": "owner-1"}
+    workflow = consumer.create_workflow(session_id="session-1", title="History", context=context)
+    event = consumer.add_event(workflow.id, "team_review", payload={"text": "review"})
+    try:
+        async with asyncio.timeout(5):
+            with store._lock:
+                request = asyncio.create_task(consumer.list_session_events_async(
+                    "session-1", source="team", event_types=("team_review",),
+                ))
+                await read_started.wait()
+                request.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+                stop = asyncio.create_task(scope.stop(FeatureStopPolicy.DRAIN, timeout_seconds=5))
+                await draining.wait()
+                assert [lease.label for lease in scope.active_leases] == ["team:kanban:history"]
+                assert not stop.done() and not completed_ids
+            await stop
+        assert completed_ids == [event.id]
+        assert scope.active_leases == ()
+        assert scope.state is FeatureState.DISPOSED
+    finally:
+        # Keep teardown safe even when a regression disposes the scope early.
+        if read_started.is_set():
+            await asyncio.wait_for(read_finished.wait(), timeout=5)
+        try:
+            await scope.stop(timeout_seconds=5)
+        finally:
+            store.close()
 
 
 @pytest.mark.asyncio

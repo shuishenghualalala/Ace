@@ -1467,6 +1467,35 @@ class SQLiteKanbanStore:
         ).fetchall()
         return [self._row_to_event(r) for r in rows]
 
+    def list_session_events(
+        self, session_id: str, *, source: str, event_types: tuple[str, ...],
+    ) -> list[BoardEvent]:
+        """Read the selected events across a session and its turns in write order for tied timestamps."""
+        owner = self._require_owner()
+        if not session_id or not event_types:
+            return []
+        prefix = f"{session_id}::turn::"
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT e.* FROM kanban_workflows AS w
+                JOIN kanban_events AS e ON e.workflow_id = w.id
+                WHERE w.owner_account_id = :owner AND w.isolation_state = 'owned'
+                  AND (w.session_id = :sid OR substr(w.session_id, 1, length(:prefix)) = :prefix)
+                  AND CASE WHEN json_valid(w.context) THEN
+                      json_extract(w.context, '$.source') = :source
+                      AND json_extract(w.context, '$.owner_account_id') = :owner
+                  END
+                  AND e.event_type IN (SELECT value FROM json_each(:event_types))
+                ORDER BY e.ts, e.rowid
+                """,
+                {
+                    "owner": owner, "sid": session_id, "prefix": prefix,
+                    "source": source, "event_types": json.dumps(event_types),
+                },
+            ).fetchall()
+        return [self._row_to_event(row) for row in rows]
+
     # ------------------------------------------------------------------ #
     # Explicit Plan Extension
     # ------------------------------------------------------------------ #

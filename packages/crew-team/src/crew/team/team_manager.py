@@ -79,7 +79,7 @@ from crew.team.delegate_tool import (
 )
 from crew.team.formation import role_key_for_capabilities
 from crew.team.graph_planner import TeamGraphPlanner, schedule_planning_provider_warmup
-from crew.team.history_projection import project_team_event_history
+from crew.team.history_projection import TEAM_HISTORY_EVENT_TYPES, project_team_event_history
 from crew.team.models import (
     RuntimeStaffingRequest,
     TeamMemberSpec,
@@ -2761,8 +2761,20 @@ class InProcessTeamManager(TeamManager):
         sid = str(session_id or "").strip()
         if not sid:
             return []
-        workflow_ids = self._team_workflow_ids_for_session(sid, owner_account_id)
-        return project_team_event_history(store, workflow_ids)
+        events = store.list_session_events(sid, source="team", event_types=TEAM_HISTORY_EVENT_TYPES)
+        return project_team_event_history(events)
+
+    async def event_history_for_session_async(self, session_id: str, owner_account_id: str) -> list[dict[str, Any]]:
+        store = self._kanban_store_for_owner(owner_account_id)
+        sid = str(session_id or "").strip()
+        if store is None or not sid:
+            return []
+        read = getattr(store, "list_session_events_async", None)
+        if callable(read):
+            events = await read(sid, source="team", event_types=TEAM_HISTORY_EVENT_TYPES)
+        else:
+            events = await asyncio.to_thread(store.list_session_events, sid, source="team", event_types=TEAM_HISTORY_EVENT_TYPES)
+        return await asyncio.to_thread(project_team_event_history, events)
 
     def update_plan_node(
         self,

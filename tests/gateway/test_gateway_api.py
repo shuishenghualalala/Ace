@@ -1327,6 +1327,77 @@ async def test_team_task_api_hides_parent_turn_when_plan_has_no_delegate_tasks(t
 
 
 @pytest.mark.asyncio
+async def test_team_history_recovers_all_workflows_and_visible_events(tmp_path, auth_headers):
+    cfg = Config(db_path=str(tmp_path / "crew.db"), kanban_db_path=str(tmp_path / "kanban.db"), cron_enabled=False)
+    crew = build_app(config=cfg, enable_team=True)
+    parent = "history_team"
+    neighbor = "historyXteam"
+    foreign_owner = "B:uid-b"
+
+    def workflow(owner, sid, turn):
+        crew.session_store.ensure_session(sid, owner_account_id=owner)
+        crew.session_store.set_agent_config(sid, {"executor": "team"}, owner_account_id=owner)
+        store = crew.dynamic_kanban.store.for_owner(owner)
+        turn_sid = f"{sid}::turn::{turn}"
+        wf = store.create_workflow(turn_sid, turn, {"source": "team", "owner_account_id": owner})
+        return store, wf
+
+    try:
+        store, older = workflow(OWNER_A, parent, "old")
+        store, recent = workflow(OWNER_A, parent, "new")
+        neighbor_store, similar = workflow(OWNER_A, neighbor, "other")
+        foreign_store, foreign = workflow(foreign_owner, parent, "old")
+        neighbor_store.add_event(similar.id, "team_decision", payload={"text": "only neighbor"})
+        foreign_store.add_event(foreign.id, "team_decision", payload={"text": "only foreign owner"})
+        request_id = "early-ask"
+        store.add_event(older.id, "team_communication", actor="coder", payload={
+            "text": "early question", "request_id": request_id,
+            "communication_kind": "ask_request", "communication_status": "pending",
+        })
+        expected = ["early question"]
+        for index in range(505):
+            text = f"visible decision {index:03d}"
+            store.add_event(older.id, "team_decision", actor="coder", payload={"text": text})
+            expected.append(text)
+        for index in range(505):
+            store.add_event(older.id, "workflow_update", payload={"text": f"internal bookkeeping {index}"})
+        store.add_event(older.id, "team_communication", actor="coder", payload={
+            "text": "hidden lifecycle", "request_id": request_id,
+            "communication_kind": "ask_lifecycle", "communication_status": "answered",
+        })
+        store.add_event(older.id, "team_communication", actor="coder", payload={
+            "text": "late answer", "request_id": request_id,
+            "communication_kind": "ask_answer", "communication_status": "answered",
+        })
+        first = store.add_event(recent.id, "team_decision", payload={"text": "same time first"})
+        second = store.add_event(recent.id, "team_decision", payload={"text": "same time second"})
+        with sqlite3.connect(cfg.kanban_db_path) as conn:
+            conn.execute("UPDATE kanban_events SET ts=? WHERE id=?", (first.ts, second.id))
+        expected.extend(["late answer", "same time first", "same time second"])
+        # A newly created active plan can coexist with older workflows restored from disk.
+        crew.team._plan_workflows[(OWNER_A, recent.session_id)] = recent.id
+
+        app = create_app(crew)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=auth_headers) as client:
+            for sid, expected_texts in ((parent, expected), (neighbor, ["only neighbor"])):
+                complete = await client.get(f"/api/session/{sid}")
+                snapshot = await client.get(f"/api/session/{sid}/history", params={"limit": 10})
+                assert complete.status_code == snapshot.status_code == 200
+                rows = complete.json()
+                assert snapshot.json() == {"items": rows, "has_more": False, "next_before": None, "mode": "snapshot"}
+                assert [row["content"] for row in rows] == expected_texts
+                assert all(row["role"] == "team_internal" for row in rows)
+                if sid == parent:
+                    asks = [(row["communication_kind"], row["communication_status"]) for row in rows
+                            if row.get("request_id") == request_id]
+                    assert asks == [("ask_request", "answered"), ("ask_answer", "answered")]
+    finally:
+        await crew.shutdown()
+
+
+
+
+@pytest.mark.asyncio
 async def test_team_session_history_uses_visible_parent_turns_only(tmp_path, auth_headers):
     cfg = Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False)
     crew = build_app(config=cfg, enable_team=True)

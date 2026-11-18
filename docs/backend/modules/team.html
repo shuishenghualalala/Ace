@@ -85,6 +85,7 @@ mode = "team"
 service = ServiceKey("team")  # InProcessTeamManager
 execute = build_team_feature(...).definition</code></pre>
 
+  <p>Team 历史对同一账号和父会话读取全部相关的持久工作流事件，包括该父会话的逐轮工作流。Team 定义公开事件种类，Dynamic Kanban 在数据库中筛选并按事件时间及写入顺序返回。历史投影随后合并协作日志与成员记录，早期追问使用后续事件恢复状态。历史读取独立于进程内的新工作流缓存。</p>
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li><code>team_internal</code> 仍是 Core ResponseChunk kind，后续迁入命名空间 Feature Event。</li>

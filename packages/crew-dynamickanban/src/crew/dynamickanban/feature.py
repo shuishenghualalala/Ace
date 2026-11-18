@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Protocol
 
 from crew.dynamickanban.manager import DynamicKanbanManager
+from crew.dynamickanban.models import BoardEvent
 from crew.dynamickanban.store import SQLiteKanbanStore
 from crew.features import (
     ExecutionDriver,
@@ -56,6 +59,34 @@ class DynamicKanbanConsumer:
     def list_workflows_by_session_prefix(self, session_id: str, *, owner_account_id: str) -> Any:
         return self._call("team:kanban:hydrate", lambda: self._scoped(owner_account_id).list_workflows_by_session_prefix(session_id))
 
+    def list_session_events(
+        self, session_id: str, *, source: str, event_types: tuple[str, ...], owner_account_id: str,
+    ) -> list[BoardEvent]:
+        return self._call(
+            "team:kanban:history",
+            lambda: self._scoped(owner_account_id).list_session_events(session_id, source=source, event_types=event_types),
+        )
+
+    async def list_session_events_async(
+        self, session_id: str, *, source: str, event_types: tuple[str, ...], owner_account_id: str,
+    ) -> list[BoardEvent]:
+        read = partial(self._scoped(owner_account_id).list_session_events, session_id, source=source, event_types=event_types)
+        lease = self._scope.acquire_lease("team:kanban:history")
+        try:
+            worker = asyncio.get_running_loop().run_in_executor(None, read)
+        except BaseException:
+            lease.release()
+            raise
+        # A cancelled HTTP request cannot interrupt a running SQLite read. Keep
+        # the generation alive until the worker finishes, and release on the loop.
+        def read_finished(done: asyncio.Future) -> None:
+            lease.release()
+            if not done.cancelled():
+                done.exception()
+
+        worker.add_done_callback(read_finished)
+        return await asyncio.shield(worker)
+
     def get_board_state(self, workflow_id: str, *, owner_account_id: str) -> Any:
         return self._call("team:kanban:board", lambda: self._scoped(owner_account_id).get_board_state(workflow_id))
 
@@ -95,6 +126,10 @@ class _OwnerConsumer:
         self._consumer, self._owner = consumer, owner
     def list_workflows_by_session_prefix(self, session_id: str) -> Any:
         return self._consumer.list_workflows_by_session_prefix(session_id, owner_account_id=self._owner)
+    def list_session_events(self, session_id: str, *, source: str, event_types: tuple[str, ...]) -> list[BoardEvent]:
+        return self._consumer.list_session_events(session_id, source=source, event_types=event_types, owner_account_id=self._owner)
+    async def list_session_events_async(self, session_id: str, *, source: str, event_types: tuple[str, ...]) -> list[BoardEvent]:
+        return await self._consumer.list_session_events_async(session_id, source=source, event_types=event_types, owner_account_id=self._owner)
     def get_board_state(self, workflow_id: str) -> Any:
         return self._consumer.get_board_state(workflow_id, owner_account_id=self._owner)
     def create_workflow_graph(self, session_id: str, title: str, **kwargs: Any) -> Any:

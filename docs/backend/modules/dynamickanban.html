@@ -83,6 +83,7 @@ generation = "product.dynamic-kanban@g1"
 service = "dynamic-kanban"
 execute = DynamicKanbanManager.interact</code></pre>
 
+  <p>历史消费者可以按账号、精确会话、逐轮子会话、工作流来源和事件类型读取持久事件。看板的最近事件列表保留原上限。历史读取在同一数据库写锁下取数，时间戳相同的事件按写入顺序返回。Gateway 异步读取从当前代次租用服务，数据库线程完成后才归还租约，调用方取消时停止流程仍等待在途读取。</p>
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>独立生命周期与实际宿主装配的验收结果待测试记录收口；本页不代表阶段 4 全部完成。</li>
