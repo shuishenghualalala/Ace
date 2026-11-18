@@ -420,7 +420,7 @@ def test_development_python_toolchain_exposes_symlinked_interpreter_root(
     venv_root = tmp_path / ".venv"
     venv_bin = venv_root / "bin"
     venv_bin.mkdir(parents=True)
-    (venv_bin / "python3").symlink_to(real_bin / "python3.11")
+    _link_tool_executable(venv_bin / "python3", real_bin / "python3.11")
     (venv_root / "pyvenv.cfg").write_text("home = /uv-python/bin\n", encoding="utf-8")
     monkeypatch.setattr(home_module.sys, "frozen", False, raising=False)
     monkeypatch.setattr(
@@ -476,9 +476,9 @@ def test_development_node_toolchain_does_not_expose_complete_install_prefix(
     (node_bin / "node").write_text("", encoding="utf-8")
     (npm_bin / "npm-cli.js").write_text("", encoding="utf-8")
     (npm_bin / "npx-cli.js").write_text("", encoding="utf-8")
-    (bin_dir / "node").symlink_to(node_bin / "node")
-    (bin_dir / "npm").symlink_to(npm_bin / "npm-cli.js")
-    (bin_dir / "npx").symlink_to(npm_bin / "npx-cli.js")
+    _link_tool_executable(bin_dir / "node", node_bin / "node")
+    _link_tool_executable(bin_dir / "npm", npm_bin / "npm-cli.js")
+    _link_tool_executable(bin_dir / "npx", npm_bin / "npx-cli.js")
     monkeypatch.setattr(
         home_module.shutil,
         "which",
@@ -493,6 +493,39 @@ def test_development_node_toolchain_does_not_expose_complete_install_prefix(
     assert node_root.resolve() in roots
     assert npm_root.resolve() in roots
     assert prefix.resolve() not in roots
+
+
+def _link_tool_executable(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if os.name == "nt" and exc.winerror == 1314:
+            pytest.skip("File symlinks require Windows Developer Mode or a symlink privilege")
+        raise
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows venv launcher and Node command shims")
+def test_development_windows_toolchains_use_venv_and_node_install_roots(tmp_path, monkeypatch, directory_link):
+    import venv
+
+    venv_root = tmp_path / "python-env"
+    venv.EnvBuilder(with_pip=False).create(venv_root)
+    python_bin = venv_root / "Scripts"
+    node_dir = tmp_path / "node-versions" / "v22"
+    node_dir.mkdir(parents=True)
+    for name in ("node.exe", "npm.cmd", "npx.cmd"):
+        (node_dir / name).touch()
+    alias = tmp_path / "node-active"
+    directory_link(alias, node_dir)
+    monkeypatch.setenv("PATH", str(alias))
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+    monkeypatch.delenv("CREW_PACKAGED", raising=False)
+    monkeypatch.setattr(home_module.sys, "executable", str(python_bin / "python.exe"))
+
+    path_dirs, roots = home_module._development_runtime_toolchain()
+
+    assert path_dirs == [str(python_bin.resolve()), str(node_dir.resolve())]
+    assert roots == (venv_root.resolve(), node_dir.resolve())
 
 
 def test_packaged_node_npm_runtime_stays_first_on_managed_path(tmp_path, monkeypatch):
