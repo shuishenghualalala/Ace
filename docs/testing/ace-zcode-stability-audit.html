@@ -266,7 +266,26 @@
 <tr><td>F6 · 工作区根路径与列表请求</td><td>渲染器在所有平台把路径转小写。在区分大小写的卷上，两个工作区可能被当成同一个。查找不存在的根目录时，测试替换目录 IO 后，500 个候选发起 500 次列表查询，实际函数累计处理 250,000 行。</td><td>Ace <code>desktop/src/ui/features/workspaces.ts</code>、<code>desktop/src/main/workspace-directory.ts</code>；ZCode <code>packages/services/src/session/claude-native/claudeNativeSessionImportRepo.ts</code>。验收大小写敏感卷、链接、目录复用和批量查找请求数。</td></tr>
 <tr><td>F7 · Gateway 子进程日志</td><td>轮转仅在接管子进程时检查。一次合成突发产生 6,304,566 字节，跨过 2 MiB 阈值后同一活动文件仍在增长，写队列一度容纳全部数据。</td><td>Ace <code>desktop/src/main/index.ts</code> 的 <code>attachGatewayLog</code>；ZCode <code>packages/desktop/src/main/desktopCrashCapture.ts</code> 为诊断目录实施留存上限。验收长时间运行、慢盘、交错输出、磁盘故障与退出。</td></tr>
 </tbody></table></div>
-<p>此前已列出的 A11 工具结果恢复、A12 实际停止、D8 包态发布、F4 首屏列表与 F5 慢客户端隔离仍需分别验收。新发现以具体入口及实测范围为准。</p>
+<h3>已完成的接手验收</h3>
+<ul>
+<li><strong>安全审批回执 · <code>56cff6d0</code></strong> Windows 原生 Electron 分别提交一次性允许和拒绝，Gateway 已处理决定后切断回应，再重启两端。桌面从回执恢复原结果。允许只写入一次隔离文件，拒绝未创建文件。四项服务端新增回归覆盖并发、重启、账号隔离与审计事务。TypeScript 与 83 项桌面定向测试通过。安全套件 480 项通过、8 项跳过，其余 6 项在独立基线复现。</li>
+<li><strong>桌面和直连 Plan · <code>e38c1426</code></strong> 真实 Chrome 双标签通过当前 Gateway 验证。在能力公告到达前提交带版本计划，审批帧数为零；在另一个标签改稿后，旧版本返回已过期。使用旧 Gateway 确认反馈发送失败时，修订状态继续显示为待核实。85 项定向回归通过。</li>
+<li><strong>身份刷新 · <code>b7b1ec4e</code></strong> Windows 原生 Electron 通过三组登录和切换场景。九个回环 HTTP 请求验证临时故障恢复、注销后迟到回包，以及切换账号后旧凭据失效。44 项定向测试通过。</li>
+<li><strong>macOS 安装包 · <code>6d53bb67</code> 与 <code>c23dd81f</code></strong> x64、arm64 下载选择通过两条实际 HTTP 下载和落盘测试，平台与架构由测试注入。另以真实 UDIF 映像通过格式验证到系统打开接口的交接。架构测试 12 项、格式和交接测试 17 项通过。macOS 原生挂载和运行仍待验证。</li>
+<li><strong>更新包替换 · <code>a02b1f04</code></strong> Windows 原生 Electron 经测试 TLS 端点下载并验证 Ed25519 签名。服务返回 503、签名无效或地址无效时，旧包仍可读。冷启动后恢复已保存的强制版本门槛，旧包安装调用被拒绝。通过桌面更新入口取得签名的测试程序后实际观察到新进程及旧包清理。63 项定向测试通过。该场景从已保存的强制更新记录开始。</li>
+<li><strong>独立 Web 的计划与导航 · <code>d38a0dab</code>、<code>8f2e71db</code></strong> Chrome 运行生产构建。默认配置下从外援切回真实会话，两个标签页提交同一草稿时只执行有效版本。丢回执或重连只查询原提交；在旧 Gateway 缺少相符执行 ID 时维持待核实。290 项 Web 测试、类型检查与生产构建通过。</li>
+<li><strong>活动进程日志 · <code>9c8ddb07</code></strong> Windows Electron 与真实 Gateway 交错写出 9,832,000 字节，三份日志均在 2 MiB 以内。模拟磁盘卡住时子进程继续输出 7,374,000 字节并通过健康检查。磁盘空间错误解除后同一进程恢复写入，关闭后确认退出标记和端口回收。18 项定向测试通过。</li>
+<li><strong>Gateway 回放内存 · <code>dc6b1ff3</code></strong> 实际回环 WebSocket 收到超大帧后的恢复水位，已有足够新游标的客户端只收到缺失的终态。向 160 个会话注入各 150 KiB 帧后，回放数据保留 16,754,063 字节，旧窗口游标收到过期响应。64 项回放与订阅回归通过。每个回合的历史仍由持久存储提供。</li>
+<li><strong>定向停止与工具退出 · <code>97449657</code></strong> Windows 真实终端在约 33.5 ms 后退出，随后的 250 ms 未再写入测试文件。无法中断的线程保留“退出待确认”，真实 stdio MCP 客户端接到取消通知，未取得远端退出证明的调用保持待核实。Electron 与独立 Web 均经实际 Gateway 验证，旧停止请求迟到时，排队的后续回合正常完成。264 项后端、125 项桌面及全部 293 项 Web 测试通过。对照 ZCode 的回合控制和工具执行生命周期，具体路径见 A12。</li>
+<li><strong>会话目录首屏与并发 · <code>b6f6ccd7</code>、<code>74d3e4e5</code>、<code>1f01c055</code></strong> 64 个会话的状态查询从 65 次降至 1 次。Windows Electron 在一组一万条旧会话的前后对照中，首行从 73.26 秒减至 15.63 秒。随后把启动页限制为 32 行，活动会话按 ID 单独恢复。100、1,000、一万行的首页均约 13.6 KB，一万行的 30 次首页 HTTP 测量 P95 为 24.1 ms。将后台翻页阻塞时仍可打开选中的旧会话；完整目录在一万条时仍需 41 个请求。桌面目录变更使用请求代次，旧回包无法复活已删除项。真实 Electron 运行两次置顶并穿插新建、归档、删除，最后核对四项状态；强制响应倒序回归在旧代码失败。分项回归为后端 43 和 68 项、桌面 27、64 和 14 项。对照路径见 F4。</li>
+<li><strong>慢订阅隔离 · <code>1317ca95</code></strong> 同一 Gateway 上阻塞一个订阅的回放写入，健康订阅仍收到全部八个事件，包括一个终态。慢端超过上限收到 1013，按游标重连后只收到一个终态。128 项相关回归通过。会话锁和序列元数据的长期驻留另行测量。对照路径见 F5。</li>
+<li><strong>文件夹绑定 · <code>e7130c4b</code></strong> 两个 Chrome 客户端连接同一 Gateway，在 Windows 目录与实际 junction 之间重复选择，改名后保留旧路径别名，三个入口都回到原工作区。显式创建共享根的旧 API 仍可用，另一个账号的数据保持隔离。25 项桌面与 30 项后端回归通过。Ace <code>crew/state/workspace_store.py</code>；ZCode 的项目根身份与选择入口见本页 F6 记录。</li>
+<li><strong>模型流中断 · <code>f0e6ecbb</code></strong> 使用真实 Gateway、WebSocket、OpenAI 兼容 SDK 与可控模型端点。发送一个参数完整的读取及一个截断的写入，在读取结束后断开 HTTP。旧版下一次模型请求缺少读取结果；修复后，有正文与无正文两种情况均只携带一次实际读取结果，写入未执行。174 项 Agent 与 Provider 回归通过。ZCode <code>apps/zcode-cli/packages/core/src/agent/session-history-hydrator.ts</code>。</li>
+<li><strong>进程崩溃后恢复工具结果 · <code>27343746</code></strong> 在 <code>file_read</code> 的结果已提交后终止 Gateway，再在另一个会话的 <code>file_write</code> 刚落盘、尚无结果时终止。重启后，模型分别收到原内容和要求核查文件的未知结果，各自只出现一次；写入文件的修改时间保持不变。旧版两个场景均恢复了零个工具结果。276 项定向回归通过，并覆盖了重名溢出文件与图片快照。Ace <code>crew/state/tool_checkpoints.py</code>；ZCode <code>session-history-hydrator.ts</code> 与 <code>streaming-tool-ledger.ts</code>。</li>
+<li><strong>Linux 日志轮转</strong> 在 WSL Alpine 的原生 Linux Node 中运行相同的活动文件轮转、背压、写入失败及关闭测试，6 项通过。</li>
+<li><strong>真实模型工具链</strong> 从维护者指定的 <code>D:\Codes\env</code> 加载模型。<code>deepseek-flash</code> 经实际 Gateway 和 WebSocket 接收隔离目录任务，调用一次 <code>file_read</code>，原样返回文件中的随机标记。再次读取会话历史，核对一个读取调用和相同的最终正文。提示词中未提供标记，凭据未进入报告。</li>
+</ul>
+<p>D8 已安装桌面、旧版升级、文件系统故障和跨平台原生运行的验收结果将按平台分别记录。以上数据仅对应各条描述的输入、边界和平台。</p>
 </section>
 <section id="validation">
 <h2>5. 证据和验收</h2>
