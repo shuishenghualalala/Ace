@@ -1,7 +1,7 @@
 """统一日志。基于 rich 输出，全模块通过 get_logger(name) 取 logger。
 
 另提供 LLM 收发全量 trace：开启后每次调用模型的「请求/响应」各写一行 JSON 到
-.crew/logs/llm.jsonl，便于排查「发给模型的 / 模型回复的」完整内容。
+Crew Home 的 logs/llm.jsonl，便于排查「发给模型的 / 模型回复的」完整内容。
 
 另维护一个进程内环形缓冲（RingBufferHandler），供 /api/system/logs 查询，
 让前端日志页能实时看到所有 crew.* 日志，按级别/关键词筛选。
@@ -32,6 +32,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from crew.core.runctx import current_owner_account_id
+from crew.state.home import get_crew_home
 
 
 def _ensure_utf8_stdio() -> None:
@@ -99,7 +100,6 @@ def log_role_prefix(prefix: str | None) -> Iterator[None]:
 
 _CONFIGURED = False
 _LLM_TRACE_ENABLED = False
-_LLM_TRACE_FILE = ".crew/logs/llm.jsonl"
 # llm_trace 队列与后台 listener（单进程单例）。热路径只做 queue.put，
 # json.dumps 与文件写入都在 listener 线程完成。
 _LLM_QUEUE: _TraceQueue | None = None
@@ -330,6 +330,12 @@ class _JsonlTraceFormatter(logging.Formatter):
             )
 
 
+def llm_trace_path(log_file: str = "") -> Path:
+    """Resolve the file shared by the trace writer and session diagnostics."""
+    log_dir = Path(log_file).expanduser().parent if log_file else get_crew_home() / "logs"
+    return log_dir / "llm.jsonl"
+
+
 def _setup_llm_trace(log_file: str = "") -> None:
     """配置专用的 LLM trace logger（crew.llm），独立写 jsonl，不污染主日志/控制台。
 
@@ -338,11 +344,7 @@ def _setup_llm_trace(log_file: str = "") -> None:
     """
     global _LLM_TRACE_ENABLED, _LLM_QUEUE, _LLM_LISTENER
     shutdown_llm_trace()
-    # trace 文件放在主日志同目录，否则用默认 .crew/logs/
-    if log_file:
-        trace_path = Path(log_file).expanduser().parent / "llm.jsonl"
-    else:
-        trace_path = Path(_LLM_TRACE_FILE).expanduser()
+    trace_path = llm_trace_path(log_file)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("crew.llm")
     logger.setLevel(logging.INFO)

@@ -385,6 +385,10 @@ codesign --verify --deep --strict "$DMG_APP"
 DMG_RESOURCES="$DMG_APP/Contents/Resources"
 DMG_SECURITY_RUNTIME="$DMG_RESOURCES/ace-security-runtime"
 DMG_GW="$DMG_RESOURCES/crew-gateway"
+if [ -e "$DMG_GW/.crew/logs/llm.jsonl" ]; then
+    echo "❌ DMG 输入目录含有运行时模型日志" >&2
+    exit 1
+fi
 codesign --verify --strict "$DMG_SECURITY_RUNTIME"
 node desktop/scripts/verify-security-runtime.mjs "$DMG_RESOURCES"
 PATH="/usr/bin:/bin:/usr/sbin:/sbin" PYTHONPATH="$DMG_GW" CREW_PACKAGED=1 PYTHONDONTWRITEBYTECODE=1 \

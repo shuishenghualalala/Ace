@@ -119,6 +119,13 @@ def test_pack_scripts_exclude_web_frontend() -> None:
         assert "plugins" in source
 
 
+def test_archives_exclude_runtime_model_trace() -> None:
+    windows = (ROOT / "deb-package/pack_exe.ps1").read_text(encoding="utf-8")
+    macos = (ROOT / "deb-package/pack_mac.sh").read_text(encoding="utf-8")
+    assert r'Excludes: "crew-gateway\.crew\logs\llm.jsonl"' in windows
+    assert macos.index('if [ -e "$DMG_GW/.crew/logs/llm.jsonl" ]') < macos.index("hdiutil create")
+
+
 def test_interactive_windows_installer_prepares_sandbox_before_launch() -> None:
     installer = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8")
     main = (ROOT / "desktop" / "src" / "main" / "index.ts").read_text(encoding="utf-8")

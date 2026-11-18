@@ -432,7 +432,7 @@ $iconConfig
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Files]
-Source: "$stage\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "$stage\*"; DestDir: "{app}"; Excludes: "crew-gateway\.crew\logs\llm.jsonl"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Crew"; Filename: "{app}\crew-desktop\crew-desktop.exe"; IconFilename: "$iconFileRef"

@@ -8,7 +8,6 @@ import json
 import logging
 import math
 from contextlib import nullcontext
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -32,6 +31,7 @@ from crew.gateway.helpers import (
 )
 from crew.features.hooks import hook_registry
 from crew.security.settings import strict_security_enabled
+from crew.state.logging import llm_trace_path
 from crew.state.session_store import (
     SessionOwnershipError,
     SessionWriteConflict,
@@ -1573,11 +1573,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             return _not_found(session_id)
         limit = max(1, min(int(limit or 200), 1000))
         enabled = bool(crew.config.llm_trace)
-        if crew.config.log_file:
-            trace_path = Path(crew.config.log_file).expanduser().parent / "llm.jsonl"
-        else:
-            from crew.state.home import get_crew_home
-            trace_path = get_crew_home() / "logs" / "llm.jsonl"
+        trace_path = llm_trace_path(crew.config.log_file)
         if not enabled or not trace_path.exists():
             return JSONResponse({"enabled": enabled, "events": []})
 
