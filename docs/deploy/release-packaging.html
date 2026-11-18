@@ -115,6 +115,14 @@ git push origin v1.1.0</pre>
   <h3>手动发布旧 tag</h3>
   <p>进入 Actions 页面，选择 <code>release-desktop</code>，点击 Run workflow，在 <code>tag</code> 输入框填写 <code>v1.1.0</code>，分支选择包含该 workflow 的分支（例如 main）。workflow 会检出该 tag 并使用其代码打包。</p>
 
+  <h2>验证候选发行包</h2>
+  <p>release-desktop 在上传资产前执行 <code>desktop/scripts/smoke-packaged-desktop.mjs</code>。Windows 运行刚编译的 EXE，静默安装到含空格与中文的临时目录，检查桌面程序与卸载收据后从该目录启动。macOS arm64 和 x64 通过 LaunchServices 启动只读挂载的 DMG 内应用。Linux 解开 UOS、Kylin 两份 deb，在独立挂载空间将各自的 <code>/opt</code> 设为只读，再在虚拟显示器中以普通用户启动。</p>
+  <p>本机可用 Node 22 和 desktop 锁定的依赖运行同一入口。传入实际发行程序的完整路径，包括 Windows 的 <code>crew-desktop.exe</code>、macOS 的 <code>.app/Contents/MacOS/crew-desktop</code> 或已安装 Linux 的 <code>/opt/crew-desktop/crew-desktop</code>。</p>
+  <pre>node desktop/scripts/smoke-packaged-desktop.mjs "&lt;发行程序完整路径&gt;"</pre>
+  <p>每轮创建带中文的临时 HOME、Electron 用户目录和工作区。桌面正常启动后，脚本通过 Gateway 启动日志、本轮实例密钥及两个本机 health 端口验证内嵌 Python 子进程身份。模型连接使用临时密钥和本机 SSE 服务。</p>
+  <p>冒烟从桌面输入框开始，验证首聊、流式生成中的定向停止，以及迟到的旧请求停止指令与后继回合。随后对当前聊天窗口触发一次 Renderer 崩溃，检查替换窗口、会话历史以及 Gateway 进程连续性。脚本终止已经验证归属的 Gateway 子进程，确认桌面自动拉起新进程并可重新读取历史。使用正式退出入口关闭应用，验证主进程、Gateway 和两个监听端口均已释放，再用同一目录重新启动并从桌面查看持久化历史。</p>
+  <p>标准输出记录各阶段耗时与失败阶段。成功后回收临时目录，失败时保留该目录供检查 <code>desktop.log</code>、Gateway 启动日志及 Renderer 恢复日志。</p>
+
   <h2>注意事项</h2>
   <ul>
     <li>macOS 产物会做 ad hoc 完整性签名，尚未配置 Developer ID 签名与 Apple 公证；Windows 侧未做 Authenticode 签名时 SmartScreen 可能拦截。</li>

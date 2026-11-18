@@ -57,10 +57,14 @@
 | `scripts/audit_runtime_npm.py` | dev-only | CI/发布期遍历源码锁文件并以固定 npm audit argv 审计生产依赖；不进入用户安装包。 |
 | `scripts/check_release_readiness.py` | dev-only | CI/发布期以固定 git argv 绑定验收证据到当前提交；不执行用户输入命令，不进入用户安装包。 |
 | `scripts/run_e2e_batch.py` | dev-only | 本地/CI 的 E2E 批量 runner：以固定 argv 为每个场景启动独立 Python 子进程并产出报告；不执行用户输入命令，不进入用户安装包。 |
+| `desktop/src/main/gateway-process-retirement.ts` | host-fixed | 持有当前实例启动的 Gateway 子进程句柄，向该进程请求退出并等待退出事件。 |
+| `desktop/src/main/gateway-startup-log.ts` | host-fixed | 使用已启动子进程的类型和句柄读取标准输出、错误输出与退出事件，按容量写入桌面日志。 |
+| `desktop/src/main/update/installer-handoff.ts` | host-fixed | 桌面更新器将已校验的安装包交给平台安装入口，按固定参数启动或打开并等待系统确认。 |
 | `desktop/src/main/index.ts` | host-fixed | Gateway 启停、更新器和 OS 生命周期；固定产品 argv。严格模式要求初始及重定向后最终地址均为 HTTPS、Ed25519 detached signature，并在下载和安装前后校验；兼容模式保留旧更新源能力。 |
 | `desktop/src/main/open-with-service.ts` | host-fixed | 仅响应 Desktop 用户“使用其他应用打开”；应用来自当前 OS 已登记清单，命令固定、argv 分离，并限制探测输出与超时；超时或输出超限会终止完整探测进程树。 |
 | `desktop/src/main/uninstall.ts` | host-fixed | 卸载清理；仅签名安装包的用户发起卸载流程可达。 |
 | `desktop/scripts/check-security.mjs` | dev-only | 构建期 Electron 安全配置检查。 |
+| `desktop/scripts/smoke-packaged-desktop.mjs` | dev-only | 发布验收通过固定参数启动候选桌面程序，使用本次临时配置验证自管 Gateway 身份与退出。 |
 | `desktop/scripts/dev.mjs` | dev-only | 源码开发入口：仅以固定 argv 启动 esbuild 与依赖目录中的 Electron，不接收产品用户/模型命令，也不进入安装包。 |
 | `desktop/scripts/resolve-playwright-candidates.mjs` | dev-only | 定时/手动兼容性 CI 解析候选 npm 版本；不进入用户安装包，也不接收产品用户输入。 |
 | `desktop/src/main/security-setup.ts` | installer-only | 仅 Windows 安装包：固定 runtime 绝对路径经编码 PowerShell `RunAs` 请求一次 UAC，用户动作不能提供 executable/argv。 |

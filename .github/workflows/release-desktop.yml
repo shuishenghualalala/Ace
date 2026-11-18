@@ -88,6 +88,14 @@ jobs:
           node-version: "22"
       - name: Build DMG
         run: ./deb-package/pack_mac.sh "${{ needs.prepare.outputs.version }}" arm64
+      - name: Smoke-test the desktop from the read-only DMG
+        env:
+          DMG: crew-desktop_${{ needs.prepare.outputs.version }}_arm64.dmg
+        run: |
+          mountpoint="$(mktemp -d "$RUNNER_TEMP/ace-dmg.XXXXXX")"
+          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$mountpoint"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          node desktop/scripts/smoke-packaged-desktop.mjs "$mountpoint/crew-desktop.app/Contents/MacOS/crew-desktop"
       - name: Stage release assets
         run: |
           mkdir -p release-output
@@ -114,6 +122,14 @@ jobs:
           node-version: "22"
       - name: Build DMG
         run: ./deb-package/pack_mac.sh "${{ needs.prepare.outputs.version }}" x64
+      - name: Smoke-test the desktop from the read-only DMG
+        env:
+          DMG: crew-desktop_${{ needs.prepare.outputs.version }}_x64.dmg
+        run: |
+          mountpoint="$(mktemp -d "$RUNNER_TEMP/ace-dmg.XXXXXX")"
+          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$mountpoint"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          node desktop/scripts/smoke-packaged-desktop.mjs "$mountpoint/crew-desktop.app/Contents/MacOS/crew-desktop"
       - name: Stage release assets
         run: |
           mkdir -p release-output
@@ -134,11 +150,31 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.commit }}
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the pinned desktop test driver
+        run: npm ci --prefix desktop --ignore-scripts --no-audit --no-fund
       - name: Build UOS and Kylin packages
         shell: bash
         run: pwsh ./deb-package/pack_deb.ps1 -Version "$VERSION"
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+      - name: Smoke-test both deb payloads under a virtual display
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          for distro in uos kylin; do
+            deb="$PWD/crew-desktop_${VERSION}_${distro}_amd64.deb"
+            sudo unshare --mount --propagation private bash -seu -- "$RUNNER_TEMP" "$deb" "$(id -un)" "$(command -v node)" <<'SMOKE'
+          staging="$(mktemp -d "$1/ace-deb.XXXXXX")"
+          trap 'rm -rf -- "$staging"' EXIT
+          dpkg-deb -x "$2" "$staging"
+          mount --bind "$staging/opt" /opt
+          mount -o remount,bind,ro /opt
+          runuser -u "$3" -- dbus-run-session -- xvfb-run -a "$4" desktop/scripts/smoke-packaged-desktop.mjs /opt/crew-desktop/crew-desktop
+          SMOKE
+          done
       - name: Stage release assets
         run: |
           mkdir -p release-output
@@ -181,6 +217,22 @@ jobs:
         run: ./deb-package/pack_exe.ps1 -Version "$env:VERSION"
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+      - name: Smoke-test the installed Windows desktop
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $install = Join-Path $env:RUNNER_TEMP ("Crew 安装 " + [guid]::NewGuid().ToString("N"))
+          $setup = Get-Item -LiteralPath "dist/Crew_Setup_v$env:VERSION.exe"
+          $log = Join-Path $env:RUNNER_TEMP "ace-install.log"
+          $options = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS', "/DIR=`"$install`"", "/LOG=`"$log`"")
+          $result = Start-Process -FilePath $setup.FullName -ArgumentList $options -WindowStyle Hidden -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Installer failed with exit code $($result.ExitCode)" }
+          $desktop = Get-Item -LiteralPath (Join-Path $install 'crew-desktop/crew-desktop.exe')
+          $null = Get-Item -LiteralPath (Join-Path $install 'unins000.dat')
+          $running = Get-Process -Name crew-desktop -ErrorAction SilentlyContinue | Where-Object Path -eq $desktop.FullName
+          if ($running) { throw "Silent setup launched the desktop before the isolated smoke test" }
+          node desktop/scripts/smoke-packaged-desktop.mjs $desktop.FullName
       - name: Stage release assets
         shell: pwsh
         run: |

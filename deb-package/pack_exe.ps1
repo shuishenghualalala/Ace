@@ -447,7 +447,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Type: filesandordirs; Name: "{app}\crew-gateway\runtimes"
 
 [Run]
-Filename: "{app}\crew-desktop\crew-desktop.exe"; Description: "{cm:LaunchProgram,Crew}"; Flags: nowait postinstall
+Filename: "{app}\crew-desktop\crew-desktop.exe"; Description: "{cm:LaunchProgram,Crew}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);

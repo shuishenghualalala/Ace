@@ -32,6 +32,7 @@ PROCESS_CALLS = {
     "subprocess.run",
 }
 INDIRECT_SURFACES = {
+    "desktop/src/main/uninstall.ts",
     "crew/browser/manager.py",
     "crew/cron/scheduler.py",
     "crew/security/launch.py",
@@ -55,12 +56,15 @@ INDIRECT_SURFACES = {
 }
 DESKTOP_PROCESS_FILES = {
     "desktop/scripts/dev.mjs",
+    "desktop/scripts/smoke-packaged-desktop.mjs",
     "desktop/scripts/check-security.mjs",
     "desktop/scripts/resolve-playwright-candidates.mjs",
+    "desktop/src/main/gateway-process-retirement.ts",
+    "desktop/src/main/gateway-startup-log.ts",
     "desktop/src/main/index.ts",
+    "desktop/src/main/update/installer-handoff.ts",
     "desktop/src/main/open-with-service.ts",
     "desktop/src/main/security-setup.ts",
-    "desktop/src/main/uninstall.ts",
 }
 
 

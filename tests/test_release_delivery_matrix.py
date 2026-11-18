@@ -130,7 +130,9 @@ def test_interactive_windows_installer_prepares_sandbox_before_launch() -> None:
     installer = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8")
     main = (ROOT / "desktop" / "src" / "main" / "index.ts").read_text(encoding="utf-8")
     assert "PrivilegesRequired=lowest" in installer
-    assert "CurStep <> ssPostInstall" in installer
+    assert "CurStep <> ssPostInstall) or WizardSilent" in installer
+    postinstall = next(line for line in installer.splitlines() if 'Description: "{cm:LaunchProgram,Crew}"' in line)
+    assert "skipifsilent" in postinstall.split("Flags:", 1)[1].split()
     assert "ExecAsOriginalUser(DesktopPath, '--crew-provision-windows-sandbox'" in installer
     assert "ewWaitUntilTerminated" in installer
     assert "packagedSecurityRuntimeEnv({ bundledOnly: true })" in main
@@ -180,6 +182,29 @@ def test_mac_package_verifies_signed_runtime_from_dmg_input() -> None:
     assert 'DMG_SECURITY_RUNTIME="$DMG_RESOURCES/ace-security-runtime"' in dmg
     assert '"$DMG_GW/runtimes/python/bin/python3" -s "$ROOT_DIR/tests/security/security_matrix.py"' in dmg
     assert verify_manifest < smoke_runtime < build_dmg
+
+
+def test_release_assets_require_packaged_desktop_smoke() -> None:
+    import yaml
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-desktop.yml").read_text(encoding="utf-8"))
+    for platform in ("mac-arm64", "mac-x64", "linux", "windows"):
+        steps = workflow["jobs"][platform]["steps"]
+        smoke = next(i for i, step in enumerate(steps) if "scripts/smoke-packaged-desktop.mjs" in step.get("run", ""))
+        upload = next(i for i, step in enumerate(steps) if step.get("uses", "").startswith("actions/upload-artifact"))
+        assert smoke < upload
+        assert not steps[smoke].get("continue-on-error")
+        command = steps[smoke]["run"]
+        if platform.startswith("mac-"):
+            assert "hdiutil attach" in command and "-readonly" in command
+        elif platform == "linux":
+            assert "for distro in uos kylin" in command and "dpkg-deb -x" in command
+            assert "mount -o remount,bind,ro /opt" in command
+        else:
+            assert "dist/Crew_Setup_v$env:VERSION.exe" in command
+            assert "/VERYSILENT" in command and "/DIR=" in command and "$env:RUNNER_TEMP" in command
+            assert "unins000.dat" in command
+            assert command.index("Start-Process") < command.index("node desktop/scripts/smoke-packaged-desktop.mjs $desktop.FullName")
 
 
 def test_release_desktop_workflow_covers_all_platforms() -> None:
