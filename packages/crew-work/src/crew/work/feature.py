@@ -105,35 +105,22 @@ def _default_knowledge_acquirer(host: WorkFeatureHost) -> KnowledgeServiceAcquir
     return acquire
 
 
-def _stamp_schema_version(*, db_path: str | Path, wal_enabled: bool) -> None:
-    """Register the Feature-level schema baseline for this database (幂等).
-
-    各 Store 构造时已完成各自的 ensure-schema；这里在装配入口统一补写
-    ``work_schema_version`` 记录。首次运行写入 v1，已有库保持原样。
-    """
+def _prepare_work_storage(
+    *,
+    db_path: str | Path,
+    wal_enabled: bool,
+    legacy_db_path: str | Path | None,
+) -> None:
+    """Commit the schema baseline, then migrate legacy rows if required."""
     conn = connect_sqlite(db_path, wal_enabled=wal_enabled)
     try:
         writer = SQLiteWriteHelper(conn, threading.Lock())
         writer.execute(
             lambda c: stamp_baseline(c, WORK_SCHEMA_FEATURE, version=WORK_SCHEMA_VERSION)
         )
-    finally:
-        conn.close()
-
-
-def _copy_legacy_work_rows(*, db_path: str | Path, legacy_db_path: str | Path, wal_enabled: bool) -> None:
-    """copy-on-first-activate：目标库为空时从旧主库整表复制 work 域行。
-
-    gate 在 ensure-schema（8 个 Store 构造）+ work_schema_version stamp 之后，
-    15 张表在同一个 SAVEPOINT 内一次复制完成——任一表失败整体回滚不半写，
-    目标库已有行即整体跳过（重复启动幂等零重复）。旧表保留在旧库不删
-    （ADR-0038 回退备份）。回退配置把 work 库指回 crew.db 时同文件直接跳过。
-    """
-    if Path(legacy_db_path).resolve() == Path(db_path).resolve():
-        return
-    conn = connect_sqlite(db_path, wal_enabled=wal_enabled)
-    try:
-        writer = SQLiteWriteHelper(conn, threading.Lock())
+        if legacy_db_path is None or Path(legacy_db_path).resolve() == Path(db_path).resolve():
+            return
+        # Keep the already-committed schema baseline if legacy rows fail to copy.
         copied = writer.execute(
             lambda c: copy_legacy_feature_rows(legacy_db_path, c, WORK_DB_TABLES)
         )
@@ -196,13 +183,11 @@ def _store_factory(
         preference_notifier=preference_notifier,
         hook_registry=hook_registry,
     )
-    _stamp_schema_version(db_path=db_path, wal_enabled=wal_enabled)
-    # 顺序保证（6R 沉淀）：ensure-schema → stamp → copy。全部 work 表在
-    # 一个公共点一次复制，而不是 8 个 Store 各自复制——13+ 表单事务更原子。
-    if legacy_db_path is not None:
-        _copy_legacy_work_rows(
-            db_path=db_path, legacy_db_path=legacy_db_path, wal_enabled=wal_enabled
-        )
+    _prepare_work_storage(
+        db_path=db_path,
+        wal_enabled=wal_enabled,
+        legacy_db_path=legacy_db_path,
+    )
     return service
 
 

@@ -663,6 +663,9 @@
 <p>对 <code>024e03da</code> 解包运行时用两个独立测试配置执行 <code>python -X importtime</code>。仅导入 <code>crew.gateway.server</code> 的墙钟为 5.274 和 5.290 秒，两次记录 980 个模块。累计导入成本包括 <code>crew.app</code> 2.302–2.387 秒、FastAPI 0.959–1.004 秒和上下文压缩子包 1.121–1.126 秒。这些分支计时包含共享依赖，例如压缩后的文件重载先引入了文件工具，而普通 Agent 与注册器之后也使用该模块。测量未运行核心就绪阶段，累计导入值不能作为移除可选功能后可节省的时间。</p>
 <p>较早的正式包构建剖面中，Work 从同一数据库打开八个业务 Store，另外打开连接写 schema 基线及复制旧数据，整个功能构建 336 毫秒，其中 Store 及准备 230 毫秒。两次辅助准备分别耗时 22、24 毫秒，其中各自打开连接约 21、18 毫秒。ZCode 将会话任务存储准备集中到独立入口，各仓库再复用已完成状态。Ace 的普通对话首轮会使用 Work 关联和偏好；当前证据只支持按开连接的量级评估准备复用。</p>
 <p class="evidence">Ace <code>crew/gateway/server.py</code>、<code>crew/app.py</code>、<code>packages/crew-work/src/crew/work/feature.py</code>。ZCode <code>packages/services/src/project-storage/startup.ts:31</code>。</p>
+<h4>复用 Work 启动准备连接</h4>
+<p>ZCode 的 <code>packages/services/src/project-storage/startup.ts:31</code> 在同一准备连接上分步执行 schema 和迁移。Ace 的 Work 装配复用一个目标库连接，保留版本写入和旧表整批迁移各自的事务。公开启动路径遇到畸形旧表时整批回滚，仍保存 schema 版本，修正旧数据后可以重试。</p>
+<p>正式 Windows 运行时中，新用户目录与合成旧库各两对。每次准备连接从 2 降至 1，Work 阶段逐对减少 16.9、18.5、25.7、10.6 毫秒。八次均验证真实 WebSocket、回环模型回复、回执、历史、旧 Work 数据和双端口回收。定向回归 17 项通过。首次基线存在一次超过 30 秒的启动异常，其他三对从启动至首正文的变化为 +0.4、−4.0、+314.4 毫秒，整体启动改善仍无证据。</p>
 <h3>Windows 正式包实际可发送时间复测</h3>
 <p>复用 <code>024e03da</code> 官方发行副本，新建两个独立用户目录。测量从新进程和新用户目录开始，沿用系统文件缓存。两轮均经真实输入框发送本地 SSE 对话，核对答复和唯一用户消息落盘。</p>
 <table>
