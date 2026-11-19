@@ -602,6 +602,21 @@
 </tbody>
 </table></div>
 <p>本组从注入故障计时，Gateway 阶段包含新进程启动和历史检查。原审计的 5 秒冷启目标在该 Windows 环境未达到。</p>
+<h3 id="windows-current-composer-baseline">当前 Windows 桌面首聊与重开基线</h3>
+<p>固定 <code>e9b3ff06</code>，从已核对的 Windows 发行布局重建桌面 ASAR 和 39 个变更的 Gateway 源文件，沿用原样的 Electron、Python 及第三方依赖。使用独立 Win32 桌面和仅在本机回环的 OpenAI 兼容流。测试用 <code>CI</code> 环境跳过自动 UAC 准备。每组先以全新用户目录启动，再以同一配置重开，沿用操作系统文件缓存。<a href="https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createdesktopw">Windows 桌面隔离接口</a></p>
+<p>30 对共 60 次启动。实际在 Composer 填入合成草稿并触发 Enter，逐次核对唯一模型请求、真实助手正文、公开历史、双方端口签名、自有进程正常退出和端口释放，失败 0。P95 取第 29 个升序值。正文采用可见 DOM 观察，前台像素目标单独测量。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">阶段（毫秒）</th><th scope="col">新配置 P50</th><th scope="col">新配置 P95</th><th scope="col">重开 P50</th><th scope="col">重开 P95</th></tr></thead>
+<tbody>
+<tr><td>启动到输入框可见</td><td>1,448.6</td><td>1,555.6</td><td>1,428.5</td><td>1,531.3</td></tr>
+<tr><td>启动到 Renderer 观察到 Gateway 就绪</td><td>9,769.6</td><td>10,736.6</td><td>9,042.0</td><td>10,104.9</td></tr>
+<tr><td>启动到 Composer 可发送</td><td>10,266.4</td><td>11,119.9</td><td>9,544.4</td><td>10,715.2</td></tr>
+<tr><td>启动到首条助手正文可见</td><td>11,225.3</td><td>12,056.8</td><td>10,506.8</td><td>11,646.1</td></tr>
+<tr><td>开始发送到回环模型收到请求</td><td>630.6</td><td>806.9</td><td>638.9</td><td>791.4</td></tr>
+<tr><td>回环模型写出正文到聊天 DOM 可见</td><td>333.4</td><td>377.7</td><td>329.1</td><td>398.5</td></tr>
+</tbody>
+</table></div>
+<p>30 对中有 27 对新配置更晚可发送，配对差中位数为 760.5 毫秒。Renderer 观察到 Gateway 就绪至可发送的中位数为 498.2 和 509.2 毫秒。新配置可发送 P95 为 11.120 秒，仍高于 5 秒的待校准目标。重建物理包路径的先导首轮和重开分别用了 38.688 与 9.460 秒才可发送；先导保留为独立记录，预先约定的重复组另列如上。</p>
 <h3>Linux 发行包的重复故障恢复</h3>
 <p>对 <code>56eb6de6</code> UOS amd64 发行包顺序执行 30 次完整九阶段桌面测试。每轮从独立用户配置启动，共核对 90 个受管 Gateway 代次的主端口和健康端口签名。正式组使用只启用回环的独立网络、只读 <code>/opt</code>、普通用户和原 Chromium 沙箱。30 轮全部通过。共享网络的先导组完成 10 轮，其中 9 轮通过，另一次触发 D2 的健康端口冲突。正式组运行 18 分 35 秒，同一 WSL 虚拟机也在执行后端回归，CPU 使用中位数 7.8%，P95 为 14.6%。</p>
 <div class="table"><table>
