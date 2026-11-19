@@ -952,8 +952,10 @@ function bindConversationViewport(container: HTMLElement, containerId: string, t
   container.ownerDocument.addEventListener('selectionchange', onSelectionOrFocus);
   if (typeof ResizeObserver !== 'undefined') {
     target.viewportObserver = new ResizeObserver((entries) => {
+      if (renderTargets.get(containerId) !== target) return;
       const reading = !anchor.isStickyBottom() ? target.readingAnchor : undefined;
       let updated = entries.some((entry) => entry.target === wrapper) && syncGeometry();
+      let liveHeightChanged = false;
       for (const entry of entries) {
         if (!(entry.target instanceof HTMLElement)) continue;
         const row = entry.target;
@@ -964,8 +966,11 @@ function bindConversationViewport(container: HTMLElement, containerId: string, t
         if (!plan || !box) continue;
         const style = getComputedStyle(row);
         const margin = (Number.parseFloat(style.marginBlockStart) || 0) + (Number.parseFloat(style.marginBlockEnd) || 0);
-        updated = target.viewport.measure(key, plan.sig, Math.max(1, box + margin)) || updated;
+        const heightChanged = target.viewport.measure(key, plan.sig, Math.max(1, box + margin));
+        updated = heightChanged || updated;
+        liveHeightChanged = (heightChanged && plan.live) || liveHeightChanged;
       }
+      if (liveHeightChanged) anchor.pinToBottomIfSticky({ preservePendingScroll: true });
       if (target.viewport.enabled && (updated || entries.some((entry) => entry.target === container))) schedule(reading);
     });
     target.viewportObserver.observe(wrapper);

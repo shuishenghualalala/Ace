@@ -472,6 +472,12 @@
 <p><strong>验收</strong> 隔离 Windows Electron 43.1 通过实际 renderer 的 <code>applyChunk</code> 送入 32 个思考增量。固定显示秒数期间，标签 DOM 变更从 55 次降至零，32 段仍依次呈现且原标签文本节点保持。随后推进计时，验证 ticker 更新与最终回复结算。两组窗口均未显示或获得焦点。87 项渲染与滚动回归和完整桌面 TypeScript 检查通过。此处测量 DOM 操作次数，输入时延和像素呈现仍需各自计时。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts</code>。ZCode <code>packages/ui/src/v4/ConversationTurnGroup.tsx:638</code>。</p>
 </article>
+<article id="stream-live-viewport-first-layout">
+<h3>F12b · 活动回合增高时正文暂时裁在对话视口外</h3>
+<p>旧版流片更新 DOM 后在下一帧跟底。ZCode 在活动行的 ResizeObserver 报告增高时核对滚动归属，并在布局完成后贴底。Ace 在已有视口测量回调跟随活动行；若滚动事件尚未送达且位置已经向上，则保留该阅读位置。</p>
+<p><strong>验收</strong> Windows Electron 43.1 隔离窗口用真实 <code>applyChunk</code> 和 110 对历史消息。旧版在首个含正文标记的布局回调中距底 44 像素，标记在容器外；候选同阶段距底为零且标记在容器内。双版均保留向上阅读时的滚动位置。补充回归覆盖尚未送达滚动事件的向上移动。正常退出复测、80 项定向回归和完整 TypeScript 检查通过。此项验证布局与视口，合成像素的 P95 仍需独立测量。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/conversation-renderer.ts</code>、<code>scroll-anchor.ts</code>。ZCode <code>packages/ui/src/v4/ConversationTimeline.tsx:1323</code>。</p>
+</article>
 <article id="evolution-worker-lifecycle">
 <h3>F13 · 后台进化完成后仍保留空闲队列和 worker</h3>
 <p>启用后台技能进化后，旧代码一次处理完 18 个会话，仍保留 18 个空队列和 18 个等待新任务的 worker，直到应用关闭。ZCode 的 Gen UI 存储按目标串行写入，当前队尾完成后从注册表移除。Ace 在会话队列排空时同步注销持有该队列的 worker。新任务可启动下一个 worker，后续回合仍能按原顺序读取结果。</p>

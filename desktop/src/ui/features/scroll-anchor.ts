@@ -21,7 +21,7 @@ export interface ScrollAnchor {
   /** 程序跳到底部：重置 stickyBottom=true 并立即滚到底。用于提交/切会话/空→非空。 */
   jumpToBottom(): void;
   /** 软钉底：仅在 stickyBottom 已 armed 时滚到底；未 armed 则不动。用于流式增量。 */
-  pinToBottomIfSticky(): void;
+  pinToBottomIfSticky(options?: { preservePendingScroll: boolean }): void;
   /** 当前是否处于 stickyBottom（停在底部）。 */
   isStickyBottom(): boolean;
   restoreReadingTop(top: number): void;
@@ -175,11 +175,18 @@ export function attachScrollAnchor(container: HTMLElement): ScrollAnchor {
     });
   };
 
-  const pinToBottomIfSticky = (): void => {
+  const pinToBottomIfSticky = (options?: { preservePendingScroll: boolean }): void => {
     if (!stickyBottom) return;
     // 已在底部：写 scrollTop 是 no-op，浏览器不触发 scroll 事件，
     // 此时 arm guard 会永久卡住，所以直接刷新 tracker 返回。
     if (isAtBottom()) {
+      lastTop = container.scrollTop;
+      lastHeight = container.scrollHeight;
+      lastClientHeight = container.clientHeight;
+      return;
+    }
+    if (options?.preservePendingScroll && container.scrollTop + 1 < lastTop) {
+      disarm();
       lastTop = container.scrollTop;
       lastHeight = container.scrollHeight;
       lastClientHeight = container.clientHeight;

@@ -176,6 +176,8 @@
 
   <p>前台渲染器定时心跳超时后，主进程向当前受信主帧发送一次即时探测。任一心跳应答都会保留原窗口。连续一个检查周期仍无应答时进入原恢复流程。Chromium 的原生进程异常和无响应事件继续走原入口。</p>
 
+  <p>活动回合测高由会话视口已有的 <code>ResizeObserver</code> 接收。回合增高时，跟随中的视口在当前布局阶段贴底；检测到已向上移动的位置时保留阅读位置，即使滚动事件尚未送达。普通重新渲染仍沿用下一帧的跟随检查。</p>
+
   <h3>3.9 看板 / Inspector 视觉</h3>
   <ul>
     <li>右侧入口 <code>#task-board-toggle</code>：图标 + 竖排「看板」标签；颜色走 <code>--shell-primary</code> / <code>--surface</code> / <code>--border-subtle</code>，随亮暗主题切换。</li>

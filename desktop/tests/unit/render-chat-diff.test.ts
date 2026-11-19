@@ -681,6 +681,58 @@ describe('conversation-renderer tracked history and live changes', () => {
     expect(revealed.querySelector<HTMLDetailsElement>('details.process-timeline__details:not([data-fold-key])')?.open).toBe(true);
   });
 
+  it('pins a growing live row during resize delivery while preserving a reader who has scrolled up', () => {
+    let receiveResize: ResizeObserverCallback | undefined;
+    class TestResizeObserver {
+      constructor(private readonly receive: ResizeObserverCallback) {}
+      observe(target: Element): void {
+        if (target.classList.contains('messages__inner')) receiveResize = this.receive;
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    try {
+      let height = 9_000;
+      let top = 0;
+      Object.defineProperties(panel, {
+        clientHeight: { configurable: true, value: 480 },
+        scrollHeight: { configurable: true, get: () => height },
+        scrollTop: {
+          configurable: true,
+          get: () => top,
+          set: (value: number) => { top = Math.max(0, Math.min(value, height - panel.clientHeight)); },
+        },
+      });
+      replaceSessionMessages(sessionId, [
+        ...longHistory(240),
+        { id: 'live-answer', role: 'assistant', content: 'Live reply', timestamp: 241, streaming: true },
+      ]);
+      render();
+      getConversationScrollAnchor(containerId).jumpToBottom();
+      const live = panel.querySelector('[data-streaming="true"]')?.closest('[data-conversation-unit]');
+      expect(live).toBeTruthy();
+      expect(receiveResize).toBeTypeOf('function');
+      const grow = (blockSize: number) => {
+        height += 44;
+        receiveResize!([{ target: live, borderBoxSize: [{ blockSize, inlineSize: 800 }] } as ResizeObserverEntry],
+          {} as ResizeObserver);
+      };
+
+      grow(220);
+      expect(panel.scrollTop).toBe(height - panel.clientHeight);
+
+      panel.scrollTop -= 100;
+      const readingTop = panel.scrollTop;
+      grow(264);
+      expect(panel.scrollTop).toBe(readingTop);
+      expect(getConversationScrollAnchor(containerId).isStickyBottom()).toBe(false);
+    } finally {
+      disposeConversationRenderer(containerId);
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not replay a pre-jump geometry anchor or discard the next correction on its scroll acknowledgment', () => {
     const paint = new Map<number, FrameRequestCallback>();
     let nextFrame = 0;
