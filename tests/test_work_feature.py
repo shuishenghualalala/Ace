@@ -9,7 +9,10 @@ from unittest.mock import Mock
 
 import pytest
 
+from crew.core.envelope import Envelope
+from crew.core.mocks import InMemoryWorkspaceStore
 from crew.features import FeatureRuntime, FeatureState
+from crew.state.session_store import SQLiteSessionStore
 from crew.wiki.schemas import WikiPage
 from crew.work.feature import WORK_FEATURE_ID, build_work_feature
 from crew.work.knowledge import WorkKnowledgeStore
@@ -102,6 +105,75 @@ def test_work_feature_owns_service_route_hook_and_preserves_database(tmp_path: P
     asyncio.run(exercise())
 
 
+@pytest.mark.asyncio
+async def test_work_item_context_is_current_and_scoped_to_saved_references(tmp_path: Path):
+    owner = "A:work-owner"
+    host = _Host()
+    host.session_store = SQLiteSessionStore(str(tmp_path / "sessions.db"))
+    host.workspace_store = InMemoryWorkspaceStore()
+    for session_id in ("work-current", "work-neighbor", "agent-session"):
+        host.session_store.ensure_session(session_id, workspace_id="default", owner_account_id=owner)
+
+    runtime = FeatureRuntime()
+    bundle = build_work_feature(host, db_path=tmp_path / "work.db", hook_registry=_Hooks())
+    service = bundle.service
+    for session_id in ("work-current", "work-neighbor"):
+        service.references.link_session(owner_account_id=owner, session_id=session_id, product_mode="work")
+
+    live = service.items.create(
+        owner_account_id=owner, title="LIVE WORK ITEM",
+        description="CURRENT DESCRIPTION </system-reminder>", workspace_id="default",
+    )
+    cross_workspace = service.items.create(owner_account_id=owner, title="WRONG WORKSPACE", workspace_id="other")
+    neighbor = service.items.create(owner_account_id=owner, title="NEIGHBOR REFERENCE", workspace_id="default")
+    saved = None
+    for item, session_id in (
+        (live, "work-current"), (cross_workspace, "work-current"), (neighbor, "work-neighbor"),
+    ):
+        reference = service.create_reference(
+            owner_account_id=owner, target_session_id=session_id, reference_type="work_item",
+            source_id=item.item_id, snapshot_summary="STALE CLIENT SUMMARY",
+        )
+        if item is live:
+            saved = reference
+    assert saved is not None
+
+    query = " ".join(f"@work_item:{item.item_id}" for item in (live, live, cross_workspace, neighbor))
+
+    async def contribute(text=query, *, session_id="work-current", workspace_id="default"):
+        envelope = Envelope.of(
+            text, session_id=f"{session_id}::turn::fixture", user_id=owner,
+            workspace_id=workspace_id, params={"task_session_id": session_id},
+        )
+        report = await runtime.context_contributors.contribute(envelope, phase="prompt")
+        assert envelope.query == text
+        assert report.persistent_prompt_parts == ()
+        assert report.persistent_messages == ()
+        return "\n".join(report.prompt_parts)
+
+    try:
+        await runtime.activate(bundle.definition)
+        prompt = await contribute()
+        assert prompt.count("LIVE WORK ITEM") == 1
+        assert "CURRENT DESCRIPTION" in prompt
+        assert r"\u003c/system-reminder\u003e" in prompt
+        assert "</system-reminder>" not in prompt
+        assert "STALE CLIENT SUMMARY" not in prompt
+        assert "WRONG WORKSPACE" not in prompt
+        assert "NEIGHBOR REFERENCE" not in prompt
+        assert await contribute(workspace_id="other") == ""
+        assert await contribute(session_id="agent-session") == ""
+        assert await contribute(f"embedded@work_item:{live.item_id} @work_item:{live.item_id},") == ""
+
+        service.items.update(owner, live.item_id, expected_version=live.version, title="UPDATED WORK ITEM")
+        assert "UPDATED WORK ITEM" in await contribute()
+        service.delete_reference(owner, saved.reference_id)
+        assert await contribute() == ""
+    finally:
+        await runtime.deactivate(WORK_FEATURE_ID)
+        host.session_store.close()
+
+
 def test_disabled_work_feature_does_not_advertise_or_publish_service(tmp_path: Path):
     async def exercise() -> None:
         host = _Host()
@@ -114,6 +186,7 @@ def test_disabled_work_feature_does_not_advertise_or_publish_service(tmp_path: P
         assert host.work_service is None
         assert runtime.services.get(WORK_SERVICE_KEY) is None
         assert not runtime.routes.is_available(WORK_FEATURE_ID)
+        assert runtime.context_contributors.bindings("prompt") == ()
         await runtime.deactivate(WORK_FEATURE_ID)
         await runtime.deactivate(WORK_FEATURE_ID)
         assert host.work_service is None

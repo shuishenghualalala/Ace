@@ -309,7 +309,7 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         assert {
             binding.contributor.contributor_id
             for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
-        } == {"wiki.agent.context"} | CORE_PROMPT_CONTRIBUTOR_IDS
+        } == {"wiki.agent.context", "work.item-references"} | CORE_PROMPT_CONTRIBUTOR_IDS
 
         envelope = Envelope.of(
             "inspect @file:notes.md @browser_tab:tab-a",
@@ -363,7 +363,7 @@ async def test_app_uses_host_and_browser_owned_context_contributors(
         assert {
             binding.contributor.contributor_id
             for binding in app.context_contributors.bindings(ContextPhase.PROMPT)
-        } == {"wiki.agent.context"} | CORE_PROMPT_CONTRIBUTOR_IDS
+        } == {"wiki.agent.context", "work.item-references"} | CORE_PROMPT_CONTRIBUTOR_IDS
     finally:
         await app.plugins.feature_runtime.deactivate(feature_id)
         await app.shutdown()
@@ -393,6 +393,7 @@ async def test_cron_context_contributor_follows_feature_flag(
         assert prompt_ids == {
             "cron.trigger.reminder",
             "wiki.agent.context",
+            "work.item-references",
         } | CORE_PROMPT_CONTRIBUTOR_IDS
 
         cron_report = await app.context_contributors.contribute(

@@ -471,6 +471,42 @@ class WorkReferenceStore:
             ).fetchall()
         return [_row_to_reference(row) for row in rows]
 
+    def resolve_referenced_work_items(
+        self,
+        owner_account_id: str,
+        target_session_id: str,
+        workspace_id: str,
+        item_ids: tuple[str, ...],
+    ) -> list[dict[str, object]]:
+        """Read current items with an exact, owned reference from the Work session."""
+        if not item_ids:
+            return []
+        placeholders = ", ".join("?" for _ in item_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT DISTINCT item.item_id, substr(item.title, 1, 200) AS title,
+                       substr(item.description, 1, 1200) AS description,
+                       item.business_status, item.execution_status, item.priority, item.due_at
+                FROM work_session_links AS link
+                JOIN work_references AS ref
+                  ON ref.owner_account_id = link.owner_account_id
+                 AND ref.target_session_id = link.session_id
+                JOIN work_items AS item
+                  ON item.owner_account_id = ref.owner_account_id
+                 AND item.item_id = ref.source_id
+                WHERE link.owner_account_id = ? AND link.session_id = ?
+                  AND link.product_mode = ? AND ref.reference_type = ?
+                  AND item.workspace_id = ? AND item.item_id IN ({placeholders})
+                """,
+                (
+                    owner_account_id, target_session_id, ProductMode.WORK.value,
+                    ReferenceType.WORK_ITEM.value, workspace_id, *item_ids,
+                ),
+            ).fetchall()
+        by_id = {row["item_id"]: dict(row) for row in rows}
+        return [by_id[item_id] for item_id in item_ids if item_id in by_id]
+
     def _owned_agent_snapshot(self, owner_account_id: str, session_id: str) -> tuple[str, str]:
         if not self._session_store.session_belongs_to(session_id, owner_account_id):
             raise PermissionError("source session is not owned by the current account")

@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from crew.features import (
+    ContextContributor,
+    ContextPhase,
     FeatureDefinition,
     FeatureInstallContext,
     FeatureRuntime,
@@ -327,6 +329,13 @@ def build_work_feature(
             contribution_id=WORK_FEATURE_ID,
             label="route:work",
         )
+        contribute_items = getattr(service, "contribute_item_context", None)
+        if callable(contribute_items):
+            context.register_context_contributor(ContextContributor(
+                contributor_id="work.item-references",
+                phase=ContextPhase.PROMPT,
+                handler=contribute_items,
+            ))
         if not explicit_binding:
             await service.start()
 

@@ -204,10 +204,12 @@
 <p><strong>验收</strong> 两个截止时间回归在旧版失败。使用实际 stdio 子进程运行 ToolRunner 并重开 SQLite，两类候选失败分别确认零次和一次实际派发。原错误正文、工具结果事件和持久回执一致，均不可自动重试且各提交一次。等待期间的另一个调用继续成功，单个取消与 stdio 回收均通过。MCP 生命周期、MCP 功能和工具执行管线的 83 项回归通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/tools/registry.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/mcp/pool.ts:532</code>、<code>apps/zcode-cli/packages/adapters/src/mcp/index.ts:1118</code>、<code>apps/zcode-cli/packages/core/src/mcp/index.ts:129</code>。</p>
 
-<h3 id="work-item-model-context-gap">Work 事项引用尚未接入本轮模型上下文</h3>
-<p>Ace 桌面先把 <code>@work_item:&lt;id&gt;</code> 写入输入框，再异步保存引用。经签名 Gateway 提交后，Work 的入口只把标记留在普通用户消息。目前 Work 的 Feature 装配注册服务、路由和轮后钩子，事项引用尚未进入既有模型上下文通道。桌面的本次偏好排除字段也未进入实际 Work 模型执行路径。</p>
-<p>两组 Windows 包态尝试均通过真实 Work 引用保存和首轮对话。受控模型收到原始事项标记，系统提示词缺少已引用事项标题。该行为在原 Work 装配和数据库顺序候选中一致。ZCode 从消息解析本轮引用，给模型提供使用 <code>ReadSessionContext</code> 按需读取的提示，并按已有会话身份查询。Ace 验收应覆盖有效引用、本轮送达、跨账号与工作区边界、删除、重发和原始历史。</p>
-<p class="evidence">Ace <code>desktop/src/ui/features/composer-mention.ts:921</code>、<code>crew/gateway/ws.py:741</code>、<code>packages/crew-work/src/crew/work/service.py:239</code>。ZCode <code>apps/zcode-cli/packages/core/src/session-context/references.ts:3</code>、<code>runtime/methods/turn.ts:1146</code>、<code>tool/handlers/read-session-context.ts:175</code>。</p>
+<h3 id="work-item-model-context-gap">Work 已保存的事项引用进入本轮模型上下文</h3>
+<p>旧版经签名 Gateway 提交时只保留普通消息里的事项标记。ZCode 从当前消息提取引用，按会话身份和精确 ID 定位来源，为模型提供有界背景。Ace 的 Work Feature 现登记本轮提示词贡献器。先按服务端主会话和所属工作区校验，再在同一次查询中匹配实体类型、已保存引用和实时事项。最多八项，去重并保留输入顺序。事项数据转义后作为模型提示的背景，原始消息继续用于回放和持久化。</p>
+<p><strong>Gateway 验收</strong> Windows 打包 Gateway 两组各跑七轮真实签名 WebSocket 和本机模型夹具。候选展示本轮有效引用及修改后的当前值。无标记、非完整标记、普通 Agent 会话和删除引用后的回合不加载事项。未保存、其他会话、其他账号、跨工作区或已删除的来源均未出现在模型请求。客户端伪造工作区由 Gateway 归一为会话的持久工作区，查询仍只返回该工作区事项。客户端保存的伪快照未被采用。同一请求重发只调用模型一次，变化的原始请求体被拒绝。签名历史和 SQLite 保留原始对话，重启后再次核对一致，监听均释放。</p>
+<p><strong>CLI 验收</strong> Windows 包内解释器两组各运行六个正常 CLI 进程，依次创建 Work 会话、事项、引用，发送有标记和无标记的两轮消息，再读取历史。候选只在显式引用的回合传入标题和描述，第二轮仍带原始历史标记。<code>session show</code> 和 11 条 SQLite 会话事件均未写入展开的事项。模型使用本机夹具。Work、上下文贡献器、Gateway 和提示词的 285 项回归以及 Ruff 通过。</p>
+<p>当前桌面产品导航关闭了 Work 模式入口，CLI 和签名 API 的 Work 路径仍可用。现有本次偏好排除字段的传递及主会话删除后独立 Work 库绑定的回收仍属后续事项。</p>
+<p class="evidence">Ace <code>packages/crew-work/src/crew/work/service.py</code>、<code>references.py</code>、<code>crew/gateway/dispatcher.py:680</code>、<code>desktop/src/ui/stores/product-mode-store.ts:84</code>。ZCode <code>apps/zcode-cli/packages/core/src/session-context/references.ts:3</code>、<code>runtime/methods/turn.ts:626</code>、<code>:1146</code>、<code>tool/handlers/read-session-context.ts:175</code>。</p>
 <h3>工具并发与异步的补充对照</h3>
 <div class="table"><table>
 <thead><tr><th>工具</th><th>Ace 与 ZCode 的已核对行为</th><th>验收范围</th></tr></thead>
