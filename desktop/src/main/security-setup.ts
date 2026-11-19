@@ -31,6 +31,29 @@ export function securityRuntimePlatformKey(platform: string, arch: string): stri
   return undefined;
 }
 
+export function windowsPackagedGatewaySecurityEnv(
+  inherited: NodeJS.ProcessEnv,
+  selected: Record<string, string>,
+  setupDirectory: string | undefined,
+): NodeJS.ProcessEnv {
+  const owned = new Set([
+    'ACE_SECURITY_RUNTIME',
+    'ACE_SECURITY_STATE_DIR',
+    'ACE_STRICT_SECURITY',
+    'ACE_SECURITY_RUNTIME_BUNDLED_ONLY',
+    'ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR',
+  ]);
+  const base = Object.fromEntries(
+    Object.entries(inherited).filter(([key]) => !owned.has(key.toUpperCase())),
+  );
+  return {
+    ...base,
+    ...selected,
+    ACE_SECURITY_RUNTIME_BUNDLED_ONLY: '1',
+    ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR: selected.ACE_SECURITY_RUNTIME ? setupDirectory : undefined,
+  };
+}
+
 function quotePowerShell(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }

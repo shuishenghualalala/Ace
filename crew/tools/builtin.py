@@ -655,11 +655,17 @@ async def handle_terminal(
         shell_kind = current_shell_kind()
         classification = None
         if mode is not ConversationPermissionMode.FULL_ACCESS:
-            classification = await NativeRuntimeClient(packaged_runtime_argv()).classify_shell(
-                shell_kind=shell_kind,
-                executable=final_argv[0],
-                raw_command=command,
-            )
+            try:
+                classification = await NativeRuntimeClient(packaged_runtime_argv()).classify_shell(
+                    shell_kind=shell_kind,
+                    executable=final_argv[0],
+                    raw_command=command,
+                )
+            except NativeRuntimeError as exc:
+                return json.dumps(
+                    {"success": False, "error": str(exc), "error_code": exc.code.value},
+                    ensure_ascii=False,
+                )
             _validate_destructive_terminal_targets(
                 classification.parsed_commands,
                 shell_kind=shell_kind,

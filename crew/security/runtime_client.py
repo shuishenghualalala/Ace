@@ -363,7 +363,10 @@ class NativeRuntimeClient:
     def __init__(self, helper_argv: Sequence[str | Path], *, startup_timeout: float = 5.0) -> None:
         argv = tuple(str(part) for part in helper_argv)
         if not argv:
-            raise ValueError("helper_argv cannot be empty")
+            raise NativeRuntimeError(
+                RuntimeErrorCode.SANDBOX_UNAVAILABLE,
+                "bundled security runtime is unavailable",
+            )
         self._helper_argv = argv
         self._startup_timeout = startup_timeout
         self._startup_token = ""

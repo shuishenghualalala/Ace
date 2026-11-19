@@ -582,8 +582,9 @@ class ProcessRegistry:
         bridge_overrides = {"PYTHONUNBUFFERED": "1"}
         # The fixed bridge starts the authenticated helper. Its state path
         # belongs to that host process and is excluded from the sandbox child.
-        if state_dir := os.environ.get("ACE_SECURITY_STATE_DIR"):
-            bridge_overrides["ACE_SECURITY_STATE_DIR"] = state_dir
+        for key in ("ACE_SECURITY_STATE_DIR", "ACE_SECURITY_RUNTIME_BUNDLED_ONLY"):
+            if value := os.environ.get(key):
+                bridge_overrides[key] = value
         bridge_env = build_spawn_env(bridge_overrides)
         if not _IS_WINDOWS:
             bridge_argv, scope_unit = wrap_argv_for_containment(bridge_argv, env=bridge_env)

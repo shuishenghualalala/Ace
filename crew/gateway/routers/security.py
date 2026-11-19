@@ -265,8 +265,8 @@ async def _live_filesystem_runtime(
     from crew.security.launch import packaged_runtime_argv, runtime_source_stale
 
     helper_argv = packaged_runtime_argv()
-    helper_present = Path(helper_argv[0]).is_file()
-    stale = runtime_source_stale(helper_argv[0])
+    helper_present = bool(helper_argv and Path(helper_argv[0]).is_file())
+    stale = runtime_source_stale(helper_argv[0]) if helper_argv else False
     system = platform.system().lower()
     if not helper_present or stale or system not in {"windows", "linux", "darwin"}:
         return None, helper_present, stale, system
@@ -282,6 +282,13 @@ async def _live_filesystem_runtime(
 
 async def _recover_windows_acl(helper_argv: tuple[str, ...], state_dir: Path) -> str | None:
     """Finish a protected native ACL journal outside the short sandbox canary."""
+    from crew.security.launch import HelperIntegrityError, verify_helper_integrity
+
+    try:
+        await asyncio.to_thread(verify_helper_integrity, helper_argv[0])
+    except (HelperIntegrityError, OSError) as exc:
+        log.warning("Windows sandbox ACL recovery skipped: invalid helper (%s)", type(exc).__name__)
+        return "windows_acl_recovery_failed"
     process = None
     try:
         process = await asyncio.create_subprocess_exec(
@@ -422,7 +429,7 @@ def create_security_router(crew) -> APIRouter:
         state_dir = Path(os.environ.get("ACE_SECURITY_STATE_DIR", ""))
         if platform.system() == "Windows" and state_dir.is_absolute():
             helper = packaged_runtime_argv()
-            if Path(helper[0]).is_file() and not runtime_source_stale(helper[0]):
+            if helper and Path(helper[0]).is_file() and not runtime_source_stale(helper[0]):
                 reason = acl_recovery.status(helper, state_dir)
                 if reason:
                     return {

@@ -633,7 +633,7 @@ async def _security_sandbox_run(args: Any, ctx: CliContext) -> CliResult:
     from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError
 
     helper_argv = packaged_runtime_argv()
-    if not Path(helper_argv[0]).is_file():
+    if not helper_argv or not Path(helper_argv[0]).is_file():
         raise CliError("native security runtime 未随包安装", exit_code=503)
     if runtime_source_stale(helper_argv[0]):
         raise CliError("native security runtime 与当前源码不一致，请重新构建", exit_code=503)

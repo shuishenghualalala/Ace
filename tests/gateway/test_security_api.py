@@ -922,6 +922,25 @@ async def test_windows_setup_action_requires_a_repairable_probe_error(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_windows_acl_recovery_rejects_invalid_helper(tmp_path, monkeypatch):
+    from crew.gateway.routers import security as security_router
+
+    helper = tmp_path / "ace-security-runtime.exe"
+    helper.write_bytes(b"fixture")
+    helper.with_name("runtime-manifest.json").write_text(json.dumps({
+        "schema": 2,
+        "binary_sha256": "0" * 64,
+    }), encoding="utf-8")
+
+    async def unexpected_spawn(*_args, **_kwargs):
+        pytest.fail("ACL recovery must validate the helper before spawning it")
+
+    monkeypatch.setattr(security_router.asyncio, "create_subprocess_exec", unexpected_spawn)
+    reason = await security_router._recover_windows_acl((str(helper),), tmp_path)
+    assert reason == "windows_acl_recovery_failed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reason", [None, "windows_sandbox_busy", "windows_acl_recovery_failed"])
 async def test_windows_capabilities_recover_acl_once_before_running_canary(api, tmp_path, monkeypatch, reason):
     from crew.gateway.routers import security as security_router

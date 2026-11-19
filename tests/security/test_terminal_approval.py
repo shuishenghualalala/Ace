@@ -119,6 +119,33 @@ async def test_every_managed_terminal_command_crosses_host_authorization(
 
 
 @pytest.mark.asyncio
+async def test_missing_bundled_runtime_is_reported_before_approval(monkeypatch, tmp_path):
+    context = SecurityContext(
+        os_user="os-a",
+        owner_account_id="owner-a",
+        workspace_id="project-a",
+        workspace_root=tmp_path,
+        session_id="session-a",
+        request_id="request-a",
+        task_id="task-a",
+        cwd=tmp_path,
+    )
+    service = _ApprovalOnlyService()
+    monkeypatch.setattr("crew.security.context.build_security_context", lambda _store: context)
+    monkeypatch.setattr("crew.security.launch.packaged_runtime_argv", lambda: ())
+    monkeypatch.setattr("crew.tools.builtin._resolve_base_dir", lambda: tmp_path)
+
+    response = await handle_terminal(
+        {"command": "echo sandbox-readiness"},
+        workspace_store=object(),
+        security_service=service,
+    )
+
+    assert json.loads(response)["error_code"] == "sandbox_unavailable"
+    assert service.actions == []
+
+
+@pytest.mark.asyncio
 async def test_direct_network_is_already_covered_by_the_terminal_profile(monkeypatch, tmp_path):
     context = SecurityContext(
         os_user="os-a", owner_account_id="owner-a", workspace_id="project-a",

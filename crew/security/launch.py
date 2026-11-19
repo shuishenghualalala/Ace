@@ -688,16 +688,22 @@ def packaged_runtime_candidates(repo_root: Path, name: str) -> tuple[Path, ...]:
     return tuple(candidates)
 
 
+def _windows_runtime_bundle_required() -> bool:
+    return os.name == "nt" and os.environ.get("ACE_SECURITY_RUNTIME_BUNDLED_ONLY") == "1"
+
+
 def packaged_runtime_argv() -> tuple[str, ...]:
     """Resolve a trusted installed helper without searching the task cwd.
 
     Priority: ACE_SECURITY_RUNTIME env (absolute) → Desktop 本地 staging 目录 → 当前
     平台/架构的仓库预编译产物。所有候选都固定在
-    仓库根目录，不搜索任务 cwd。
+    仓库根目录，不搜索任务 cwd。Windows 打包桌面只传递已校验的随包组件。
     """
     configured = os.environ.get("ACE_SECURITY_RUNTIME", "").strip()
     if configured:
         candidate = Path(configured).expanduser().resolve(strict=False)
+    elif _windows_runtime_bundle_required():
+        return ()
     else:
         name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
         # crew/security/launch.py → parents[2] = 仓库根
@@ -725,9 +731,12 @@ def _manifest_for(helper_path: Path) -> dict | None:
     if not manifest_path.is_file():
         return None
     try:
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
+    if not isinstance(manifest, dict):
+        raise HelperIntegrityError("native security runtime manifest must be an object")
+    return manifest
 
 
 def verify_helper_integrity(helper_path: str | Path) -> None:
@@ -739,10 +748,10 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
     manifest left behind) and aligns Python with the Desktop sha256 gate, so the
     `ACE_SECURITY_RUNTIME` env path no longer bypasses integrity entirely.
     A missing binary is NOT raised here--the subsequent spawn's FileNotFoundError
-    already maps to SANDBOX_UNAVAILABLE, and tests assert that spawn path is
-    reached. A missing manifest is allowed in an unbuilt development tree.
-    Once a manifest is present it must be schema 2 and include the selected
-    helper's binary digest; otherwise the managed path fails closed. A source
+    already maps to SANDBOX_UNAVAILABLE. A missing manifest is allowed for
+    development. The Windows Desktop bundle requires a readable manifest
+    with an explicit platform and architecture. Manifest schema and digest
+    must match the helper. A source
     tree may carry one entry per platform in the same manifest.
     """
     path = Path(helper_path)
@@ -750,12 +759,16 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         return
     manifest = _manifest_for(path)
     if manifest is None:
+        if _windows_runtime_bundle_required():
+            raise HelperIntegrityError("bundled security runtime manifest is unavailable")
         return
     if manifest.get("schema") != 2:
         raise HelperIntegrityError("native security runtime manifest schema is unsupported")
     declared_platform = str(manifest.get("platform", "")).strip()
     declared_arch = str(manifest.get("arch", "")).strip()
-    if bool(declared_platform) != bool(declared_arch):
+    if bool(declared_platform) != bool(declared_arch) or (
+        _windows_runtime_bundle_required() and not declared_platform
+    ):
         raise HelperIntegrityError("native security runtime manifest target is incomplete")
     if declared_platform and declared_arch:
         declared_key = runtime_platform_key(declared_platform, declared_arch)
@@ -767,7 +780,10 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         raise HelperIntegrityError("native security runtime manifest names a different binary")
     expected = str(manifest.get("binary_sha256", "")).strip()
     if not expected:
-        for entry in manifest.get("files", []):
+        files = manifest.get("files", [])
+        if not isinstance(files, list):
+            raise HelperIntegrityError("native security runtime manifest files must be a list")
+        for entry in files:
             if isinstance(entry, dict) and str(entry.get("name", "")).strip() == path.name:
                 expected = str(entry.get("sha256", "")).strip()
                 break
@@ -790,7 +806,10 @@ def runtime_source_stale(helper_path: str | Path | None = None) -> bool | None:
     repo_root = Path(__file__).resolve().parents[2]
     sec_root = repo_root / "security-runtime"
     if helper_path is None:
-        helper_path = packaged_runtime_argv()[0]
+        helper_argv = packaged_runtime_argv()
+        if not helper_argv:
+            return None
+        helper_path = helper_argv[0]
     manifest_path = Path(helper_path).expanduser().resolve(strict=False).with_name(
         "runtime-manifest.json"
     )

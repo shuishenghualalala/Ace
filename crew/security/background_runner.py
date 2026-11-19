@@ -16,10 +16,10 @@ from crew.security.runtime_client import (
 
 
 async def _run(payload: dict) -> int:
-    client = NativeRuntimeClient(tuple(payload["helper_argv"]))
     env_overrides = dict(payload.get("env_overrides") or {})
     trusted_path = env_overrides.pop("PATH", None)
     try:
+        client = NativeRuntimeClient(tuple(payload["helper_argv"]))
         result = await client.execute(
             command=tuple(payload["command"]),
             cwd=Path(payload["cwd"]),

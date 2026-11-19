@@ -390,6 +390,52 @@ def test_packaged_runtime_honors_explicit_platform_artifact(monkeypatch, tmp_pat
     assert packaged_runtime_argv() == (str(runtime.resolve()),)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows packaged Gateway contract")
+def test_windows_bundle_requires_the_desktop_validated_helper(monkeypatch, tmp_path):
+    runtime = tmp_path / "ace-security-runtime.exe"
+    runtime.write_bytes(b"runtime")
+    monkeypatch.setenv("ACE_SECURITY_RUNTIME_BUNDLED_ONLY", "1")
+    monkeypatch.delenv("ACE_SECURITY_RUNTIME", raising=False)
+    monkeypatch.setattr(
+        "crew.security.launch.packaged_runtime_candidates", lambda *_: (runtime,),
+    )
+
+    assert packaged_runtime_argv() == ()
+    assert runtime_source_stale() is None
+
+    monkeypatch.setenv("ACE_SECURITY_RUNTIME", str(runtime))
+    assert packaged_runtime_argv() == (str(runtime.resolve()),)
+    with pytest.raises(HelperIntegrityError, match="manifest is unavailable"):
+        verify_helper_integrity(runtime)
+    manifest = runtime.with_name("runtime-manifest.json")
+    manifest.write_text(json.dumps({
+        "schema": 2,
+        "binary_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+    }), encoding="utf-8")
+    with pytest.raises(HelperIntegrityError, match="target is incomplete"):
+        verify_helper_integrity(runtime)
+
+    monkeypatch.delenv("ACE_SECURITY_RUNTIME_BUNDLED_ONLY")
+    verify_helper_integrity(runtime)
+    monkeypatch.delenv("ACE_SECURITY_RUNTIME")
+    assert packaged_runtime_argv() == (str(runtime),)
+
+
+@pytest.mark.asyncio
+async def test_background_bridge_reports_missing_helper(tmp_path):
+    from crew.security import background_runner
+
+    result_path = tmp_path / "result.json"
+    exit_code = await background_runner._run({
+        "helper_argv": [],
+        "result_path": str(result_path),
+        "result_nonce": "a" * 32,
+    })
+
+    assert exit_code == 125
+    assert json.loads(result_path.read_text(encoding="utf-8"))["stable_error_code"] == "sandbox_unavailable"
+
+
 @pytest.mark.parametrize(
     ("system_name", "machine_name", "expected"),
     [

@@ -13,8 +13,44 @@ import {
   provisionInstalledWindowsSandbox,
   publishWindowsSandboxSetup,
   securityRuntimePlatformKey,
+  windowsPackagedGatewaySecurityEnv,
   type SecuritySetupResult,
 } from '../../src/main/security-setup';
+
+describe('Windows packaged Gateway security environment', () => {
+  it('replaces inherited security keys regardless of their casing', () => {
+    expect(windowsPackagedGatewaySecurityEnv({
+      Ace_Security_Runtime: 'old helper',
+      ACE_SECURITY_RUNTIME: 'another helper',
+      ace_security_state_dir: 'old state',
+      ace_strict_security: '0',
+      ace_security_runtime_bundled_only: '0',
+      ace_desktop_windows_sandbox_setup_dir: 'old attempt',
+      Path: 'system path',
+    }, {
+      ACE_SECURITY_RUNTIME: 'bundled helper',
+      ACE_SECURITY_STATE_DIR: 'current state',
+      ACE_STRICT_SECURITY: '1',
+    }, 'current attempt')).toEqual({
+      Path: 'system path',
+      ACE_SECURITY_RUNTIME: 'bundled helper',
+      ACE_SECURITY_STATE_DIR: 'current state',
+      ACE_STRICT_SECURITY: '1',
+      ACE_SECURITY_RUNTIME_BUNDLED_ONLY: '1',
+      ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR: 'current attempt',
+    });
+  });
+
+  it('omits the runtime and preparation location when the bundle fails validation', () => {
+    const env = windowsPackagedGatewaySecurityEnv({
+      ACE_SECURITY_RUNTIME: 'old helper',
+      ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR: 'old attempt',
+    }, { ACE_SECURITY_STATE_DIR: 'current state' }, 'current attempt');
+    expect(env).not.toHaveProperty('ACE_SECURITY_RUNTIME');
+    expect(env.ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR).toBeUndefined();
+    expect(env.ACE_SECURITY_RUNTIME_BUNDLED_ONLY).toBe('1');
+  });
+});
 
 describe('Windows security setup elevation', () => {
   it('uses the ordinary native check to skip setup on an already prepared device', async () => {

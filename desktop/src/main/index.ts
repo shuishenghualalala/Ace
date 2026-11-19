@@ -130,6 +130,7 @@ import {
   publishWindowsSandboxSetup,
   runElevatedUacEnable,
   securityRuntimePlatformKey,
+  windowsPackagedGatewaySecurityEnv,
 } from './security-setup';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
@@ -1556,12 +1557,21 @@ function packagedSecurityRuntimeEnv({ bundledOnly = false } = {}): Record<string
   if (fs.existsSync(manifestPath)) {
     try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+        schema?: number;
         files?: Array<{ name?: string; sha256?: string }>;
         binary_name?: string;
         binary_sha256?: string;
         platform?: string;
         arch?: string;
       };
+      if (
+        bundledOnly && (
+          manifest.schema !== 2 || !manifest.platform || !manifest.arch
+          || (manifest.binary_name && manifest.binary_name !== runtimeName)
+        )
+      ) {
+        return { ACE_SECURITY_STATE_DIR: stateDir, ACE_STRICT_SECURITY: strictSecurity };
+      }
       const declaresPlatform = Boolean(manifest.platform || manifest.arch);
       if (
         declaresPlatform
@@ -1572,8 +1582,10 @@ function packagedSecurityRuntimeEnv({ bundledOnly = false } = {}): Record<string
           ACE_STRICT_SECURITY: strictSecurity,
         };
       }
-      const expected = manifest.files?.find((item) => item.name === runtimeName)?.sha256
-        ?? (manifest.binary_name === runtimeName ? manifest.binary_sha256 : undefined);
+      const fileDigest = manifest.files?.find((item) => item.name === runtimeName)?.sha256;
+      const expected = bundledOnly
+        ? manifest.binary_sha256?.trim() || fileDigest
+        : fileDigest ?? (manifest.binary_name === runtimeName ? manifest.binary_sha256 : undefined);
       const actual = createHash('sha256').update(fs.readFileSync(runtime)).digest('hex');
       if (!expected || actual !== expected) {
         return {
@@ -1766,24 +1778,25 @@ function startWindowsPackagedGateway(port: number): void {
 
   try {
     const spawnStart = Date.now();
-    const securityRuntimeEnv = packagedSecurityRuntimeEnv();
-    const bundledRuntime = path.join(process.resourcesPath, 'ace-security-runtime.exe');
-    const setupDirectory = securityRuntimeEnv.ACE_SECURITY_RUNTIME === bundledRuntime
-      ? windowsSandboxSetupDirectory
-      : undefined;
+    const securityEnv = windowsPackagedGatewaySecurityEnv(
+      process.env,
+      packagedSecurityRuntimeEnv({ bundledOnly: true }),
+      windowsSandboxSetupDirectory,
+    );
+    if (!securityEnv.ACE_SECURITY_RUNTIME) {
+      console.warn('[security] Windows bundled sandbox runtime unavailable');
+    }
     managedGateway = spawnOwnedGateway(launch.command, launch.args, {
       cwd: gatewayRoot,
       windowsHide: true,
       detached: false,
       // 不注入 CREW_TASK_WORKSPACE_ROOT，让后端从 config.yaml 自行计算
       env: {
-        ...process.env,
+        ...securityEnv,
         CREW_HOME: resolveCrewHome(),
         GATEWAY_PORT: String(port),
         ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
         ...launch.envExtras,
-        ...securityRuntimeEnv,
-        ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR: setupDirectory,
         // 与开发态一致：内嵌 Python 仍可能走 GBK 控制台
         PYTHONIOENCODING: 'utf-8',
         ...(process.platform === 'win32' ? { PYTHONUTF8: '1' } : {}),
