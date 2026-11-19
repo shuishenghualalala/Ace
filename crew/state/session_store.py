@@ -2800,6 +2800,15 @@ class SQLiteSessionStore(SessionStore):
         with self._lock:
             return self._read_history_incarnation(self._conn, session_id, owner_account_id)
 
+    def get_history_incarnations(self, owner_account_id: str) -> dict[str, str]:
+        """Read the owned session identities from one SQLite snapshot."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT session_id, history_incarnation FROM sessions WHERE owner_account_id = ?",
+                (owner_account_id,),
+            ).fetchall()
+        return dict(rows)
+
     def _require_history_incarnation(
         self, conn: sqlite3.Connection, session_id: str, owner_account_id: str
     ) -> str:

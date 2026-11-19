@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from crew.core.envelope import Envelope
+from crew.core.runctx import current_turn_session_incarnation
 from crew.core.mocks import InMemoryWorkspaceStore
 from crew.features import FeatureRuntime, FeatureState
-from crew.state.session_store import SQLiteSessionStore
+from crew.state.session_store import SQLiteSessionStore, SessionIncarnationChanged
 from crew.wiki.schemas import WikiPage
 from crew.work.feature import WORK_FEATURE_ID, build_work_feature
 from crew.work.knowledge import WorkKnowledgeStore
@@ -169,8 +171,99 @@ async def test_work_item_context_is_current_and_scoped_to_saved_references(tmp_p
         assert "UPDATED WORK ITEM" in await contribute()
         service.delete_reference(owner, saved.reference_id)
         assert await contribute() == ""
+
+        old_reference = service.create_reference(
+            owner_account_id=owner, target_session_id="work-current",
+            reference_type="work_item", source_id=live.item_id,
+        )
+        old_incarnation = host.session_store.get_history_incarnation("work-current", owner)
+        host.session_store.clear("work-current", owner_account_id=owner)
+        host.session_store.ensure_session("work-current", workspace_id="default", owner_account_id=owner)
+        assert host.session_store.get_history_incarnation("work-current", owner) != old_incarnation
+        assert await contribute() == ""
+        assert service.list_references(owner, "work-current") == []
+        assert not service.is_work_session(owner, "work-current")
+
+        with pytest.raises(SessionIncarnationChanged):
+            service.references.link_session(owner_account_id=owner, session_id="work-current", product_mode="work")
+        with pytest.raises(KeyError):
+            service.references.get_reference(owner, old_reference.reference_id)
+        with closing(sqlite3.connect(tmp_path / "work.db")) as conn:
+            assert conn.execute(
+                "SELECT session_incarnation FROM work_session_links WHERE owner_account_id=? AND session_id=?",
+                (owner, "work-current"),
+            ).fetchone() == (old_incarnation,)
+            assert conn.execute(
+                "SELECT 1 FROM work_references WHERE owner_account_id=? AND reference_id=?",
+                (owner, old_reference.reference_id),
+            ).fetchone() == (1,)
+        fresh = service.create_session(owner_account_id=owner)["session_id"]
+        assert await contribute(session_id=fresh) == ""
+        service.create_reference(
+            owner_account_id=owner, target_session_id=fresh,
+            reference_type="work_item", source_id=live.item_id,
+        )
+        assert "UPDATED WORK ITEM" in await contribute(session_id=fresh)
+        older_turn = current_turn_session_incarnation.set((owner, fresh, old_incarnation))
+        try:
+            assert await contribute(session_id=fresh) == ""
+        finally:
+            current_turn_session_incarnation.reset(older_turn)
+        with closing(sqlite3.connect(tmp_path / "work.db")) as conn:
+            conn.execute(
+                "UPDATE work_session_links SET session_incarnation='' WHERE owner_account_id=? AND session_id=?",
+                (owner, fresh),
+            )
+            conn.commit()
+        assert host.session_store.get_history_incarnation(fresh, owner)
+        assert not service.is_work_session(owner, fresh)
+        assert service.list_references(owner, fresh) == []
+        assert await contribute(session_id=fresh) == ""
     finally:
         await runtime.deactivate(WORK_FEATURE_ID)
+        host.session_store.close()
+
+
+@pytest.mark.parametrize("entry", ["chat", "new-item", "process-item"])
+def test_work_creation_error_does_not_clear_a_replacement_session(tmp_path, monkeypatch, entry):
+    owner = "A:work-owner"
+    host = _Host()
+    host.session_store = SQLiteSessionStore(str(tmp_path / "sessions.db"))
+    host.workspace_store = InMemoryWorkspaceStore()
+    service = build_work_feature(host, db_path=tmp_path / "work.db", hook_registry=_Hooks()).service
+    replacement = {}
+    link = service.references.link_session
+
+    def replace_before_link(**kwargs):
+        session_id = kwargs["session_id"]
+        old = kwargs["expected_incarnation"]
+        host.session_store.clear(session_id, owner_account_id=owner, expected_incarnation=old)
+        new = host.session_store.ensure_session_incarnation(session_id, owner_account_id=owner)
+        assert new != old
+        replacement.update(session_id=session_id, incarnation=new)
+        return link(**kwargs)
+
+    monkeypatch.setattr(service.references, "link_session", replace_before_link)
+    try:
+        with pytest.raises(SessionIncarnationChanged, match="before Work binding"):
+            if entry == "chat":
+                service.create_session(owner_account_id=owner)
+            elif entry == "new-item":
+                service.create_item(
+                    owner_account_id=owner, values={"title": "new", "create_processing_session": True},
+                )
+            else:
+                item = service.create_item(owner_account_id=owner, values={"title": "existing"})
+                service.start_item_processing_session(
+                    owner_account_id=owner, item_id=item.item_id, expected_version=item.version,
+                )
+        assert host.session_store.get_history_incarnation(replacement["session_id"], owner) == replacement["incarnation"]
+        assert service.references.list_session_links(owner) == []
+        assert [item.processing_session_id for item in service.items.list(owner)] == (
+            [None] if entry == "process-item" else []
+        )
+    finally:
+        service.close()
         host.session_store.close()
 
 

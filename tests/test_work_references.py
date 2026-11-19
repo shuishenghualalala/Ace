@@ -4,17 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from crew.state.session_store import SQLiteSessionStore, SessionIncarnationChanged
+
 from crew.work.items import WorkItemStore
 from crew.work.models import ProductMode
 from crew.work.references import ReferenceType, WorkReferenceStore
-
-
-class _FakeSessionStore:
-    def session_belongs_to(self, session_id: str, owner_account_id: str) -> bool:
-        return True
-
-    def load(self, session_id: str, owner_account_id: str = "") -> list:
-        return []
 
 
 @pytest.fixture
@@ -22,10 +16,9 @@ def store(tmp_path):
     db_path = tmp_path / "crew.db"
     # work_session_links/work_references 对 work_items 有外键，需同库建表。
     items = WorkItemStore(db_path)
-    reference_store = WorkReferenceStore(
-        db_path,
-        session_store=_FakeSessionStore(),
-    )
+    sessions = SQLiteSessionStore(str(tmp_path / "sessions.db"))
+    sessions.ensure_session("sess-1", owner_account_id="owner")
+    reference_store = WorkReferenceStore(db_path, session_store=sessions)
     reference_store.link_session(
         owner_account_id="owner",
         session_id="sess-1",
@@ -34,6 +27,49 @@ def store(tmp_path):
     yield reference_store
     reference_store.close()
     items.close()
+    sessions.close()
+
+
+def test_delayed_binding_cannot_replace_another_sessions_references(tmp_path, monkeypatch):
+    work_db = tmp_path / "work.db"
+    main_db = str(tmp_path / "sessions.db")
+    sessions = SQLiteSessionStore(main_db)
+    replacement_sessions = SQLiteSessionStore(main_db)
+    items = WorkItemStore(work_db)
+    refs = WorkReferenceStore(work_db, session_store=sessions)
+    replacement_refs = WorkReferenceStore(work_db, session_store=replacement_sessions)
+    owner, session_id = "owner", "same-id"
+    try:
+        old = sessions.ensure_session_incarnation(session_id, owner_account_id=owner)
+        write = refs._writer.execute
+
+        def allow_replacement_then_write(callback):
+            replacement_sessions.clear(session_id, owner_account_id=owner, expected_incarnation=old)
+            new = replacement_sessions.ensure_session_incarnation(session_id, owner_account_id=owner)
+            assert new != old
+            replacement_refs.link_session(
+                owner_account_id=owner, session_id=session_id, product_mode="work",
+                expected_incarnation=new,
+            )
+            replacement_refs.create_reference(
+                owner_account_id=owner, target_session_id=session_id,
+                reference_type="browser_tab", source_id="replacement-tab",
+            )
+            return write(callback)
+
+        monkeypatch.setattr(refs._writer, "execute", allow_replacement_then_write)
+        with pytest.raises(SessionIncarnationChanged):
+            refs.link_session(
+                owner_account_id=owner, session_id=session_id, product_mode="work",
+                expected_incarnation=old,
+            )
+        assert [item.source_id for item in refs.list_references(owner, session_id)] == ["replacement-tab"]
+    finally:
+        refs.close()
+        replacement_refs.close()
+        items.close()
+        sessions.close()
+        replacement_sessions.close()
 
 
 def test_browser_tab_reference_round_trip(store):

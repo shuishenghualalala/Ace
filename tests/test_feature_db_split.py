@@ -536,18 +536,24 @@ def _seed_legacy_work_rows(legacy_db) -> None:
     sources.refresh(owner, "crm")
     sources.close()
 
-    refs = WorkReferenceStore(str(legacy_db), session_store=object())
-    refs.link_session(
-        owner_account_id=owner, session_id="s-legacy", product_mode="work"
-    )
-    refs.create_reference(
-        owner_account_id=owner,
-        target_session_id="s-legacy",
-        reference_type="work_item",
-        source_id=item.item_id,
-        target_item_id=item.item_id,
-    )
-    refs.close()
+    sessions = SQLiteSessionStore(str(legacy_db))
+    sessions.ensure_session("s-legacy", owner_account_id=owner)
+    refs = WorkReferenceStore(str(legacy_db), session_store=sessions)
+    try:
+        refs.link_session(owner_account_id=owner, session_id="s-legacy", product_mode="work")
+        refs.create_reference(
+            owner_account_id=owner,
+            target_session_id="s-legacy",
+            reference_type="work_item",
+            source_id=item.item_id,
+            target_item_id=item.item_id,
+        )
+    finally:
+        refs.close()
+        sessions.close()
+    with closing(sqlite3.connect(legacy_db)) as conn:
+        conn.execute("UPDATE work_session_links SET session_incarnation = ''")
+        conn.commit()
 
     prefs = WorkPreferenceStore(str(legacy_db))
     prefs.set_auto_learning_enabled(owner, True)

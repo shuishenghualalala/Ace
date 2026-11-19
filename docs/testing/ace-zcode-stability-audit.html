@@ -208,8 +208,14 @@
 <p>旧版经签名 Gateway 提交时只保留普通消息里的事项标记。ZCode 从当前消息提取引用，按会话身份和精确 ID 定位来源，为模型提供有界背景。Ace 的 Work Feature 现登记本轮提示词贡献器。先按服务端主会话和所属工作区校验，再在同一次查询中匹配实体类型、已保存引用和实时事项。最多八项，去重并保留输入顺序。事项数据转义后作为模型提示的背景，原始消息继续用于回放和持久化。</p>
 <p><strong>Gateway 验收</strong> Windows 打包 Gateway 两组各跑七轮真实签名 WebSocket 和本机模型夹具。候选展示本轮有效引用及修改后的当前值。无标记、非完整标记、普通 Agent 会话和删除引用后的回合不加载事项。未保存、其他会话、其他账号、跨工作区或已删除的来源均未出现在模型请求。客户端伪造工作区由 Gateway 归一为会话的持久工作区，查询仍只返回该工作区事项。客户端保存的伪快照未被采用。同一请求重发只调用模型一次，变化的原始请求体被拒绝。签名历史和 SQLite 保留原始对话，重启后再次核对一致，监听均释放。</p>
 <p><strong>CLI 验收</strong> Windows 包内解释器两组各运行六个正常 CLI 进程，依次创建 Work 会话、事项、引用，发送有标记和无标记的两轮消息，再读取历史。候选只在显式引用的回合传入标题和描述，第二轮仍带原始历史标记。<code>session show</code> 和 11 条 SQLite 会话事件均未写入展开的事项。模型使用本机夹具。Work、上下文贡献器、Gateway 和提示词的 285 项回归以及 Ruff 通过。</p>
-<p>当前桌面产品导航关闭了 Work 模式入口，CLI 和签名 API 的 Work 路径仍可用。现有本次偏好排除字段的传递及主会话删除后独立 Work 库绑定的回收仍属后续事项。</p>
+<p>当前桌面产品导航关闭了 Work 模式入口，CLI 和签名 API 的 Work 路径仍可用。现有本次偏好排除字段的传递仍属后续事项。主会话删除后独立 Work 库的引用隔离见下节。</p>
 <p class="evidence">Ace <code>packages/crew-work/src/crew/work/service.py</code>、<code>references.py</code>、<code>crew/gateway/dispatcher.py:680</code>、<code>desktop/src/ui/stores/product-mode-store.ts:84</code>。ZCode <code>apps/zcode-cli/packages/core/src/session-context/references.ts:3</code>、<code>runtime/methods/turn.ts:626</code>、<code>:1146</code>、<code>tool/handlers/read-session-context.ts:175</code>。</p>
+<h3 id="work-reference-session-incarnation">Work 引用绑定主会话的具体实例</h3>
+<p>基线 <code>53b551fd</code> 删除主会话时保留独立 Work 库的绑定和引用。同账号同工作区用相同 ID 建立普通会话后，旧事项会出现在完整的模型请求中。ZCode 持久化软删除标记，再清理运行会话。相同 ID 的写入会保留删除标记。Ace 继续使用现有的主会话删除语义，在 Work 绑定中存入由主库生成的会话实例标识。读取核对当前实例，已接受的回合另核对其执行身份。Work 与主库分别完成各自的 SQLite 操作。</p>
+<p>旧绑定及其引用保留原数据，缺失实例标识的旧记录无法用于新回合。普通会话重用 ID 也无法接收旧绑定。要在 Work 中继续使用原事项，可以新建 Work 会话并重新保存引用。延迟的写入不会覆盖已经存在的绑定。会话创建失败时，按该次创建返回的标识清理，避免清掉后继实例。</p>
+<p><strong>验收</strong> 基线和候选使用真实 Windows 打包 Gateway、验签 WebSocket 和本地模型夹具。候选在签名删除、重启和同 ID 重建后没有发送旧事项，另一账号的同 ID 记录保持原样。旧版创建的独立配置原地升级后，旧事项、链接和引用仍在 SQLite，新建 Work 会话并显式保存引用后读到原事项。签名历史和原始事件在再次重启后均保持原始输入及回复。</p>
+<p>打包 CLI 的七轮请求也通过，覆盖仍有效的新绑定、两种旧版配置、重建的普通会话和新 Work 会话重新保存引用。直接查询重建会话的引用返回空列表，保存引用被拒绝，当前 Work 会话可读到新引用。314 项 Work、迁移、会话存储、Gateway 和提示词回归通过。并发回归模拟另一连接在旧写入等待时绑定后继会话，验证后继引用保留。普通过程及绑定失败清理均有覆盖。Ruff 与差异检查通过。</p>
+<p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>packages/crew-work/src/crew/work/references.py</code>、<code>service.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/storage/session-store/repositories/sessions.ts:25–51、128–151</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts:1216–1236</code>。</p>
 <h3>工具并发与异步的补充对照</h3>
 <div class="table"><table>
 <thead><tr><th>工具</th><th>Ace 与 ZCode 的已核对行为</th><th>验收范围</th></tr></thead>

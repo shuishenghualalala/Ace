@@ -6,17 +6,19 @@ import inspect
 import json
 import re
 import uuid
+from contextlib import suppress
 from datetime import date, datetime, time, timedelta
 from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 
-from crew.core.runctx import normalize_owner_account_id
+from crew.core.runctx import current_turn_session_incarnation, normalize_owner_account_id
 from crew.core.envelope import Envelope
 from crew.core.interfaces import LLMProvider, SessionStore, WorkspaceStore
 from crew.core.types import Message
 from crew.features.context import ContextContribution
 from crew.providers import stream_aux
 from crew.state.logging import get_logger
+from crew.state.session_store import SessionIncarnationChanged
 from crew.work.briefs import WorkBriefStore, WorkPeriodReport
 from crew.work.items import WorkItemEvent, WorkItemStore
 from crew.work.models import BusinessStatus, Disposition, ProductMode, WorkItem
@@ -263,7 +265,10 @@ class WorkService:
         except (KeyError, ValueError):
             return None
 
-        items = self.references.resolve_referenced_work_items(owner, session_id, workspace_id, tuple(item_ids))
+        items = self.references.resolve_referenced_work_items(
+            owner, session_id, workspace_id, tuple(item_ids),
+            expected_incarnation=_turn_incarnation(owner, session_id),
+        )
         if not items:
             return None
         data = json.dumps(items, ensure_ascii=False).replace("<", r"\u003c").replace(">", r"\u003e")
@@ -276,7 +281,11 @@ class WorkService:
     def enrich_envelope(self, envelope: Envelope) -> bool:
         """Apply account preferences and append product rules only for Work sessions."""
         try:
-            link = self.references.get_session_link(envelope.user_id, envelope.session_id)
+            link = self.references.get_session_link(
+                envelope.user_id,
+                envelope.session_id,
+                expected_incarnation=_turn_incarnation(envelope.user_id, envelope.session_id),
+            )
         except (KeyError, ValueError):
             link = None
         is_work = link is not None and link.product_mode is ProductMode.WORK
@@ -348,26 +357,16 @@ class WorkService:
         workspace = _required_text(workspace_id, "workspace_id")
         normalized_title = str(title or "").strip() or "新对话"
         self.workspace_store.get(workspace, owner_account_id=owner)
-        ensure = getattr(self.session_store, "ensure_session", None)
-        if not callable(ensure):
-            raise RuntimeError("session store does not support session creation")
-        session_id = f"work_{uuid.uuid4().hex}"
-        ensure(
-            session_id,
-            workspace_id=workspace,
-            title=normalized_title,
-            owner_account_id=owner,
-        )
+        session_id, incarnation = self._create_owned_session(owner, workspace, normalized_title)
         try:
             self.references.link_session(
                 owner_account_id=owner,
                 session_id=session_id,
                 product_mode=ProductMode.WORK,
+                expected_incarnation=incarnation,
             )
         except Exception:
-            clear = getattr(self.session_store, "clear", None)
-            if callable(clear):
-                clear(session_id, owner_account_id=owner)
+            self._clear_created_session(owner, session_id, incarnation)
             raise
         return {
             "session_id": session_id,
@@ -375,6 +374,20 @@ class WorkService:
             "workspace_id": workspace,
             "product_mode": ProductMode.WORK.value,
         }
+
+    def _create_owned_session(self, owner: str, workspace_id: str, title: str) -> tuple[str, str]:
+        ensure = getattr(self.session_store, "ensure_session_incarnation", None)
+        if not callable(ensure):
+            raise RuntimeError("session store does not support durable session identity")
+        session_id = f"work_{uuid.uuid4().hex}"
+        incarnation = ensure(session_id, workspace_id=workspace_id, title=title, owner_account_id=owner)
+        return session_id, incarnation
+
+    def _clear_created_session(self, owner: str, session_id: str, incarnation: str) -> None:
+        clear = getattr(self.session_store, "clear", None)
+        if callable(clear):
+            with suppress(SessionIncarnationChanged):
+                clear(session_id, owner_account_id=owner, expected_incarnation=incarnation)
 
     def is_work_session(self, owner_account_id: str, session_id: str) -> bool:
         """Return whether an owned Session is mapped to the Work product."""
@@ -469,40 +482,33 @@ class WorkService:
         if workspace_id is not None:
             self.workspace_store.get(workspace_id, owner_account_id=owner)
 
-        session_id: str | None = None
+        created_session: tuple[str, str] | None = None
         item: WorkItem | None = None
         if create_processing_session:
             workspace_id = workspace_id or "default"
             self.workspace_store.get(workspace_id, owner_account_id=owner)
-            ensure = getattr(self.session_store, "ensure_session", None)
-            if not callable(ensure):
-                raise RuntimeError("session store does not support session creation")
-            session_id = f"work_{uuid.uuid4().hex}"
-            ensure(
-                session_id,
-                workspace_id=workspace_id,
-                title=str(data.get("title") or "新事项"),
-                owner_account_id=owner,
-            )
+            created_session = self._create_owned_session(owner, workspace_id, str(data.get("title") or "新事项"))
             data["workspace_id"] = workspace_id
-            data["processing_session_id"] = session_id
+            data["processing_session_id"] = created_session[0]
         try:
             item = self.items.create(owner_account_id=owner, **data)
-            if session_id is not None:
+            if created_session is not None:
+                session_id, incarnation = created_session
                 self.references.link_session(
                     owner_account_id=owner,
                     session_id=session_id,
                     product_mode=ProductMode.WORK,
                     work_item_id=item.item_id,
+                    expected_incarnation=incarnation,
                 )
             return item
         except Exception:
-            if item is not None:
-                self.items.delete(owner, item.item_id, expected_version=item.version)
-            if session_id is not None:
-                clear = getattr(self.session_store, "clear", None)
-                if callable(clear):
-                    clear(session_id, owner_account_id=owner)
+            try:
+                if item is not None:
+                    self.items.delete(owner, item.item_id, expected_version=item.version)
+            finally:
+                if created_session is not None:
+                    self._clear_created_session(owner, *created_session)
             raise
 
     def start_item_processing_session(
@@ -519,18 +525,7 @@ class WorkService:
             return item
         workspace_id = item.workspace_id or "default"
         self.workspace_store.get(workspace_id, owner_account_id=owner)
-        ensure = getattr(self.session_store, "ensure_session", None)
-        clear = getattr(self.session_store, "clear", None)
-        if not callable(ensure) or not callable(clear):
-            raise RuntimeError("session store does not support processing session creation")
-
-        session_id = f"work_{uuid.uuid4().hex}"
-        ensure(
-            session_id,
-            workspace_id=workspace_id,
-            title=item.title,
-            owner_account_id=owner,
-        )
+        session_id, incarnation = self._create_owned_session(owner, workspace_id, item.title)
         linked_item: WorkItem | None = None
         try:
             linked_item = self.items.update(
@@ -545,18 +540,21 @@ class WorkService:
                 session_id=session_id,
                 product_mode=ProductMode.WORK,
                 work_item_id=item.item_id,
+                expected_incarnation=incarnation,
             )
             return linked_item
         except Exception:
-            if linked_item is not None:
-                self.items.update(
-                    owner,
-                    item.item_id,
-                    expected_version=linked_item.version,
-                    actor="rollback",
-                    processing_session_id=None,
-                )
-            clear(session_id, owner_account_id=owner)
+            try:
+                if linked_item is not None:
+                    self.items.update(
+                        owner,
+                        item.item_id,
+                        expected_version=linked_item.version,
+                        actor="rollback",
+                        processing_session_id=None,
+                    )
+            finally:
+                self._clear_created_session(owner, session_id, incarnation)
             raise
 
     def update_item(
@@ -1375,6 +1373,11 @@ def _period_bounds(period: str, anchor: str) -> tuple[str, str, float, float]:
     start_at = datetime.combine(start, time.min).astimezone().timestamp()
     end_at = datetime.combine(exclusive_end, time.min).astimezone().timestamp()
     return start.isoformat(), (exclusive_end - timedelta(days=1)).isoformat(), start_at, end_at
+
+
+def _turn_incarnation(owner: str, session_id: str) -> str | None:
+    turn = current_turn_session_incarnation.get()
+    return turn[2] if turn is not None and turn[:2] == (owner, session_id) else None
 
 
 def _required_text(value: Any, field: str) -> str:

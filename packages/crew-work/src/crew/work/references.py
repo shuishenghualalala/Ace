@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 from crew.core.types import Message
+from crew.state.session_store import SessionIncarnationChanged
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 from crew.work.models import OwnerKey, ProductMode, WorkSessionLink
 
@@ -21,7 +22,9 @@ from crew.work.models import OwnerKey, ProductMode, WorkSessionLink
 class SessionSnapshotSource(Protocol):
     """Minimum trusted SessionStore surface needed to create owned snapshots."""
 
-    def session_belongs_to(self, session_id: str, owner_account_id: str) -> bool: ...
+    def get_history_incarnation(self, session_id: str, owner_account_id: str) -> str | None: ...
+
+    def get_history_incarnations(self, owner_account_id: str) -> dict[str, str]: ...
 
     def load(self, session_id: str, owner_account_id: str) -> list[Message]: ...
 
@@ -85,6 +88,7 @@ class WorkReferenceStore:
                 product_mode TEXT NOT NULL,
                 work_item_id TEXT,
                 created_at REAL NOT NULL,
+                session_incarnation TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (owner_account_id, session_id),
                 FOREIGN KEY (owner_account_id, work_item_id)
                     REFERENCES work_items(owner_account_id, item_id) ON DELETE CASCADE
@@ -122,6 +126,9 @@ class WorkReferenceStore:
         )
         for statement in statements:
             conn.execute(statement)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(work_session_links)")}
+        if "session_incarnation" not in columns:
+            conn.execute("ALTER TABLE work_session_links ADD COLUMN session_incarnation TEXT NOT NULL DEFAULT ''")
 
     def link_session(
         self,
@@ -130,6 +137,7 @@ class WorkReferenceStore:
         session_id: str,
         product_mode: ProductMode | str,
         work_item_id: str | None = None,
+        expected_incarnation: str | None = None,
     ) -> WorkSessionLink:
         """Fix one owned Session to one product mode for its lifetime."""
         link = WorkSessionLink(
@@ -138,16 +146,23 @@ class WorkReferenceStore:
             product_mode=product_mode,
             work_item_id=work_item_id,
         )
+        incarnation = self._session_store.get_history_incarnation(link.session_id, link.owner_account_id)
+        if expected_incarnation is not None and expected_incarnation != incarnation:
+            raise SessionIncarnationChanged(f"Session changed before Work binding: {link.session_id}")
+        if not incarnation:
+            raise KeyError(f"Session not found: {link.session_id}")
 
         def _write(conn: sqlite3.Connection) -> WorkSessionLink:
             existing = self._select_session_link(conn, link.owner_account_id, link.session_id)
             if existing is not None:
+                # Keep historical links and their references intact, including
+                # when a delayed writer encounters a newer binding.
+                if existing["session_incarnation"] != incarnation:
+                    raise SessionIncarnationChanged(f"Work session ID already has a binding: {link.session_id}")
                 current = _row_to_session_link(existing)
-                if current == link:
-                    return current
-                raise ValueError(
-                    f"session already belongs to product mode: {current.product_mode.value}"
-                )
+                if current != link:
+                    raise ValueError(f"session already belongs to product mode: {current.product_mode.value}")
+                return current
             if link.work_item_id is not None:
                 item_row = conn.execute(
                     """
@@ -178,8 +193,8 @@ class WorkReferenceStore:
             conn.execute(
                 """
                 INSERT INTO work_session_links (
-                    owner_account_id, session_id, product_mode, work_item_id, created_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    owner_account_id, session_id, product_mode, work_item_id, created_at, session_incarnation
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     link.owner_account_id,
@@ -187,25 +202,35 @@ class WorkReferenceStore:
                     link.product_mode.value,
                     link.work_item_id,
                     time.time(),
+                    incarnation,
                 ),
             )
             return link
 
         try:
-            return self._writer.execute(_write)
+            result = self._writer.execute(_write)
         except sqlite3.IntegrityError as exc:
             raise ValueError("session or work_item_id mapping is not unique") from exc
+        if self._session_store.get_history_incarnation(link.session_id, link.owner_account_id) != incarnation:
+            raise SessionIncarnationChanged(f"Session changed during Work binding: {link.session_id}")
+        return result
 
     def get_session_link(
         self,
         owner_account_id: str,
         session_id: str,
+        *,
+        expected_incarnation: str | None = None,
     ) -> WorkSessionLink:
         owner = _required(owner_account_id, "owner_account_id")
         session = _required(session_id, "session_id")
         with self._lock:
             row = self._select_session_link(self._conn, owner, session)
-        if row is None:
+        incarnation = self._session_store.get_history_incarnation(session, owner)
+        if (
+            row is None or not incarnation or row["session_incarnation"] != incarnation
+            or (expected_incarnation is not None and expected_incarnation != incarnation)
+        ):
             raise KeyError(f"Work session link not found: {session}")
         return _row_to_session_link(row)
 
@@ -224,12 +249,18 @@ class WorkReferenceStore:
             params.append(ProductMode(product_mode).value)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT owner_account_id, session_id, product_mode, work_item_id "
+                "SELECT owner_account_id, session_id, product_mode, work_item_id, created_at, session_incarnation "
                 f"FROM work_session_links WHERE {' AND '.join(clauses)} "
                 "ORDER BY created_at, rowid",
                 params,
             ).fetchall()
-        return [_row_to_session_link(row) for row in rows]
+        if not rows:
+            return []
+        incarnations = self._session_store.get_history_incarnations(owner)
+        return [
+            _row_to_session_link(row) for row in rows
+            if row["session_incarnation"] and row["session_incarnation"] == incarnations.get(row["session_id"])
+        ]
 
     def create_reference(
         self,
@@ -272,35 +303,44 @@ class WorkReferenceStore:
         owner = _required(owner_account_id, "owner_account_id")
         target_session = _required(target_session_id, "target_session_id")
         source = _required(source_id, "source_id")
-        target_link = self._require_work_target(owner, target_session)
-        target_item = str(target_item_id or target_link.work_item_id or "").strip() or None
-        if (
-            target_link.work_item_id is not None
-            and target_item is not None
-            and target_link.work_item_id != target_item
-        ):
-            raise ValueError("target_item_id does not belong to target_session_id")
-        now = time.time()
-        reference = WorkReference(
-            owner_account_id=owner,
-            reference_id=f"work_ref_{uuid.uuid4().hex}",
-            target_session_id=target_session,
-            target_item_id=target_item,
-            reference_type=reference_type,
-            source_id=source,
-            snapshot_version=str(snapshot_version or "").strip(),
-            snapshot_summary=str(snapshot_summary or ""),
-            source_link=str(source_link or "").strip(),
-            created_at=now,
-            updated_at=now,
+        incarnation = self._session_store.get_history_incarnation(target_session, owner)
+        if not incarnation:
+            raise PermissionError("target Work session is not owned by the current account")
+        source_incarnation = (
+            self._session_store.get_history_incarnation(source, owner)
+            if reference_type is ReferenceType.WORK_SESSION else None
         )
 
-        def _write(conn: sqlite3.Connection) -> None:
+        def _write(conn: sqlite3.Connection) -> WorkReference:
+            target = self._select_session_link(conn, owner, target_session)
+            if target is None or target["session_incarnation"] != incarnation:
+                raise PermissionError("target Work session is not owned by the current account")
+            target_link = _row_to_session_link(target)
+            if target_link.product_mode is not ProductMode.WORK:
+                raise ValueError("target_session_id must belong to work mode")
+            target_item = str(target_item_id or target_link.work_item_id or "").strip() or None
+            if target_link.work_item_id is not None and target_link.work_item_id != target_item:
+                raise ValueError("target_item_id does not belong to target_session_id")
+            now = time.time()
+            reference = WorkReference(
+                owner_account_id=owner,
+                reference_id=f"work_ref_{uuid.uuid4().hex}",
+                target_session_id=target_session,
+                target_item_id=target_item,
+                reference_type=reference_type,
+                source_id=source,
+                snapshot_version=str(snapshot_version or "").strip(),
+                snapshot_summary=str(snapshot_summary or ""),
+                source_link=str(source_link or "").strip(),
+                created_at=now,
+                updated_at=now,
+            )
             self._require_owned_source(
                 conn,
                 owner_account_id=owner,
                 reference_type=reference_type,
                 source_id=source,
+                source_incarnation=source_incarnation,
             )
             if target_item is not None and conn.execute(
                 """
@@ -321,8 +361,9 @@ class WorkReferenceStore:
                 _reference_values(reference),
             )
 
-        self._writer.execute(_write)
-        return reference
+            return reference
+
+        return self._writer.execute(_write)
 
     @staticmethod
     def _require_owned_source(
@@ -331,20 +372,19 @@ class WorkReferenceStore:
         owner_account_id: str,
         reference_type: ReferenceType,
         source_id: str,
+        source_incarnation: str | None,
     ) -> None:
-        table_and_column = {
-            ReferenceType.WORK_ITEM: ("work_items", "item_id"),
-            ReferenceType.WORK_SESSION: ("work_session_links", "session_id"),
-        }.get(reference_type)
-        if table_and_column is None:
-            return
-        table, column = table_and_column
-        row = conn.execute(
-            f"SELECT 1 FROM {table} WHERE owner_account_id = ? AND {column} = ?",
-            (owner_account_id, source_id),
-        ).fetchone()
-        if row is None:
-            raise PermissionError("source entity is not owned by the current account")
+        if reference_type is ReferenceType.WORK_ITEM:
+            owned = conn.execute(
+                "SELECT 1 FROM work_items WHERE owner_account_id = ? AND item_id = ?",
+                (owner_account_id, source_id),
+            ).fetchone()
+            if owned is None:
+                raise PermissionError("source entity is not owned by the current account")
+        elif reference_type is ReferenceType.WORK_SESSION:
+            link = WorkReferenceStore._select_session_link(conn, owner_account_id, source_id)
+            if not source_incarnation or link is None or link["session_incarnation"] != source_incarnation:
+                raise PermissionError("source entity is not owned by the current account")
 
     def create_agent_session_snapshot(
         self,
@@ -422,18 +462,21 @@ class WorkReferenceStore:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT owner_account_id, reference_id, target_session_id, target_item_id,
-                       reference_type, source_id, snapshot_version, snapshot_summary,
-                       source_link, created_at, updated_at
-                FROM work_references
-                WHERE owner_account_id = ? AND reference_id = ?
+                SELECT ref.*, link.session_incarnation
+                FROM work_references AS ref
+                JOIN work_session_links AS link
+                  ON link.owner_account_id = ref.owner_account_id
+                 AND link.session_id = ref.target_session_id
+                WHERE ref.owner_account_id = ? AND ref.reference_id = ?
                 """,
                 (owner, resource),
             ).fetchone()
-        if row is None:
+        if (
+            row is None or not row["session_incarnation"]
+            or row["session_incarnation"] != self._session_store.get_history_incarnation(row["target_session_id"], owner)
+        ):
             raise KeyError(f"Work reference not found: {resource}")
         return _row_to_reference(row)
-
 
     def delete_reference(self, owner_account_id: str, reference_id: str) -> None:
         """Remove one owned reference; never touches the referenced entity."""
@@ -457,17 +500,22 @@ class WorkReferenceStore:
     ) -> list[WorkReference]:
         owner = _required(owner_account_id, "owner_account_id")
         session = _required(target_session_id, "target_session_id")
+        incarnation = self._session_store.get_history_incarnation(session, owner)
+        if not incarnation:
+            return []
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT owner_account_id, reference_id, target_session_id, target_item_id,
-                       reference_type, source_id, snapshot_version, snapshot_summary,
-                       source_link, created_at, updated_at
-                FROM work_references
-                WHERE owner_account_id = ? AND target_session_id = ?
-                ORDER BY created_at, reference_id
+                SELECT ref.*
+                FROM work_references AS ref
+                JOIN work_session_links AS link
+                  ON link.owner_account_id = ref.owner_account_id
+                 AND link.session_id = ref.target_session_id
+                WHERE ref.owner_account_id = ? AND ref.target_session_id = ?
+                  AND link.session_incarnation = ?
+                ORDER BY ref.created_at, ref.reference_id
                 """,
-                (owner, session),
+                (owner, session, incarnation),
             ).fetchall()
         return [_row_to_reference(row) for row in rows]
 
@@ -477,9 +525,14 @@ class WorkReferenceStore:
         target_session_id: str,
         workspace_id: str,
         item_ids: tuple[str, ...],
+        *,
+        expected_incarnation: str | None = None,
     ) -> list[dict[str, object]]:
         """Read current items with an exact, owned reference from the Work session."""
         if not item_ids:
+            return []
+        incarnation = self._session_store.get_history_incarnation(target_session_id, owner_account_id)
+        if not incarnation or (expected_incarnation is not None and incarnation != expected_incarnation):
             return []
         placeholders = ", ".join("?" for _ in item_ids)
         with self._lock:
@@ -497,41 +550,33 @@ class WorkReferenceStore:
                  AND item.item_id = ref.source_id
                 WHERE link.owner_account_id = ? AND link.session_id = ?
                   AND link.product_mode = ? AND ref.reference_type = ?
+                  AND link.session_incarnation = ?
                   AND item.workspace_id = ? AND item.item_id IN ({placeholders})
                 """,
                 (
                     owner_account_id, target_session_id, ProductMode.WORK.value,
-                    ReferenceType.WORK_ITEM.value, workspace_id, *item_ids,
+                    ReferenceType.WORK_ITEM.value, incarnation, workspace_id, *item_ids,
                 ),
             ).fetchall()
+        if rows and self._session_store.get_history_incarnation(target_session_id, owner_account_id) != incarnation:
+            return []
         by_id = {row["item_id"]: dict(row) for row in rows}
         return [by_id[item_id] for item_id in item_ids if item_id in by_id]
 
     def _owned_agent_snapshot(self, owner_account_id: str, session_id: str) -> tuple[str, str]:
-        if not self._session_store.session_belongs_to(session_id, owner_account_id):
+        incarnation = self._session_store.get_history_incarnation(session_id, owner_account_id)
+        if not incarnation:
             raise PermissionError("source session is not owned by the current account")
-        with self._lock:
-            source_link = self._select_session_link(self._conn, owner_account_id, session_id)
-        if (
-            source_link is not None
-            and _row_to_session_link(source_link).product_mode is ProductMode.WORK
-        ):
+        try:
+            source_link = self.get_session_link(owner_account_id, session_id, expected_incarnation=incarnation)
+        except KeyError:
+            source_link = None
+        if source_link is not None and source_link.product_mode is ProductMode.WORK:
             raise ValueError("source session is a Work session, not an Agent session")
         messages = self._session_store.load(session_id, owner_account_id=owner_account_id)
+        if self._session_store.get_history_incarnation(session_id, owner_account_id) != incarnation:
+            raise PermissionError("source session changed before saving its snapshot")
         return _snapshot(messages)
-
-    def _require_work_target(
-        self,
-        owner_account_id: str,
-        session_id: str,
-    ) -> WorkSessionLink:
-        try:
-            link = self.get_session_link(owner_account_id, session_id)
-        except KeyError as exc:
-            raise PermissionError("target Work session is not owned by the current account") from exc
-        if link.product_mode is not ProductMode.WORK:
-            raise ValueError("target_session_id must belong to work mode")
-        return link
 
     @staticmethod
     def _select_session_link(
@@ -541,7 +586,7 @@ class WorkReferenceStore:
     ) -> sqlite3.Row | None:
         return conn.execute(
             """
-            SELECT owner_account_id, session_id, product_mode, work_item_id
+            SELECT owner_account_id, session_id, product_mode, work_item_id, created_at, session_incarnation
             FROM work_session_links
             WHERE owner_account_id = ? AND session_id = ?
             """,
