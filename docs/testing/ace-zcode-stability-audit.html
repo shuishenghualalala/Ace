@@ -418,6 +418,13 @@
 <p><strong>验收</strong> 旧版发行 helper 和候选 Release helper 在普通权限下用不同的有效 SID 触发拒绝，分别返回 1 和 4，均未创建目标状态目录。复用已就绪的隔离预览配置，两者原生自检都返回 0，身份文件内容和时间戳均不变。Windows 发行包内的 Electron 对照共六次启动，使用真实预检和原生拒绝，以非提权进程模拟不同账号结果。旧版在安装后和首次打开均尝试提权，候选首次打开和重开只预检，安全设置中的显式点击可再次触发且收到明确结果。原生账号和 CLI 共 6 项、桌面 39 项通过，完整 TypeScript、Rust 格式检查通过。实际 UAC 与防火墙未参与本项试验。</p>
 <p class="evidence">Ace <code>desktop/src/main/security-setup.ts</code>、<code>security-runtime/src/windows/identity.rs</code>。Codex <code>codex-rs/windows-sandbox-rs/src/setup.rs:53</code>、<code>identity.rs:437</code>。</p>
 </article>
+<article id="windows-sandbox-managed-provisioning">
+<h3>D7l · 标准 Windows 账号的首次准备与失效账号修复</h3>
+<p>Codex 的提权服务从本地命名管道模拟调用者并读取 Windows 令牌，要求调用端进程和连接身份一致，并验证 Windows 会话。客户端从服务控制管理器核对对端进程。Ace 的 Inno 安装入口以普通用户运行，现有状态目录和 WFP 元数据保护都取准备进程的当前 SID。直接以另一管理员或 SYSTEM 运行该入口，会失去当前用户的正确归属。</p>
+<p><strong>交付边界</strong> 管理部署需要从受保护的程序入口获得 Windows 账号身份，为该 SID 准备专属凭据。受保护凭据与普通用户可写的任务 ACL 日志分开。验收包含两位标准用户和一位独立管理员，覆盖首次准备、普通权限重开、跨身份拒绝、文件访问、离线和代理规则、重启及独立卸载。Codex 的免提权模式支持工作区写入约束，但拒绝部分读取限制和受管联网，Ace 继续验证原生文件及网络边界。</p>
+<p><strong>已安装账号</strong> Ace 当前自检会读取受保护凭据、检查账号 SID 和网络规则。已禁用或过期的系统账号仍可能报告就绪，离线或在线账号被删除时现有设置会在 SID 查询失败处退出。Codex 在准备前读取本地账号标记并识别凭据失效。本机只读查询不存在的合成技术账号得到 <code>NERR_UserNotFound</code>。本机具备 WSL2 和 Linux Docker，未发现隔离的 Windows 客体，现有账号及 WFP 迁移仍需在隔离环境联合验收。</p>
+<p class="evidence">Ace <code>deb-package/pack_exe.ps1</code>、<code>security-runtime/src/windows/identity.rs</code>、<code>state.rs</code>。Codex <code>codex-rs/windows-sandbox-service/src/ipc/authentication.rs:80</code>、<code>windows-sandbox-rs/src/provisioning_client.rs:399</code>、<code>identity.rs:373</code>、<code>unified_exec/mod.rs:81</code>。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>
