@@ -466,6 +466,7 @@
 <h3>F10 · 内建请求能力的重复事件循环</h3>
 <p>同步构建 Gateway 时，内建 Agent Factory、执行 Driver 和四个上下文贡献器分别创建短命 asyncio 事件循环。ZCode 桌面在同一宿主循环内顺序等待启动协调步骤。Ace 将已知内建请求 Feature 顺序装配到同一个兼容循环内，每项仍单独记入启动审计、独立提交激活事务并按原逆序关停。静态内建内容之外的插件与在线激活仍用各自生命周期。</p>
 <p><strong>Windows 原生配对</strong> 两份正式 <code>8165a51b</code> EXE 的解包运行时只替换 <code>crew/app.py</code>，逐一核对 17,399 个文件。构建剖析中的激活次数仍为 15，临时 Proactor 循环从 14 个减至 9 个，唤醒管道累计从 0.759 秒减至 0.292 秒。未开启剖析时，六对首次启动的主端口就绪中位数从 11.147 秒降至 9.991 秒，六对同一配置重开从 10.686 秒降至 9.179 秒。逐对改善的中位数分别为 0.908 和 0.457 秒，两组各 6/6 改善。24 次启动均通过双端口身份、子进程 PID、会话 API 和正常退出验证。</p>
+<p><strong>后续消重实验</strong> 从 <code>e9b3ff06</code> 仅调整 <code>crew/app.py</code>，让 Subagent 与读取其服务的 External Agent 复用现有的顺序批处理。四对真实打包 Gateway 的启动兼容循环均从 9 减至 8，完整激活顺序和状态一致。被省掉的对照循环创建需 9.8–14.0 毫秒，两模块局部窗口缩短 0.8–37.4 毫秒。签名就绪的四个候选差值分别为 −130、−280、−375、+291 毫秒，同期 Gateway 和 SDK 导入也有数百毫秒波动。八次均通过普通 WebSocket 首聊、公开和 SQLite 历史、正常退出及端口释放。当前保留原装配。ZCode 的宿主启动协调器在同一宿主内按序等待数据库与服务准备。</p>
 <p>候选副本的原生 Electron 九阶段首次通过，首聊 1.014 秒，Gateway 故障恢复 11.282 秒，正常退出 1.435、2.271 秒。同步宿主与已有事件循环的嵌入式宿主在旧代码分别创建六个循环，修复后均以一个独立循环按既定顺序完成。Windows 后端分项 63 项通过。该对照使用发行内容副本，冷启动 5 秒目标仍待达到。候选副本另用维护者指定的 <code>deepseek-flash</code> 完成真实文件读取。两次上游调用后得到精确内容，重开后在聊天窗口呈现同一条历史，两次正常退出。</p>
 <p class="evidence">Ace <code>crew/app.py</code> 中的内建请求能力与 <code>crew/features/manager.py</code> 的同步桥。ZCode <code>packages/desktop/src/host/index.ts:4155</code>、<code>packages/desktop/src/host/databaseStartupCoordinator.ts:58</code>。</p>
 </article>
