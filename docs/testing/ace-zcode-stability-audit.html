@@ -707,6 +707,19 @@
 <p>候选仅在创建 ASGI 应用时调用公开的 <code>api.url_path_for("ws")</code>。监听前共构建同样的 189 个上下文，查询耗时 89.29 毫秒。随后两次产品请求均未新建路由上下文。WebSocket 首次执行时仍有约 23–24 毫秒独立的端点源码检查。两组各运行一次，均完成双端口签名、正常 WebSocket 对话和回环流式首答，工具 schema、持久历史及禁用的 OpenAPI 路径行为一致，进程正常退出并释放端口。</p>
 <p>ZCode 宿主在连接就绪前注册当前窗口的服务通道，renderer 拿到与已就绪数据库同代的 MessagePort 才建立服务连接。Ace 此次试验只证明路由构建可移到监听前，总启动与首聊收益尚无证据，因此放弃无条件预热。当前 FastAPI 对路由组缓存使用同步锁，监听后用后台线程预建仍可能与业务请求争用该锁。</p>
 <p class="evidence">Ace <code>crew/gateway/app.py</code>。Windows 随包 FastAPI <code>fastapi/routing.py</code> 的 <code>_IncludedRouter.effective_candidates</code>、<code>_EffectiveRouteContext.from_api_route</code> 与 <code>_extract_endpoint_context</code>。ZCode <code>packages/desktop/src/host/index.ts:2652</code>、<code>packages/desktop/src/renderer/src/databaseStartupAdmission.ts:25</code>。</p>
+<h4 id="gateway-direct-route-first-reply">直接注册 Gateway 入口的 Windows 首答对照</h4>
+<p>本地 ZCode 启动后按已登记的 RPC 通道直接分派。Ace 候选用同一 FastAPI 应用直接注册原有健康检查和聊天 WebSocket。包内的 ASGI 对照中，两条入口触发的路由组上下文从 116 和 73 降到各 0，技能预取仍会创建 115 个。签名、安全响应头、就绪和鉴权关闭行为、重定向与 OpenAPI schema 一致。</p>
+<p>从 <code>9b9def5b</code> 冻结同一物理 Windows 发行路径，采用八组交替顺序。每组两版分别新建用户配置后启动、用同配置重开，共 32 次。每次完成双端口签名、真实输入框提交、本机 SSE 模型回复、聊天 DOM 显示、历史存储与端口回收。物理路径首次读取的四次先导单列。下表给出候选相对基线的配对中位差。</p>
+<div class="table"><table>
+<thead><tr><th>阶段</th><th>新配置</th><th>同配置重开</th></tr></thead>
+<tbody>
+<tr><td>核心就绪到可发送</td><td>提前 89.8 ms</td><td>提前 90.5 ms</td></tr>
+<tr><td>可发送到回环模型收到请求</td><td>延后 122.8 ms</td><td>延后 152.2 ms</td></tr>
+<tr><td>按下 Enter 到首答在 DOM 出现</td><td>延后 142.1 ms</td><td>延后 159.1 ms</td></tr>
+<tr><td>启动到首答在 DOM 出现</td><td>提前 128.9 ms</td><td>延后 68.8 ms</td></tr>
+</tbody></table></div>
+<p>可发送阶段两组均有八对提前。新配置实际提交后八对均更慢，重开七对更慢。两组的启动到首答配对变化范围分别为提前 610.9 至延后 777.8 毫秒、提前 231.0 至延后 672.9 毫秒。测试量化了实际等待位置，尚未证实哪项工作造成提交之后的延后。由于首答未稳定改善，候选留在私有对照中。</p>
+<p class="evidence">Ace <code>crew/gateway/app.py</code>、<code>crew/gateway/ws.py</code>、<code>crew/gateway/routers/misc.py</code>。ZCode <code>packages/rpc/src/channelServer.ts:14</code>、<code>:107</code>。</p>
 <h4>同机 ZCode 发行版的 Composer 先导</h4>
 <p>本机发行二进制为 ZCode 3.15.3.8237，参考源码快照的包版为 3.16.2。正式包只读，使用独立 Win32 桌面、全新测试配置、私有工作区和回环模型。先导首轮核对实际 Host、数据库和模型选择，未达到发送。夹具补齐逐阶段存证及有界收尾后，第二轮经可见控件完成登录和偏好跳过、可信发送、一次匹配的流式请求、可见用户消息和助手正文。私有 SQLite 中用户输入与随机助手标记各出现一次，应用及 Host 正常退出，模型和 CDP 端口释放。</p>
 <p>第二轮含首次引导的启动到 Composer 可交互为 10.662 秒，点击发送到用户和助手正文 DOM 分别为 15.284 和 16.378 秒。正文显示后还有一次非流式请求，回环夹具返回 422，同期记录标题生成失败。这一轮用于验证真实发行版的测量入口。正式对照需统一两边引导状态、后台模型请求和采样次数。</p>
