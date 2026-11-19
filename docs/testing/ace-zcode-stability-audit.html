@@ -680,6 +680,11 @@
 <p>本地 ZCode 的技能适配器等异步目录发现完成再返回清单。Ace 将两条读取路由交给 Gateway 工作线程，异步索引使用已有的同步目录实现在线程中执行。提示词和包成员通过同一锁读取索引及元数据。技能商店及工具返回仍沿用原来字段和作用域。</p>
 <p><strong>验收</strong> 使用 Windows 发行解释器、真实 Gateway、签名主端口与独立健康端口、WebSocket 及本机合成模型。夹具持有实际技能扫描锁。在技能列表、商店和已预热的 <code>skills_list</code> 三组中，原版主端口与新 WebSocket 都等锁释放才应答，候选能在锁仍被持有时应答。首聊经正常准入，释放锁后继续生成提示词并完成。目录、商店及模型工具 schema 在归一化私有路径后与原版一致。两版均在关闭并重启后读取提交的历史，双端口正常回收。六组组合回归 184 项通过、8 项跳过，Ruff 通过。剩余 FastAPI 路由初始化延迟单独保留。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/misc.py</code> 与 <code>crew/agent/skills/index.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/skills.ts:31</code>、<code>apps/zcode-cli/packages/adapters/src/skills/scan.ts:62</code>。</p>
+<h4 id="gateway-deferred-route-metadata">Gateway 首次签名请求中的路由初始化</h4>
+<p>在 <code>6576146a</code> 的私有 Windows 发行运行时中探测 FastAPI 0.163.2 与 Pydantic 2.14.3。原版在首次签名 <code>/api/health</code> 中构建 116 个挂载后的路由上下文，合计 52.52 毫秒，在首次 <code>/ws</code> 中再构建 73 个，合计 36.81 毫秒。FastAPI 首次匹配时会为经过的路由组生成依赖和字段元数据，因此请求在执行自身鉴权逻辑前也可能承担同组其他路由的初始化。</p>
+<p>候选仅在创建 ASGI 应用时调用公开的 <code>api.url_path_for("ws")</code>。监听前共构建同样的 189 个上下文，查询耗时 89.29 毫秒。随后两次产品请求均未新建路由上下文。WebSocket 首次执行时仍有约 23–24 毫秒独立的端点源码检查。两组各运行一次，均完成双端口签名、正常 WebSocket 对话和回环流式首答，工具 schema、持久历史及禁用的 OpenAPI 路径行为一致，进程正常退出并释放端口。</p>
+<p>ZCode 宿主在连接就绪前注册当前窗口的服务通道，renderer 拿到与已就绪数据库同代的 MessagePort 才建立服务连接。Ace 此次试验只证明路由构建可移到监听前，总启动与首聊收益尚无证据，因此放弃无条件预热。当前 FastAPI 对路由组缓存使用同步锁，监听后用后台线程预建仍可能与业务请求争用该锁。</p>
+<p class="evidence">Ace <code>crew/gateway/app.py</code>。Windows 随包 FastAPI <code>fastapi/routing.py</code> 的 <code>_IncludedRouter.effective_candidates</code>、<code>_EffectiveRouteContext.from_api_route</code> 与 <code>_extract_endpoint_context</code>。ZCode <code>packages/desktop/src/host/index.ts:2652</code>、<code>packages/desktop/src/renderer/src/databaseStartupAdmission.ts:25</code>。</p>
 <h4>同机 ZCode 发行版的 Composer 先导</h4>
 <p>本机发行二进制为 ZCode 3.15.3.8237，参考源码快照的包版为 3.16.2。正式包只读，使用独立 Win32 桌面、全新测试配置、私有工作区和回环模型。先导首轮核对实际 Host、数据库和模型选择，未达到发送。夹具补齐逐阶段存证及有界收尾后，第二轮经可见控件完成登录和偏好跳过、可信发送、一次匹配的流式请求、可见用户消息和助手正文。私有 SQLite 中用户输入与随机助手标记各出现一次，应用及 Host 正常退出，模型和 CDP 端口释放。</p>
 <p>第二轮含首次引导的启动到 Composer 可交互为 10.662 秒，点击发送到用户和助手正文 DOM 分别为 15.284 和 16.378 秒。正文显示后还有一次非流式请求，回环夹具返回 422，同期记录标题生成失败。这一轮用于验证真实发行版的测量入口。正式对照需统一两边引导状态、后台模型请求和采样次数。</p>
