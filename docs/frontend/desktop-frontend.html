@@ -183,6 +183,7 @@
     <li>看板每 2 秒读取当前 Session 的 task 与 runtime 快照；只在「协作」Tab 激活时轮询，离开 Tab、切换非 Team Session 或关闭 Inspector 后立即停止，避免后台冗余请求。</li>
     <li>既有 Kanban / Files / Context / Plan / Browser Tab 保持原实现；协作样式全部收敛在 <code>.team-collaboration-board</code> 作用域，避免影响 Desktop 其他页面。</li>
   </ul>
+  <p>Inspector 显示浏览器时会保留页面容器。文件、任务与计划更新仍可刷新通知和数量；用户切换面板、会话或关闭右栏时，按原有生命周期卸载页面。</p>
   <h3>3.10 Team Session 成员消息</h3>
   <ul>
     <li>Desktop 直接消费 Gateway 既有 <code>team_internal</code> 协议，不增加 Desktop 专用后端接口；<code>chat-reducer.ts</code> 将该帧纳入 request gate 与 replay 去重，避免旧回合成员消息污染当前回合。</li>

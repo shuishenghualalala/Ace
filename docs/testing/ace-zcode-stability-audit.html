@@ -298,6 +298,11 @@
 <p><strong>修复和验收</strong> 同标签同会话的模式切换保留原生视图。迟到的旧模式布局只在身份与视图仍匹配时保留挂载，输入权限仍取主进程当前状态。120 项桌面回归通过。隔离 Windows Electron 使用实际 WebContentsView 和本地 HTML，接管往返及迟到布局均为零隐藏、零移除、零挂载、零导航。主动切出标签仍会移除原生视图。现场窗口心跳超时的具体来源尚待核实。</p>
 <p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code> 与 <code>browser-panel.ts</code>。ZCode <code>BrowserViewportSurface.tsx</code> 与 <code>browserGuestManager.ts</code>。</p>
 </article>
+<article id="browser-inspector-refresh">
+<h3>D7b · 会话详情刷新会卸载仍在显示的浏览器</h3>
+<p>文件、待办与计划更新触发 Inspector 刷新。旧实现重建右栏正文，导致本地 HTML 的原生视图被移除后再挂回。ZCode 在布局更新时保留 <code>BrowserViewportSurface</code> 的 guest，恢复异常来宾时才切换 generation。</p>
+<p><strong>修复和验收</strong> 浏览器仍为当前面板时保留容器，并继续刷新通知和计数。合并两项浏览器修复后，8 个测试文件共 182 项通过。实际 Windows Electron 中，文件数更新至 2，HTML 文档与原生来宾保持原实例，零隐藏、移除、挂载或导航。单独应用本项也能消除会话详情刷新引起的拆挂；主动切到会话信息仍会移除浏览器。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>

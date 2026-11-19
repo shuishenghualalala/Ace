@@ -2776,7 +2776,8 @@ export function refreshInspector(): void {
   }
   renderTabs();
   syncInspectorToggleState();
-  if (inspectorOpen) renderBody();
+  // Browser state is updated by its panel subscription. Keep the native view attached.
+  if (inspectorOpen && activeTab !== 'browser') renderBody();
 }
 
 /**

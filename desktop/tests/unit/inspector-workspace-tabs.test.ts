@@ -8,6 +8,7 @@ import {
   enableInspectorSurfaceAutoWidth,
   openBrowserWorkbench,
   openInspectorToTab,
+  refreshInspector,
 } from '../../src/ui/features/inspector';
 import { needsFirstTurnSecurityMode } from '../../src/ui/features/security-approval';
 import { isDraftSession } from '../../src/ui/features/workspaces';
@@ -183,6 +184,37 @@ describe('Inspector browser-style workspace tabs', () => {
     expect(backendApi.ensureSession).toHaveBeenCalled();
     });
     expect(needsFirstTurnSecurityMode('sess-workspace', 'default')).toBe(false);
+  });
+
+  it('refreshes inspector counts without replacing or hiding the active browser stage', () => {
+    const hide = vi.fn(async () => undefined);
+    vi.stubGlobal('Crew', { browserViewHide: hide });
+    try {
+      openInspectorToTab('files');
+      openInspectorToTab('browser');
+      const stage = document.querySelector('[data-browser-stage]');
+      const fileBadge = () => document.querySelector('[data-workspace-tab="core:files"] .chat-inspector__tab-count');
+      expect(stage).toBeTruthy();
+      expect(fileBadge()?.textContent).toBe('1');
+      hide.mockClear();
+
+      messageStore.set({ messages: {
+        'sess-workspace': messageStore.get().messages['sess-workspace'].map(
+          (message) => ({ ...message, turnFileChanges: [] }),
+        ),
+      } });
+      refreshInspector();
+
+      expect(fileBadge()?.textContent).toBe('0');
+      expect(document.querySelector('[data-browser-stage]')).toBe(stage);
+      expect(hide).not.toHaveBeenCalled();
+
+      openInspectorToTab('context');
+      expect(document.querySelector('[data-browser-stage]')).toBeNull();
+      expect(hide).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('keeps a browser-only conversation pending for its original workspace and owner', async () => {
