@@ -479,6 +479,128 @@ async def test_interrupt_one_shot_child_is_scoped_and_keeps_sibling_approval(api
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("inherit_launch", [True, False])
+async def test_identical_child_approvals_and_once_grants_follow_their_own_run(api, monkeypatch, inherit_launch):
+    from crew.agent.subagent.service import StartRequest
+    from crew.core.envelope import ResponseChunk, TurnOutcome
+    from crew.security.actions import normalize_exec_action
+    from crew.security.context import build_gateway_security_context
+    from crew.security.launch import current_process_launch
+
+    crew = api.state.crew
+    crew.config.auth_mode = "remote"
+    crew.config.auth_provider_id = "test"
+    runtime = crew.subagent_runtime
+    approval = crew.security_service
+    owner_id = "test:uid-a"
+    provider = runtime.providers.get(runtime.default_provider, owner_account_id=owner_id)
+    parent = build_gateway_security_context(
+        crew.workspace_store, owner_account_id=owner_id, workspace_id="default", session_id="parent",
+    )
+    action = normalize_exec_action(["echo", "approval-fixture"], parent.cwd)
+    opened = {name: asyncio.Event() for name in ("a", "b")}
+    consume_a = asyncio.Event()
+    pending = {}
+    child_ids = {}
+
+    class Child:
+        def __init__(self, spec):
+            self.role = spec["role"]
+            self.interrupted = False
+
+        def interrupt(self, _message=None):
+            self.interrupted = True
+
+        async def run(self, envelope):
+            child_ids[self.role] = envelope.params["subagent_id"]
+            launch = envelope.params.get("_security_process_launch")
+            if launch is None:
+                assert envelope.session_id != parent.session_id
+                context = build_gateway_security_context(
+                    crew.workspace_store, owner_account_id=owner_id,
+                    workspace_id="default", session_id=envelope.session_id,
+                )
+            else:
+                context = launch.security_context
+
+            def authorize():
+                return approval.authorize_exec_action(
+                    context, action, tool_name="terminal", risk_class="fixture",
+                )
+
+            first = authorize()
+            assert not first.allowed and first.request is not None
+            pending[self.role] = first.request
+            assert authorize().request["request_id"] == first.request["request_id"]
+            opened[self.role].set()
+            result = await approval.await_decision(first.request["request_id"])
+            if self.interrupted:
+                assert result is None
+                yield ResponseChunk.final("fixture", "", outcome=TurnOutcome("stopped", reason="interrupted"))
+                return
+            assert self.role == "a" and result is not None and result.grant is not None
+            await consume_a.wait()
+            assert authorize().allowed
+            assert not authorize().allowed
+            yield ResponseChunk.final("fixture", "only the approved run consumed the grant")
+
+    monkeypatch.setattr(provider, "_build_child", Child)
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    tasks = {}
+    try:
+        launch = current_process_launch.set(SimpleNamespace(security_context=parent) if inherit_launch else None)
+        try:
+            for role in opened:
+                request = StartRequest(
+                    label=role, goal_text="fixture", parent_session_id="parent",
+                    workspace_id="default", owner_account_id=owner_id, user_id=owner_id,
+                    spec={"role": role},
+                )
+                tasks[role] = asyncio.create_task(runtime.execute(request))
+        finally:
+            current_process_launch.reset(launch)
+        for ready in opened.values():
+            await asyncio.wait_for(ready.wait(), 3)
+
+        request_a, request_b = pending["a"], pending["b"]
+        assert request_a["request_id"] != request_b["request_id"]
+        assert {row["request_id"] for row in approval.pending(parent, include_nonce=True)} == {
+            request_a["request_id"], request_b["request_id"],
+        }
+
+        async with AsyncClient(
+            transport=transport, base_url="http://test", cookies=_remote_cookies("uid-a"),
+        ) as owner:
+            stopped = await owner.post(
+                f"/api/subagents/{child_ids['b']}/interrupt", params={"session_id": "parent"}, json={},
+            )
+            assert stopped.json()["status"] == "interrupted"
+            assert (await asyncio.wait_for(tasks["b"], 3)).stop_reason == "aborted"
+            assert not tasks["a"].done()
+            assert approval.pending(parent, include_nonce=True) == [request_a]
+
+            async def decide(request):
+                path = f"/api/security/requests/{request['request_id']}/decision"
+                return await _post_json(owner, path, {
+                    "session_id": "parent", "nonce": request["nonce"], "decision": "once",
+                })
+
+            assert (await decide(request_b)).status_code == 409
+            assert (await decide(request_a)).status_code == 200
+            assert approval.grants.authorize_action(parent, action, tool_name="terminal") is None
+            consume_a.set()
+            completed = await asyncio.wait_for(tasks["a"], 3)
+            assert completed.output == "only the approved run consumed the grant"
+            assert approval.pending(parent, include_nonce=True) == []
+    finally:
+        for task in tasks.values():
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        await crew.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_exact_read_only_decision_receipt_is_scoped_to_account_and_desktop_proof(api):
     api.state.crew.config.auth_mode = "remote"
     api.state.crew.config.auth_provider_id = "test"

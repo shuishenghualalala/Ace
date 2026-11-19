@@ -7,13 +7,13 @@ import json
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Callable, Sequence
 from uuid import uuid4
 
 from crew.security.actions import ActionKind, NormalizedAction
-from crew.security.context import SecurityContext
+from crew.security.context import ApprovalOrigin, SecurityContext
 from crew.security.grants import ExecutionGrant, GrantRegistry
 from crew.security.models import (
     EMPTY_ADDITIONAL_PERMISSIONS,
@@ -101,6 +101,7 @@ class ApprovalRequest:
     expires_monotonic: float
     additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
     proposed_argv_prefix: tuple[str, ...] = ()
+    approval_origin: ApprovalOrigin | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -198,6 +199,7 @@ class ApprovalManager:
                     and request.proposed_argv_prefix
                     == _validated_exec_prefix(action, proposed_argv_prefix)
                     and _request_context_matches(request, context)
+                    and request.approval_origin is context.approval_origin
                 ),
                 None,
             )
@@ -263,6 +265,8 @@ class ApprovalManager:
                 raise ApprovalError("批准请求上下文不匹配")
             if request_id in self._handled:
                 raise ApprovalError("批准请求已处理")
+            if request.approval_origin is not None and request.approval_origin.closed:
+                raise ApprovalError("子智能体运行已结束", terminal=True)
             if self._clock() > request.expires_monotonic:
                 self._handled.add(request_id)
                 raise ApprovalError("批准请求已过期", terminal=True)
@@ -291,7 +295,7 @@ class ApprovalManager:
             grant_scope = RuleScope.ONCE
             expires = request.expires_monotonic
         grant = self._grants.issue(
-            context,
+            replace(context, approval_origin=request.approval_origin),
             request.action,
             grant_scope,
             expires_monotonic=expires,
@@ -356,6 +360,15 @@ class ApprovalManager:
                 and request.expires_monotonic >= now
                 and _request_session_matches(request, context)
             ]
+
+    def revoke_pending_origin(self, origin: ApprovalOrigin) -> tuple[ApprovalRequest, ...]:
+        with self._lock:
+            pending = tuple(
+                request for request_id, request in self._requests.items()
+                if request_id not in self._handled and request.approval_origin is origin
+            )
+            self._handled.update(request.request_id for request in pending)
+        return pending
 
     def revoke_pending_session(self, context: SecurityContext) -> int:
         """Invalidate only pending requests when a conversation mode changes.
@@ -477,6 +490,7 @@ def _new_request(
         expires_monotonic=now + ttl_seconds,
         additional_permissions=additional_permissions,
         proposed_argv_prefix=_validated_exec_prefix(action, proposed_argv_prefix),
+        approval_origin=context.approval_origin,
     )
 
 

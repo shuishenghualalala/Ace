@@ -24,6 +24,7 @@ from crew.core.runctx import (
     current_workspace_id,
     normalize_owner_account_id,
 )
+from crew.security.context import ApprovalOrigin, current_approval_origin
 from crew.security.launch import current_process_launch
 from crew.state.logging import get_logger
 
@@ -163,6 +164,7 @@ class InProcessSpawnProvider:
             f"sub::{label}::{uuid.uuid4().hex[:8]}"
         )
         parent_session_id = request.parent_session_id or ""
+        approval_origin = ApprovalOrigin(security_context, parent_session_id=parent_session_id)
         child_session_id = (
             _canonical_child_session_id(parent_session_id, child_id)
             if request.session_persistence == "hidden"
@@ -205,6 +207,7 @@ class InProcessSpawnProvider:
                         "agent": child,
                         "started_at": time.time(),
                         "owner_account_id": owner_account_id,
+                        "before_interrupt": approval_origin.close,
                     },
                 )
         except Exception:
@@ -382,6 +385,7 @@ class InProcessSpawnProvider:
                     # 先下中断标志再关流：aclose() 会把 GeneratorExit 推进子 agent 的收尾
                     # 逻辑，interrupt 必须在关流前设置，收尾阶段才观察得到
                     if stop_reason in {"timed_out", "aborted"}:
+                        approval_origin.close()
                         interrupt = getattr(child, "interrupt", None)
                         if callable(interrupt):
                             try:
@@ -518,16 +522,22 @@ class InProcessSpawnProvider:
                     log.debug("注销子智能体 %s 失败", label, exc_info=True)
 
         async def run_child_with_cleanup() -> SubagentResult:
+            origin_token = current_approval_origin.set(approval_origin)
             try:
                 return await run_child()
             finally:
-                await cleanup_child()
+                try:
+                    approval_origin.close()
+                    await cleanup_child()
+                finally:
+                    current_approval_origin.reset(origin_token)
 
         loop = asyncio.get_running_loop()
         run_task = loop.create_task(run_child_with_cleanup(), name=f"subagent:{child_id}")
 
         async def dispose() -> None:
             nonlocal disposed
+            approval_origin.close()
             if disposed:
                 if run_task is not None:
                     await _await_task_quietly(run_task)

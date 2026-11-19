@@ -249,6 +249,8 @@ subagent_id ── descriptor(spec, provider, depth, hidden session) ── suba
   </table>
   <p>Activation 状态由现场派生为 <code>running</code>、<code>ready</code>、<code>idle</code>，并通过 <code>activation_running</code>、<code>activation_ready</code>、<code>activation_idle</code> 事件投影到 Web。后台任务创建时预分配并记录 <code>task_id ↔ subagent_id</code>，任务进度、collect 结果和结算通知均保留双向定位字段。</p>
 
+  <p>内建 Provider 为每次实际子代理运行建立私有审批来源。即使使用隐藏会话，工具审批仍按父会话定位，并保留实际工作目录。指定子代理或级联停止先关闭对应来源，随后下达中断信号。其他子代理继续等待自己的审批；活动记录公开投影只包含展示数据。</p>
+
   <h2>10. 阶段 E：Fork、结构化输出与 UI Contribution</h2>
   <p><code>inprocess-fork</code> 是跨平台的会话快照 Provider，不使用 Unix <code>fork(2)</code>。它按 owner 读取父会话，找到最后一个无工具调用的 assistant 完成点，只播种此前缀；<code>is_meta</code> 与 <code>source_kind</code> 共同完成结构化净化，不依赖正文关键词。fork Provider 默认不注册，需通过 <code>subagent.fork_enabled: true</code> 启用；它只支持 one-shot，不开放 continuable。</p>
   <p>结构化结果通过子作用域工具 <code>structured_output</code> 一次提交。只有请求包含 <code>output_schema</code> 的子 Agent 会在 child tool filter 中看到它；handler 在 ContextVar sink 中做 JSON Schema 子集校验，Provider 收到成功提交后关闭 child iterator，并把结果放进 <code>SubagentResult.structured</code>。没有工具提交时仍兼容从最终 JSON 文本解析，非法或缺失结果以 <code>stop_reason=error</code> 返回。</p>

@@ -104,11 +104,8 @@ class ActiveSubagents:
                 if normalize_owner_account_id(record.get("owner_account_id")) == owner
             ]
         did = False
-        for rec in records:
-            agent = rec.get("agent")
-            fn = getattr(agent, "interrupt", None)
-            if callable(fn):
-                fn(message)
+        for record in records:
+            if self._interrupt_record(record, message):
                 did = True
         return did
 
@@ -124,9 +121,16 @@ class ActiveSubagents:
             record = self._active.get(parent_session_id, {}).get(child_id)
             if record is None or normalize_owner_account_id(record.get("owner_account_id")) != owner_account_id:
                 return False
-            interrupt = getattr(record.get("agent"), "interrupt", None)
+        return self._interrupt_record(record, message)
+
+    @staticmethod
+    def _interrupt_record(record: dict[str, Any], message: str | None) -> bool:
+        interrupt = getattr(record.get("agent"), "interrupt", None)
         if not callable(interrupt):
             return False
+        before_interrupt = record.get("before_interrupt")
+        if callable(before_interrupt):
+            before_interrupt()
         interrupt(message)
         return True
 
@@ -137,7 +141,7 @@ class ActiveSubagents:
         owner_account_id: str | None = None,
     ) -> Any:
         def _public(rec: dict[str, Any]) -> dict[str, Any]:
-            return {k: v for k, v in rec.items() if k != "agent"}
+            return {key: value for key, value in rec.items() if key not in {"agent", "before_interrupt"}}
 
         owner = normalize_owner_account_id(owner_account_id) if owner_account_id else None
 

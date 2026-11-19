@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import getpass
 import os
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +79,64 @@ class SecurityContext:
     request_id: str
     task_id: str
     cwd: Path | None
+    approval_origin: ApprovalOrigin | None = field(default=None, repr=False)
+
+
+class ApprovalOrigin:
+    """The host-owned lifetime of one child execution's pending approvals."""
+
+    def __init__(self, parent: SecurityContext | None = None, *, parent_session_id: str = "") -> None:
+        self._parent = parent
+        self._parent_session_id = parent_session_id
+        self._lock = threading.Lock()
+        self._closed = False
+        self._cleanup: set[Callable[[ApprovalOrigin], None]] = set()
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def attach(self, cleanup: Callable[[ApprovalOrigin], None]) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            self._cleanup.add(cleanup)
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            callbacks = tuple(self._cleanup)
+            self._cleanup.clear()
+        for cleanup in callbacks:
+            cleanup(self)
+
+    def bind(self, context: SecurityContext) -> SecurityContext:
+        parent = self._parent
+        if parent is None:
+            return replace(context, session_id=self._parent_session_id or context.session_id, approval_origin=self)
+        if (
+            context.os_user != parent.os_user
+            or context.owner_account_id != parent.owner_account_id
+            or context.workspace_id != parent.workspace_id
+        ):
+            raise SecurityContextError("子智能体审批上下文与父会话不匹配")
+        return replace(
+            context, session_id=parent.session_id, task_id=parent.task_id, approval_origin=self,
+        )
+
+
+current_approval_origin: ContextVar[ApprovalOrigin | None] = ContextVar(
+    "current_approval_origin", default=None,
+)
+
+
+def bind_approval_context(context: SecurityContext) -> SecurityContext:
+    origin = current_approval_origin.get()
+    return origin.bind(context) if origin is not None and context.approval_origin is not origin else context
 
 
 def build_security_context(workspace_store: Any) -> SecurityContext:
@@ -101,7 +162,7 @@ def build_security_context(workspace_store: Any) -> SecurityContext:
             cwd.relative_to(workspace_root)
         except ValueError as exc:
             raise SecurityContextError("可信工作目录不属于已认证工作空间") from exc
-    return SecurityContext(
+    context = SecurityContext(
         os_user=_host_os_user(),
         owner_account_id=owner,
         workspace_id=workspace_id,
@@ -111,6 +172,7 @@ def build_security_context(workspace_store: Any) -> SecurityContext:
         task_id=current_task_runtime_id.get().strip(),
         cwd=cwd,
     )
+    return bind_approval_context(context)
 
 
 def build_gateway_security_context(

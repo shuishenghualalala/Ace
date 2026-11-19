@@ -29,7 +29,7 @@ from crew.security.audit import (
     SQLiteSecurityAudit,
     format_action_for_audit,
 )
-from crew.security.context import SecurityContext
+from crew.security.context import ApprovalOrigin, SecurityContext, bind_approval_context
 from crew.security.file_policy import (
     FilePolicyResult,
     approvable_file_permission_root,
@@ -72,86 +72,103 @@ class ExecAuthorization:
         yield self.request
 
 
-class _ApprovalWaiter:
-    """按 request_id 挂起工具调用，直到 owner 下达决策或授权被撤销。
+@dataclass
+class _WaitingApproval:
+    future: asyncio.Future[ApprovalOutcome | None]
+    session_key: tuple[str, ...]
+    owner_account_id: str
+    origin: ApprovalOrigin | None
+    listeners: int = 0
 
-    作用等同于 codex 的 ``oneshot::Sender`` / opencode 的 ``Deferred``：工具不在
-    ``ToolError`` 里把审批请求塞给模型，而是阻塞在 future 上；``decide()`` 落地后
-    唤醒，工具据此继续执行或回灌干净错误。这避免了"模型复述审批文本→污染正文"
-    和"对话停了无人恢复"两类问题（见 AGENTS.md §2.2 回归自查）。
-    """
+
+class _ApprovalWaiter:
+    """Keep one result per request and isolate cancellation of its listeners."""
 
     def __init__(self) -> None:
-        self._futures: dict[str, asyncio.Future[ApprovalOutcome | None]] = {}
-        # request_id -> (session_key, owner)，用于 logout / 模式切换时成批唤醒。
-        self._meta: dict[str, tuple[tuple[str, ...], str]] = {}
+        self._lock = threading.Lock()
+        self._entries: dict[str, _WaitingApproval] = {}
 
     def register(
-        self,
-        request_id: str,
-        *,
-        session_key: tuple[str, ...],
-        owner_account_id: str,
+        self, request_id: str, *, session_key: tuple[str, ...], owner_account_id: str, origin: ApprovalOrigin | None,
     ) -> None:
-        """为新建的 pending 请求登记一个 future；复用请求不重复登记。"""
-        if request_id in self._futures:
-            return
         try:
             loop = asyncio.get_running_loop()
-        except RuntimeError:  # 无事件循环（单元 registry 直测）→ 不阻塞，decide 仍可正常落地。
+        except RuntimeError:
             return
-        self._futures[request_id] = loop.create_future()
-        self._meta[request_id] = (session_key, str(owner_account_id))
+        with self._lock:
+            if request_id not in self._entries:
+                self._entries[request_id] = _WaitingApproval(
+                    loop.create_future(), session_key, str(owner_account_id), origin,
+                )
 
     async def wait(self, request_id: str) -> ApprovalOutcome | None:
-        """阻塞至决策到达；请求不存在/超时/被撤销均返回 None（按拒绝处理）。"""
-        future = self._futures.get(request_id)
-        if future is None:
-            return None
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is None:
+                return None
+            entry.listeners += 1
         try:
-            return await asyncio.wait_for(future, timeout=_DECIDE_WAIT_TIMEOUT)
+            async with asyncio.timeout(_DECIDE_WAIT_TIMEOUT):
+                return await asyncio.shield(entry.future)
         except TimeoutError:
             return None
         finally:
-            self._futures.pop(request_id, None)
-            self._meta.pop(request_id, None)
+            with self._lock:
+                entry.listeners -= 1
+                if entry.listeners == 0 and self._entries.get(request_id) is entry:
+                    self._entries.pop(request_id)
 
-    def resolve(self, request_id: str, outcome: ApprovalOutcome | None) -> None:
-        """Resolve without removing; wait() is the single cleanup owner.
+    def resolve(
+        self, request_id: str, outcome: ApprovalOutcome | None, *, discard: bool = False,
+    ) -> None:
+        # Decisions can arrive before a tool starts awaiting. Only revocation
+        # discards the entry early, as a subsequent listener should see no authority.
+        with self._lock:
+            entry = self._entries.pop(request_id, None) if discard else self._entries.get(request_id)
+        if entry is None:
+            return
+        future = entry.future
 
-        Gateway may decide after register() but before the tool coroutine actually
-        enters wait(). Removing here would make that later wait observe no future
-        and treat a valid approval as rejection.
-        """
-        future = self._futures.get(request_id)
-        if future is not None and not future.done():
-            future.set_result(outcome)
+        def deliver() -> None:
+            if not future.done():
+                future.set_result(outcome)
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        loop = future.get_loop()
+        if running is loop:
+            deliver()
+        else:
+            try:
+                loop.call_soon_threadsafe(deliver)
+            except RuntimeError:
+                # Shutdown may have closed the consumer's loop already.
+                pass
+
+    def cancel_for_origin(self, origin: ApprovalOrigin) -> int:
+        return self._cancel_matching(lambda entry: entry.origin is origin)
 
     def cancel_for_session(self, session_key: tuple[str, ...]) -> int:
-        """模式切换：把该精确会话上下文下的 pending 等待按 None 唤醒。"""
-        return self._cancel(
-            [rid for rid, (sk, _o) in self._meta.items() if sk == session_key]
-        )
+        return self._cancel_matching(lambda entry: entry.session_key == session_key)
 
     def cancel_for_owned_session(self, owner_account_id: str, session_id: str) -> int:
-        """真正会话结束：跨 workspace key 清理 owner/session 的等待方。"""
         owner = str(owner_account_id).strip()
         session = str(session_id).strip()
-        return self._cancel(
-            [
-                rid
-                for rid, (key, request_owner) in self._meta.items()
-                if request_owner == owner and len(key) >= 4 and key[3] == session
-            ]
+        return self._cancel_matching(
+            lambda entry: entry.owner_account_id == owner and entry.session_key[3] == session,
         )
 
     def cancel_for_owner(self, owner_account_id: str) -> int:
         owner = str(owner_account_id).strip()
-        return self._cancel([rid for rid, (_sk, o) in self._meta.items() if o == owner])
+        return self._cancel_matching(lambda entry: entry.owner_account_id == owner)
 
-    def _cancel(self, request_ids: list[str]) -> int:
-        for rid in request_ids:
-            self.resolve(rid, None)
+    def _cancel_matching(self, matches: Callable[[_WaitingApproval], bool]) -> int:
+        with self._lock:
+            request_ids = [request_id for request_id, entry in self._entries.items() if matches(entry)]
+        for request_id in request_ids:
+            self.resolve(request_id, None, discard=True)
         return len(request_ids)
 
 
@@ -189,7 +206,7 @@ class SecurityApprovalService:
         self._rule_cache = _RuleSnapshotCache()
         self._audit_sink = _AsyncAuditSink(audit)
         self._session_modes: dict[tuple[str, str, str, str], ConversationPermissionMode] = {}
-        self._recent_rejections: dict[tuple[str, str, str, str], float] = {}
+        self._recent_rejections: dict[tuple[str, str, str, str, ApprovalOrigin | None], float] = {}
         # 通知钩子（由装配层注入）：新审批请求创建 / 请求被决策后触发；缺席时无影响
         self._on_request_created: Callable[[SecurityContext, dict], None] | None = None
         self._on_request_decided: Callable[[str, str], None] | None = None
@@ -325,42 +342,59 @@ class SecurityApprovalService:
         proposed_argv_prefix: Sequence[str] | None = None,
     ) -> dict:
         """Create or reuse one exact pending request without performing the action."""
-        request, created = self.approvals.create_or_get(
-            context,
-            action,
-            tool_name,
-            risk_class=risk_class,
-            preview=preview,
-            additional_permissions=additional_permissions,
-            proposed_argv_prefix=proposed_argv_prefix,
-        )
-        # Register even for a reused request. The prior caller may have timed out or
-        # been cancelled while the approval itself remains pending; a new caller must
-        # still be attachable and resumable instead of receiving an immediate None.
-        self._waiters.register(
-            request.request_id,
-            session_key=_session_key(context),
-            owner_account_id=context.owner_account_id,
-        )
-        if not created:
-            return _public_request(request, include_nonce=True)
-        event_context = replace(context, request_id=request.request_id)
-        self.audit.record(
-            AuditEvent.for_action(
-                event_context,
+        context = bind_approval_context(context)
+        with self._decision_lock:
+            origin = context.approval_origin
+            if origin is not None and not origin.attach(self._close_approval_origin):
+                raise ApprovalError("子智能体运行已结束", terminal=True)
+            request, created = self.approvals.create_or_get(
+                context,
                 action,
-                action_type="approval_requested",
-                decision="pending",
-                decision_source="gateway",
-                approval_mode=self.mode_for(context).value,
-                tool_name=tool_name,
-                additional_permissions_summary=_permissions_summary(additional_permissions),
+                tool_name,
+                risk_class=risk_class,
+                preview=preview,
+                additional_permissions=additional_permissions,
+                proposed_argv_prefix=proposed_argv_prefix,
             )
-        )
-        public = _public_request(request, include_nonce=True)
-        self._push_pending_approval(context, public)
-        self._notify_request_created(context, public)
-        return public
+            # Register even for a reused request. The prior caller may have timed out or
+            # been cancelled while the approval itself remains pending; a new caller must
+            # still be attachable and resumable instead of receiving an immediate None.
+            self._waiters.register(
+                request.request_id,
+                session_key=_session_key(context),
+                owner_account_id=context.owner_account_id,
+                origin=origin,
+            )
+            if not created:
+                return _public_request(request, include_nonce=True)
+            event_context = replace(context, request_id=request.request_id)
+            self.audit.record(
+                AuditEvent.for_action(
+                    event_context,
+                    action,
+                    action_type="approval_requested",
+                    decision="pending",
+                    decision_source="gateway",
+                    approval_mode=self.mode_for(context).value,
+                    tool_name=tool_name,
+                    additional_permissions_summary=_permissions_summary(additional_permissions),
+                )
+            )
+            public = _public_request(request, include_nonce=True)
+            self._push_pending_approval(context, public)
+            self._notify_request_created(context, public)
+            return public
+
+    def _close_approval_origin(self, origin: ApprovalOrigin) -> None:
+        with self._decision_lock:
+            pending = self.approvals.revoke_pending_origin(origin)
+            self.grants.revoke_origin(origin)
+            self._waiters.cancel_for_origin(origin)
+            self._recent_rejections = {
+                key: expiry for key, expiry in self._recent_rejections.items() if key[-1] is not origin
+            }
+            for request in pending:
+                self._notify_request_decided(request.owner_account_id, request.request_id)
 
     def _cached_rules(self, context: SecurityContext) -> tuple[ActionRule, ...]:
         """授权规则内存快照读取；写路径失效后下一次读取自动重建。"""
@@ -400,6 +434,7 @@ class SecurityApprovalService:
         preview: str = "",
     ) -> tuple[FilePolicyResult, str, dict | None]:
         """Evaluate base policy, explicit rules, grants, and auto-review in order."""
+        context = bind_approval_context(context)
         mode = self.mode_for(context)
         assessment = assess_file_action(context, action, mode, db_path=self.db_path)
         if assessment.result is FilePolicyResult.DENY:
@@ -418,6 +453,8 @@ class SecurityApprovalService:
         # that this authorize matches before its durable audit commits, then roll it
         # back after execution has already started (H-7).
         with self._decision_lock:
+            if context.approval_origin is not None and context.approval_origin.closed:
+                return FilePolicyResult.DENY, "approval_origin_closed", None
             session_permissions = self.grants.session_permissions(context)
             rules = self._cached_rules(context)
             # Persisted DENY is explicit owner policy and must short-circuit base
@@ -489,6 +526,7 @@ class SecurityApprovalService:
         proposed_argv_prefix: Sequence[str] | None = None,
     ) -> ExecAuthorization:
         """Authorize one exact command according to the selected conversation mode."""
+        context = bind_approval_context(context)
         mode = self.mode_for(context)
         if (
             mode is not ConversationPermissionMode.FULL_ACCESS
@@ -501,6 +539,8 @@ class SecurityApprovalService:
         # end_session/logout terminal sweep so a grant published in the issue window
         # cannot be consumed after the session ended (H-6).
         with self._decision_lock:
+            if context.approval_origin is not None and context.approval_origin.closed:
+                return ExecAuthorization(False)
             session_permissions = self.grants.session_permissions(context)
             rules = self._cached_rules(context)
             if any(
@@ -626,6 +666,7 @@ class SecurityApprovalService:
         public_target: bool,
     ) -> ExecAuthorization:
         """Authorize one exact outbound target for an in-process network tool."""
+        context = bind_approval_context(context)
         mode = self.mode_for(context)
         if (
             mode is not ConversationPermissionMode.FULL_ACCESS
@@ -634,6 +675,8 @@ class SecurityApprovalService:
             self._audit_network(context, action, "deny", "recent_user_rejection", tool_name)
             return ExecAuthorization(False)
         with self._decision_lock:
+            if context.approval_origin is not None and context.approval_origin.closed:
+                return ExecAuthorization(False)
             session_permissions = self.grants.session_permissions(context)
             rules = self._cached_rules(context)
             if any(
@@ -899,7 +942,8 @@ class SecurityApprovalService:
             self._waiters.resolve(request_id, None)
             raise
         if outcome.decision is ApprovalDecision.REJECT:
-            self._recent_rejections[_rejection_key(context, outcome.request.action)] = (
+            rejected_context = replace(context, approval_origin=outcome.request.approval_origin)
+            self._recent_rejections[_rejection_key(rejected_context, outcome.request.action)] = (
                 time.monotonic() + _REJECTION_COOLDOWN_SECONDS
             )
         # 唤醒阻塞在 await_decision 的工具调用：批准则 outcome.grant 非 None，调用方据此继续执行。
@@ -1300,10 +1344,11 @@ def _rule_applies_to_tool(rule: ActionRule, tool_name: str) -> bool:
 def _rejection_key(
     context: SecurityContext,
     action: NormalizedAction,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, ApprovalOrigin | None]:
     return (
         context.owner_account_id,
         context.workspace_id,
         context.session_id,
         action.digest,
+        context.approval_origin,
     )

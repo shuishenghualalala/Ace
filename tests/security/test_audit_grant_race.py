@@ -24,7 +24,7 @@ from crew.security.actions import (
 )
 from crew.security.approvals import ApprovalDecision, ApprovalError, ApprovalManager, ApprovalSubmission
 from crew.security.audit import AuditWriteError, SQLiteSecurityAudit
-from crew.security.context import SecurityContext
+from crew.security.context import ApprovalOrigin, SecurityContext
 from crew.security.grants import GrantRegistry
 from crew.security.models import (
     AdditionalPermissionProfile,
@@ -915,3 +915,86 @@ def test_persistent_rule_and_decision_receipt_commit_together(tmp_path, monkeypa
                             submission_id=submission.submission_id)
     assert service.decision_receipt(context, submission) == result["receipt"]
     assert len(rules.list(os_user=context.os_user, owner_account_id=context.owner_account_id, workspace_id=context.workspace_id)) == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", [ApprovalDecision.ONCE, ApprovalDecision.SESSION, ApprovalDecision.ALWAYS])
+async def test_child_close_preserves_durable_decision_and_only_revokes_unused_once(tmp_path, decision):
+    _, grants, _, service = _service(tmp_path)
+    parent = _context(tmp_path)
+    origin = ApprovalOrigin(parent)
+    child = origin.bind(replace(parent, session_id="hidden-session", task_id="hidden-task"))
+    sibling = ApprovalOrigin(parent).bind(parent)
+    action = normalize_exec_action(["echo", "fixture"], tmp_path)
+    try:
+        request = service.request_action(child, action, tool_name="terminal", risk_class="fixture")
+        assert "approval_origin" not in request
+        assert [item["request_id"] for item in service.pending(parent, include_nonce=True)] == [request["request_id"]]
+        submission = ApprovalSubmission.from_decision(request["request_id"], "a" * 32, decision, None)
+        result = service.decide(
+            parent, request_id=request["request_id"], nonce=request["nonce"],
+            decision=decision, submission_id=submission.submission_id,
+        )
+        assert result["receipt"]["status"] == "recorded"
+        if decision is ApprovalDecision.ONCE:
+            assert grants.authorize_action(sibling, action, tool_name="terminal") is None
+
+        await asyncio.to_thread(origin.close)
+        assert await service.await_decision(request["request_id"]) is None
+        assert service.decision_receipt(parent, submission) == result["receipt"]
+        retained = grants.authorize_action(child, action, tool_name="terminal")
+        assert (retained is not None) is (decision is ApprovalDecision.SESSION)
+        assert not service.authorize_exec_action(child, action, tool_name="terminal", risk_class="fixture").allowed
+        response = service.authorize_exec_action(sibling, action, tool_name="terminal", risk_class="fixture")
+        assert response.allowed is (decision is not ApprovalDecision.ONCE)
+        with pytest.raises(ApprovalError, match="运行已结束"):
+            service.request_action(child, action, tool_name="terminal", risk_class="fixture")
+    finally:
+        origin.close()
+        sibling.approval_origin.close()
+        service.close()
+
+
+@pytest.mark.asyncio
+async def test_same_request_listener_cancellation_leaves_other_listener_alive(tmp_path):
+    _, _, _, service = _service(tmp_path)
+    context = _context(tmp_path)
+    action = normalize_exec_action(["echo", "fixture"], tmp_path)
+    request = service.request_action(context, action, tool_name="terminal", risk_class="fixture")
+    listeners = [asyncio.create_task(service.await_decision(request["request_id"])) for _ in range(2)]
+    try:
+        await asyncio.sleep(0)
+        listeners[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await listeners[0]
+        assert not listeners[1].done()
+        service.decide(
+            context, request_id=request["request_id"], nonce=request["nonce"], decision=ApprovalDecision.ONCE,
+        )
+        outcome = await asyncio.wait_for(listeners[1], 3)
+        assert outcome is not None and outcome.grant is not None
+    finally:
+        for listener in listeners:
+            listener.cancel()
+        await asyncio.gather(*listeners, return_exceptions=True)
+        service.close()
+
+
+def test_rejection_cooldown_belongs_only_to_the_originating_child(tmp_path):
+    _, _, _, service = _service(tmp_path)
+    parent = _context(tmp_path)
+    a, b = ApprovalOrigin(parent), ApprovalOrigin(parent)
+    action = normalize_exec_action(["echo", "fixture"], tmp_path)
+    try:
+        first = service.request_action(a.bind(parent), action, tool_name="terminal", risk_class="fixture")
+        service.decide(
+            parent, request_id=first["request_id"], nonce=first["nonce"], decision=ApprovalDecision.REJECT,
+        )
+        denied = service.authorize_exec_action(a.bind(parent), action, tool_name="terminal", risk_class="fixture")
+        sibling = service.authorize_exec_action(b.bind(parent), action, tool_name="terminal", risk_class="fixture")
+        assert not denied.allowed and denied.request is None
+        assert not sibling.allowed and sibling.request is not None
+        assert sibling.request["request_id"] != first["request_id"]
+    finally:
+        a.close()
+        b.close()
+        service.close()

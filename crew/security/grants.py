@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 from uuid import uuid4
 
 from crew.security.actions import ActionKind, NormalizedAction
-from crew.security.context import SecurityContext
+from crew.security.context import ApprovalOrigin, SecurityContext
 from crew.security.models import (
     EMPTY_ADDITIONAL_PERMISSIONS,
     AdditionalPermissionProfile,
@@ -38,6 +38,7 @@ class ExecutionGrant:
     expires_monotonic: float | None
     additional_permissions: AdditionalPermissionProfile = EMPTY_ADDITIONAL_PERMISSIONS
     tool_name: str = ""
+    approval_origin: ApprovalOrigin | None = field(default=None, repr=False)
 
 
 class GrantRegistry:
@@ -73,6 +74,7 @@ class GrantRegistry:
             expires_monotonic=expires_monotonic,
             additional_permissions=additional_permissions,
             tool_name=str(tool_name).strip(),
+            approval_origin=context.approval_origin if scope is RuleScope.ONCE else None,
         )
         with self._lock:
             self._grants[grant.grant_id] = grant
@@ -203,6 +205,13 @@ class GrantRegistry:
                 profiles.append(grant.additional_permissions)
         return merge_additional_permissions(*profiles)
 
+    def revoke_origin(self, origin: ApprovalOrigin) -> int:
+        with self._lock:
+            grant_ids = [grant_id for grant_id, grant in self._grants.items() if grant.approval_origin is origin]
+            for grant_id in grant_ids:
+                del self._grants[grant_id]
+        return len(grant_ids)
+
     def revoke(self, grant_id: str) -> bool:
         """Revoke one grant during fail-closed coordination rollback."""
         with self._lock:
@@ -212,7 +221,11 @@ class GrantRegistry:
 def _context_matches(grant: ExecutionGrant, context: SecurityContext) -> bool:
     if not _same_session(grant, context):
         return False
-    return grant.scope is RuleScope.SESSION or grant.task_id == context.task_id
+    return grant.scope is RuleScope.SESSION or (
+        grant.task_id == context.task_id
+        and grant.approval_origin is context.approval_origin
+        and (grant.approval_origin is None or not grant.approval_origin.closed)
+    )
 
 
 def _same_session(grant: ExecutionGrant, context: SecurityContext) -> bool:

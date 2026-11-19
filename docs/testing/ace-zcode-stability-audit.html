@@ -182,12 +182,16 @@
 <h3 id="one-shot-subagent-interrupt">按父会话和账号停止指定一次性子代理</h3>
 <p>旧版公开停止入口将仍在运行的一次性子代理判定为 <code>not_running</code>。ZCode 将子任务停止信号绑定到任务 ID，并将审批投递到父会话且保留请求来源。Ace 用持久化账号、父会话和子代理 ID 校验目标，再查同一范围内的活动记录。内建执行器的结构化中断终态在子代理账本记为 <code>aborted</code>，续跑消息仍要求续跑身份。</p>
 <p><strong>验收</strong> 真实 Gateway ASGI 路由、应用运行时、签名账号 Cookie、桌面 HMAC 审批与 SQLite，使用两个受控内建子代理。旧版正确账号和父会话的停止返回 <code>not_running</code>。候选仅停止目标并落盘 <code>aborted</code>，重复停止显示已退出。另一子代理原审批仍待处理，经一次性批准后正常完成。错误账号、错误父会话和一次性身份的续跑请求均未改变目标。子代理和网关安全回归共 205 项通过，Ruff 通过。两个未修改的深度账本用例报告协程未等待警告。</p>
-<p><strong>待修复</strong> 另一个实际应用夹具确认，同一父会话中两个子代理请求相同操作时会共用审批和等待对象。通过运行句柄取消其中一个，会提前终止另一个并留下待处理审批。</p>
+<p>相同操作的子代理审批与取消另见 <a href="#same-action-child-approval-origin">按子运行隔离审批</a>。</p>
 <p class="evidence">Ace <code>crew/agent/subagent/runtime.py</code>、<code>tools.py</code>、<code>providers.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/subagent/runner.ts:565</code>、<code>runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
 <h3 id="parent-child-stop-owner-scope">父会话停止按账号级联</h3>
 <p>ZCode 将每个子运行的取消控制器与发起它的父级信号相连。Ace 旧版在父回合停止时只按会话 ID 找子代理。网关已取得可信账号，现由 CrewApp 将账号传给活动子代理注册表，按账号和父会话筛选后发送中断。</p>
 <p><strong>验收</strong> 实际 Gateway WebSocket 使用签名 Cookie 认证。两个不同账号在 SQLite 各有相同 ID 的父会话，同时运行独立子代理。旧版账号 A 发会话 Stop 后，两个子代理均收到中断。候选仅将 A 的子代理记为 <code>aborted</code>，B 的子代理保持活动，独立完成后记为 <code>completed</code>。使用受控子运行。四组子代理、账号及 Dispatcher 回归共 81 项通过，Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/app.py</code>、<code>crew/agent/subagent/tools.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/subagent/runner.ts:203</code>、<code>:624</code>。</p>
+<h3 id="same-action-child-approval-origin">相同操作的子代理审批按运行隔离</h3>
+<p>ZCode 的父会话代理保留真正的子运行来源，并将审批投递到父界面。Ace 在内建子运行中建立私有审批来源，每次创建待审批和消费一次性授权时核对来源。续跑未继承启动上下文时，使用由运行时已校验的父会话 ID 进行投递。退出时撤销本运行的待处理审批与未消费的一次性授权，已记录的决定仍可查询。会话和持久规则继续遵循用户选择的授权范围。</p>
+<p><strong>验收</strong> Windows 发行包的 Python 启动真实 Gateway ASGI、内建子代理和文件工具，模型使用脚本响应。两次相同的工作空间外追加操作在旧版共用一条会话 ID 为空的审批，签名父会话看不到请求，停止 B 也停止 A 并留下待处理审批。候选在父会话收到两个独立请求，停止 B 后它的迟到批准返回 409，A 经签名批准后真实文件只追加一次。SQLite 记录 A 为 <code>completed</code>、B 为 <code>aborted</code>，只记录一次批准，退出后没有待处理请求、剩余一次性授权或活动子代理。审批、账号、Dispatcher 与子代理回归共 335 项通过，Ruff 通过。另有两条既有深度账本用例的协程警告。</p>
+<p class="evidence">Ace <code>crew/agent/subagent/providers.py</code>、<code>crew/security/context.py</code>、<code>service.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/helpers/subagent-interaction-broker.ts:17</code>、<code>tool/executor/permission-request.ts:52</code>。</p>
 <h3>A15 · P1 · 流式提前派发越过写入与串行配置</h3>
 <p>旧版收到完整参数就独立派发只读工具，待模型流收尾才按全批顺序返回结果。在同一次模型响应中先写新文件再读，实际读处理可能先运行。模型收到按顺序排列的写入成功和读取失败。禁用 <code>agent.parallel_tools</code> 时，旧版两条独立读取也可提前并发。</p>
 <p>ZCode 根据注册表中只读、并发、审批、交互及副作用字段决定能否提前派发。完整批次另有按依赖分组的调度器，当前 runtime 传入的通用模型调用依赖列表为空。流式路径按单调用判定。本轮对 ZCode 的行为对照来自源码。</p>
@@ -208,7 +212,7 @@
 <tr><td>终端、后台输出</td><td>Ace 仅在整批判定为独立只读时并发终端命令，后台任务由进程注册表跟踪。ZCode Bash 在普通批使用独占属性，后台输出另有只读入口，回传按启动会话校验。</td><td>已验证长输出游标和按请求退出。两个会话在一方等待后台进程时可独立读取日志，见下节。</td></tr>
 <tr><td>MCP</td><td>原版 Ace 独立启动各服务器，同配置共用一个串行 worker。ZCode 默认按会话租用并按请求调用，普通批次使用服务工具的只读或幂等注解。</td><td>截止时间与回收见 A16。同服务支持两条明确只读请求并发，完整模型回复按现有授权分段并发。</td></tr>
 <tr><td>浏览器</td><td>Ace 按账号串行化共享选中标签和原生引用。ZCode CLI 托管 CDP 按会话建 BrowserContext，按会话和回合取消。</td><td>同账号双标签已用原生 Electron 验证等待取消和正常等待，见 D7f、D7g。</td></tr>
-<tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已验证一个子代理等待审批时公开停止另一一次性子代理。相同操作的共享审批仍待修复，见 <a href="#one-shot-subagent-interrupt">定向停止验收</a>。</td></tr>
+<tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已验证停止按账号和子运行隔离，相同操作分别审批并各自消费一次性授权。见 <a href="#same-action-child-approval-origin">按子运行隔离审批</a>。</td></tr>
 </tbody></table></div>
 <p class="evidence">Ace <code>crew/agent/loop/tool_dispatch_helpers.py</code>、<code>crew/tools/process_registry.py</code>、<code>crew/browser/manager.py:306</code>、<code>crew/agent/subagent/runtime.py:839</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts:481</code>、<code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>、<code>apps/zcode-cli/packages/core/src/runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
 <h3 id="background-process-wait-cancellable">后台进程等待释放工具工作线程</h3>
