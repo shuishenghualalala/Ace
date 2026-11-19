@@ -5,9 +5,11 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildElevatedSecuritySetup,
   buildElevatedUacEnable,
+  createWindowsSandboxSetupCoordinator,
   parseEnableLuaOutput,
   provisionInstalledWindowsSandbox,
   securityRuntimePlatformKey,
+  type SecuritySetupResult,
 } from '../../src/main/security-setup';
 
 describe('Windows security setup elevation', () => {
@@ -70,5 +72,64 @@ describe('Windows security setup elevation', () => {
     expect(parseEnableLuaOutput('EnableLUA    REG_DWORD    0x0')).toBe(false);
     expect(parseEnableLuaOutput('EnableLUA    REG_DWORD    0x1')).toBe(true);
     expect(parseEnableLuaOutput('not available')).toBeNull();
+  });
+});
+
+describe('Windows sandbox setup coordinator', () => {
+  const runtimePath = 'C:\\Program Files\\Crew\\ace-security-runtime.exe';
+  const stateDir = 'C:\\Users\\A\\AppData\\Roaming\\Crew\\security';
+  const visibleWindows = { platform: 'win32', packaged: true, visible: true, hiddenLaunch: false, ci: false };
+  const ready = { ok: true, exitCode: 0 };
+  const location = () => ({ runtimePath, stateDir });
+
+  it.each([
+    { platform: 'darwin' },
+    { platform: 'linux' },
+    { packaged: false },
+    { visible: false },
+    { hiddenLaunch: true },
+    { ci: true },
+  ])('does not inspect the runtime or provision for an ineligible launch (%j)', async (condition) => {
+    const provision = vi.fn(async () => ready);
+    const locate = vi.fn(location);
+    const coordinator = createWindowsSandboxSetupCoordinator(provision);
+    expect(coordinator.startAutomatically({ ...visibleWindows, ...condition }, locate)).toBeUndefined();
+    expect(locate).not.toHaveBeenCalled();
+    expect(provision).not.toHaveBeenCalled();
+
+    await expect(coordinator.startAutomatically(visibleWindows, locate)).resolves.toEqual(ready);
+    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir);
+  });
+
+  it('shares one install between a visible startup and the settings action', async () => {
+    let resolveProvision: (value: SecuritySetupResult) => void = () => {};
+    const provision = vi.fn(() => new Promise<SecuritySetupResult>((resolve) => { resolveProvision = resolve; }));
+    const elevated = vi.fn(async () => ready);
+    const coordinator = createWindowsSandboxSetupCoordinator(provision, elevated);
+    const first = coordinator.startAutomatically(visibleWindows, location);
+    expect(first).toBeDefined();
+    expect(coordinator.run('install', runtimePath, stateDir)).toBe(first);
+    expect(coordinator.startAutomatically(visibleWindows, location)).toBeUndefined();
+    await expect(coordinator.run('uninstall', runtimePath, stateDir)).resolves.toMatchObject({ ok: false, exitCode: null });
+    expect(elevated).not.toHaveBeenCalled();
+
+    resolveProvision(ready);
+    await expect(first).resolves.toEqual(ready);
+    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir);
+    await expect(coordinator.run('repair', runtimePath, stateDir)).resolves.toEqual(ready);
+    expect(elevated).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, 'repair');
+  });
+
+  it('keeps cancellation from triggering another automatic attempt and permits an explicit retry', async () => {
+    const cancelled = { ok: false, exitCode: 1 };
+    const provision = vi.fn<() => Promise<SecuritySetupResult>>()
+      .mockResolvedValueOnce(cancelled)
+      .mockResolvedValueOnce(ready);
+    const coordinator = createWindowsSandboxSetupCoordinator(provision);
+
+    await expect(coordinator.startAutomatically(visibleWindows, location)).resolves.toEqual(cancelled);
+    expect(coordinator.startAutomatically(visibleWindows, location)).toBeUndefined();
+    await expect(coordinator.run('install', runtimePath, stateDir)).resolves.toEqual(ready);
+    expect(provision).toHaveBeenCalledTimes(2);
   });
 });

@@ -308,6 +308,12 @@
 <p>现场首条失败来自 <code>terminal</code>，返回 <code>sandbox_unavailable</code>，当时此预览用户目录没有身份文件。身份就绪后，第二条失败仍用同一错误码，原因是组件被误判为目标平台不符。终端桥接过滤环境时去掉处理器变量，发行包内 Python 3.11.9 的 <code>platform.machine()</code> 因此为空。ZCode 的桌面架构保护从 Electron <code>process.arch</code> 读取当前进程架构；Ace 的 Python 桥接现从解释器目标读取。</p>
 <p><strong>验收</strong> 用发行包 Python、真实 <code>build_spawn_env</code> 与原样 x64 helper 复现旧版失败，修复后原样清单完整性检查通过。分别用错误架构和错误 SHA-256 的私有清单验证仍然拒绝。相关 pytest 共 50 项通过。组合运行还暴露 4 项独立失败，其中 2 项依赖配置过的原生 helper，另 2 项检测到 Apple Silicon 已提交预编译清单的源摘要落后于 Rust 源码。隔离验证覆盖真实发行组件的完整性检查，原生终端启动需要另有配置完成的 Windows 沙箱。</p>
 </article>
+<article id="windows-sandbox-visible-startup">
+<h3>D7d · 直接启动 Windows 发行版时应自动准备沙箱</h3>
+<p>预览版解包后从独立用户目录直接启动，跳过了正式安装器的首次防护配置。正常安装器和首次显示窗口现使用同一套原生身份检查与 UAC 授权入口。已有健康身份时复用；缺少身份时自动发起一次初始化并复查；设置页的并发安装共用结果。登录自启及 CI 跳过。Codex 的 Windows 提权模式也在首次缺少对应配置时走原生授权。</p>
+<p><strong>验收</strong> 14 项设置与启动测试、完整桌面 TypeScript 检查通过。正式 Windows Electron 43.1 的隔离测试通过 4 项。健康身份两次显示仅调用一次 helper 检查；缺少身份时并发设置页真实 IPC 共用检查、初始化、复查的唯一序列；登录自启和 CI 各两次显示均未启动 helper。夹具使用无特权原生组件代替 UAC 操作，独立验证 Windows 实际管理员授权仍需平台环境。</p>
+<p class="evidence">Ace <code>desktop/src/main/index.ts</code>、<code>security-setup.ts</code>、<code>deb-package/pack_exe.ps1</code>。Codex <code>codex-rs/windows-sandbox-rs/src/provisioning_client.rs</code>。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>

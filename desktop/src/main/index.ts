@@ -124,9 +124,9 @@ import {
   WikiOpenSourceFileArgs,
 } from '../shared/ipc-schemas';
 import {
+  createWindowsSandboxSetupCoordinator,
   getWindowsUacStatus,
   provisionInstalledWindowsSandbox,
-  runElevatedSecuritySetup,
   runElevatedUacEnable,
   securityRuntimePlatformKey,
 } from './security-setup';
@@ -374,6 +374,7 @@ const MANAGED_GATEWAY_PORT = Number.isInteger(devGatewayPort) && devGatewayPort 
   ? devGatewayPort
   : 28180;
 const AUTOSTART_ARG = '--autostart';
+const windowsSandboxSetup = createWindowsSandboxSetupCoordinator();
 const RENDERER_LAUNCH_SEARCH = '';
 let gatewayIdentityMode: GatewayIdentityMode = 'local';
 
@@ -1419,7 +1420,27 @@ function createWindow(previous?: BrowserWindow): void {
     if (mainWindow === win) browserHost?.hidePanel();
   });
   win.on('show', () => {
-    if (currentWindow()) sendToMainRenderer('browser-view:layout-invalidated');
+    if (!currentWindow()) return;
+    sendToMainRenderer('browser-view:layout-invalidated');
+    queueMicrotask(() => {
+      if (!currentWindow()) return;
+      const setup = windowsSandboxSetup.startAutomatically({
+        platform: process.platform,
+        packaged: app.isPackaged,
+        visible: win.isVisible() && !win.isMinimized(),
+        hiddenLaunch: shouldLaunchHidden(),
+        ci: Boolean(process.env['CI']),
+      }, () => {
+        const { ACE_SECURITY_RUNTIME: runtimePath, ACE_SECURITY_STATE_DIR: stateDir } =
+          packagedSecurityRuntimeEnv({ bundledOnly: true });
+        return runtimePath ? { runtimePath, stateDir } : undefined;
+      });
+      void setup?.then((result) => {
+        if (!result.ok) console.warn('[security] Windows initial sandbox setup:', result.code ?? result.exitCode);
+      }).catch(() => {
+        console.warn('[security] Windows initial sandbox setup could not complete');
+      });
+    });
   });
   win.on('closed', () => {
     releaseRendererTransports(senderId);
@@ -3754,7 +3775,8 @@ function registerIpc() {
     if (process.platform !== 'win32') {
       return { ok: false, exitCode: null, detail: '当前设备无需手动安装安全防护' };
     }
-    const { ACE_SECURITY_RUNTIME: runtime, ACE_SECURITY_STATE_DIR: stateDir } = packagedSecurityRuntimeEnv();
+    const { ACE_SECURITY_RUNTIME: runtime, ACE_SECURITY_STATE_DIR: stateDir } =
+      packagedSecurityRuntimeEnv({ bundledOnly: app.isPackaged });
     if (!runtime || path.basename(runtime) !== 'ace-security-runtime.exe') {
       return {
         ok: false,
@@ -3764,7 +3786,7 @@ function registerIpc() {
           : '未找到可用的 Windows 安全运行组件，请先构建并检查运行组件清单',
       };
     }
-    return runElevatedSecuritySetup(runtime, stateDir, args.action);
+    return windowsSandboxSetup.run(args.action, runtime, stateDir);
   });
   // 手动重试接管自动重启，并和已经发起的回收等待同一个退出结果。
   trustedHandle('gateway:retry', async () => {

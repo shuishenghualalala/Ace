@@ -209,3 +209,57 @@ export async function provisionInstalledWindowsSandbox(
   const setup = await runElevatedSecuritySetup(runtimePath, stateDir, 'install', spawnProcess);
   return setup.ok ? verify() : setup;
 }
+
+interface WindowsSandboxStartup {
+  platform: string;
+  packaged: boolean;
+  visible: boolean;
+  hiddenLaunch: boolean;
+  ci: boolean;
+}
+
+interface WindowsSandboxLocation {
+  runtimePath: string;
+  stateDir: string;
+}
+
+/** Share the host's one-time check and native consent flow across startup and Settings. */
+export function createWindowsSandboxSetupCoordinator(
+  provision = provisionInstalledWindowsSandbox,
+  elevate = runElevatedSecuritySetup,
+) {
+  let automaticAttempted = false;
+  let active: {
+    action: SecuritySetupAction;
+    runtimePath: string;
+    stateDir: string;
+    promise: Promise<SecuritySetupResult>;
+  } | undefined;
+
+  function run(action: SecuritySetupAction, runtimePath: string, stateDir: string): Promise<SecuritySetupResult> {
+    if (active) {
+      if (action === active.action && runtimePath === active.runtimePath && stateDir === active.stateDir) {
+        return active.promise;
+      }
+      return Promise.resolve({ ok: false, exitCode: null, detail: '另一个 Windows 防护操作正在进行' });
+    }
+    const promise = Promise.resolve().then(() => (
+      action === 'install' ? provision(runtimePath, stateDir) : elevate(runtimePath, stateDir, action)
+    )).finally(() => { active = undefined; });
+    active = { action, runtimePath, stateDir, promise };
+    return promise;
+  }
+
+  function startAutomatically(
+    launch: WindowsSandboxStartup,
+    resolveLocation: () => WindowsSandboxLocation | undefined,
+  ): Promise<SecuritySetupResult> | undefined {
+    if (automaticAttempted || launch.platform !== 'win32' || !launch.packaged || !launch.visible
+      || launch.hiddenLaunch || launch.ci) return;
+    automaticAttempted = true;
+    const location = resolveLocation();
+    return location ? run('install', location.runtimePath, location.stateDir) : undefined;
+  }
+
+  return { run, startAutomatically };
+}
