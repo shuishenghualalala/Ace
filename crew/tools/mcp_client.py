@@ -51,6 +51,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 MCP_QUEUE_CAPACITY = 32
+MCP_CONCURRENT_READS_PER_SERVER = 2
 MCP_CALL_TIMEOUT_SECONDS = 60.0
 MCP_STARTUP_TIMEOUT_SECONDS = 30.0
 MCP_SHUTDOWN_TIMEOUT_SECONDS = 10.0
@@ -84,7 +85,8 @@ class _CallRequest:
     observation_context: ObservationContext
     started: bool = False
     replied: bool = False
-    call_task: asyncio.Task[Any] | None = None
+    call_task: asyncio.Task[None] | None = None
+    parallel_read: bool = False
 
     def abandon(self) -> None:
         self.future.cancel()
@@ -330,13 +332,16 @@ class _ServerWorker:
         self.cfg = cfg
         self.registry = registry
         self._queue: asyncio.Queue[_CallRequest] = asyncio.Queue(maxsize=queue_capacity)
+        self._request_ready = asyncio.Event()
+        self._pending: _CallRequest | None = None
         self._call_timeout = call_timeout
         self._startup_timeout = startup_timeout
         self._ready = asyncio.Event()
         self._error: Exception | None = None
         self._tools: list[Any] = []
         self._task: asyncio.Task[None] | None = None
-        self._current: _CallRequest | None = None
+        self._inflight: dict[asyncio.Task[None], _CallRequest] = {}
+        self._parallel_reads: set[str] = set()
         self._closing = False
         # ---- 重连 supervisor 策略（cfg.reconnect / cfg.fail_on_startup_error）----
         reconnect = cfg.get("reconnect")
@@ -535,15 +540,8 @@ class _ServerWorker:
                         self._error = exc
                         self._ready.set()
                     # 在途调用立即失败；排队请求保留，重连成功后仍可在截止时间内被服务。
-                    if self._current is not None:
-                        self._complete(
-                            self._current,
-                            tool_error(
-                                f"MCP server {self.name} 连接已断开；"
-                                "远端最终副作用状态可能未知，系统不会自动重试"
-                            ),
-                        )
-                        self._current = None
+                    self._settle_inflight(f"MCP server {self.name} 连接已断开")
+                    self._inflight.clear()
                     log.warning("MCP server %s 连接异常：%s", self.name, exc)
                     if connected_at is not None and (
                         asyncio.get_running_loop().time() - connected_at
@@ -596,115 +594,151 @@ class _ServerWorker:
                 if self._closing
                 else f"MCP server {self.name} 连接已断开"
             )
-            if self._current is not None:
-                self._complete(
-                    self._current,
-                    tool_error(f"{reason}；远端最终副作用状态可能未知，系统不会自动重试"),
-                )
-                self._current = None
+            self._settle_inflight(reason)
+            self._inflight.clear()
             # 只有 supervisor 循环存活期间才保留排队请求（重连后仍可能被服务）；
             # task 退出（取消/关闭/预算耗尽）时必须全部完成，不得遗留 pending。
             self._drain_queue(reason)
 
     async def _serve(self, session: Any) -> None:
-        """Serialize individual requests on the connection and ping while idle."""
+        """Supervise the requests issued on one connection generation."""
         consecutive_errors = 0
-        while True:
-            if self._ping_supported and self._ping_interval > 0:
+        try:
+            while not self._closing:
+                self._request_ready.clear()
+                for task, request in tuple(self._inflight.items()):
+                    if not task.done():
+                        continue
+                    try:
+                        task.result()
+                    except asyncio.CancelledError:
+                        if not request.future.cancelled():
+                            raise
+                    except Exception as exc:  # noqa: BLE001 - probe before reconnecting
+                        consecutive_errors += 1
+                        if not await self._probe_once(session) or consecutive_errors >= MCP_MAX_CONSECUTIVE_CALL_ERRORS:
+                            raise
+                        self._complete(request, tool_error(f"MCP 调用失败: {exc}"))
+                    else:
+                        consecutive_errors = 0
+                    del self._inflight[task]
+
+                self._dispatch_ready(session)
+                if self._inflight or not self._ping_supported or self._ping_interval <= 0:
+                    await self._request_ready.wait()
+                    continue
                 try:
-                    request = await asyncio.wait_for(
-                        self._queue.get(), timeout=self._ping_interval
-                    )
+                    async with asyncio.timeout(self._ping_interval):
+                        await self._request_ready.wait()
                 except TimeoutError:
                     if not await self._probe_once(session):
                         raise ConnectionError(f"MCP server {self.name} ping 探活失败")
-                    continue
-            else:
-                request = await self._queue.get()
-            if request.future.done():
+        finally:
+            if self._inflight:
+                for task in self._inflight:
+                    task.cancel()
+                await asyncio.gather(*self._inflight, return_exceptions=True)
+
+    def _dispatch_ready(self, session: Any) -> None:
+        """Admit contiguous reads up to the limit and keep an exclusive FIFO boundary."""
+        if any(
+            not request.parallel_read or request.tool_name not in self._parallel_reads
+            for request in self._inflight.values()
+        ):
+            return
+        while len(self._inflight) < MCP_CONCURRENT_READS_PER_SERVER:
+            if self._pending is None:
+                try:
+                    self._pending = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+            request = self._pending
+            if request.future.done() or request.deadline <= asyncio.get_running_loop().time():
+                self._pending = None
+                if not request.future.done():
+                    self._fail(request, self._deadline_error(request))
                 continue
-            if request.deadline <= asyncio.get_running_loop().time():
-                self._fail(request, self._deadline_error(request))
-                continue
-            self._current = request
+            parallel_read = request.tool_name in self._parallel_reads
+            if self._inflight and not parallel_read:
+                return
+            self._pending = None
             request.started = True
-            try:
-                with attach_context(request.observation_context):
-                    with span(
-                        "mcp.call",
-                        kind="client",
+            request.parallel_read = parallel_read
+            task = asyncio.create_task(self._execute_request(session, request))
+            request.call_task = task
+            self._inflight[task] = request
+            task.add_done_callback(self._wake_dispatch)
+            if not parallel_read:
+                return
+
+    def _wake_dispatch(self, _task: asyncio.Task[None]) -> None:
+        self._request_ready.set()
+
+    async def _execute_request(self, session: Any, request: _CallRequest) -> None:
+        try:
+            with attach_context(request.observation_context):
+                with span(
+                    "mcp.call",
+                    kind="client",
+                    module="mcp",
+                    component="worker",
+                    operation="mcp.call",
+                    attributes={"service": self.name, "tool": request.tool_name},
+                ):
+                    request_capture = capture_payload(
+                        "mcp.request",
+                        request.args,
+                        attributes={
+                            "capture_layer": "mcp.worker",
+                            "service": self.name,
+                            "tool": request.tool_name,
+                        },
+                    )
+                    async with asyncio.timeout_at(request.deadline):
+                        result = await session.call_tool(request.tool_name, request.args or {})
+                        request.replied = True
+                    extracted = _extract_text(result)
+                    response_capture = capture_payload(
+                        "mcp.response",
+                        extracted,
+                        attributes={
+                            "capture_layer": "mcp.worker",
+                            "service": self.name,
+                            "tool": request.tool_name,
+                        },
+                    )
+                    event(
+                        "mcp.call.completed",
                         module="mcp",
                         component="worker",
                         operation="mcp.call",
-                        attributes={"service": self.name, "tool": request.tool_name},
-                    ):
-                        request_capture = capture_payload(
-                            "mcp.request",
-                            request.args,
-                            attributes={
-                                "capture_layer": "mcp.worker",
-                                "service": self.name,
-                                "tool": request.tool_name,
-                            },
-                        )
-                        async with asyncio.timeout_at(request.deadline):
-                            request.call_task = asyncio.create_task(session.call_tool(request.tool_name, request.args or {}))
-                            result = await request.call_task
-                            request.replied = True
-                        consecutive_errors = 0
-                        extracted = _extract_text(result)
-                        response_capture = capture_payload(
-                            "mcp.response",
-                            extracted,
-                            attributes={
-                                "capture_layer": "mcp.worker",
-                                "service": self.name,
-                                "tool": request.tool_name,
-                            },
-                        )
-                        event(
-                            "mcp.call.completed",
-                            module="mcp",
-                            component="worker",
-                            operation="mcp.call",
-                            attributes={
-                                "request_payload_id": request_capture.payload_id,
-                                "response_payload_id": response_capture.payload_id,
-                                "is_error": bool(getattr(result, "is_error", False)),
-                                "service": self.name,
-                                "tool": request.tool_name,
-                            },
-                        )
-                        if getattr(result, "is_error", False):
-                            try:
-                                message = str(json.loads(extracted).get("error") or extracted)
-                            except (AttributeError, json.JSONDecodeError):
-                                message = extracted
-                            self._fail(request, ToolError(message))
-                        else:
-                            # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
-                            truncated, _ = truncate_output(extracted)
-                            self._complete(request, truncated)
-            except asyncio.CancelledError:
-                if request.future.cancelled() and not asyncio.current_task().cancelling():
-                    continue
-                raise
-            except TimeoutError:
-                consecutive_errors = 0
-                self._fail(request, self._deadline_error(request))
-            except Exception as exc:  # noqa: BLE001 - 需先判活再决定 tool_error 还是断线
-                consecutive_errors += 1
-                if (
-                    await self._probe_once(session)
-                    and consecutive_errors < MCP_MAX_CONSECUTIVE_CALL_ERRORS
-                ):
-                    self._complete(request, tool_error(f"MCP 调用失败: {exc}"))
-                else:
-                    raise
-            finally:
-                # CancelledError 会直接离开本层；保留 current 给外层 finally 完成 Future。
-                if request.future.done():
-                    self._current = None
+                        attributes={
+                            "request_payload_id": request_capture.payload_id,
+                            "response_payload_id": response_capture.payload_id,
+                            "is_error": bool(getattr(result, "is_error", False)),
+                            "service": self.name,
+                            "tool": request.tool_name,
+                        },
+                    )
+                    if getattr(result, "is_error", False):
+                        try:
+                            message = str(json.loads(extracted).get("error") or extracted)
+                        except (AttributeError, json.JSONDecodeError):
+                            message = extracted
+                        self._fail(request, ToolError(message))
+                    else:
+                        # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
+                        truncated, _ = truncate_output(extracted)
+                        self._complete(request, truncated)
+        except TimeoutError:
+            self._fail(request, self._deadline_error(request))
+
+    def _settle_inflight(self, reason: str) -> None:
+        for request in self._inflight.values():
+            self._complete(
+                request,
+                tool_error(f"{reason}；远端最终副作用状态可能未知，系统不会自动重试"),
+            )
 
     @staticmethod
     def _complete(request: _CallRequest, result: str) -> None:
@@ -733,6 +767,9 @@ class _ServerWorker:
 
     def _drain_queue(self, reason: str) -> None:
         """完成所有尚未执行的排队请求，明确保证远端未被调用。"""
+        if self._pending is not None:
+            self._complete(self._pending, tool_error(f"{reason}；排队请求未调用远端"))
+            self._pending = None
         while True:
             try:
                 request = self._queue.get_nowait()
@@ -742,7 +779,20 @@ class _ServerWorker:
 
     def _register_tools(self) -> int:
         count = 0
+        parallel_reads: set[str] = set()
+        seen: set[str] = set()
         for tool in self._tools:
+            annotations = getattr(tool, "annotations", None)
+            if (
+                tool.name not in seen
+                and getattr(annotations, "read_only_hint", None) is True
+                and getattr(annotations, "destructive_hint", None) is not True
+                and getattr(annotations, "idempotent_hint", None) is not False
+            ):
+                parallel_reads.add(tool.name)
+            else:
+                parallel_reads.discard(tool.name)
+            seen.add(tool.name)
             qualified = f"{self.name}__{tool.name}"
             schema = {
                 "name": qualified,
@@ -763,6 +813,8 @@ class _ServerWorker:
                 search_hint=f"mcp {self.name} {tool.name} {getattr(tool, 'description', '') or ''}",
             )
             count += 1
+        self._parallel_reads = parallel_reads
+        self._request_ready.set()
         return count
 
     def _unregister_tools(self) -> int:
@@ -857,12 +909,13 @@ class _ServerWorker:
             from crew.core.runctx import observe_tool_exit
 
             observe_tool_exit(lambda: not request.started or request.replied)
-            try:
-                self._queue.put_nowait(request)
-            except asyncio.QueueFull:
+            queued_count = self._queue.qsize() + (self._pending is not None)
+            if 0 < self._queue.maxsize <= queued_count:
                 return tool_error(
                     f"MCP server {self.name} 调用队列已满（上限 {self._queue.maxsize}）"
                 )
+            self._queue.put_nowait(request)
+            self._request_ready.set()
 
             try:
                 async with asyncio.timeout_at(request.deadline):
@@ -928,11 +981,7 @@ class _ServerWorker:
         self._closing = True
         if self._task is not None and not self._task.done():
             self._task.cancel()
-        if self._current is not None:
-            self._complete(
-                self._current,
-                tool_error(f"{reason}；远端最终副作用状态可能未知，系统不会自动重试"),
-            )
+        self._settle_inflight(reason)
         self._drain_queue(reason)
 
 

@@ -185,11 +185,15 @@
 <tbody>
 <tr><td>文件、搜索、写入</td><td>Ace 按已有只读白名单和混合批顺序调度。ZCode 用 registry 并发属性区分读、搜索和写入。</td><td>符合同批顺序、乱序参数和开关并发的实测见 A15。搜索功能验收见 A1、A5。</td></tr>
 <tr><td>终端、后台输出</td><td>Ace 仅在整批判定为独立只读时并发终端命令，后台任务由进程注册表跟踪。ZCode Bash 在普通批使用独占属性，后台输出另有只读入口，回传按启动会话校验。</td><td>已验证长输出游标和按请求退出。多会话并发读取后台输出待同夹具验证。</td></tr>
-<tr><td>MCP</td><td>Ace 独立启动各服务器，同配置复用单个顺序 worker。ZCode 默认按会话租用并按请求调用，普通批次使用服务工具的只读或幂等注解。</td><td>实测同 worker 的等待、截止、取消和回收见 A16。并发调度仍待核对各工具的副作用顺序。</td></tr>
+<tr><td>MCP</td><td>原版 Ace 独立启动各服务器，同配置共用一个串行 worker。ZCode 默认按会话租用并按请求调用，普通批次使用服务工具的只读或幂等注解。</td><td>截止时间与回收见 A16。同服务已支持两条明确只读请求并发，待核对同一模型响应的批次调度。</td></tr>
 <tr><td>浏览器</td><td>Ace 按账号串行化共享选中标签和原生引用。ZCode CLI 托管 CDP 按会话建 BrowserContext，按会话和回合取消。</td><td>源码及既有排队超时测试已核对。同账号双会话、双标签的真实交互待复验。</td></tr>
 <tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已跑子 Agent 批次回归，独立退出与请求范围见 A12。并行子任务中一个等待审批、另一个被取消，仍待用两端同夹具验证。</td></tr>
 </tbody></table></div>
 <p class="evidence">Ace <code>crew/agent/loop/tool_dispatch_helpers.py</code>、<code>crew/tools/process_registry.py</code>、<code>crew/browser/manager.py:306</code>、<code>crew/agent/subagent/runtime.py:839</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts:481</code>、<code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>、<code>apps/zcode-cli/packages/core/src/runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
+<h3>同服务 MCP 调用的有界并发</h3>
+<p>原版同一 worker 上，第一条只读调用持有任务闸门时，第二条也无法到达服务器。ZCode 以独立截止时间和取消信号向已租用的 MCP 客户端派发请求，Agent 按工具只读或幂等声明组织批次。Ace 先在每个服务上开放两个明确且声明一致的只读槽位，未知、变更及声明冲突的调用保留独占的 FIFO 顺序。每条请求继续沿用原安全审批和绝对截止时间，已派发请求在断线后仅结算原结果，排队请求可在原截止前重连派发。同一模型回复中的工具编排待另行验证。</p>
+<p><strong>验收</strong> 真实 stdio 服务器的阻塞闸门验证双只读执行、第三条等待空位、独占栅栏、单独取消、队列与在途超时、断线后的重连及两代子进程退出。Streamable HTTP 使用真实 MCP SDK 和本机 ASGI 应用，较快请求在较慢请求释放前返回，两次调用的会话标识与授权上下文分别核对。目标 worktree 的 MCP 客户端、生命周期、图像、服务、安装与 Gateway 接口共 93 项回归通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/mcp/index.ts:197</code>、<code>core/src/tool/scheduler.ts:173</code>、<code>adapters/src/mcp/index.ts:770</code>。</p>
 <h3>前台对话安装 MCP</h3>
 <p>ZCode 官方配置技能把对话操作接到结构化 MCP 配置，变更保存后由运行时连接、发现和注册工具。Ace 复用现有 MCP 设置的保存事务与增量连接，新增可调用的 <code>mcp_install</code>。管理员在前台对话一次确认，拒绝或取消不写配置；同名同配置保持幂等。同一会话下一轮可发现新工具。远程工具联网卡按公开会话和实际任务关联。</p>
 <p>两类本机真实传输各验证五轮。HTTP 与显式授权的宿主 stdio 均完成拒绝、批准、重复安装、同会话调用和重启后调用。面板使用的公开设置接口返回真实连接状态。HTTP 两次工具调用在公开会话完成原联网批准，四个 Gateway 和两个 stdio 进程正常退出。97 项安装、MCP 管理、生命周期和工具管线回归通过。</p>

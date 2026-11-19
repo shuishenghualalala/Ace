@@ -12,7 +12,7 @@ from crew.core.errors import StructuredToolError
 from crew.core.observability import bind_observation, install_sink
 from crew.state.observability import ObservationRecorder
 from crew.state.trace_store import TraceStore
-from crew.tools.mcp_client import MCPClientManager, _ServerWorker
+from crew.tools.mcp_client import MCP_QUEUE_CAPACITY, MCPClientManager, _ServerWorker
 from crew.tools.registry import Registry
 
 
@@ -46,12 +46,14 @@ async def _started_worker(
     monkeypatch: pytest.MonkeyPatch,
     *,
     call_timeout: float = 0.2,
+    queue_capacity: int = MCP_QUEUE_CAPACITY,
 ) -> tuple[_ServerWorker, _FakeSession]:
     worker = _ServerWorker(
         "fake",
         {},
         Registry(),
         call_timeout=call_timeout,
+        queue_capacity=queue_capacity,
         startup_timeout=0.1,
     )
     session = _FakeSession()
@@ -89,6 +91,77 @@ async def test_queue_full_fails_immediately_without_displacing_existing_requests
     worker.force_abort("test cleanup")
     await asyncio.gather(first, second)
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exclusive_annotations",
+    [
+        None,
+        SimpleNamespace(read_only_hint=False, idempotent_hint=True),
+        SimpleNamespace(read_only_hint=True, destructive_hint=True),
+        SimpleNamespace(read_only_hint=True, idempotent_hint=False),
+    ],
+)
+async def test_parallel_reads_respect_exclusive_queue_boundary(monkeypatch, exclusive_annotations):
+    worker, session = await _started_worker(monkeypatch, call_timeout=8.0, queue_capacity=2)
+    starts = {name: asyncio.Event() for name in ("first", "second", "exclusive", "after")}
+    releases = {name: asyncio.Event() for name in ("first", "second", "exclusive")}
+
+    async def listed_tools():
+        return SimpleNamespace(tools=[
+            SimpleNamespace(name="read", annotations=SimpleNamespace(read_only_hint=True)),
+            SimpleNamespace(name="exclusive", annotations=exclusive_annotations),
+        ])
+
+    async def controlled_call(name, args):
+        label = args["label"]
+        starts[label].set()
+        if label in releases:
+            await releases[label].wait()
+        return SimpleNamespace(content=[SimpleNamespace(text=label)], is_error=False)
+
+    monkeypatch.setattr(session, "list_tools", listed_tools)
+    monkeypatch.setattr(session, "call_tool", controlled_call)
+    calls = []
+
+    def submit(tool, label):
+        call = asyncio.create_task(worker._make_handler(tool)({"label": label}))
+        calls.append(call)
+        return call
+
+    try:
+        await worker._resync_tools(session)
+        first = submit("read", "first")
+        await asyncio.wait_for(starts["first"].wait(), 2)
+        second = submit("read", "second")
+        await asyncio.wait_for(starts["second"].wait(), 2)
+
+        exclusive = submit("exclusive", "exclusive")
+        after = submit("read", "after")
+        releases["first"].set()
+        assert await first == "first"
+        # Let the available read slot reach the exclusive request at the queue head.
+        async def wait_for_exclusive_head():
+            while worker._pending is None and not starts["exclusive"].is_set():
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_exclusive_head(), 2)
+        assert not starts["exclusive"].is_set()
+        assert not starts["after"].is_set()
+        overflow = await asyncio.wait_for(worker._make_handler("read")({"label": "extra"}), 2)
+        assert "队列已满" in _error(overflow)
+
+        releases["second"].set()
+        assert await second == "second"
+        await asyncio.wait_for(starts["exclusive"].wait(), 2)
+        assert not starts["after"].is_set()
+        releases["exclusive"].set()
+        assert await exclusive == "exclusive"
+        assert await after == "after"
+    finally:
+        await worker.stop()
+        await asyncio.gather(*calls, return_exceptions=True)
 
 
 @pytest.mark.asyncio
