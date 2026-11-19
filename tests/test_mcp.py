@@ -85,7 +85,7 @@ async def test_mcp_client_connects_and_calls(monkeypatch):
         current_process_launch.reset(launch_token)
 
 
-async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
+async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch, tmp_path):
     """HTTP 分支使用 MCP 2 的 streamable_http_client、httpx2 和双元素流。"""
     import httpx2
     from mcp.server import MCPServer
@@ -109,17 +109,29 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
         )
 
     monkeypatch.setattr(httpx2, "AsyncClient", asgi_client)
+    from crew.security.context import SecurityContext
     from crew.security.launch import current_process_launch
 
-    async def authorize_remote_call(*_args, **_kwargs):
-        return None
+    context = SecurityContext(
+        os_user="tester",
+        owner_account_id="owner",
+        workspace_id="default",
+        workspace_root=tmp_path,
+        session_id="http-session",
+        request_id="http-1",
+        task_id="http-task",
+        cwd=tmp_path,
+    )
+
+    async def authorize_remote_call(*_args, security_context, **_kwargs):
+        seen["security_context"] = security_context
 
     monkeypatch.setattr(
         "crew.tools.security_guard.authorize_configured_mcp_call",
         authorize_remote_call,
     )
     launch_token = current_process_launch.set(SimpleNamespace(
-        security_context=object(),
+        security_context=context,
         approval_service=object(),
     ))
     reg = Registry()
@@ -144,6 +156,7 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch):
                 )
                 assert not result.is_error
                 assert "http echo: hi" in result.content
+                assert seen["security_context"] == context
             finally:
                 await mgr.aclose()
     finally:
