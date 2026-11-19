@@ -964,13 +964,13 @@ export async function waitFor(ctx: ActionContext, options: WaitOptions): Promise
       }
     }
     if (checked.textGone) {
-      await ctx.page.getByText(checked.textGone).first().waitFor({
+      await ctx.page.getByText(checked.textGone).filter({ visible: true }).first().waitFor({
         state: 'hidden',
         timeout: dispatchTimeout(ctx),
       });
     }
     if (checked.text) {
-      await ctx.page.getByText(checked.text).first().waitFor({
+      await ctx.page.getByText(checked.text).filter({ visible: true }).first().waitFor({
         state: 'visible',
         timeout: dispatchTimeout(ctx),
       });

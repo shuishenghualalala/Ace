@@ -131,7 +131,9 @@ function actionFixture(): {
         byText.set(text, waiter);
       }
       return {
-        first: () => ({ waitFor: waiter }),
+        filter: () => ({
+          first: () => ({ waitFor: waiter }),
+        }),
       };
     }),
   } as unknown as Page;
@@ -867,10 +869,12 @@ describe('Playwright MCP action parity', () => {
       calls.push('time');
     });
     vi.mocked(page.getByText).mockImplementation((text: string) => ({
-      first: () => ({
-        waitFor: async (options: { state: string }) => {
-          calls.push(`${text}:${options.state}`);
-        },
+      filter: () => ({
+        first: () => ({
+          waitFor: async (options: { state: string }) => {
+            calls.push(`${text}:${options.state}`);
+          },
+        }),
       }),
     }) as ReturnType<Page['getByText']>);
 
@@ -911,10 +915,12 @@ describe('Playwright MCP action parity', () => {
   it('reports text wait timeout as a non-mutating wait_timeout', async () => {
     const { ctx, page } = actionFixture();
     vi.mocked(page.getByText).mockReturnValue({
-      first: () => ({
-        waitFor: async () => {
-          throw new Error('Timeout 12345ms exceeded while waiting for locator');
-        },
+      filter: () => ({
+        first: () => ({
+          waitFor: async () => {
+            throw new Error('Timeout 12345ms exceeded while waiting for locator');
+          },
+        }),
       }),
     } as ReturnType<Page['getByText']>);
 

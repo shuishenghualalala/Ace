@@ -1473,6 +1473,35 @@ app.whenReady().then(async () => {
     return `${snap.text.split('\n').length} 行`;
   });
 
+  await check('wait 按全部同文匹配的可见性判断出现和消失', async () => {
+    const marker = '重复等待文本';
+    await page.evaluate((text) => {
+      const group = document.createElement('div');
+      group.id = 'wait-duplicates';
+      for (const hidden of [true, false]) {
+        const copy = document.createElement('span');
+        copy.hidden = hidden;
+        copy.textContent = text;
+        group.append(copy);
+      }
+      document.body.append(group);
+    }, marker);
+    try {
+      const waitContext = { ...ctx, timeoutMs: 1_000 };
+      await actions.waitFor(waitContext, { text: marker });
+      const error: unknown = await actions.waitFor({ ...waitContext, timeoutMs: 250 }, { textGone: marker })
+        .then(() => undefined, (cause: unknown) => cause);
+      if (!(error instanceof actions.ActionError) || error.code !== 'wait_timeout') {
+        throw new Error('可见的同文元素必须继续阻止消失条件');
+      }
+      await page.locator('#wait-duplicates span').last().evaluate((el) => el.remove());
+      await actions.waitFor(waitContext, { textGone: marker });
+      return '重复文本仍可见时继续等待，最后一项消失后完成';
+    } finally {
+      await page.locator('#wait-duplicates').evaluate((el) => el.remove());
+    }
+  });
+
   await check('动作层 click 走 Locator', async () => {
     const snap = await captureSnapshot(page, { full: true, hash, timeoutMs: 10_000 });
     ctx = { page, refs: snap.refs, hash, timeoutMs: 10_000 };

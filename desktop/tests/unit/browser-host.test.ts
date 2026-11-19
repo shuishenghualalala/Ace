@@ -1204,10 +1204,12 @@ vi.mock('../../src/main/browser/playwright-engine', () => {
           record('clearPageErrors', '');
         },
         getByText: (text: string) => ({
-          first: () => ({
-            waitFor: async (options: unknown): Promise<void> => {
-              record('waitForText', '', text, options);
-            },
+          filter: () => ({
+            first: () => ({
+              waitFor: async (options: unknown): Promise<void> => {
+                record('waitForText', '', text, options);
+              },
+            }),
           }),
         }),
       });
