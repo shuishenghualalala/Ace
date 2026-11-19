@@ -137,6 +137,9 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
   <p>重试判定从 <code>isinstance(exc, ProviderError) and exc.retryable</code> 收敛为 <code>isinstance(exc, CrewError) and exc.is_retryable()</code>（ProviderError 显式 retryable 优先语义不变）；等待时长优先取服务端建议的 <code>retry_delay</code>（Retry-After / body 字段，批次 2 解析），封顶 <code>_RETRY_DELAY_CAP_SECONDS = 60s</code> 防异常大值拖死重试循环，无建议值时维持本地指数退避 + jitter。非 CrewError 异常不重试、走既有兜底。<code>unsupported_capability</code> 降级分支改按 <code>exc.kind</code> 判定（不再比对字符串 category）。</p>
   <p>LLM 路径 error 帧（重试耗尽 / 流中断不可恢复）统一经 <code>_llm_error_chunk</code> 发出：CrewError 时 <code>code</code> 传 kind 值（如 <code>"timeout"</code>），body 附加 <code>retryable</code> 与 <code>retry_delay</code>（有则带，纯增量）；非类型化异常保持纯 message 帧。出站 <code>enrich_error_chunk</code> 的 category 优先取类型化分类（无 exc 时可从 body 的 kind code 反推），文本兜底仅保留给非类型化异常。</p>
 
+  <h2>流式工具派发顺序</h2>
+  <p>工具参数就绪时，提供方可在 <code>StreamChunk.ready_tool_call_index</code> 给出从零开始的调用位置。OpenAI 使用最终排序的声明下标，Anthropic 使用最终工具列表的追加位置。执行器只提前派发从零开始、连续就绪且可并行的只读调用。遇到序号缺口或写入等独占调用时，后续工具等完整批次到达，按批次中的读写屏障执行。提前就绪的高下标调用也可在完整批次接续，无需重新发送工具参数。</p>
+  <p><code>ToolRunner</code> 在 <code>agent.parallel_tools</code> 关闭时停用提前派发和批内并行。审批模式同样走串行路径。工具进度独立于实际派发，提供方没有调用位置时仍可展示进度。已有并发限额、结果顺序、断流接续和最终参数匹配共同约束实际执行。</p>
   <h2>模型流中断时保留已执行工具的结果</h2>
   <p><code>ToolRunner</code> 在提前派发只读调用时保存完整参数和执行任务。模型流断开或报告长度截断时，执行器按调用 ID 收集已派发任务的结果，将对应的 assistant 调用、tool 回复和媒体按协议顺序写入历史与下一次模型请求。仅展示过、参数尚未拼完的调用在界面标记为未执行。执行状态无法确认或遇到权限边界时，回合停止并提示核对。</p>
   <p>正常收尾时同一 ID 的最终工具名与参数也要匹配派发记录。参数变化返回明确错误，实际执行起点与耗时随匹配成功的调用返回。</p>

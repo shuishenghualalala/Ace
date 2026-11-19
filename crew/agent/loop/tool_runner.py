@@ -292,6 +292,8 @@ class ToolRunner:
         同一 (name, args) 去重，避免模型重复调用时重复执行/重复计 guardrail。
         返回 True 表示本次确实新建了提前执行任务，可安全向 UI 发送 start 帧。
         """
+        if not self.parallel_enabled:
+            return False
         if self._interrupted or self.approval_rejected or self._request_approval_mode() or tc.id in self._prewarm:
             return False
         # 未授权调用不得进入提前执行，也不得借 start 帧把参数写进 trace/UI。

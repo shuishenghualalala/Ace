@@ -747,7 +747,7 @@ class OpenAIProvider(LLMProvider):
                                 "name": ready.name,
                                 "elapsed_ms": round((time.perf_counter() - stream_started_at) * 1000),
                             })
-                        yield StreamChunk(ready_tool_call=ready)
+                        yield StreamChunk(ready_tool_call=ready, ready_tool_call_index=idx)
 
                 if choice.finish_reason is not None:
                     finish_reason = choice.finish_reason
@@ -824,7 +824,7 @@ class OpenAIProvider(LLMProvider):
                 ready = _build_tool_call(acc)
                 if ready is not None:
                     emitted_ready.add(idx)
-                    yield StreamChunk(ready_tool_call=ready)
+                    yield StreamChunk(ready_tool_call=ready, ready_tool_call_index=idx)
 
         llm_trace("response", {
             "session_id": session, "model": self.model, "stream": True,

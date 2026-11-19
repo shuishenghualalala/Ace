@@ -447,9 +447,8 @@ class StreamChunk:
     reasoning_content: str = ""
     # 本轮 usage（prompt/completion/cache_* 字段），仅在 done 帧填充；透传到前端 Inspector。
     usage: dict[str, int] = field(default_factory=dict)
-    # 流式工具派发（Crew StreamingToolExecutor 思路）：某个工具的参数在流中刚拼完、
-    # 可立即派发执行时，provider 单独 yield 一帧带上它（近似 Anthropic 的
-    # content_block_stop 信号）。done 帧仍携带完整 tool_calls，供组装 assistant 消息。
+    # 工具参数在流中拼完时单独给出。执行器根据调用顺序和工具属性决定是否提前运行。
+    # done 帧仍携带完整 tool_calls，供组装 assistant 消息。
     ready_tool_call: ToolCall | None = None
     # Legacy 兼容字段：旧 provider 在工具 name 一出现即 yield。executor 现在把它映射
     # 为 tool_call_generating，只显示参数生成中的卡片，不触发真正 start/执行。
@@ -457,3 +456,5 @@ class StreamChunk:
     # Crew tool generation signal：模型已经开始生成工具调用参数，但完整
     # arguments 尚未就绪。展示层可先渲染「正在准备/写入文件」，执行层不能据此执行工具。
     tool_call_generating: ToolCall | None = None
+    # Position in the completed tool list, when the provider can prove its order.
+    ready_tool_call_index: int | None = None

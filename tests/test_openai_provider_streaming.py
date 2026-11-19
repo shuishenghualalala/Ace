@@ -63,6 +63,7 @@ async def test_stream_emits_ready_tool_call_per_index(monkeypatch):
     ready = [c.ready_tool_call for c in out if c.ready_tool_call is not None]
     # 两个工具都被提前派发，且顺序为 index 顺序
     assert [r.id for r in ready] == ["call_a", "call_b"]
+    assert [c.ready_tool_call_index for c in out if c.ready_tool_call is not None] == [0, 1]
     assert ready[0].name == "file_read" and ready[0].arguments == {"path": "/tmp/a.txt"}
     assert ready[1].name == "web_search" and ready[1].arguments == {"q": "x"}
 

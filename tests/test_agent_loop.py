@@ -733,7 +733,7 @@ async def test_runtime_hard_stop_commits_streamed_text_without_pending_tool(tmp_
         async def stream_chat(self, messages, tools=None):
             try:
                 yield StreamChunk(delta_text="first ")
-                yield StreamChunk(ready_tool_call=ToolCall("preview", "file_read", {"path": "fixture.txt"}))
+                yield StreamChunk(ready_tool_call=ToolCall("preview", "file_read", {"path": "fixture.txt"}), ready_tool_call_index=0)
                 await read_started.wait()
                 yield StreamChunk(delta_text="second")
                 if stop_during == "provider_wait":
@@ -2034,7 +2034,7 @@ async def test_interrupted_stream_recovers_only_dispatched_read_result(visible_t
             if len(observed) == 1:
                 if visible_text:
                     yield StreamChunk(delta_text="looking")
-                yield StreamChunk(ready_tool_call=ToolCall("verified", "file_read", {"path": "example"}))
+                yield StreamChunk(ready_tool_call=ToolCall("verified", "file_read", {"path": "example"}), ready_tool_call_index=0)
                 await asyncio.wait_for(read.wait(), 1)
                 await asyncio.sleep(.05)
                 partial = ToolCall("partial", "file_write", {"_raw": "{"})
@@ -2074,6 +2074,14 @@ async def test_prewarm_never_substitutes_a_result_for_changed_final_arguments():
     assert runs == ["first"] and result.code == "tool_arguments_changed" and result.is_error
 
 
+async def test_serial_tool_setting_disables_prewarm():
+    reg = Registry()
+    reg.register(name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+                 handler=lambda _args: tool_result(ok=True), is_async=False, override=True)
+    runner = _runner(reg, parallel_enabled=False)
+    assert not runner.prewarm(ToolCall("read", "file_read", {"path": "sample.txt"}))
+
+
 async def test_prewarm_ignores_unsafe_tool():
     """写工具不提前派发，留给 run_batch 顺序执行。"""
     reg = Registry()
@@ -2108,37 +2116,50 @@ async def test_interrupt_blocks_prewarm():
     assert not runner._prewarm
 
 
-async def test_mixed_batch_preserves_order_with_prewarm():
-    """[read, write, read] 经分段执行后顺序不变，safe 读已 prewarm 复用。"""
-    reg = Registry()
-    runs: list[str] = []
+@pytest.mark.parametrize("ready_order", [(0, 1), (1, 0)])
+async def test_streaming_read_respects_prior_write_even_when_ready_first(ready_order):
+    current = "before"
+    read_started = asyncio.Event()
 
-    async def read_handler(args):
-        runs.append("read:" + args.get("path"))
-        return tool_result(path=args.get("path"))
+    async def read_handler(_args):
+        read_started.set()
+        return tool_result(value=current)
 
-    def write_handler(args):
-        runs.append("write:" + args.get("path"))
+    async def write_handler(args):
+        nonlocal current
+        current = args["content"]
         return tool_result(ok=True)
 
+    reg = Registry()
     reg.register(name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
                  handler=read_handler, is_async=True, override=True)
     reg.register(name="file_write", toolset="file", schema={"name": "file_write", "parameters": {}},
-                 handler=write_handler, is_async=False, override=True)
-
-    runner = _runner(reg)
+                 handler=write_handler, is_async=True, override=True)
+    target = "sample.txt"
     calls = [
-        ToolCall("r1", "file_read", {"path": "/tmp/a"}),
-        ToolCall("w1", "file_write", {"path": "/tmp/b", "content": "x"}),
-        ToolCall("r2", "file_read", {"path": "/tmp/c"}),
+        ToolCall("write", "file_write", {"path": target, "content": "after"}),
+        ToolCall("read", "file_read", {"path": target}),
     ]
-    for tc in calls:  # 流式期间会逐个 prewarm（写工具被忽略）
-        runner.prewarm(tc)
-    await asyncio.sleep(0)
 
-    messages: list[Message] = []
-    _ = [c async for c in runner.run_batch(calls, messages, "rid", _seq_counter())]
-    assert [m.tool_call_id for m in messages if m.role == "tool"] == ["r1", "w1", "r2"]
+    class MixedToolProvider(FakeProvider):
+        async def stream_chat(self, messages, tools=None):
+            if any(message.role == "tool" for message in messages):
+                yield StreamChunk(delta_text="done")
+                yield StreamChunk(done=True, finish_reason="stop")
+                return
+            for index in ready_order:
+                yield StreamChunk(ready_tool_call=calls[index], ready_tool_call_index=index)
+            try:
+                await asyncio.wait_for(read_started.wait(), timeout=0.05)
+            except TimeoutError:
+                pass
+            yield StreamChunk(done=True, finish_reason="tool_calls", tool_calls=calls)
+
+    ctx = _ctx()
+    await _collect(_executor(MixedToolProvider(), registry=reg), ctx)
+    results = [message for message in ctx.messages if message.role == "tool"]
+    assert [message.tool_call_id for message in results] == ["write", "read"]
+    assert json.loads(results[-1].content)["value"] == "after"
 
 
 # --------------------------------------------------------------------------- #
@@ -2338,30 +2359,36 @@ class ReadyStreamProvider(LLMProvider):
             yield StreamChunk(delta_text="完成")
             yield StreamChunk(delta_text="", done=True, finish_reason="stop")
             return
-        for tc in self._tool_calls:
-            yield StreamChunk(ready_tool_call=tc)
+        for index, tc in enumerate(self._tool_calls):
+            yield StreamChunk(ready_tool_call=tc, ready_tool_call_index=index)
         # 流尾阻塞，直到工具 handler set 了 gate —— 若工具没在流式期间起跑，这里会超时
         await asyncio.wait_for(self._gate.wait(), timeout=2.0)
         yield StreamChunk(delta_text="", done=True, tool_calls=self._tool_calls, finish_reason="tool_calls")
 
 
-async def test_tool_executes_during_streaming_window():
-    """端到端：safe 工具在流式还没结束时就已开跑（与流重叠）。"""
+async def test_independent_tools_overlap_each_other_and_the_stream():
     reg = Registry()
     gate = asyncio.Event()
+    started = set()
 
     async def read_handler(args):
-        gate.set()  # 工具一旦真正执行就放行流尾
-        return tool_result(path=args.get("path"))
+        started.add(args["path"])
+        if len(started) == 2:
+            gate.set()
+        await gate.wait()
+        return tool_result(path=args["path"])
 
     reg.register(name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
                  handler=read_handler, is_async=True, override=True)
 
-    tc = ToolCall("r1", "file_read", {"path": "/tmp/a.txt"})
-    ex = _executor(ReadyStreamProvider([tc], gate), reg)
+    calls = [
+        ToolCall("r1", "file_read", {"path": "a.txt"}),
+        ToolCall("r2", "file_read", {"path": "b.txt"}),
+    ]
     ctx = _ctx()
-    await _collect(ex, ctx)  # 不超时即证明工具在流式期间已执行
-    assert [m.tool_call_id for m in ctx.messages if m.role == "tool"] == ["r1"]
+    await _collect(_executor(ReadyStreamProvider(calls, gate), reg), ctx)
+    assert started == {"a.txt", "b.txt"}
+    assert [m.tool_call_id for m in ctx.messages if m.role == "tool"] == ["r1", "r2"]
 
 
 class ReasoningDeltaProvider(LLMProvider):

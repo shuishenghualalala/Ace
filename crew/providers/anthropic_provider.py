@@ -422,7 +422,7 @@ class AnthropicProvider(LLMProvider):
                         elif event_name == "content_block_stop":
                             ready = flush_tool(int(item.get("index") or 0))
                             if ready is not None:
-                                yield StreamChunk(ready_tool_call=ready)
+                                yield StreamChunk(ready_tool_call=ready, ready_tool_call_index=len(assembled) - 1)
                         elif event_name == "message_delta":
                             delta = item.get("delta") or {}
                             finish_reason = delta.get("stop_reason") or finish_reason

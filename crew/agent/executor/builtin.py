@@ -46,7 +46,7 @@ from crew.agent.loop import (
     provider_chain,
     should_continue,
 )
-from crew.agent.loop.tool_dispatch_helpers import plan_tool_calls
+from crew.agent.loop.tool_dispatch_helpers import is_tool_parallel_safe, plan_tool_calls
 from crew.core.envelope import ResponseChunk, TurnOutcome
 from crew.core.errors import CrewError, CrewErrorKind, ProviderError
 from crew.core.interfaces import LLMProvider, ToolRegistry
@@ -1508,8 +1508,8 @@ class BuiltinExecutor(AgentExecutor):
         """调模型一轮：流式 yield delta，结果写入 result。
 
         流式提前派发（Crew StreamingToolExecutor）：流中每收到一帧 ready_tool_call
-        （某工具参数已拼完），立即交给 runner.prewarm() 把 safe 工具跑起来——与流式
-        剩余部分重叠执行。流中断时将已派发调用的实际结果交给下一次请求。
+        （某工具参数已拼完），只有已确认顺序的连续并发安全前缀可与剩余流重叠执行。
+        流中断时将已派发调用的实际结果交给下一次请求。
 
         四重保护（前两种仅在「尚未 emit 过 delta」时才可恢复）：
           - 瞬时错误（retryable）→ 同 provider 指数退避重试（可选 jitter）；
@@ -1536,6 +1536,7 @@ class BuiltinExecutor(AgentExecutor):
             started_tool_call_ids: set[str] = set()
             generating_tool_call_signatures: dict[str, str] = {}
             visible_started_tool_calls: dict[str, Any] = {}
+            next_prewarm_index = 0
             t0 = time.perf_counter()
             middleware_ready: float | None = None
             first_event: float | None = None
@@ -1677,12 +1678,13 @@ class BuiltinExecutor(AgentExecutor):
                             generating_tool_call_signatures[tc.id] = signature
                             visible_started_tool_calls[tc.id] = tc
                             yield runner._generating_event(tc, rid, next_seq)
-                    # 参数拼完 → prewarm safe 工具（用完整参数起跑）；所有工具都发
-                    # start，让 UI 从“生成参数中”切到“执行中”。若 provider 没有提前
-                    # 生成中信号，ready 时也会兜底发 start。
+                    # 参数就绪后发送进度。实际提前执行只覆盖已确认顺序的只读前缀。
                     if chunk.ready_tool_call is not None and runner is not None:
                         tc = chunk.ready_tool_call
-                        runner.prewarm(tc)  # unsafe 返回 False 无妨；safe 用完整参数起跑
+                        # Earlier writes or unresolved positions can change the value a read sees.
+                        if chunk.ready_tool_call_index == next_prewarm_index and is_tool_parallel_safe(tc):
+                            runner.prewarm(tc)
+                            next_prewarm_index += 1
                         if tc.id not in started_tool_call_ids:
                             visible_started_tool_calls[tc.id] = tc
                             started_tool_call_ids.add(tc.id)

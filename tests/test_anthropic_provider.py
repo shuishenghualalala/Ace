@@ -91,6 +91,7 @@ async def test_stream_emits_text_ready_tool_and_done():
     chunks = [chunk async for chunk in provider.stream_chat([Message.user("hi")])]
 
     assert "".join(chunk.delta_text for chunk in chunks) == "hello"
+    assert [chunk.ready_tool_call_index for chunk in chunks if chunk.ready_tool_call is not None] == [0]
     ready = [chunk.ready_tool_call for chunk in chunks if chunk.ready_tool_call is not None]
     assert ready[0].id == "toolu_1"
     assert ready[0].arguments == {"q": "x"}

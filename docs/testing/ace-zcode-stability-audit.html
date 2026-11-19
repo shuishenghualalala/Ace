@@ -164,6 +164,12 @@
 <p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts:2030</code>，<code>crew/gateway/ws.py:744</code>，<code>crew/agent/loop/tool_runner.py:859</code>。</p>
 </article>
 <article id="evolution-result-scope">
+<h3>A15 · P1 · 流式提前派发越过写入与串行配置</h3>
+<p>旧版收到完整参数就独立派发只读工具，待模型流收尾才按全批顺序返回结果。在同一次模型响应中先写新文件再读，实际读处理可能先运行。模型收到按顺序排列的写入成功和读取失败。禁用 <code>agent.parallel_tools</code> 时，旧版两条独立读取也可提前并发。</p>
+<p>ZCode 根据注册表中只读、并发、审批、交互及副作用字段决定能否提前派发。完整批次另有按依赖分组的调度器，当前 runtime 传入的通用模型调用依赖列表为空。流式路径按单调用判定。本轮对 ZCode 的行为对照来自源码。</p>
+<p>Ace 沿用既有并发安全判定和完整批次执行器。OpenAI 的声明下标和 Anthropic 最终工具列表的位置传给执行器，流式提前派发只覆盖从零开始连续就绪的只读前缀。前序未知、存在写入或命令、显式关闭并发时，相应工具留到完整批次执行。缺少位置的提供方仍及时发出工具进度。请求审批模式继续走顺序执行。断流只接续已派发的实际结果。</p>
+<p><strong>验收</strong> 新增回归在基线确认模型收到原内容，即使结果消息按声明顺序排列。Windows 包内 Gateway 以旧版、候选各开并发和关并发，共四套私有配置，跑十六轮公开 WebSocket 对话。覆盖新建后读、先读后建、读取参数早于写入参数到达，以及两个独立文件并行读。旧版四次新建后读均返回不存在，候选四次均读到实际写入。反向调用均先得到不存在再写入。旧版开关两档的独立读取都在流结束前重叠；候选打开时重叠，关闭时两次读取在流结束后依次执行。每轮核对提供方收到的精确工具结果、公开历史、只读 SQLite 和真实文件内容。四套 Gateway 均正常退出并释放端口。执行器、工具管线、两类 provider 及子 Agent 批处理共 233 项通过。</p>
+<p class="evidence">Ace <code>crew/agent/executor/builtin.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/providers/openai_provider.py</code>、<code>crew/providers/anthropic_provider.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/streaming-tool-coordinator.ts:122</code>、<code>:373</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/tools.ts:49</code>。</p>
 <h3>后台进化结果的账号与会话代次</h3>
 <p>SQLite 允许两个账号各自持有相同的会话 ID。旧进化队列仅按会话 ID 保存任务和结果。真实 Windows Gateway 经公开删除接口及 WebSocket 重建同一会话后，已完成的旧结果和重建后才返回的旧结果均被新回合取出，随后因缺少响应构造返回错误。新实现从首条用户消息的同一 SQLite 写事务取得 <code>history_incarnation</code>，并把任务和答复绑定账号、会话 ID 及该代次。worker 执行和写入结果前核对代次，读取也核对后才消费。SQLite 校验中途取消时可重试读取。进化进度和结果沿用既有状态帧。</p>
 <p><strong>运行时对照</strong> 在 Windows 正式运行时上，两组隔离会话的实际 DELETE 和同 ID 重建都产生新代次。两个新回合都正常结束、保存新历史且没有取得各自的旧进化标记。各自下一回合收到且仅收到一次本代次的结果状态，再正常结束。六次模型调用都来自回环测试端点。Gateway 正常退出，双端口释放。</p>
