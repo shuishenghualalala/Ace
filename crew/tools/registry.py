@@ -57,6 +57,20 @@ def _structured_error_result(call_id: str, name: str, error: StructuredToolError
     )
 
 
+async def run_sync_tool_handler(handler: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run blocking tool work in a thread and keep its exit observable if cancelled."""
+    from crew.core.runctx import observe_tool_exit
+
+    worker = asyncio.create_task(asyncio.to_thread(handler, *args, **kwargs))
+    observe_tool_exit(worker.done)
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # The thread owns its handler until it returns, including any final exception.
+        worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        raise
+
+
 class FunctionTool(Tool):
     """把 Crew handler 包装成 Crew Tool。"""
 
@@ -185,17 +199,7 @@ class FunctionTool(Tool):
             if inspect.isawaitable(result):
                 result = await result
         else:
-            # 同步 handler 丢线程池执行，避免阻塞事件循环（拖垮网关心跳）。
-            from crew.core.runctx import observe_tool_exit
-
-            worker = asyncio.create_task(asyncio.to_thread(self.handler, args))
-            observe_tool_exit(worker.done)
-            try:
-                result = await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                # The thread owns its handler until it returns, including any final exception.
-                worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
-                raise
+            result = await run_sync_tool_handler(self.handler, args)
         if isinstance(result, (str, ToolOutput)):
             return result
         return json.dumps(result, ensure_ascii=False)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -14,12 +15,15 @@ import time
 import pytest
 
 from crew.core.runctx import current_owner_account_id
+from crew.core.types import ToolCall
 from crew.tools.process_registry import (
     ProcessRegistry,
     _handle_process,
     format_process_notification,
     process_registry,
+    register_process_tool,
 )
+from crew.tools.registry import Registry
 
 
 @pytest.fixture(autouse=True)
@@ -236,9 +240,31 @@ registry._record_checkpoint(session)
             assert registry.poll("proc_1", owner_account_id="other")["status"] == "not_found"
             assert registry.poll("proc_1", owner_account_id="local")["detached"] is True
             assert registry.recover_from_checkpoint() == 0
-            child.terminate()
-            child.wait(timeout=10)
-            assert registry.poll("proc_1", owner_account_id="local")["status"] == "exited"
+            async def wait_for_adopted_process():
+                loop = asyncio.get_running_loop()
+                first_lookup = asyncio.Event()
+                get = registry.get
+
+                def observe_lookup(*args, **kwargs):
+                    result = get(*args, **kwargs)
+                    loop.call_soon_threadsafe(first_lookup.set)
+                    return result
+
+                monkeypatch.setattr(registry, "get", observe_lookup)
+                monkeypatch.setattr("crew.tools.process_registry.process_registry", registry)
+                tools = Registry()
+                register_process_tool(tools)
+                waiter = asyncio.create_task(tools.execute(ToolCall("adopted", "process", {
+                    "action": "wait", "session_id": "proc_1", "timeout": 3,
+                })))
+                await asyncio.wait_for(first_lookup.wait(), 5)
+                child.terminate()
+                await asyncio.to_thread(child.wait, 10)
+                result = json.loads((await waiter).content)
+                assert result["status"] == "exited"
+                assert result["exit_code"] is None
+
+            asyncio.run(wait_for_adopted_process())
             with sqlite3.connect(path) as db:
                 assert db.execute("SELECT session_id FROM processes").fetchall() == [("damaged",)]
         finally:
@@ -306,6 +332,63 @@ def test_wait_wakes_promptly_on_process_exit():
     assert result["exit_code"] == 0
     # 事件驱动：0.3s 进程 + reader 结算开销，远小于轮询最坏情况
     assert elapsed < 3
+
+
+def test_process_tool_wait_leaves_single_worker_available_and_can_be_cancelled(monkeypatch):
+    reg = ProcessRegistry()
+    session = reg.spawn_local(
+        _py_cmd("import sys; print('ready', flush=True); sys.stdin.readline(); print('finished')"),
+        session_key="async-wait", owner_account_id="local",
+    )
+    monkeypatch.setattr("crew.tools.process_registry.process_registry", reg)
+    registry = Registry()
+    register_process_tool(registry)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        entered = asyncio.Event()
+        get = reg.get
+
+        def observe_lookup(*args, **kwargs):
+            item = get(*args, **kwargs)
+            loop.call_soon_threadsafe(entered.set)
+            return item
+
+        monkeypatch.setattr(reg, "get", observe_lookup)
+
+        def invoke(call_id, action):
+            return registry.execute(ToolCall(call_id, "process", {
+                "action": action, "session_id": session.id, "timeout": 30,
+            }))
+
+        wait = asyncio.create_task(invoke("wait", "wait"))
+        try:
+            await asyncio.wait_for(entered.wait(), 4)
+            log = await asyncio.wait_for(invoke("log", "log"), 1)
+            assert json.loads(log.content)["status"] == "running"
+            assert not wait.done()
+            wait.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await wait
+            assert not session.exited
+
+            entered.clear()
+            finished = asyncio.create_task(invoke("later", "wait"))
+            await asyncio.wait_for(entered.wait(), 4)
+            assert not finished.done()
+            reg.write_stdin(session.id, "done\n", owner_account_id="local", close=True)
+            result = json.loads((await asyncio.wait_for(finished, 5)).content)
+            assert result["status"] == "exited"
+            assert result["exit_code"] == 0
+            assert "finished" in result["output"]
+        finally:
+            reg.kill_process(session.id, owner_account_id="local")
+            if not wait.done():
+                wait.cancel()
+                await asyncio.gather(wait, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 def test_wait_returns_timeout_status_for_running_process():

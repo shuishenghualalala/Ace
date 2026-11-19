@@ -81,6 +81,8 @@
   <p>终端日志合并 stdout 和 stderr。<code>process(action='log', task_id=..., cursor=0)</code> 从头读取，后续把返回的 <code>next_offset</code> 传给 <code>cursor</code>。字节页保持有效 UTF-8。<code>gap</code> 标记请求范围的缺失或游标未对齐。按行读取时，省略 <code>offset</code> 获取尾页，指定 <code>offset=0</code> 从第一行读取。</p>
   <p>每个进程保留有界内存尾窗，任务日志最多落盘 64 MiB。<code>output_retention</code> 标记保留状态，<code>output_truncated</code> 标记内容缺失。Gateway 重启后可按同账号的 <code>task_id</code> 查询已落盘的日志。Windows 终端优先在开始执行前进入 Job Object，停止后等待输出和任务状态结算。</p>
 
+  <p><code>process(action='wait')</code> 订阅该进程的完成事件，由输出线程在完成日志与任务状态结算后唤醒。回合取消会移除自己的订阅，后台进程继续由任务注册表管理。重启认领的进程通过短时异步存活检查结算。前台终端也复用完成事件及原有的进度刷新间隔，日志和其他阻塞操作仍在工作线程执行。</p>
+
   <h3>2.3 网络与搜索</h3>
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>

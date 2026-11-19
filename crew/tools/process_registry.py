@@ -59,7 +59,7 @@ from crew.tools.child_env import build_spawn_env
 from crew.tools.output_filters import strip_ansi
 from crew.tools.process_checkpoint import ProcessCheckpoints
 from crew.tools.process_output import MAX_PAGE_BYTES, OutputSnapshot, ProcessOutput
-from crew.tools.registry import tool_error
+from crew.tools.registry import run_sync_tool_handler, tool_error
 
 logger = logging.getLogger(__name__)
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -98,6 +98,7 @@ MAX_PROCESSES = 64              # 最大并发跟踪进程数（超出按最旧 
 MAX_PENDING_PER_SESSION = 20    # 每 session 待注入通知上限，防无限堆积
 _MAX_STDIN_WRITE_CHARS = 1_000_000  # 单次 stdin 批量写入上限（半交互喂入）
 _OUTPUT_ACTIVITY_INTERVAL = 0.25
+_DETACHED_WAIT_POLL_SECONDS = 0.25
 
 # ---- watch_patterns 限流（单 session）----
 # 硬规则：每 WATCH_MIN_INTERVAL_SECONDS 至多发一条 watch 命中通知。冷却窗口内到达的
@@ -196,6 +197,49 @@ def _pid_alive(pid: int | None) -> bool:
         return False
 
 
+class _ProcessCompletion(threading.Event):
+    """Wake asyncio consumers from a reader thread without reserving a worker per wait."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._waiters_lock = threading.Lock()
+        self._waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = set()
+
+    def set(self) -> None:
+        with self._waiters_lock:
+            super().set()
+            waiters, self._waiters = self._waiters, set()
+        for loop, future in waiters:
+            try:
+                loop.call_soon_threadsafe(self._resolve, future)
+            except RuntimeError:
+                # The consumer's event loop already closed.
+                continue
+
+    @staticmethod
+    def _resolve(waiter: asyncio.Future[None]) -> None:
+        if not waiter.done():
+            waiter.set_result(None)
+
+    async def wait_async(self, timeout: float) -> bool:
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        subscription = (loop, waiter)
+        with self._waiters_lock:
+            if self.is_set():
+                return True
+            self._waiters.add(subscription)
+        try:
+            async with asyncio.timeout(timeout):
+                await waiter
+            return True
+        except TimeoutError:
+            return self.is_set()
+        finally:
+            with self._waiters_lock:
+                self._waiters.discard(subscription)
+
+
 @dataclass
 class ProcessSession:
     """一个被跟踪的后台进程及其输出缓冲。"""
@@ -226,8 +270,8 @@ class ProcessSession:
     _heartbeat_thread: threading.Thread | None = field(default=None, repr=False)
     _owner: ProcessOwner | None = field(default=None, repr=False)
     _checkpoint: Path | None = field(default=None, repr=False)
-    # 完全结算事件：reader 收尾 / kill / detached 结算时 set，wait() 条件唤醒（无轮询）
-    _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    # Complete only after reader or detached settlement publishes the terminal output.
+    _done_event: _ProcessCompletion = field(default_factory=_ProcessCompletion, repr=False)
     _secret_values: tuple[str, ...] = field(default=(), repr=False)
     task_id: str = ""
     output_ref: str = ""
@@ -973,8 +1017,8 @@ class ProcessRegistry:
             session.exited = True
             session.exit_code = None  # 无句柄可 wait，真实退出码不可得
         release_live(session._owner)
-        session._done_event.set()
         self._move_to_finished(session)
+        session._done_event.set()
         return session
 
     def poll(self, session_id: str, owner_account_id: str) -> dict[str, Any]:
@@ -1078,12 +1122,39 @@ class ProcessRegistry:
         session = self.get(session_id, owner_account_id=owner_account_id)
         if session is None:
             return {"status": "not_found", "error": f"无此进程: {session_id}"}
-        effective_timeout = float(timeout) if timeout and timeout > 0 else 180.0
-        if not session._done_event.wait(effective_timeout):
+        effective_timeout = self._wait_timeout(timeout)
+        return self._wait_result(session, effective_timeout, session._done_event.wait(effective_timeout))
+
+    async def wait_async(self, session_id: str, timeout: int | None = None, *, owner_account_id: str) -> dict[str, Any]:
+        session = await run_sync_tool_handler(self.get, session_id, owner_account_id)
+        if session is None:
+            return {"status": "not_found", "error": f"无此进程: {session_id}"}
+        effective_timeout = self._wait_timeout(timeout)
+        if not session.detached:
+            settled = await session._done_event.wait_async(effective_timeout)
+            return self._wait_result(session, effective_timeout, settled)
+
+        # Adopted processes have no reader thread to signal exit. Probe only for active waiters.
+        try:
+            async with asyncio.timeout(effective_timeout):
+                while not await session._done_event.wait_async(_DETACHED_WAIT_POLL_SECONDS):
+                    await run_sync_tool_handler(self._refresh_detached, session)
+        except TimeoutError:
+            pass
+        return await run_sync_tool_handler(
+            self._wait_result, session, effective_timeout, session._done_event.is_set(),
+        )
+
+    @staticmethod
+    def _wait_timeout(timeout: int | None) -> float:
+        return float(timeout) if timeout and timeout > 0 else 180.0
+
+    def _wait_result(self, session: ProcessSession, timeout: float, settled: bool) -> dict[str, Any]:
+        if not settled:
             return {
                 "status": "timeout",
                 "output": strip_ansi(session.output_buffer[-1000:]),
-                "timeout_note": f"已等待 {int(effective_timeout)}s，进程仍在运行",
+                "timeout_note": f"已等待 {int(timeout)}s，进程仍在运行",
             }
         return {
             "status": "exited",
@@ -1478,6 +1549,18 @@ def _handle_process(args: dict[str, Any]) -> str:
     )
 
 
+async def _handle_process_async(args: dict[str, Any]) -> str:
+    if args.get("action") != "wait":
+        return await run_sync_tool_handler(_handle_process, args)
+    session_id = str(args.get("session_id") or "")
+    if not session_id:
+        return tool_error("wait 需要 session_id")
+    result = await process_registry.wait_async(
+        session_id, timeout=args.get("timeout"), owner_account_id=current_owner_account_id.get(),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
 def register_process_tool(registry: Any) -> None:
     """注册 process 工具到给定 registry。"""
     def _result_policy(args: dict[str, Any]) -> ToolResultPolicy:
@@ -1493,7 +1576,8 @@ def register_process_tool(registry: Any) -> None:
         name="process",
         toolset="terminal",
         schema=PROCESS_SCHEMA,
-        handler=_handle_process,
+        handler=_handle_process_async,
+        is_async=True,
         emoji="⚙️",
         display_name="管理进程",
         ui_label_template="进程 {action}",

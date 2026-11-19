@@ -196,12 +196,16 @@
 <thead><tr><th>工具</th><th>Ace 与 ZCode 的已核对行为</th><th>验收范围</th></tr></thead>
 <tbody>
 <tr><td>文件、搜索、写入</td><td>Ace 按已有只读白名单和混合批顺序调度。ZCode 用 registry 并发属性区分读、搜索和写入。</td><td>符合同批顺序、乱序参数和开关并发的实测见 A15。搜索功能验收见 A1、A5。</td></tr>
-<tr><td>终端、后台输出</td><td>Ace 仅在整批判定为独立只读时并发终端命令，后台任务由进程注册表跟踪。ZCode Bash 在普通批使用独占属性，后台输出另有只读入口，回传按启动会话校验。</td><td>已验证长输出游标和按请求退出。多会话并发读取后台输出待同夹具验证。</td></tr>
+<tr><td>终端、后台输出</td><td>Ace 仅在整批判定为独立只读时并发终端命令，后台任务由进程注册表跟踪。ZCode Bash 在普通批使用独占属性，后台输出另有只读入口，回传按启动会话校验。</td><td>已验证长输出游标和按请求退出。两个会话在一方等待后台进程时可独立读取日志，见下节。</td></tr>
 <tr><td>MCP</td><td>原版 Ace 独立启动各服务器，同配置共用一个串行 worker。ZCode 默认按会话租用并按请求调用，普通批次使用服务工具的只读或幂等注解。</td><td>截止时间与回收见 A16。同服务支持两条明确只读请求并发，完整模型回复按现有授权分段并发。</td></tr>
 <tr><td>浏览器</td><td>Ace 按账号串行化共享选中标签和原生引用。ZCode CLI 托管 CDP 按会话建 BrowserContext，按会话和回合取消。</td><td>同账号双标签已用原生 Electron 验证等待取消和正常等待，见 D7f、D7g。</td></tr>
 <tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已跑子 Agent 批次回归，独立退出与请求范围见 A12。并行子任务中一个等待审批、另一个被取消，仍待用两端同夹具验证。</td></tr>
 </tbody></table></div>
 <p class="evidence">Ace <code>crew/agent/loop/tool_dispatch_helpers.py</code>、<code>crew/tools/process_registry.py</code>、<code>crew/browser/manager.py:306</code>、<code>crew/agent/subagent/runtime.py:839</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts:481</code>、<code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>、<code>apps/zcode-cli/packages/core/src/runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
+<h3 id="background-process-wait-cancellable">后台进程等待释放工具工作线程</h3>
+<p>旧版 <code>process.wait</code> 在线程池中一直阻塞到进程结束或超时。停止回合只能取消等待结果的协程，原线程仍被占用。ZCode 的 <code>TaskOutput</code> 以异步等待并检查调用取消信号。Ace 的前台终端和后台等待订阅同一个跨线程完成事件，收到取消即撤销订阅。已有 process 日志及变更动作继续在线程池执行，并保留真实退出观察。重启认领的任务没有输出线程，以有界异步存活检查确认退出。</p>
+<p><strong>验收</strong> Windows 包内解释器与真实签名 Gateway 用本机合成模型启动带闸门的真实后台进程，给 Gateway 配置一个工作线程。旧版另一会话读日志在 3.5 秒内未完成，释放进程后才返回。候选在闸门仍关闭时读到实际运行中的日志。停止原等待后，后台进程仍存活。另一次等待经进程真实退出取得完整输出与退出码，并通过签名历史接口验证已持久化。两套 Gateway 与属主进程均正常退出并清理端口。五组定向回归 142 项通过，另用已就绪的原生沙箱与精简隔离解释器完成两项文件路由复验。Ruff 和差异检查通过。</p>
+<p class="evidence">Ace <code>crew/tools/process_registry.py</code>、<code>registry.py</code> 与 <code>builtin.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/task-output.ts:237</code>。</p>
 <h3>工具已失败时恢复历史仍显示完成</h3>
 <p>原版只将特定的退出未确认错误写到助手的工具调用状态。ZCode 的产品投影从持久工具结算的结构化成功字段生成真实状态。Ace 在串并行共用的 Agent 结算入口，按已有 <code>is_error</code> 保存调用失败。历史继续读取这一权威状态，供模型的工具正文和已有披露规则保持一致。</p>
 <p><strong>验收</strong> Windows 真实 Gateway 与 Streamable HTTP 用隔离会话、一次性授权和模拟迟到的结果触发原有 <code>mcp_call_timeout</code>。两版的 WebSocket 错误及 <code>side_effect_state=unknown</code> 相同，公开历史从 <code>done</code> 变为 <code>error</code>，助手调用结果仍为空，远端各只收到一次调用。两进程正常退出并释放端口。107 项 Agent 回归通过，新增串行和并行用例在旧版均为失败。无法与同 owner、会话、请求及步骤唯一关联的旧历史仍用原保存状态。</p>

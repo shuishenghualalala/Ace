@@ -980,7 +980,7 @@ async def handle_terminal(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            done = await asyncio.to_thread(session._done_event.wait, min(0.5, remaining))
+            done = await session._done_event.wait_async(min(0.5, remaining))
             if done:
                 break
             cursor = await drain_progress(cursor)
