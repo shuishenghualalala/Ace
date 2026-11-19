@@ -2374,6 +2374,62 @@ async def test_security_runtime_failure_is_a_real_tool_error():
     assert messages[-1].content.endswith('"runtime_crashed"}')
 
 
+@pytest.mark.parametrize("code", [
+    "runtime_crashed", "runtime_protocol_mismatch", "sandbox_unavailable",
+    "sandbox_denied", "network_unavailable",
+])
+async def test_terminal_security_failure_keeps_the_reason_and_reports_its_code(code):
+    reg = Registry()
+    reg.register(
+        name="terminal", toolset="terminal", schema={"name": "terminal", "parameters": {}},
+        handler=lambda _args: tool_result(
+            success=False, error="fixture native detail", error_code=code,
+        ),
+    )
+    provider = RaiseThenScript(RuntimeError("fixture"), 0, [
+        ChatResponse(tool_calls=[ToolCall("t1", "terminal", {"command": "pwd"})]),
+    ])
+
+    chunks = await _collect(_executor(provider, reg), _ctx())
+
+    final, = [chunk for chunk in chunks if chunk.kind == "final"]
+    assert final.body["outcome"] == {
+        "status": "failed", "reason": "security_boundary_failed", "code": code,
+    }
+    assert "fixture native detail" not in json.dumps(final.body)
+    assert provider.stream_calls == 1
+
+
+async def test_parallel_security_failures_keep_the_first_reported_code():
+    reg = Registry()
+
+    async def read_file(args):
+        raise ToolError(json.dumps({"error_code": args["failure"], "error": "fixture"}))
+
+    def write_file(_args):
+        pytest.fail("a subsequent segment ran after a security boundary failure")
+
+    reg.register(
+        name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+        handler=read_file, is_async=True,
+    )
+    reg.register(
+        name="file_write", toolset="file", schema={"name": "file_write", "parameters": {}},
+        handler=write_file,
+    )
+    provider = RaiseThenScript(RuntimeError("fixture"), 0, [ChatResponse(tool_calls=[
+        ToolCall("read-1", "file_read", {"path": "a.txt", "failure": "network_unavailable"}),
+        ToolCall("read-2", "file_read", {"path": "b.txt", "failure": "runtime_crashed"}),
+        ToolCall("write", "file_write", {"path": "c.txt", "content": "fixture"}),
+    ])])
+
+    chunks = await _collect(_executor(provider, reg, parallel_tools=True), _ctx())
+
+    final, = [chunk for chunk in chunks if chunk.kind == "final"]
+    assert final.body["outcome"]["code"] == "network_unavailable"
+    assert provider.stream_calls == 1
+
+
 async def test_wrapped_approval_rejection_in_parallel_results_fences_the_next_segment():
     reg = Registry()
 

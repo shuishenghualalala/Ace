@@ -168,7 +168,11 @@ class ToolRunner:
         self._leaked_tasks: set[asyncio.Task[Any]] = set()
         self.tool_step = 0
         self.approval_rejected = False
-        self.security_boundary_failed = False
+        self.security_boundary_failure_code: str | None = None
+
+    @property
+    def security_boundary_failed(self) -> bool:
+        return self.security_boundary_failure_code is not None
 
     @staticmethod
     def _extract_mcp_images(content: str) -> tuple[list[dict[str, str]], str] | None:
@@ -254,7 +258,7 @@ class ToolRunner:
         started_tool_call_ids 用于 UI 已提前收到 start 帧的工具，避免 run_batch 重复发 start。
         """
         self.approval_rejected = False
-        self.security_boundary_failed = False
+        self.security_boundary_failure_code = None
         segments = self._plan_segments(tool_calls)
         catalogue_revision = getattr(self.registry, "mcp_catalog_revision", None)
         self._latest_outcomes.clear()
@@ -1513,7 +1517,8 @@ class ToolRunner:
         elif code in {
             "runtime_crashed", "runtime_protocol_mismatch", "sandbox_unavailable", "sandbox_denied", "network_unavailable",
         }:
-            self.security_boundary_failed = True
+            if self.security_boundary_failure_code is None:
+                self.security_boundary_failure_code = code
             result.is_error = True
 
     def _plan_mode_active(self) -> bool:

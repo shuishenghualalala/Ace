@@ -1609,6 +1609,43 @@ describe('typed agent turn outcomes', () => {
     expect(plan.querySelector('[data-plan-action="open_board"]')).not.toBeNull();
   });
 
+  it.each([
+    ['runtime_crashed', '安全运行时异常退出，本轮执行已结束。', 'The security runtime stopped unexpectedly. The turn ended.'],
+    ['runtime_protocol_mismatch', '安全运行时与应用的协议不匹配，本轮执行已结束。', 'The security runtime protocol does not match the app. The turn ended.'],
+    ['sandbox_unavailable', '安全沙箱未就绪，本轮执行已结束。', 'The security sandbox is unavailable. The turn ended.'],
+    ['sandbox_denied', '安全沙箱拒绝了这项操作，本轮执行已结束。', 'The security sandbox denied the operation. The turn ended.'],
+    ['network_unavailable', '安全运行时无法应用网络策略，本轮执行已结束。', 'The security runtime could not apply the network policy. The turn ended.'],
+  ])('localizes a %s security outcome without displaying native detail', (code, zh, en) => {
+    try {
+      for (const [locale, description] of [['zh-CN', zh], ['en', en]] as const) {
+        setLocale(locale);
+        const root = renderAgentTurn(makeMessages({
+          content: '', turnOutcome: {
+            status: 'failed', reason: 'security_boundary_failed', code, message: 'fixture raw path',
+          },
+        }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 0 });
+        const outcome = root.querySelector('[data-turn-outcome="failed"]');
+        expect(outcome?.querySelector('p')?.textContent).toBe(description);
+        expect(outcome?.textContent).not.toContain('fixture raw path');
+      }
+    } finally {
+      setLocale('zh-CN');
+    }
+  });
+
+  it.each([undefined, 'security_boundary_failed', 'unrecognized_runtime_reason'])(
+    'uses the generic safety notice for a legacy or unknown security code (%s)',
+    (code) => {
+      const root = renderAgentTurn(makeMessages({
+        content: '', turnOutcome: {
+          status: 'failed', reason: 'security_boundary_failed', code, message: 'fixture raw path',
+        },
+      }), { isStreaming: false, userPinnedOpen: null, turnDurationMs: 0 });
+      const detail = root.querySelector('[data-turn-outcome="failed"] p');
+      expect(detail?.textContent).toBe('安全检查未通过，本轮执行已结束。');
+    },
+  );
+
   it('renders unrecognized reason text without interpreting it as markup', () => {
     const root = renderAgentTurn(makeMessages({
       content: '', turnOutcome: { status: 'stopped', reason: 'new_reason', message: '<span>Literal diagnostic</span>' },

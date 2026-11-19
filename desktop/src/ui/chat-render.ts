@@ -1223,6 +1223,10 @@ const outcomeDescriptionKeys = new Set([
   'auth', 'config', 'usage_limit', 'quota_exceeded', 'server_overloaded', 'timeout', 'context_window_exceeded',
 ]);
 
+const securityOutcomeDescriptionKeys = new Set([
+  'runtime_crashed', 'runtime_protocol_mismatch', 'sandbox_unavailable', 'sandbox_denied', 'network_unavailable',
+]);
+
 function renderTurnOutcome(outcome: TurnOutcome): HTMLElement | undefined {
   if (outcome.status === 'completed') return undefined;
   const box = document.createElement('div');
@@ -1236,7 +1240,10 @@ function renderTurnOutcome(outcome: TurnOutcome): HTMLElement | undefined {
     : t('chat.outcome.' + outcome.status);
   box.appendChild(title);
 
-  const key = [outcome.reason, outcome.code].find((value) => value && outcomeDescriptionKeys.has(value));
+  const key = outcome.reason === 'security_boundary_failed' && outcome.code
+    && securityOutcomeDescriptionKeys.has(outcome.code)
+    ? outcome.code
+    : [outcome.reason, outcome.code].find((value) => value && outcomeDescriptionKeys.has(value));
   const description = key ? t('chat.outcome.reason.' + key) : outcome.message;
   if (description) {
     const detail = document.createElement('p');

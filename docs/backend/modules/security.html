@@ -515,6 +515,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     <p>审批决定、规则创建/禁用/删除和秘密注入是关键事件，无法持久写入时会让授权失败并回滚刚创建的 grant 或规则。普通事件可进入有界内存缓冲，后续成功写入时再刷新。这样不会出现“执行已经放行，但决定没有证据”的静默状态。</p>
 
     <p>审计保存动作摘要和动作 hash，不直接依赖原始工具参数展示。命令行 token/password、HTTP 鉴权头、注入的秘密值等会在事件创建与入库阶段重复脱敏。查询始终按 owner 过滤，OS 用户仅保存 SHA-256。每次 captured execution，以及终端前台/后台进程结束时，都会写入 <code>exec_result</code>，包含实际 sandbox backend、已启用 capability、exit code；超时、runtime 崩溃、协议不匹配和 sandbox 拒绝则保存稳定错误码。后台 bridge 通过位于 Ace 受保护目录的随机 nonce sidecar 回传运行元数据，命令本身不能伪造该结果。</p>
+    <p>需要结束本轮的工具安全错误保留在 <code>outcome.code</code>。沙箱尚未就绪、沙箱拒绝、运行时退出、协议不匹配和网络策略不可用分别显示固定提示。回合类别 <code>security_boundary_failed</code> 供已有客户端与历史继续识别，原生错误详情按独立的执行审计及脱敏规则处理。</p>
 
     <h4>2.8.3 并发边界</h4>
     <ul>

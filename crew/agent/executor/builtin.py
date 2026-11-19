@@ -1402,15 +1402,15 @@ class BuiltinExecutor(AgentExecutor):
                 ):
                     yield _fc
                 return
-            if runner.security_boundary_failed:
+            if security_code := runner.security_boundary_failure_code:
                 async for _fc in self._emit_final(
                     rid,
                     next_seq,
                     ctx.session_id,
                     owner_account_id,
-                    "操作未执行：安全运行时发生故障，请检查运行时状态后重试。",
+                    "操作未执行：本轮安全检查未通过。",
                     usage=result.get("usage"),
-                    outcome=TurnOutcome("failed", reason="security_boundary_failed", code="security_boundary_failed"),
+                    outcome=TurnOutcome("failed", reason="security_boundary_failed", code=security_code),
                 ):
                     yield _fc
                 return
