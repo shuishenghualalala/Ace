@@ -2082,6 +2082,57 @@ async def test_serial_tool_setting_disables_prewarm():
     assert not runner.prewarm(ToolCall("read", "file_read", {"path": "sample.txt"}))
 
 
+@pytest.mark.parametrize("revoke_at_start", [False, True])
+async def test_mcp_catalogue_reads_parallelize_only_after_complete_response(revoke_at_start):
+    registry = Registry()
+    admitted = True
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def read(args):
+        if args.get("path") == "first":
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+        return str(args["path"])
+
+    registry.register(
+        name="remote__read", toolset="mcp:remote",
+        schema={"name": "remote__read", "parameters": {
+            "type": "object", "properties": {"path": {"type": "string"}},
+        }},
+        handler=read, is_async=True, is_mcp=True, mcp_parallel_read=lambda: admitted,
+    )
+    calls = [ToolCall(name, "remote__read", {"path": name}) for name in ("first", "second")]
+    runner = _runner(registry)
+    assert not runner.prewarm(calls[0])
+    assert not first_started.is_set()
+    model_messages = []
+
+    async def collect():
+        nonlocal admitted
+        async for _chunk in runner.run_batch(calls, model_messages, "rid", _seq_counter()):
+            if revoke_at_start:
+                admitted = False
+
+    task = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(first_started.wait(), 2)
+        if revoke_at_start:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(second_started.wait(), .1)
+        else:
+            await asyncio.wait_for(second_started.wait(), 2)
+        assert not task.done()
+    finally:
+        release_first.set()
+        await asyncio.wait_for(task, 2)
+
+    assert [message.tool_call_id for message in model_messages] == ["first", "second"]
+
+
 async def test_prewarm_ignores_unsafe_tool():
     """写工具不提前派发，留给 run_batch 顺序执行。"""
     reg = Registry()

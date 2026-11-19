@@ -793,6 +793,7 @@ class _ServerWorker:
             else:
                 parallel_reads.discard(tool.name)
             seen.add(tool.name)
+        for tool in self._tools:
             qualified = f"{self.name}__{tool.name}"
             schema = {
                 "name": qualified,
@@ -810,6 +811,7 @@ class _ServerWorker:
                 ui_label_template=f"MCP {tool.name}",
                 should_defer=True,
                 is_mcp=True,
+                mcp_parallel_read=self._can_parallelize_read if tool.name in parallel_reads else None,
                 search_hint=f"mcp {self.name} {tool.name} {getattr(tool, 'description', '') or ''}",
             )
             count += 1
@@ -846,6 +848,34 @@ class _ServerWorker:
     def tool_names(self) -> list[str]:
         return [getattr(t, "name", "") for t in self._tools]
 
+    @staticmethod
+    def _approval_context(context: Any) -> Any:
+        from crew.core.runctx import current_session_id, current_task_runtime_id
+
+        return replace(
+            context,
+            session_id=current_session_id.get() or context.session_id,
+            task_id=current_task_runtime_id.get() or context.task_id,
+        )
+
+    def _can_parallelize_read(self) -> bool:
+        from crew.security.launch import current_process_launch
+        from crew.tools.security_guard import can_schedule_configured_mcp_read
+
+        launch = current_process_launch.get()
+        if launch is None or not self.is_connected:
+            return False
+        if self._host_stdio_spawn:
+            return not getattr(launch, "managed", False)
+        url = str(self.cfg.get("url") or "").strip()
+        context = getattr(launch, "security_context", None)
+        service = getattr(launch, "approval_service", None)
+        if not url or context is None or service is None:
+            return False
+        return can_schedule_configured_mcp_read(
+            url, security_context=self._approval_context(context), security_service=service,
+        )
+
     def _make_handler(self, tool_name: str):
         async def handler(args: dict[str, Any]) -> str:
             qualified_name = f"{self.name}__{tool_name}"
@@ -863,7 +893,6 @@ class _ServerWorker:
                     )
             configured_url = str(self.cfg.get("url") or "").strip()
             if configured_url:
-                from crew.core.runctx import current_session_id, current_task_runtime_id
                 from crew.security.launch import current_process_launch
                 from crew.tools.security_guard import authorize_configured_mcp_call
 
@@ -883,11 +912,7 @@ class _ServerWorker:
                         args=args,
                         security_service=launch.approval_service,
                         # Approval is pending on the public turn's session and task.
-                        security_context=replace(
-                            launch.security_context,
-                            session_id=current_session_id.get() or launch.security_context.session_id,
-                            task_id=current_task_runtime_id.get() or launch.security_context.task_id,
-                        ),
+                        security_context=self._approval_context(launch.security_context),
                     )
                 except ToolError as exc:
                     return tool_error(str(exc))

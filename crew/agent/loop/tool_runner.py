@@ -256,6 +256,7 @@ class ToolRunner:
         self.approval_rejected = False
         self.security_boundary_failed = False
         segments = self._plan_segments(tool_calls)
+        catalogue_revision = getattr(self.registry, "mcp_catalog_revision", None)
         self._latest_outcomes.clear()
         started_ids = set(started_tool_call_ids or set())
         llm_trace("tool_batch_plan", {
@@ -268,8 +269,10 @@ class ToolRunner:
         self._pending_media = []
         try:
             for safe, calls in segments:
-                if safe and len(calls) > 1:
-                    async for chunk in self._run_parallel_segment(calls, messages, rid, next_seq, started_ids):
+                if safe and len(calls) > 1 and self._parallel_segment_is_current(calls, catalogue_revision):
+                    async for chunk in self._run_parallel_segment(
+                        calls, messages, rid, next_seq, started_ids, catalogue_revision=catalogue_revision,
+                    ):
                         yield chunk
                 else:
                     async for chunk in self._run_sequential_segment(calls, messages, rid, next_seq, started_ids):
@@ -285,7 +288,18 @@ class ToolRunner:
             return [(False, [tc]) for tc in tool_calls]
         if should_parallelize_tool_batch(tool_calls).parallel:
             return [(True, list(tool_calls))]
-        return segment_consecutive_safe(tool_calls)
+        mcp_parallel_read = getattr(self.registry, "is_mcp_parallel_read", None)
+        return segment_consecutive_safe(tool_calls, mcp_parallel_read=mcp_parallel_read)
+
+    def _parallel_segment_is_current(self, calls: list, catalogue_revision: int | None) -> bool:
+        if self._request_approval_mode():
+            return False
+        if (
+            catalogue_revision != getattr(self.registry, "mcp_catalog_revision", None)
+            or any(self._is_mcp_tool(tc.name) for tc in calls)
+        ):
+            return self._plan_segments(calls) == [(True, calls)]
+        return True
 
     # ---- prewarm（流式提前派发）------------------------------------------ #
     def prewarm(self, tc) -> bool:
@@ -537,11 +551,19 @@ class ToolRunner:
         rid,
         next_seq,
         started_tool_call_ids: set[str],
+        *,
+        catalogue_revision: int | None,
     ) -> AsyncIterator[ResponseChunk]:
         # 先发本段全部 start 帧（保持顺序），再并发执行，最后按序回灌结果。
         for tc in calls:
             if tc.id not in started_tool_call_ids:
                 yield self._start_event(tc, rid, next_seq)
+        if not self._parallel_segment_is_current(calls, catalogue_revision):
+            # The event consumer can yield while the catalogue or grants change.
+            announced = started_tool_call_ids | {tc.id for tc in calls}
+            async for chunk in self._run_sequential_segment(calls, messages, rid, next_seq, announced):
+                yield chunk
+            return
         # 并行段默认不接 file_write（非 parallel-safe，由 sequential 段处理），
         # 但保留 before 读取与 file_change 广播，防御未来放宽安全判定时漏播。
         before_map: dict[str, Any] = {}

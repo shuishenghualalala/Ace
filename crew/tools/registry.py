@@ -79,6 +79,7 @@ class FunctionTool(Tool):
         search_hint: str = "",
         always_load: bool = False,
         is_mcp: bool = False,
+        mcp_parallel_read: Callable[[], bool] | None = None,
         aliases: list[str] | None = None,
         validate_input: Callable[[dict[str, Any]], str | None] | None = None,
         structured_argument_errors: bool = False,
@@ -112,6 +113,7 @@ class FunctionTool(Tool):
         self.search_hint = search_hint
         self.always_load = always_load
         self.is_mcp = is_mcp
+        self.mcp_parallel_read = mcp_parallel_read
         # Crew Stage 1：别名 + 废弃警告。alias 命中时记一条 deprecation note 回灌模型。
         self.aliases = list(aliases or [])
         # 业务级 validate 钩子（如 FileEdit 检查文件是否已读过）
@@ -241,6 +243,7 @@ class Registry(ToolRegistry):
                 search_hint=kwargs.get("search_hint", ""),
                 always_load=bool(kwargs.get("always_load", False)),
                 is_mcp=bool(kwargs.get("is_mcp", False)),
+                mcp_parallel_read=kwargs.get("mcp_parallel_read"),
                 aliases=kwargs.get("aliases"),
                 validate_input=kwargs.get("validate_input"),
                 structured_argument_errors=bool(kwargs.get("structured_argument_errors", False)),
@@ -320,6 +323,22 @@ class Registry(ToolRegistry):
     def toolset_for(self, name: str) -> str | None:
         tool = self._tools.get(name)
         return getattr(tool, "toolset", "default") if tool else None
+
+    def is_mcp_parallel_read(self, name: str) -> bool:
+        """Look up read-only scheduling metadata from the active MCP catalogue."""
+        tool = self._tools.get(name)
+        if (
+            tool is None
+            or not tool.is_mcp
+            or not callable(tool.mcp_parallel_read)
+            or tool.permission_resolver is not None
+            or tool.permission_approver is not None
+        ):
+            return False
+        try:
+            return tool.mcp_parallel_read() is True
+        except Exception:  # noqa: BLE001 - uncertain approval state stays sequential
+            return False
 
     def result_policy(self, name: str, args: dict[str, Any]) -> ToolResultPolicy:
         """返回具体调用的结果生命周期；解析失败时宁可多保留，也不误删。"""

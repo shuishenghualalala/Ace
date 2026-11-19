@@ -16,7 +16,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -183,16 +183,6 @@ def _terminal_parallel_safety(function_args: dict[str, Any]) -> tuple[bool, str]
     return _is_readonly_terminal_command(command)
 
 
-def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
-    """Conservative MCP parallel-safe opt-in for Crew.
-
-    Crew's MCP registry does not yet expose a per-server parallel-safe bit.
-    Treat only names already present in the explicit read-only allowlist as
-    parallel safe.
-    """
-    return tool_name in _PARALLEL_SAFE_TOOLS
-
-
 def _extract_parallel_scope_path(tool_name: str, function_args: dict[str, Any]) -> Path | None:
     """Return normalized target path for path-scoped Crew/Crew file tools."""
     if tool_name not in _PATH_SCOPED_TOOLS:
@@ -264,7 +254,7 @@ def should_parallelize_tool_batch(tool_calls: list[Any]) -> ToolBatchDecision:
                 return ToolBatchDecision(False, f"{tool_name} mutates files")
             continue
 
-        if tool_name not in _PARALLEL_SAFE_TOOLS and not _is_mcp_tool_parallel_safe(tool_name):
+        if tool_name not in _PARALLEL_SAFE_TOOLS:
             return ToolBatchDecision(False, f"{tool_name} is not parallel safe")
 
     return ToolBatchDecision(True, "all tool calls are independent read-only calls")
@@ -274,7 +264,11 @@ def should_parallelize(tool_calls: list[Any]) -> bool:
     return should_parallelize_tool_batch(tool_calls).parallel
 
 
-def is_tool_parallel_safe(tool_call: Any) -> bool:
+def is_tool_parallel_safe(
+    tool_call: Any,
+    *,
+    mcp_parallel_read: Callable[[str], bool] | None = None,
+) -> bool:
     """单工具并发安全判定（per-tool，对应 Crew 的 isConcurrencySafe）。
 
     只读、无共享副作用的工具才安全：可在流式期间提前派发、可与其它 safe 工具并发。
@@ -291,10 +285,16 @@ def is_tool_parallel_safe(tool_call: Any) -> bool:
     args = _tool_args(tool_call)
     if args is None:
         return False
-    return name in _PARALLEL_SAFE_TOOLS or _is_mcp_tool_parallel_safe(name)
+    return name in _PARALLEL_SAFE_TOOLS or (
+        mcp_parallel_read is not None and mcp_parallel_read(name)
+    )
 
 
-def segment_consecutive_safe(tool_calls: list[Any]) -> list[tuple[bool, list[Any]]]:
+def segment_consecutive_safe(
+    tool_calls: list[Any],
+    *,
+    mcp_parallel_read: Callable[[str], bool] | None = None,
+) -> list[tuple[bool, list[Any]]]:
     """把工具序列切成「连续 safe 并发段」与「unsafe 独占段」，保持原始顺序。
 
     例：``[read, read, write, read]`` → ``[(True,[read,read]), (False,[write]), (True,[read])]``
@@ -303,7 +303,7 @@ def segment_consecutive_safe(tool_calls: list[Any]) -> list[tuple[bool, list[Any
     """
     segments: list[tuple[bool, list[Any]]] = []
     for tc in tool_calls:
-        safe = is_tool_parallel_safe(tc)
+        safe = is_tool_parallel_safe(tc, mcp_parallel_read=mcp_parallel_read)
         if segments and segments[-1][0] and safe:
             segments[-1][1].append(tc)
         else:

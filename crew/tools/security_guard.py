@@ -8,7 +8,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from crew.core.errors import ToolError
 from crew.security.actions import normalize_file_action, normalize_network_action
@@ -19,6 +19,13 @@ from crew.security.context import (
     resolve_requested_path,
 )
 from crew.security.file_policy import FilePolicyResult
+from crew.security.models import (
+    AdditionalPermissionProfile,
+    ConversationPermissionMode,
+    NetworkEntry,
+    SandboxPermissions,
+    additional_permissions_cover,
+)
 
 _PREVIEW_LIMIT = 4000
 
@@ -209,6 +216,47 @@ async def authorize_network_target(
         raise ToolError("批准后联网授权校验失败，请重试")
 
 
+def _parse_configured_mcp_url(url: str) -> SplitResult:
+    value = str(url or "").strip()
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ToolError("MCP URL 包含控制字符")
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ToolError("MCP 远程端点仅支持 http/https")
+    if parsed.username is not None or parsed.password is not None:
+        raise ToolError("MCP URL 不允许内嵌用户名或密码")
+    return parsed
+
+
+def _mcp_network_permissions(parsed: SplitResult, port: int) -> AdditionalPermissionProfile:
+    return AdditionalPermissionProfile(
+        network=(NetworkEntry(
+            (parsed.hostname or "").rstrip(".").lower(),
+            port,
+            parsed.scheme,
+            allow_private=True,
+        ),),
+        sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
+    )
+
+
+def can_schedule_configured_mcp_read(
+    url: str, *, security_service: Any, security_context: Any,
+) -> bool:
+    """Use existing conversation authority without requesting or consuming a grant."""
+    mode = security_service.mode_for(security_context)
+    if mode is ConversationPermissionMode.FULL_ACCESS:
+        return True
+    if mode is not ConversationPermissionMode.AUTO_REVIEW:
+        return False
+    parsed = _parse_configured_mcp_url(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return additional_permissions_cover(
+        security_service.grants.session_permissions(security_context),
+        _mcp_network_permissions(parsed, port),
+    )
+
+
 async def authorize_configured_mcp_call(
     url: str,
     *,
@@ -219,31 +267,10 @@ async def authorize_configured_mcp_call(
 ) -> None:
     """Bind one remote MCP call and its configured network target to one approval."""
     from crew.security.actions import normalize_exec_action
-    from crew.security.models import (
-        AdditionalPermissionProfile,
-        NetworkEntry,
-        SandboxPermissions,
-    )
-
-    value = str(url or "").strip()
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
-        raise ToolError("MCP URL 包含控制字符")
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ToolError("MCP 远程端点仅支持 http/https")
-    if parsed.username is not None or parsed.password is not None:
-        raise ToolError("MCP URL 不允许内嵌用户名或密码")
+    parsed = _parse_configured_mcp_url(url)
     try:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        additional = AdditionalPermissionProfile(
-            network=(NetworkEntry(
-                parsed.hostname.rstrip(".").lower(),
-                port,
-                parsed.scheme,
-                allow_private=True,
-            ),),
-            sandbox_permissions=SandboxPermissions.WITH_ADDITIONAL_PERMISSIONS,
-        )
+        additional = _mcp_network_permissions(parsed, port)
         canonical_args = json.dumps(
             args,
             ensure_ascii=False,
