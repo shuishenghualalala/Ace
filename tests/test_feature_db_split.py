@@ -2469,6 +2469,7 @@ _CORE_MAIN_DB_TABLES = frozenset(
     {
         "sessions",
         "session_events",
+        "session_fork_prefix_events",
         "writer_leases",
         "sessions_schema_version",
         "session_agent_config",
