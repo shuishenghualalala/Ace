@@ -711,7 +711,7 @@ async function connectBrowserHost(): Promise<void> {
         socket.close(1008, 'invalid-browser-host-request');
         return;
       }
-      void ensureBrowserHost().handleRpc(request).then((result) => {
+      void ensureBrowserHost().handleRpc(request, socket).then((result) => {
         if (socket.readyState !== WebSocket.OPEN || socket !== browserHostSocket) return;
         const sent = sendBrowserHostFrame(
           socket,

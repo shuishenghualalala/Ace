@@ -1345,6 +1345,11 @@ export class BrowserHost extends EventEmitter {
     }
   >();
   private readonly ownerQueues = new Map<string, Promise<void>>();
+  private readonly pendingWaits = new Map<string, {
+    key: string;
+    connection: object;
+    controller: AbortController;
+  }>();
   private readonly ownerEpochs = new Map<string, number>();
   private panel: {
     owner: BrowserOwner;
@@ -1358,7 +1363,7 @@ export class BrowserHost extends EventEmitter {
     super();
   }
 
-  async handleRpc(requestValue: unknown): Promise<unknown> {
+  async handleRpc(requestValue: unknown, connection?: object): Promise<unknown> {
     const request = asRecord(requestValue, 'RPC 请求') as unknown as BrowserRpcRequest;
     const key = runtimeKey(request.runtime_key);
     const method = asString(request.method, 'RPC method', 80).trim();
@@ -1366,6 +1371,32 @@ export class BrowserHost extends EventEmitter {
     if (!method) throw new BrowserHostError('RPC method 不能为空', { code: 'invalid_request' });
 
     this.assertUsable();
+    if (method === 'cancel_wait') {
+      const id = asString(params.request_id, 'request_id', 32);
+      const wait = this.pendingWaits.get(id);
+      if (!wait || wait.connection !== connection || wait.key !== key) return { cancelled: false };
+      wait.controller.abort(new pwActions.ActionError('Browser wait cancelled', 'wait_cancelled'));
+      return { cancelled: true };
+    }
+    if (connection && method === 'execute' && params.command === 'wait'
+      && typeof params.target_id === 'string' && params.target_id.trim()
+      && typeof request.id === 'string' && /^[0-9a-f]{32}$/.test(request.id)) {
+      const id = request.id;
+      if (this.pendingWaits.has(id)) {
+        throw new BrowserHostError('Duplicate browser wait ID', { code: 'invalid_request' });
+      }
+      const controller = new AbortController();
+      this.pendingWaits.set(id, { key, connection, controller });
+      try {
+        return await this.enqueue(key, async () => {
+          this.assertUsable();
+          controller.signal.throwIfAborted();
+          return this.execute(key, params, controller.signal);
+        }, controller.signal).catch(BrowserHost.rethrowAction);
+      } finally {
+        this.pendingWaits.delete(id);
+      }
+    }
     if (method === 'deny_downloads') return this.denyDownloads(key, params);
     if (method === 'close_owner') return this.closeOwner(key, params);
     if (method === 'clear_owner_data') return this.clearOwnerData(key, params);
@@ -1631,7 +1662,7 @@ export class BrowserHost extends EventEmitter {
     }
   }
 
-  private async enqueue<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  private async enqueue<T>(key: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const epoch = this.ownerEpochs.get(key) ?? 0;
     const previous = this.ownerQueues.get(key) ?? Promise.resolve();
     let release!: () => void;
@@ -1640,15 +1671,29 @@ export class BrowserHost extends EventEmitter {
     });
     const tail = previous.then(() => next, () => next);
     this.ownerQueues.set(key, tail);
-    await previous.catch(() => undefined);
-    if ((this.ownerEpochs.get(key) ?? 0) !== epoch) {
-      release();
-      throw new BrowserHostError('浏览器操作已被生命周期命令取消', {
-        code: 'operation_preempted',
-        uncertain: true,
-      });
-    }
     try {
+      if (signal) {
+        // Only race queue admission. Once admitted, the operation owns its slot until it settles.
+        await new Promise<void>((resolve, reject) => {
+          const cancelled = () => reject(signal.reason);
+          const ready = () => {
+            signal.removeEventListener('abort', cancelled);
+            resolve();
+          };
+          signal.addEventListener('abort', cancelled, { once: true });
+          if (signal.aborted) cancelled();
+          void previous.then(ready, ready);
+        });
+      } else {
+        await previous.catch(() => undefined);
+      }
+      signal?.throwIfAborted();
+      if ((this.ownerEpochs.get(key) ?? 0) !== epoch) {
+        throw new BrowserHostError('浏览器操作已被生命周期命令取消', {
+          code: 'operation_preempted',
+          uncertain: true,
+        });
+      }
       const result = await operation();
       if ((this.ownerEpochs.get(key) ?? 0) !== epoch) {
         throw new BrowserHostError('浏览器操作已被生命周期命令取消', {
@@ -1983,10 +2028,11 @@ export class BrowserHost extends EventEmitter {
     owner.proxy = next;
   }
 
-  private async execute(key: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async execute(key: string, params: Record<string, unknown>, waitSignal?: AbortSignal): Promise<Record<string, unknown>> {
     const profile = profilePath(params.profile_dir, key);
     const proxy = asString(params.proxy_url, 'proxy_url', 4096).trim();
     const owner = await this.ensureOwner(key, profile, proxy);
+    waitSignal?.throwIfAborted();
     const command = asString(params.command, 'browser command', 80).trim();
     const requestedDownloadDir = taskDownloadDirectory(params.download_dir);
     const requestedTransferLimit = transferLimit(params.max_transfer_bytes);
@@ -1998,7 +2044,7 @@ export class BrowserHost extends EventEmitter {
 
     try {
       let operation = (): Promise<unknown> => (
-        this.executeCommand(owner, command, args, params)
+        this.executeCommand(owner, command, args, params, false, waitSignal)
       );
       if (command !== 'tab') {
         const requestedTarget = typeof params.target_id === 'string'
@@ -2115,7 +2161,9 @@ export class BrowserHost extends EventEmitter {
     args: string[],
     params: Record<string, unknown>,
     modalRaceArmed = false,
+    waitSignal?: AbortSignal,
   ): Promise<unknown> {
+    waitSignal?.throwIfAborted();
     let commandTimeoutMs = resolveCommandTimeoutMs(
       params.command_timeout_ms,
       params.command_deadline_ms,
@@ -2219,7 +2267,7 @@ export class BrowserHost extends EventEmitter {
       return this.withSessionModalRace(
         owner,
         tab,
-        () => this.executeCommand(owner, command, args, params, true),
+        () => this.executeCommand(owner, command, args, params, true, waitSignal),
         {
           ...(clearsFileChooser ? { clearsExisting: 'fileChooser' as const } : {}),
           // upload_with_trigger arms and consumes the exact chooser inside one
@@ -2532,6 +2580,7 @@ export class BrowserHost extends EventEmitter {
         await pwActions.waitFor(
           await this.actionContext(tab, commandTimeoutMs),
           parseWaitArgs(args),
+          waitSignal,
         )
           .catch(BrowserHost.rethrowAction);
         return {};

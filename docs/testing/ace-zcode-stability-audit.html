@@ -318,7 +318,13 @@
 <article id="browser-wait-visible-text">
 <h3>D7e · 重复文本会导致浏览器等待误判</h3>
 <p>首个匹配隐藏、后续同文匹配可见时，旧版等待出现可能超时，等待消失可能提前成功。ZCode <code>page-command.ts</code> 对同文多匹配返回 Playwright 严格匹配错误。Ace 的等待工具按页面可见文本定义结果，因此用可见匹配集合判定出现与消失，沿用现有命令截止时间。</p>
-<p><strong>验收</strong> Windows Chrome 的六个离线场景从 3 项通过提高到全部通过。原生 Electron 契约在基线失败、修复后通过，覆盖隐藏首项、第二项仍可见、最后一项移除。相关 Vitest 127 项和桌面 TypeScript 检查通过。跨会话等待仍占用账号队列，Python 侧取消后 Electron 命令的收尾需另行验证。</p>
+<p><strong>验收</strong> Windows Chrome 的六个离线场景从 3 项通过提高到全部通过。原生 Electron 契约在基线失败、修复后通过，覆盖隐藏首项、第二项仍可见、最后一项移除。相关 Vitest 127 项和桌面 TypeScript 检查通过。等待取消和释放账号队列见 <a href="#browser-wait-cancellation">D7f</a>。</p>
+</article>
+<article id="browser-wait-cancellation">
+<h3>D7f · 停止回合后浏览器等待仍占用桌面队列</h3>
+<p>Ace 的 Python 驱动把未明确分类的 <code>wait</code> 按变更操作收尾，原版取消等待直到 Electron 的正常等待结束。ZCode 在托管 CDP 客户端按原请求登记 <code>AbortController</code>，回合结束只取消对应请求。Ace 复用原 RPC 身份向同一宿主连接发取消；Electron 只允许取消同账号、同连接、同请求的显式目标等待。排队的等待可直接结束，已派发的等待按原截止时间检查信号，每段 Playwright 等待收尾后才释放账号队列。旧宿主继续按原始终态收尾。</p>
+<p><strong>验收</strong> 真实 Windows Electron 经 Python 驱动、Gateway 浏览器 broker 与独立 WebSocket 使用同账号的两个真实标签。定时等待取消从 1,892.3 降至 111.2 毫秒，文本等待从 2,373.2 降至 93.8 毫秒。第二个标签分别在 111.4 与 94.0 毫秒读回本页。新 Gateway 搭配旧 Electron 仍等原请求且标签身份正确。三个 Electron 进程均正常退出。后端 172 项通过、2 项跳过，桌面 130 项与完整 TypeScript 检查通过。未取消的等待仍按账号排队。</p>
+<p class="evidence">Ace <code>crew/browser/electron_bridge.py</code>、<code>desktop/src/main/browser-host.ts</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>。</p>
 </article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>

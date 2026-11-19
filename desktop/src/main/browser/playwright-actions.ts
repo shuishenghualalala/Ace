@@ -948,33 +948,59 @@ export async function reload(ctx: ActionContext): Promise<void> {
   }
 }
 
-export async function waitFor(ctx: ActionContext, options: WaitOptions): Promise<void> {
+// Playwright waits have no AbortSignal. A bounded slice must settle before
+// the owner queue can dispatch the next command to the same browser.
+const WAIT_CANCEL_CHECK_MS = 100;
+
+async function waitForText(
+  ctx: ActionContext, text: string, state: 'hidden' | 'visible', signal?: AbortSignal,
+): Promise<void> {
+  const locator = ctx.page.getByText(text).filter({ visible: true }).first();
+  const deadline = Date.now() + dispatchTimeout(ctx);
+  for (;;) {
+    signal?.throwIfAborted();
+    const remaining = Math.max(1, deadline - Date.now());
+    const timeout = signal ? Math.min(WAIT_CANCEL_CHECK_MS, remaining) : remaining;
+    try {
+      await locator.waitFor({ state, timeout });
+      signal?.throwIfAborted();
+      return;
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (!signal || !(error instanceof Error) || error.name !== 'TimeoutError'
+          || Date.now() >= deadline) throw error;
+    }
+  }
+}
+
+export async function waitFor(ctx: ActionContext, options: WaitOptions, signal?: AbortSignal): Promise<void> {
   const checked = validatedWaitOptions(options);
   try {
+    signal?.throwIfAborted();
     if (checked.timeSeconds > 0) {
       const requestedMs = checked.timeSeconds * 1_000;
       const remainingMs = dispatchTimeout(ctx);
-      const truncatedByDeadline = requestedMs > remainingMs;
-      await ctx.page.waitForTimeout(Math.min(requestedMs, remainingMs));
-      if (truncatedByDeadline) {
+      const duration = Math.min(requestedMs, remainingMs);
+      if (signal) {
+        const end = Date.now() + duration;
+        let left = duration;
+        do {
+          await ctx.page.waitForTimeout(Math.min(WAIT_CANCEL_CHECK_MS, left));
+          signal.throwIfAborted();
+          left = end - Date.now();
+        } while (left > 0);
+      } else {
+        await ctx.page.waitForTimeout(duration);
+      }
+      if (requestedMs > remainingMs) {
         throw new ActionError(
           '等待时长超过浏览器命令截止时间',
           'command_timeout',
         );
       }
     }
-    if (checked.textGone) {
-      await ctx.page.getByText(checked.textGone).filter({ visible: true }).first().waitFor({
-        state: 'hidden',
-        timeout: dispatchTimeout(ctx),
-      });
-    }
-    if (checked.text) {
-      await ctx.page.getByText(checked.text).filter({ visible: true }).first().waitFor({
-        state: 'visible',
-        timeout: dispatchTimeout(ctx),
-      });
-    }
+    if (checked.textGone) await waitForText(ctx, checked.textGone, 'hidden', signal);
+    if (checked.text) await waitForText(ctx, checked.text, 'visible', signal);
   } catch (error) {
     translateWaitFailure(error);
   }

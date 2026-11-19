@@ -96,7 +96,7 @@ class _PendingRequest:
 
 @dataclass
 class _AttemptState:
-    sent: bool = False
+    sent_rpc: tuple[_HostConnection, str] | None = None
 
 
 @dataclass
@@ -440,7 +440,7 @@ class ElectronBrowserBridge:
                     # Mark before the await. If send_json raises or times out,
                     # the transport cannot prove that a mutation was not received.
                     pending.sent = True
-                    state.sent = True
+                    state.sent_rpc = (connection, request_id)
                     await connection.socket.send_json(
                         {
                             "type": "request",
@@ -513,6 +513,32 @@ class ElectronBrowserBridge:
             )
         return response.get("result")
 
+    async def _cancel_wait_if_pending(
+        self, key: str, connection: _HostConnection, request_id: str
+    ) -> None:
+        try:
+            async with asyncio.timeout(0.5):
+                async with connection.send_lock:
+                    pending = connection.pending.get(request_id)
+                    if (
+                        self._connections.get(key) is not connection
+                        or pending is None
+                        or pending.future.done()
+                    ):
+                        return
+                    await connection.socket.send_json(
+                        {
+                            "type": "request",
+                            "id": uuid.uuid4().hex,
+                            "runtime_key": key,
+                            "method": "cancel_wait",
+                            "params": {"request_id": request_id},
+                        }
+                    )
+        except Exception:
+            # The original RPC supplies the terminal result, including on older hosts.
+            pass
+
     async def request(
         self,
         runtime_key: str,
@@ -550,15 +576,30 @@ class ElectronBrowserBridge:
         try:
             return await asyncio.shield(task) if mutating else await task
         except asyncio.CancelledError:
-            if not mutating or not state.sent:
+            sent_rpc = state.sent_rpc
+            if not mutating or sent_rpc is None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 raise
-            # A sent mutation owns BrowserManager's account lock until the Host
-            # confirms it or the bounded timeout produces fail-stop metadata.
-            while not task.done():
+            terminal = task
+            if method == "execute" and params.get("command") == "wait" and not task.done():
+                connection, request_id = sent_rpc
+
+                async def cancel_and_wait() -> Any:
+                    notice = asyncio.create_task(
+                        self._cancel_wait_if_pending(key, connection, request_id)
+                    )
+                    try:
+                        return await task
+                    finally:
+                        notice.cancel()
+                        await asyncio.gather(notice, return_exceptions=True)
+
+                terminal = asyncio.create_task(cancel_and_wait())
+            # The original response owns the account lock through host settlement.
+            while not terminal.done():
                 try:
-                    await asyncio.shield(task)
+                    await asyncio.shield(terminal)
                 except asyncio.CancelledError:
                     # Repeated caller cancellation still cannot abandon a
                     # possibly executed mutation.
@@ -566,7 +607,7 @@ class ElectronBrowserBridge:
                 except ElectronBridgeError:
                     break
             try:
-                task.result()
+                terminal.result()
             except ElectronBridgeError as exc:
                 # Keep the remote lifecycle outcome without consuming the
                 # user's cancellation and starting another LLM iteration.

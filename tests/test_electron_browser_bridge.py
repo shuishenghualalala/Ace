@@ -202,6 +202,44 @@ async def test_readonly_request_fails_retryable_without_cross_epoch_replay() -> 
 
 
 @pytest.mark.asyncio
+async def test_cancelling_active_wait_signals_host_and_waits_for_original_terminal() -> None:
+    bridge = ElectronBrowserBridge()
+    key = "crew_0123456789ab"
+    socket, server = await _connect(bridge, key)
+    request = asyncio.create_task(
+        bridge.request(
+            key,
+            "execute",
+            {"command": "wait", "args": ["--time-seconds", "10"]},
+            timeout=2,
+            mutating=True,
+        )
+    )
+    try:
+        original = await asyncio.wait_for(socket.outgoing.get(), timeout=1)
+        request.cancel()
+        cancellation = await asyncio.wait_for(socket.outgoing.get(), timeout=1)
+        assert cancellation["runtime_key"] == key
+        assert cancellation["method"] == "cancel_wait"
+        assert cancellation["id"] != original["id"]
+        assert cancellation["params"] == {"request_id": original["id"]}
+        await socket.incoming.put(
+            {"type": "response", "id": cancellation["id"], "ok": True, "result": {}}
+        )
+        await asyncio.sleep(0)
+        assert not request.done()
+        await socket.incoming.put(
+            {"type": "response", "id": original["id"], "ok": True, "result": {}}
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(request), timeout=1)
+        assert socket.outgoing.empty()
+    finally:
+        await socket.incoming.put(WebSocketDisconnect())
+        await asyncio.gather(server, request, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_sent_mutation_defers_cancellation_until_remote_completion() -> None:
     bridge = ElectronBrowserBridge()
     key = "crew_0123456789ab"

@@ -1242,6 +1242,7 @@ vi.mock('../../src/main/browser/playwright-engine', () => {
 });
 
 import { BrowserHost } from '../../src/main/browser-host';
+import * as actions from '../../src/main/browser/playwright-actions';
 
 const OWNER_ID = 'owner:test';
 const OWNER_DIGEST = createHash('sha256').update(OWNER_ID).digest('hex');
@@ -1497,6 +1498,59 @@ describe('BrowserHost', () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it('scopes wait cancellation to its socket, owner and live request, joining dispatched work', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    const socket = {};
+    const firstId = 'a'.repeat(32);
+    const secondId = 'b'.repeat(32);
+    const run = (id: string) => host.handleRpc({
+      id, runtime_key: RUNTIME_KEY, method: 'execute',
+      params: { profile_dir: PROFILE, proxy_url: PROXY_URL, command: 'wait',
+        args: ['--time-seconds', '5'], target_id: currentTargetId },
+    }, socket);
+    const cancel = (id: string, connection = socket, key = RUNTIME_KEY) => host.handleRpc({
+      runtime_key: key, method: 'cancel_wait', params: { request_id: id },
+    }, connection);
+    let release!: () => void;
+    const exit = new Promise<void>((resolve) => { release = resolve; });
+    let dispatched!: () => void;
+    const entered = new Promise<void>((resolve) => { dispatched = resolve; });
+    let active: AbortSignal | undefined;
+    const spy = vi.spyOn(actions, 'waitFor').mockImplementationOnce(async (_ctx, _options, signal) => {
+      active = signal;
+      dispatched();
+      await exit;
+      signal?.throwIfAborted();
+    });
+    try {
+      const first = run(firstId);
+      const firstResult = expect(first).rejects.toMatchObject({ code: 'wait_cancelled', uncertain: false });
+      await entered;
+      const queued = run(secondId);
+      const queueResult = expect(queued).rejects.toMatchObject({ code: 'wait_cancelled', uncertain: false });
+      expect(await cancel(firstId, {})).toEqual({ cancelled: false });
+      expect(await cancel(firstId, socket, 'crew_ffffffffffff')).toEqual({ cancelled: false });
+      expect(await cancel(secondId)).toEqual({ cancelled: true });
+      await queueResult;
+      expect(active?.aborted).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(await cancel(firstId)).toEqual({ cancelled: true });
+      expect(active?.aborted).toBe(true);
+      expect(await cancel(firstId)).toEqual({ cancelled: true });
+      expect(await cancel(secondId)).toEqual({ cancelled: false });
+      release();
+      await firstResult;
+      expect(await cancel(firstId)).toEqual({ cancelled: false });
+      await expect(host.handleRpc({ runtime_key: RUNTIME_KEY, method: 'doctor' }, socket))
+        .resolves.toMatchObject({ ok: true });
+    } finally {
+      release();
+      spy.mockRestore();
+      await host.dispose();
+    }
   });
 
   it('uses a dedicated persistent Session, grants web capabilities, and keeps renderer isolation', async () => {

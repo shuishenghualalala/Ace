@@ -912,6 +912,50 @@ describe('Playwright MCP action parity', () => {
     }
   });
 
+  it('waits for a dispatched page timer to settle before confirming cancellation', async () => {
+    const { ctx, page } = actionFixture();
+    const controller = new AbortController();
+    let release!: () => void;
+    const slice = new Promise<void>((resolve) => { release = resolve; });
+    vi.mocked(page.waitForTimeout).mockReturnValueOnce(slice);
+    const pending = waitFor(ctx, { timeSeconds: 2, text: 'Never dispatched' }, controller.signal);
+    let settled = false;
+    void pending.catch(() => { settled = true; });
+    controller.abort(new ActionError('Cancelled', 'wait_cancelled'));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await expect(pending).rejects.toMatchObject({ code: 'wait_cancelled', uncertain: false });
+    expect(page.waitForTimeout).toHaveBeenCalledTimes(1);
+    expect(page.getByText).not.toHaveBeenCalled();
+  });
+
+  it('bounds cancellable text slices by the one original deadline', async () => {
+    const { ctx, page } = actionFixture();
+    let clock = 10_000;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const budgets: number[] = [];
+    ctx.deadlineAt = clock + 240;
+    vi.mocked(page.getByText).mockReturnValue({
+      filter: () => ({ first: () => ({
+        waitFor: async ({ timeout }: { timeout: number }) => {
+          budgets.push(timeout);
+          clock += timeout;
+          const error = new Error('Timeout exceeded while waiting for locator');
+          error.name = 'TimeoutError';
+          throw error;
+        },
+      }) }),
+    } as ReturnType<Page['getByText']>);
+    try {
+      await expect(waitFor(ctx, { text: 'Missing' }, new AbortController().signal))
+        .rejects.toMatchObject({ code: 'wait_timeout', uncertain: false });
+      expect(budgets).toEqual([100, 100, 40]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('reports text wait timeout as a non-mutating wait_timeout', async () => {
     const { ctx, page } = actionFixture();
     vi.mocked(page.getByText).mockReturnValue({
