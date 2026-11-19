@@ -531,6 +531,103 @@ def _approve_click(
 
 
 
+def test_wait_topology_binds_legacy_labels_only_to_original_native_target():
+    from crew.browser.manager import _WaitTarget
+
+    target = _WaitTarget("target-1", 0, 0, None, "sone-1")
+    legacy = {"targetId": "target-1", "label": "sone-1"}
+    assert target.matches_native_row(legacy, "one")
+    assert target.matches_native_row({**legacy, "sessionHash": ""}, "one")
+    assert not target.matches_native_row({**legacy, "label": "stwo-1"}, "one")
+    assert not target.matches_native_row({**legacy, "targetId": "target-2"}, "one")
+    assert not target.matches_native_row({**legacy, "sessionHash": "two"}, "one")
+    assert target.matches_native_row({**legacy, "sessionHash": "one"}, "one")
+    assert not _WaitTarget("target-1", 0, 0, None, "").matches_native_row(legacy, "one")
+
+
+@pytest.mark.parametrize("intervening", ["snapshot", "control", "selection"])
+async def test_targeted_wait_revalidates_control_and_selection_not_plain_snapshots(browser_env, intervening):
+    from crew.browser.manager import _WaitTarget
+
+    manager = BrowserManager(BrowserConfig(), ReviewDriver())
+    try:
+        await manager.navigate("owner", "session", "https://example.com/")
+        owner = await manager._owner("owner")
+        session = owner.sessions["session"]
+        original_label = session.active_label
+        target = _WaitTarget(
+            session.tabs[original_label].target_id,
+            session.wait_epoch,
+            manager.capability_generation("owner"),
+            owner.proxy,
+            session.tabs[original_label].label,
+        )
+        if intervening == "control":
+            await manager.user_control("owner", "session", "takeover")
+            await manager.user_control("owner", "session", "return")
+        elif intervening == "selection":
+            await manager.tabs("owner", "session", "new", url="https://example.org/")
+            await manager.tabs("owner", "session", "select", tab_id=original_label)
+        else:
+            await manager.snapshot("owner", "session")
+
+        assert session.mode == "ai" and session.active_label == original_label
+        resume = manager._wait_on_target(owner, session, target, 0, [], 1, "")
+        if intervening == "snapshot":
+            assert "page_generation:" in await resume
+        else:
+            with pytest.raises(BrowserDriverError) as caught:
+                await resume
+            assert caught.value.code == "wait_target_changed"
+    finally:
+        await manager.aclose()
+
+
+async def test_wait_queue_cancel_preserves_caller_and_releases_admission(browser_env):
+    from crew.browser.manager import _OwnerOperationLock
+
+    lock = _OwnerOperationLock()
+    entered = asyncio.Event()
+    async def contender():
+        entered.set()
+        async with lock.before(asyncio.get_running_loop().time() + 5):
+            pytest.fail("cancelled wait was admitted")
+
+    async with lock:
+        pending = asyncio.create_task(contender())
+        await entered.wait()
+        pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert not lock.locked() and lock.queue_depth == 0
+
+
+@pytest.mark.parametrize(
+    ("retry_deadline", "expected"),
+    [("elapsed", "command_timeout"), ("final", "wait_timeout")],
+)
+async def test_wait_timeout_distinguishes_a_late_slice_from_final_observation(
+    browser_env, monkeypatch, retry_deadline, expected,
+):
+    driver = ReviewDriver()
+    manager = BrowserManager(BrowserConfig(), driver)
+    try:
+        await manager.navigate("owner", "session", "https://example.com/")
+        owner = await manager._owner("owner")
+        session = owner.sessions["session"]
+        async def timed_out(*args, **kwargs):
+            raise BrowserDriverError("Native locator wait timed out", code="wait_timeout")
+
+        monkeypatch.setattr(driver, "execute_targeted", timed_out)
+        deadline = asyncio.get_running_loop().time() - 1 if retry_deadline == "elapsed" else None
+        async with owner.lock:
+            with pytest.raises(BrowserDriverError) as caught:
+                await manager._run(owner, session, "wait", ["--text", "absent"], retry_wait_until=deadline)
+        assert caught.value.code == expected
+    finally:
+        await manager.aclose()
+
+
 async def test_snapshot_functional_fast_path_uses_two_browser_rpcs(browser_env):
     driver = ReviewDriver()
     manager = BrowserManager(BrowserConfig(), driver)

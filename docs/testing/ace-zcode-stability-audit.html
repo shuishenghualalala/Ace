@@ -186,7 +186,7 @@
 <tr><td>文件、搜索、写入</td><td>Ace 按已有只读白名单和混合批顺序调度。ZCode 用 registry 并发属性区分读、搜索和写入。</td><td>符合同批顺序、乱序参数和开关并发的实测见 A15。搜索功能验收见 A1、A5。</td></tr>
 <tr><td>终端、后台输出</td><td>Ace 仅在整批判定为独立只读时并发终端命令，后台任务由进程注册表跟踪。ZCode Bash 在普通批使用独占属性，后台输出另有只读入口，回传按启动会话校验。</td><td>已验证长输出游标和按请求退出。多会话并发读取后台输出待同夹具验证。</td></tr>
 <tr><td>MCP</td><td>原版 Ace 独立启动各服务器，同配置共用一个串行 worker。ZCode 默认按会话租用并按请求调用，普通批次使用服务工具的只读或幂等注解。</td><td>截止时间与回收见 A16。同服务支持两条明确只读请求并发，完整模型回复按现有授权分段并发。</td></tr>
-<tr><td>浏览器</td><td>Ace 按账号串行化共享选中标签和原生引用。ZCode CLI 托管 CDP 按会话建 BrowserContext，按会话和回合取消。</td><td>源码及既有排队超时测试已核对。同账号双会话、双标签的真实交互待复验。</td></tr>
+<tr><td>浏览器</td><td>Ace 按账号串行化共享选中标签和原生引用。ZCode CLI 托管 CDP 按会话建 BrowserContext，按会话和回合取消。</td><td>同账号双标签已用原生 Electron 验证等待取消和正常等待，见 D7f、D7g。</td></tr>
 <tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已跑子 Agent 批次回归，独立退出与请求范围见 A12。并行子任务中一个等待审批、另一个被取消，仍待用两端同夹具验证。</td></tr>
 </tbody></table></div>
 <p class="evidence">Ace <code>crew/agent/loop/tool_dispatch_helpers.py</code>、<code>crew/tools/process_registry.py</code>、<code>crew/browser/manager.py:306</code>、<code>crew/agent/subagent/runtime.py:839</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts:481</code>、<code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>、<code>apps/zcode-cli/packages/core/src/runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
@@ -330,8 +330,14 @@
 <article id="browser-wait-cancellation">
 <h3>D7f · 停止回合后浏览器等待仍占用桌面队列</h3>
 <p>Ace 的 Python 驱动把未明确分类的 <code>wait</code> 按变更操作收尾，原版取消等待直到 Electron 的正常等待结束。ZCode 在托管 CDP 客户端按原请求登记 <code>AbortController</code>，回合结束只取消对应请求。Ace 复用原 RPC 身份向同一宿主连接发取消；Electron 只允许取消同账号、同连接、同请求的显式目标等待。排队的等待可直接结束，已派发的等待按原截止时间检查信号，每段 Playwright 等待收尾后才释放账号队列。旧宿主继续按原始终态收尾。</p>
-<p><strong>验收</strong> 真实 Windows Electron 经 Python 驱动、Gateway 浏览器 broker 与独立 WebSocket 使用同账号的两个真实标签。定时等待取消从 1,892.3 降至 111.2 毫秒，文本等待从 2,373.2 降至 93.8 毫秒。第二个标签分别在 111.4 与 94.0 毫秒读回本页。新 Gateway 搭配旧 Electron 仍等原请求且标签身份正确。三个 Electron 进程均正常退出。后端 172 项通过、2 项跳过，桌面 130 项与完整 TypeScript 检查通过。未取消的等待仍按账号排队。</p>
+<p><strong>验收</strong> 真实 Windows Electron 经 Python 驱动、Gateway 浏览器 broker 与独立 WebSocket 使用同账号的两个真实标签。定时等待取消从 1,892.3 降至 111.2 毫秒，文本等待从 2,373.2 降至 93.8 毫秒。第二个标签分别在 111.4 与 94.0 毫秒读回本页。新 Gateway 搭配旧 Electron 仍等原请求且标签身份正确。三个 Electron 进程均正常退出。后端 172 项通过、2 项跳过，桌面 130 项与完整 TypeScript 检查通过。正常等待的跨会话占用见 <a href="#browser-targeted-wait">D7g</a>。</p>
 <p class="evidence">Ace <code>crew/browser/electron_bridge.py</code>、<code>desktop/src/main/browser-host.ts</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>。</p>
+</article>
+<article id="browser-targeted-wait">
+<h3>D7g · 正常浏览器等待长时间占用同账号队列</h3>
+<p>旧版在等待和最终快照期间一直持有账号锁。ZCode 托管 CDP 为每个会话使用独立 BrowserContext，窗口定时等待由宿主按单调时钟计时。Ace 在当前 Native Target 可定向时绑定目标、控制代次和能力。定时期间释放队列，长等待每两秒复查目标；文本使用短段的原 Playwright 观察，保留可见匹配及整体截止时间。每段观察收尾后释放队列，完成时复核身份才生成原目标快照。兼容旧宿主缺少会话哈希时，仍要求原 UUID 和经核对的原生标签均匹配。</p>
+<p><strong>验收</strong> Windows 原生 Electron、实际 Python BrowserManager 和独立 WebSocket 双标签。A 等约 1.2 秒时，B 的快照从 1,281.2 降到 75.4 毫秒；A 同时等计时和文本时从 1,258.9 降到 46.0 毫秒。A 纯等其专属延迟文本时，B 在 246.9 毫秒取得自己的页面。两个标签和同目标观察均返回各自应有的正文。接管、切页后切回、在途取消与错标签均验证；一例 Gateway 未收到原生关闭事件时约 2.03 秒发现目标消失。兼容旧行的定向正负例均通过，Electron 正常退出。六组回归 424 项通过、2 项跳过，Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/browser/manager.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts:240</code>、<code>page-command.ts:286</code>。</p>
 </article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>

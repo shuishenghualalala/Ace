@@ -16,7 +16,7 @@ import stat
 import struct
 import time
 import uuid
-from contextlib import contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -266,7 +266,8 @@ class _Session:
     session_id: str
     owner: str
     tabs: dict[str, _Tab] = field(default_factory=dict)
-    active_label: str = ""
+    _active_label: str = ""
+    wait_epoch: int = 0
     counter: int = 0
     generation: int = 0
     refs: dict[str, str] = field(default_factory=dict)
@@ -303,6 +304,17 @@ class _Session:
     downloads: list[dict[str, Any]] = field(default_factory=list)
 
 
+    @property
+    def active_label(self) -> str:
+        return self._active_label
+
+    @active_label.setter
+    def active_label(self, label: str) -> None:
+        if label != self._active_label:
+            self._active_label = label
+            self.wait_epoch += 1
+
+
 class _OwnerOperationLock(asyncio.Lock):
     """Owner lock with bounded queue waiting and low-cost runtime metrics."""
 
@@ -323,7 +335,8 @@ class _OwnerOperationLock(asyncio.Lock):
         try:
             timeout = float(self.queue_timeout_seconds or 0)
             if timeout > 0:
-                acquired = await asyncio.wait_for(super().acquire(), timeout)
+                async with asyncio.timeout(timeout):
+                    acquired = await super().acquire()
             else:
                 acquired = await super().acquire()
         except asyncio.TimeoutError:
@@ -343,6 +356,18 @@ class _OwnerOperationLock(asyncio.Lock):
         self.last_queue_wait_ms = max(0.0, (time.monotonic() - started) * 1000)
         self._acquired_at = time.monotonic()
         return acquired
+
+    @asynccontextmanager
+    async def before(self, deadline: float) -> AsyncIterator[None]:
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self.acquire()
+        except TimeoutError:
+            raise BrowserDriverError("等待浏览器操作队列时已超过截止时间", code="browser_queue_timeout") from None
+        try:
+            yield
+        finally:
+            self.release()
 
     def release(self) -> None:
         if self._acquired_at:
@@ -376,6 +401,27 @@ class _Owner:
     actions_blocked: bool = False
     downloads_locked: bool = False
     closed_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass(frozen=True)
+class _WaitTarget:
+    target_id: str
+    epoch: int
+    capability: int
+    proxy: LoopbackPolicyProxy | None
+    native_label: str
+
+    def matches_native_row(self, row: dict[str, Any], session_hash: str) -> bool:
+        if row.get("targetId") != self.target_id:
+            return False
+        reported = row.get("sessionHash")
+        if reported is None or reported == "":
+            return bool(self.native_label) and row.get("label") == self.native_label
+        return reported == session_hash
+
+
+class _WaitConditionPending(Exception):
+    """A bounded native observation completed without seeing the condition."""
 
 
 @dataclass(frozen=True)
@@ -1137,6 +1183,7 @@ class BrowserManager:
         mutating: bool = False,
         workdir: str = "",
         timeout_seconds: float | None = None,
+        retry_wait_until: float | None = None,
     ) -> dict[str, Any]:
         self._ensure_leased_capability_current(owner.owner)
         if owner.closing or owner.stopping or owner.actions_blocked:
@@ -1202,6 +1249,15 @@ class BrowserManager:
             session.last_error = ""
             return result
         except BrowserDriverError as exc:
+            if (
+                retry_wait_until is not None
+                and exc.code == "wait_timeout"
+                and not (exc.uncertain or exc.browser_stopped or exc.stop_unconfirmed)
+            ):
+                if asyncio.get_running_loop().time() >= retry_wait_until:
+                    # A late intermediate reply proves only that slice's observation.
+                    raise BrowserDriverError("等待浏览器观察回复时已超过截止时间", code="command_timeout") from None
+                raise _WaitConditionPending from None
             await self._raise_driver_error(owner, session, exc)
             raise AssertionError("unreachable")
         except BrowserOperationCancelled as exc:
@@ -3511,41 +3567,96 @@ class BrowserManager:
             text,
             text_gone,
         )
+        conditions = [
+            (flag, value) for flag, value in (("--text-gone", checked_text_gone), ("--text", checked_text)) if value
+        ]
+        timeout = checked_time + len(conditions) * self.config.command_timeout_seconds + 5
         owner = await self._owner(owner_id)
         async with owner.lock:
             session = self._session(owner, session_id)
             self._require_ai(owner, session)
-            await self._select(owner, session)
-            args: list[str] = []
-            if checked_time > 0:
-                args.extend(["--time-seconds", format(checked_time, ".15g")])
-            if checked_text:
-                args.extend(["--text", checked_text])
-            if checked_text_gone:
-                args.extend(["--text-gone", checked_text_gone])
-            condition_count = int(bool(checked_text)) + int(bool(checked_text_gone))
-            await self._run(
-                owner,
-                session,
-                "wait",
-                args,
-                mutating=False,
-                workdir=workdir,
-                # A combined wait is sequential by contract. Give each text
-                # condition one full action timeout plus transport headroom.
-                timeout_seconds=(
-                    checked_time
-                    + condition_count * self.config.command_timeout_seconds
-                    + 5
-                ),
+            tab, _ = await self._select(owner, session)
+            if not isinstance(self.driver, ElectronBrowserDriver) or not tab.target_id:
+                args = ["--time-seconds", format(checked_time, ".15g")] if checked_time else []
+                if checked_text:
+                    args.extend(["--text", checked_text])
+                if checked_text_gone:
+                    args.extend(["--text-gone", checked_text_gone])
+                await self._run(owner, session, "wait", args, workdir=workdir, timeout_seconds=timeout)
+                session.last_action = "等待页面条件"
+                return await self._snapshot_locked(owner, session, full=False, workdir=workdir)
+            target = _WaitTarget(
+                tab.target_id, session.wait_epoch, self.capability_generation(owner.owner),
+                owner.proxy, tab.label if tab.native_labeled else "",
             )
-            session.last_action = "等待页面条件"
-            return await self._snapshot_locked(
-                owner,
-                session,
-                full=False,
-                workdir=workdir,
-            )
+
+        return await self._wait_on_target(owner, session, target, checked_time, conditions, timeout, workdir)
+
+    def _require_wait_target(self, owner: _Owner, session: _Session, target: _WaitTarget) -> None:
+        self._ensure_leased_capability_current(owner.owner)
+        self._require_ai(owner, session)
+        active = session.tabs.get(session.active_label)
+        if (
+            self._owners.get(owner.owner) is not owner
+            or owner.sessions.get(session.session_id) is not session
+            or session.wait_epoch != target.epoch
+            or self.capability_generation(owner.owner) != target.capability
+            or owner.proxy is not target.proxy
+            or active is None
+            or active.target_id != target.target_id
+        ):
+            raise BrowserDriverError("等待中的标签页或控制权已变化", code="wait_target_changed")
+
+    async def _wait_on_target(
+        self, owner: _Owner, session: _Session, target: _WaitTarget, delay: float,
+        conditions: list[tuple[str, str]], timeout: float, workdir: str,
+    ) -> str:
+        clock = asyncio.get_running_loop().time
+        started = clock()
+        timer_end = started + delay
+        deadline = started + timeout
+        next_topology_check = started + 2.0
+        while True:
+            async with owner.lock.before(deadline):
+                self._require_wait_target(owner, session, target)
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    raise BrowserDriverError("等待浏览器操作队列时已超过截止时间", code="browser_queue_timeout")
+                delay_left = timer_end - clock()
+                if delay_left > 0:
+                    owner.last_activity = time.monotonic()
+                    # Native page closes are not pushed to the gateway. Check occasionally
+                    # during a long timer without selecting the tab or taking a snapshot.
+                    if clock() >= next_topology_check:
+                        graph = await self._run(
+                            owner, session, "tab", ["list"], workdir=workdir, timeout_seconds=remaining,
+                        )
+                        rows = self._native_tab_rows(graph)
+                        session_hash = _hash(session.session_id, 32)
+                        if not any(target.matches_native_row(row, session_hash) for row in rows):
+                            raise BrowserDriverError("等待中的标签页已关闭", code="wait_target_changed")
+                        next_topology_check = clock() + 2.0
+                elif conditions:
+                    # Each Playwright observation settles before yielding the owner queue.
+                    try:
+                        await self._run(
+                            owner, session, "wait", conditions[0], workdir=workdir,
+                            timeout_seconds=min(0.2, remaining),
+                            retry_wait_until=deadline if remaining > 0.2 else None,
+                        )
+                    except _WaitConditionPending:
+                        pass
+                    else:
+                        conditions.pop(0)
+                else:
+                    await self._select(owner, session)
+                    self._require_wait_target(owner, session, target)
+                    session.last_action = "等待页面条件"
+                    output = await self._snapshot_locked(owner, session, full=False, workdir=workdir)
+                    self._require_wait_target(owner, session, target)
+                    return output
+            if delay_left > 0:
+                await asyncio.sleep(min(0.2, delay_left))
 
     async def console(
         self,
@@ -5075,6 +5186,8 @@ class BrowserManager:
                 owner.actions_blocked = False
                 if not session.tabs:
                     owner.running = False
+                if session.mode != "ai":
+                    session.wait_epoch += 1
                 session.mode = "ai"
                 self._clear_ref_state(session)
                 session.generation += 1
