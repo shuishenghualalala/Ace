@@ -75,6 +75,9 @@ export interface ToolChunk {
     /** phase=progress 时的阶段进度文案或终端输出。 */
     text?: string;
     progress_metadata?: {
+      source?: 'mcp';
+      progress?: number;
+      total?: number;
       offset?: number;
       next_offset?: number;
       total_output_bytes?: number;
@@ -355,6 +358,10 @@ function turnSemanticsOf(chunk: AnyChatChunk): TurnSemantics {
   return 'bypass';
 }
 
+function isMcpToolProgress(chunk: AnyChatChunk): boolean {
+  return chunk.kind === 'tool' && chunk.body?.phase === 'progress' && chunk.body.progress_metadata?.source === 'mcp';
+}
+
 /**
  * 决定 chunk 是否属于当前可接收回合。该 gate 必须在 reducer patch 写入 store 前执行。
  *
@@ -373,6 +380,11 @@ export function resolveTurnGate(
   requestId: string | undefined,
   gate: TurnGateState,
 ): TurnGateDecision {
+  if (isMcpToolProgress(chunk)) {
+    return !gate.turnSealed && requestId && requestId === gate.activeRequestId
+      ? { action: 'accept' }
+      : { action: 'drop' };
+  }
   const semantics = turnSemanticsOf(chunk);
   if (semantics === 'bypass') return { action: 'accept' };
   if (!requestId) {
@@ -821,6 +833,8 @@ function capTerminalProgress(text: string, clipped: boolean, nextOffset?: number
   return { text: text.slice(start), clipped: clipped || start > 0, ...(nextOffset == null ? {} : { nextOffset }) };
 }
 
+const MCP_PROGRESS_CAPTION_LIMIT = 400;
+
 export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): ReducerResult {
   const book = { ...snapshot.book };
   const upserts: MessageUpsert[] = [];
@@ -838,7 +852,15 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
   else if (existing?.args) toolUpsert.args = existing.args;
 
   const phase = chunk.body.phase;
-  if (phase === 'progress') {
+  if (isMcpToolProgress(chunk)) {
+    if (book.turnSealed || existing?.status !== 'running' || typeof chunk.body.text !== 'string') {
+      return emptyFeatureReducerResult();
+    }
+    const prefix = chunk.body.text.trim().slice(0, MCP_PROGRESS_CAPTION_LIMIT * 2);
+    const caption = Array.from(prefix).slice(0, MCP_PROGRESS_CAPTION_LIMIT).join('');
+    if (!caption || caption === existing.mcpProgressText) return emptyFeatureReducerResult();
+    toolUpsert.mcpProgressText = caption;
+  } else if (phase === 'progress') {
     // 进度帧：保持运行态，进度作为独立过程行保留；不能落入完成分支。
     if (existing) {
       toolUpsert.status = existing.status === 'generating' ? 'generating' : 'running';
@@ -915,6 +937,7 @@ export function toolReducer(chunk: ToolChunk, snapshot: ReducerSnapshot): Reduce
     duration: toolUpsert.duration,
     progressText: toolUpsert.progressText,
     progressHistory: toolUpsert.progressHistory ?? existing?.progressHistory,
+    mcpProgressText: toolUpsert.mcpProgressText,
     terminalProgress: toolUpsert.terminalProgress,
   });
   book.toolMap = newToolMap;

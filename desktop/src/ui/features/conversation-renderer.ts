@@ -597,7 +597,7 @@ function sigWorkflowProgress(msg: ChatMessage, _configModel: string): string {
 
 function sigTeamInternal(msg: ChatMessage, isStreaming: boolean): string {
   const tools = (msg.toolCalls || []).map((tool) =>
-    `${tool.toolCallId}|${tool.name}|${tool.args || ''}|${tool.result || ''}|${tool.status}|${tool.duration || ''}|${JSON.stringify(tool.terminalProgress ?? null)}`,
+    `${tool.toolCallId}|${tool.name}|${tool.args || ''}|${tool.result || ''}|${tool.status}|${tool.duration || ''}|${JSON.stringify(tool.terminalProgress ?? null)}|${JSON.stringify(tool.mcpProgressText ?? null)}`,
   ).join(';');
   const artifacts = (msg.artifacts || []).map((artifact) =>
     `${artifact.artifact_id || artifact.id || ''}|${artifact.title || ''}|${artifact.path || ''}|${artifact.summary || ''}`,
@@ -631,7 +631,7 @@ function sigAgentTurn(
       ? m.toolCalls
           .map(
             (t) =>
-              `${t.toolCallId}|${t.name}|${t.args ?? ''}|${t.result ?? ''}|${t.status}|${t.startedAt}|${t.duration ?? ''}|${JSON.stringify(t.terminalProgress ?? null)}`,
+              `${t.toolCallId}|${t.name}|${t.args ?? ''}|${t.result ?? ''}|${t.status}|${t.startedAt}|${t.duration ?? ''}|${JSON.stringify(t.terminalProgress ?? null)}|${JSON.stringify(t.mcpProgressText ?? null)}`,
           )
           .join(';')
       : '';

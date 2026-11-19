@@ -242,6 +242,11 @@
 <p>ZCode 把非空 <code>structuredContent</code> 投影到模型，服务业务错误也保留相关详情。Ace 旧版只读取文本和图片，只含结构字段时交给模型的是空结果。现在将有效结构字段编码到工具正文，已经包含相同 JSON 对象的正文保持原样。真正的图片继续来自 MCP 协议图片块。图片组合在预算内先保留图片再截取转义后的文本，避免截断后整包无法解析。MCP Worker 诊断采集沿用结构字段的按键脱敏。</p>
 <p><strong>验收</strong> 真实 MCP SDK 的 stdio 回归在基线失败。真实 Streamable HTTP 在修复前还复现了加入大段结构字段后外层图片 JSON 被切坏。Windows 包内解释器经真实签名 Gateway、公开 WebSocket、默认延迟发现和一次性批准，以本机 MCP 与脚本模型对照运行。基线六轮复现三类结构数据丢失，最终七轮验证结构化正文、结构与普通文本并存、重复及空对象、真图片、业务错误与超限转义内容。含超限内容的一轮仍将完整图片送到模型，并保留正文头尾和截断标记。模型实际收到结果，各调用只派发一次，重启后七轮历史均可读，监听均释放。MCP、Agent、工具流水线和终端组合回归 270 项及 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/tools/output_filters.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/mcp/index.ts:425</code>、<code>:442</code>。</p>
+<h3 id="mcp-call-live-progress">并发 MCP 调用分别显示执行进度</h3>
+<p>ZCode 给每次 MCP 请求注册进度回调，事件带原会话、回合和工具 ID，界面按工具展示最新进度。Ace 旧版只调用 SDK 的工具入口，服务端缺少进度令牌。现在各调用在实际派发时注册 SDK 回调，发起调用通过原工具事件转发。每次调用只保留一条待发更新并限制频率，发送端取消后清理转发任务。原调用的绝对截止时间、权限和普通工具结果保持原语义。桌面只更新当前请求正在运行的工具行，过期帧不能在新回合创建或重新激活卡片。</p>
+<p><strong>Gateway 验收</strong> Windows 包内解释器用真实签名 WebSocket、状态保持的 Streamable HTTP MCP 和本地合成模型，在一个 MCP 连接中同时运行两条批准过的只读操作。基线两个会话均没有进度。候选分别收到一条和两条调用标识准确的更新。停止左会话使实际 MCP 处理器取消。服务端随后通过仍存活的 SSE 发出左调用的旧进度令牌，两条会话均未收到该条更新。右会话继续收到 <code>7/10</code>，模型取得精确工具结果。两组重启的签名公开历史一致，SQLite 中左操作退出待确认、右操作成功，进度未进入持久工具结果。所有监听释放。</p>
+<p><strong>桌面验收</strong> Windows Electron 用生产渲染模块处理签名 Gateway 捕获的进度帧。两条工具行各显示最新值，一条完成时另一条继续显示。实际点击停止会移除本地进度，随后送入停止终态和迟到帧也不会恢复卡片。第二个回合复用工具 ID 的边界另由 reducer 测试覆盖。后端 263 项、桌面定向 234 项、完整 TypeScript 检查、触及文件 ESLint 与 Ruff 通过。后端回归另验证慢进度接收端不阻塞另一条调用，以及不断上报进度也不会延长绝对截止时间。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>desktop/src/ui/reducers/chat-reducer.ts</code>。ZCode <code>apps/zcode-cli/packages/core/src/mcp/index.ts:277</code>、<code>packages/adapters/src/mcp/index.ts:1162</code>、<code>packages/ui/src/ToolCallBlocks/renderers/mcp.tsx:184</code>。</p>
 <h3>前台对话安装 MCP</h3>
 <p>ZCode 官方配置技能把对话操作接到结构化 MCP 配置，变更保存后由运行时连接、发现和注册工具。Ace 复用现有 MCP 设置的保存事务与增量连接，新增可调用的 <code>mcp_install</code>。管理员在前台对话一次确认，拒绝或取消不写配置；同名同配置保持幂等。同一会话下一轮可发现新工具。远程工具联网卡按公开会话和实际任务关联。</p>
 <p>两类本机真实传输各验证五轮。HTTP 与显式授权的宿主 stdio 均完成拒绝、批准、重复安装、同会话调用和重启后调用。面板使用的公开设置接口返回真实连接状态。HTTP 两次工具调用在公开会话完成原联网批准，四个 Gateway 和两个 stdio 进程正常退出。97 项安装、MCP 管理、生命周期和工具管线回归通过。</p>

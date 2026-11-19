@@ -23,6 +23,7 @@ import {
   planReviewReducer,
   todoUpdatedReducer,
   followupQuestionReducer,
+  resolveTurnGate,
   type ReducerSnapshot,
 } from '../../src/ui/reducers/chat-reducer';
 import { workflowProgressReducer, initKanbanBoard, disposeKanbanBoard } from '../../src/ui/features/kanban-board';
@@ -654,6 +655,51 @@ describe('toolReducer', () => {
       '读取文档…',
       '正在通读素材（1/2 段）…',
     ]);
+  });
+
+  it('retains one bounded MCP caption for each running tool and ignores late progress', () => {
+    let book = emptyBook();
+    const send = (body: Record<string, unknown>) => {
+      const chunk = normalizeChunk({ kind: 'tool', sequence: 1, body });
+      if (chunk?.kind !== 'tool') throw new Error('Expected tool chunk');
+      const result = toolReducer(chunk, makeSnapshot({ book }));
+      book = result.replaceBook ?? book;
+      return result;
+    };
+    const progress = (id: string, text: string) => send({
+      tool_call_id: id, phase: 'progress', text, progress_metadata: { source: 'mcp', progress: 1, total: 2 },
+    });
+    expect(progress('first', 'before start').replaceBook).toBeNull();
+    send({ tool_call_id: 'first', name: 'mcp__test__read', phase: 'start' });
+    send({ tool_call_id: 'second', name: 'mcp__test__read', phase: 'start' });
+    progress('first', 'first update');
+    progress('second', '1 / 2');
+    progress('first', '𠮷'.repeat(450));
+    expect(book.toolMap.get('first')).toMatchObject({ status: 'running', mcpProgressText: '𠮷'.repeat(400) });
+    expect(book.toolMap.get('first')?.progressHistory).toBeUndefined();
+    expect(book.toolMap.get('second')).toMatchObject({ status: 'running', mcpProgressText: '1 / 2' });
+    expect(progress('second', '1 / 2').replaceBook).toBeNull();
+
+    send({ tool_call_id: 'first', phase: 'result', detail: 'finished' });
+    expect(book.toolMap.get('first')?.mcpProgressText).toBeUndefined();
+    expect(progress('first', 'late after done').replaceBook).toBeNull();
+    expect(book.toolMap.get('first')).toMatchObject({ status: 'done', result: 'finished' });
+    book = { ...book, turnSealed: true };
+    expect(progress('second', 'late after stop').replaceBook).toBeNull();
+  });
+
+  it('requires an open matching request for MCP progress, including reused tool IDs', () => {
+    const chunk = normalizeChunk({
+      kind: 'tool', sequence: 1,
+      body: { tool_call_id: 'reused-call', phase: 'progress', progress_metadata: { source: 'mcp', progress: 1 } },
+    })!;
+    const pending = { turnSealed: false, activeRequestId: null, acceptingNewRequest: true };
+    const active = { ...pending, activeRequestId: 'new-turn', acceptingNewRequest: false };
+    expect(resolveTurnGate(chunk, 'old-turn', pending)).toEqual({ action: 'drop' });
+    expect(resolveTurnGate(chunk, 'old-turn', active)).toEqual({ action: 'drop' });
+    expect(resolveTurnGate(chunk, undefined, active)).toEqual({ action: 'drop' });
+    expect(resolveTurnGate(chunk, 'new-turn', active)).toEqual({ action: 'accept' });
+    expect(resolveTurnGate(chunk, 'new-turn', { ...active, turnSealed: true })).toEqual({ action: 'drop' });
   });
 
   it('clears stage text when the tool completes', () => {

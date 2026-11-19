@@ -58,6 +58,7 @@ export interface ToolCallInfo {
   progressText?: string | undefined;
   /** 按到达顺序保留的阶段进度行，供过程时间线逐行渲染。 */
   progressHistory?: string[] | undefined;
+  mcpProgressText?: string | undefined;
   terminalProgress?: { text: string; clipped: boolean; nextOffset?: number } | undefined;
 }
 
@@ -642,11 +643,10 @@ function appendToolProgressLines(
   ctx: { isActive: boolean; foldKey: string },
 ): void {
   if (STDOUT_PROGRESS_TOOLS.has(String(tool.name || '').trim().toLowerCase())) return;
-  const lines = tool.progressHistory?.length
-    ? tool.progressHistory
-    : tool.progressText
-      ? [tool.progressText]
-      : [];
+  const liveMcpProgress = ctx.isActive ? tool.mcpProgressText : undefined;
+  const lines = liveMcpProgress
+    ? [liveMcpProgress]
+    : (tool.progressHistory?.length ? tool.progressHistory : tool.progressText ? [tool.progressText] : []);
   if (lines.length === 0) return;
 
   const lineCount = lines.reduce((sum, s) => sum + s.split('\n').length, 0);

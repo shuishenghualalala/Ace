@@ -35,6 +35,7 @@ export interface ToolUpsert {
   duration?: number;
   progressText?: string;
   progressHistory?: string[];
+  mcpProgressText?: string;
   terminalProgress?: ToolCallInfo['terminalProgress'];
 }
 

@@ -358,6 +358,38 @@ describe('conversation-renderer 双实例隔离', () => {
     expect(panel.querySelector('[data-section="result"] pre')?.textContent).toBe('雪𠮷 finished');
   });
 
+  it('shows only the latest live MCP caption per tool on a cached turn', () => {
+    const panel = document.getElementById('panel-a')!;
+    const first = { toolCallId: 'first', name: 'mcp__example__work', args: '{}', status: 'running' as const, startedAt: 1 };
+    const second = { ...first, toolCallId: 'second' };
+    const message: ChatMessage = {
+      id: 'mcp-turn', role: 'assistant', content: '', timestamp: 1, streaming: true,
+    };
+    const render = (tools: ChatMessage['toolCalls'], streaming = true) => {
+      replaceSessionMessages('sid-mcp', [{ ...message, toolCalls: tools, streaming }]);
+      renderConversation(panel, 'panel-a', 'sid-mcp');
+    };
+    const captions = () => Array.from(panel.querySelectorAll('.process-timeline__stage'), node => node.textContent);
+    render([first, second]);
+    expect(captions()).toEqual([]);
+
+    const pendingSecond = { ...second, mcpProgressText: '1 / 2' };
+    render([{ ...first, mcpProgressText: 'Starting' }, pendingSecond]);
+    expect(captions()).toEqual(['Starting', '1 / 2']);
+    const pendingFirst = { ...first, mcpProgressText: '<example>Almost done</example>' };
+    render([pendingFirst, pendingSecond]);
+    expect(captions()).toEqual(['<example>Almost done</example>', '1 / 2']);
+    expect(panel.querySelector('.process-timeline__stage example')).toBeNull();
+
+    const completed = { ...pendingFirst, status: 'done' as const, result: 'First result' };
+    render([completed, pendingSecond]);
+    expect(captions()).toEqual(['1 / 2']);
+    expect(panel.querySelector('[data-section="result"] pre')?.textContent).toBe('First result');
+    render([completed, pendingSecond], false);
+    expect(captions()).toEqual([]);
+    expect(panel.querySelector('[data-section="result"] pre')?.textContent).toBe('First result');
+  });
+
   it('keeps native controls and their values while the answer streams', () => {
     const panel = document.getElementById('panel-a')!;
     appendSessionMessage('sid-a', { id: 'native-answer', role: 'assistant', content: '解释', timestamp: 1,

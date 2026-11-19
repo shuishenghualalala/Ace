@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
 import sys
 from contextlib import AsyncExitStack
+from contextvars import Context, copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,7 @@ from crew.core.observability import (
     event,
     span,
 )
+from crew.core.runctx import current_tool_progress_fn, emit_tool_progress
 from crew.state.logging import get_logger
 from crew.tools.output_filters import fit_json_text, get_max_output_chars, truncate_output
 from crew.tools.pipeline import DEFAULT_MAX_RESULT_SIZE_CHARS
@@ -56,6 +59,9 @@ MCP_CONCURRENT_READS_PER_SERVER = 2
 MCP_CALL_TIMEOUT_SECONDS = 60.0
 MCP_STARTUP_TIMEOUT_SECONDS = 30.0
 MCP_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+
+_PROGRESS_INTERVAL_SECONDS = 0.25
+_PROGRESS_MESSAGE_LIMIT = 400
 
 # 重连 supervisor 的共享默认（可被单个 server 配置 reconnect.* 覆盖）
 MCP_RECONNECT_ENABLED = True
@@ -75,6 +81,50 @@ async def _sleep(delay: float) -> None:
     await asyncio.sleep(delay)
 
 
+class _CallProgress:
+    """Forward only the latest update in the context of the originating call."""
+
+    def __init__(self) -> None:
+        self._origin: Context | None = copy_context()
+        self._pending: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(maxsize=1)
+        self._forwarder: asyncio.Task[None] | None = None
+
+    async def report(self, progress: float, total: float | None, message: str | None) -> None:
+        origin = self._origin
+        if origin is None or not math.isfinite(progress) or progress < 0:
+            return
+        metadata = {"source": "mcp", "progress": progress}
+        text = " ".join((message or "")[:_PROGRESS_MESSAGE_LIMIT].split())
+        if total is not None and math.isfinite(total) and total > 0:
+            metadata["total"] = total
+            text = text or f"{progress:g} / {total:g}"
+
+        # The SDK shares its receive loop across calls. Never wait for the UI here.
+        if self._pending.full():
+            self._pending.get_nowait()
+            self._pending.task_done()
+        self._pending.put_nowait((text or f"{progress:g}", metadata))
+        if self._forwarder is None:
+            self._forwarder = asyncio.create_task(self._forward(), context=origin)
+
+    async def _forward(self) -> None:
+        while True:
+            text, metadata = await self._pending.get()
+            self._pending.task_done()
+            await emit_tool_progress(text, metadata=metadata)
+            await asyncio.sleep(_PROGRESS_INTERVAL_SECONDS)
+
+    async def aclose(self) -> None:
+        self._origin = None
+        if not self._pending.empty():
+            self._pending.get_nowait()
+            self._pending.task_done()
+        forwarder, self._forwarder = self._forwarder, None
+        if forwarder is not None:
+            forwarder.cancel()
+            await asyncio.gather(forwarder, return_exceptions=True)
+
+
 @dataclass(slots=True)
 class _CallRequest:
     """一次 MCP 调用及其从入队时开始计算的绝对截止时间。"""
@@ -84,6 +134,7 @@ class _CallRequest:
     future: asyncio.Future[str]
     deadline: float
     observation_context: ObservationContext
+    progress: _CallProgress | None = None
     started: bool = False
     replied: bool = False
     call_task: asyncio.Task[None] | None = None
@@ -719,8 +770,11 @@ class _ServerWorker:
                             "tool": request.tool_name,
                         },
                     )
+                    progress_options = (
+                        {"progress_callback": request.progress.report} if request.progress is not None else {}
+                    )
                     async with asyncio.timeout_at(request.deadline):
-                        result = await session.call_tool(request.tool_name, request.args or {})
+                        result = await session.call_tool(request.tool_name, request.args or {}, **progress_options)
                         request.replied = True
                     max_chars = get_max_output_chars()
                     extracted = _extract_text(result, media_budget=min(max_chars, DEFAULT_MAX_RESULT_SIZE_CHARS))
@@ -961,12 +1015,14 @@ class _ServerWorker:
                 raise StructuredToolError(f"MCP server {self.name} 连接已断开", code="mcp_unavailable")
             loop = asyncio.get_running_loop()
             future: asyncio.Future[str] = loop.create_future()
+            progress = _CallProgress() if current_tool_progress_fn.get() is not None else None
             request = _CallRequest(
                 tool_name=tool_name,
                 args=args,
                 future=future,
                 deadline=loop.time() + self._call_timeout,
                 observation_context=capture_context(),
+                progress=progress,
             )
             from crew.core.runctx import observe_tool_exit
 
@@ -989,6 +1045,9 @@ class _ServerWorker:
                 # Cancelling the SDK request signals abandonment to the server; remote exit needs its own evidence.
                 request.abandon()
                 raise
+            finally:
+                if progress is not None:
+                    await progress.aclose()
 
         return handler
 

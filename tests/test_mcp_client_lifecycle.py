@@ -11,6 +11,7 @@ import pytest
 from crew.core.errors import StructuredToolError
 from crew.core.types import ToolCall
 from crew.core.observability import bind_observation, install_sink
+from crew.core.runctx import current_request_id, current_tool_progress_fn, current_tool_progress_metadata
 from crew.state.observability import ObservationRecorder
 from crew.state.trace_store import TraceStore
 from crew.tools.mcp_client import MCP_QUEUE_CAPACITY, MCPClientManager, _ServerWorker
@@ -41,6 +42,110 @@ class _FakeSession:
         self.call_started.set()
         await self.release.wait()
         return SimpleNamespace(content=[SimpleNamespace(text=name)], is_error=False)
+
+
+@pytest.mark.asyncio
+async def test_parallel_mcp_progress_is_bounded_and_stays_with_its_call(monkeypatch):
+    worker, session = await _started_worker(monkeypatch, call_timeout=4)
+    worker._parallel_reads = {"read"}
+    entered = {label: asyncio.Event() for label in ("left", "right")}
+    released = {label: asyncio.Event() for label in entered}
+    callbacks = {}
+    observed = {label: [] for label in entered}
+    unblock_left_sink = asyncio.Event()
+
+    async def server_call(_name, args, *, progress_callback=None):
+        label = args["label"]
+        callbacks[label] = progress_callback
+        entered[label].set()
+        await released[label].wait()
+        return SimpleNamespace(content=[SimpleNamespace(text=label)], is_error=False)
+
+    monkeypatch.setattr(session, "call_tool", server_call)
+
+    def start(label):
+        async def sink(text):
+            assert current_request_id.get() == label
+            observed[label].append((text, current_tool_progress_metadata.get()))
+            if label == "left":
+                await unblock_left_sink.wait()
+
+        request_token = current_request_id.set(label)
+        progress_token = current_tool_progress_fn.set(sink)
+        try:
+            return asyncio.create_task(worker._make_handler("read")({"label": label}))
+        finally:
+            current_tool_progress_fn.reset(progress_token)
+            current_request_id.reset(request_token)
+
+    left, right = (start(label) for label in entered)
+    try:
+        await asyncio.wait_for(asyncio.gather(*(ready.wait() for ready in entered.values())), 2)
+        assert callbacks["left"] is not None and callbacks["right"] is not None
+
+        await asyncio.wait_for(callbacks["left"](1, 50, "left started"), 0.8)
+        await _wait_for(lambda: len(observed["left"]) == 1)
+        for value in range(2, 51):
+            await callbacks["left"](value, 50, f"left {value}")
+
+        await callbacks["right"](2, 5, "right update")
+        await _wait_for(lambda: len(observed["right"]) == 1)
+        assert observed["right"] == [("right update", {"source": "mcp", "progress": 2, "total": 5})]
+        released["right"].set()
+        assert await asyncio.wait_for(right, 2) == "right"
+
+        unblock_left_sink.set()
+        await _wait_for(lambda: len(observed["left"]) == 2)
+        assert observed["left"] == [
+            ("left started", {"source": "mcp", "progress": 1, "total": 50}),
+            ("left 50", {"source": "mcp", "progress": 50, "total": 50}),
+        ]
+        left.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await left
+        await callbacks["left"](51, None, "late after stop")
+        await callbacks["right"](3, None, "late after result")
+        await asyncio.sleep(0)
+        assert len(observed["left"]) == 2 and len(observed["right"]) == 1
+    finally:
+        for task in (left, right):
+            task.cancel()
+        await asyncio.gather(left, right, return_exceptions=True)
+        await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_mcp_progress_cannot_extend_the_call_deadline(monkeypatch):
+    worker, session = await _started_worker(monkeypatch, call_timeout=0.2)
+    sink_closed = asyncio.Event()
+    observed = []
+
+    async def server_call(_name, _args, *, progress_callback):
+        value = 1
+        while True:
+            await progress_callback(value, float("inf"), "   ")
+            value += 1
+            await asyncio.sleep(0.01)
+
+    async def sink(text):
+        observed.append((text, current_tool_progress_metadata.get()))
+        try:
+            await asyncio.Future()
+        finally:
+            sink_closed.set()
+
+    monkeypatch.setattr(session, "call_tool", server_call)
+    progress_token = current_tool_progress_fn.set(sink)
+    try:
+        with pytest.raises(StructuredToolError) as failure:
+            await asyncio.wait_for(worker._make_handler("read")({}), 1.5)
+        assert failure.value.code == "mcp_call_timeout"
+        assert failure.value.side_effect_state == "unknown"
+        assert observed == [("1", {"source": "mcp", "progress": 1})]
+        assert sink_closed.is_set()
+    finally:
+        current_tool_progress_fn.reset(progress_token)
+        await worker.stop()
 
 
 async def _started_worker(
