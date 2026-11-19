@@ -331,7 +331,8 @@
 <p><strong>登录自启回归</strong> Windows Electron 43.1 的基线与候选共运行 10 个隔离场景。真实第二实例通过系统单实例锁打开原窗口。旧版在已有身份、缺少身份和从最小化恢复时均跳过检查。新版分别触发一次检查、检查 → 配置 → 复查，以及一次检查，重复打开无额外操作。隐藏和 CI 仍没有启动 helper。试验以无特权夹具代替管理员授权。桌面初始化单测 13 项和 TypeScript 检查通过。</p>
 <p><strong>设置入口复验</strong> Windows Electron 中通过真实设置页和原生 IPC 点击防护设置。旧版在自动配置未结束时返回忙碌，页面状态过期时再次请求提升权限。新版复用进行中的配置；自动配置已完成时仅复查，随后刷新为已就绪。基线与候选各两个场景，均正常退出。Gateway 状态与原生授权由隔离夹具提供。四组桌面回归 46 项通过、2 项现有跳过，TypeScript 检查通过。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts</code>、<code>security-setup.ts</code>、<code>deb-package/pack_exe.ps1</code>。Codex <code>codex-rs/windows-sandbox-rs/src/provisioning_client.rs</code>。</p>
-<p><strong>待验收的首次工具竞争</strong> 受管命令在获取 Windows ACL lease 前读取沙箱身份，自动准备可能在 UAC 等待中或尚未发布身份文件。此时首次工具仍可能提前得到沙箱未就绪。需用隔离包态验证工具早到、配置完成和取消三个分支。Codex App Server 对准备开始与准备完成使用独立事件。</p>
+<p><strong>首次工具与自动准备的竞争</strong> 旧版受管命令在获取 Windows ACL lease 前读取沙箱身份，自动准备可能还在 UAC 等待中或尚未发布身份。Codex 的 App Server 分别记录准备开始与完成，ZCode 工具执行器等待对应的准入结果。Ace 的打包桌面在自动准备前发布一次启动范围内的状态，终端在审批后、创建任务前短暂等待。成功时继续原生校验，失败和停止时当前命令未启动。独立 Gateway 不接收此信号。异步捕获进程沿用其原有的总超时，同步转换遇到准备中则立即报告未启动。</p>
+<p><strong>验收</strong> 在 Windows 隐藏 Electron 与验签 Gateway 中，基线 <code>a77de44e</code> 的首条受管终端命令在配置释放前返回 <code>sandbox_unavailable</code>。最终候选四个独立场景通过。另一会话在等待期间完成纯文本回合，准备成功后原工具只执行一次，历史显示成功。实际 WebSocket 停止、显式 1 秒等待超时、配置失败均未进入原生执行。停止和超时后发布就绪也不会重放。五个场景均正常结束和释放端口。试验使用真实状态发布器、合成模型和带清单校验的无特权 helper，未触发 UAC。后端 103 项通过、1 项跳过，桌面 37 项通过，TypeScript 与 Ruff 通过。</p>
 </article>
 <article id="browser-wait-visible-text">
 <h3>D7e · 重复文本会导致浏览器等待误判</h3>

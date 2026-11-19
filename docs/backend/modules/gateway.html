@@ -162,6 +162,7 @@ loop_lag_ms                         业务循环滞后毫秒：哨兵 task 每�
   <p>components 快照（startup / cron 状态）由业务循环上的哨兵 task 每秒戳到模块级变量，主端点与线程服务共用同一份 <code>build_health_components</code> 逻辑，两处响应不会出现语义分叉。线程服务生命周期挂在 FastAPI lifespan 内：启动早期拉起，shutdown 的最后一步停止——shutdown 期间桌面端仍能看到进程活性与循环滞后。桌面端探测优先打 health 线程端口（主端口 +1，<code>backend-health-probe.ts</code> 推导），验证失败（旧 gateway 无独立 health 线程）再回退主端口。</p>
 
   <p>桌面受管启动通过父进程租约辨认。若独立健康端口无法绑定，lifespan 跳过核心任务及可选服务的启动，主端口健康响应返回 <code>GATEWAY_HEALTH_PORT_UNAVAILABLE</code>。REST 和 WebSocket 的业务入口继续受启动状态约束。桌面验签并确认这是本次启动的子进程后，关闭该进程的父管道并等待退出，再继续选择端口。</p>
+  <p>Windows 安装版启动受管 Gateway 时传入当前桌面沙箱准备状态的位置。后台调用只在实际启动同一随包运行时前等待；独立启动的 Gateway 在引导阶段清除此位置。<a href="security.html#platforms">Windows 沙箱准备流程</a></p>
 
   <h2>7. 变更记录</h2>
   <table>

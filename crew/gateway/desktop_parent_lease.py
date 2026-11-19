@@ -87,6 +87,7 @@ def bootstrap_desktop_parent_lease(argv: Sequence[str]) -> DesktopParentLease | 
     global _active_lease
     raw_key = os.environ.pop(DESKTOP_PARENT_LEASE_KEY_ENV, "")
     if DESKTOP_PARENT_LEASE_ARG not in argv:
+        os.environ.pop("ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR", None)
         return None
     if re.fullmatch(r"[0-9a-f]{64}", raw_key) is None:
         raise SystemExit("Invalid Desktop Gateway parent lease key")

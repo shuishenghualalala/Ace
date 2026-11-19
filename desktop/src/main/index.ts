@@ -127,6 +127,7 @@ import {
   createWindowsSandboxSetupCoordinator,
   getWindowsUacStatus,
   provisionInstalledWindowsSandbox,
+  publishWindowsSandboxSetup,
   runElevatedUacEnable,
   securityRuntimePlatformKey,
 } from './security-setup';
@@ -378,6 +379,9 @@ const MANAGED_GATEWAY_PORT = Number.isInteger(devGatewayPort) && devGatewayPort 
   : 28180;
 const AUTOSTART_ARG = '--autostart';
 const windowsSandboxSetup = createWindowsSandboxSetupCoordinator();
+const windowsSandboxSetupDirectory = process.platform === 'win32' && app.isPackaged
+  ? path.join(app.getPath('userData'), 'crew-sandbox-setup-' + randomBytes(16).toString('hex'))
+  : undefined;
 const RENDERER_LAUNCH_SEARCH = '';
 let gatewayIdentityMode: GatewayIdentityMode = 'local';
 
@@ -1435,6 +1439,12 @@ function createWindow(previous?: BrowserWindow): void {
           packagedSecurityRuntimeEnv({ bundledOnly: true });
         return runtimePath ? { runtimePath, stateDir } : undefined;
       });
+      if (setup && windowsSandboxSetupDirectory) {
+        const disposeStatus = publishWindowsSandboxSetup(windowsSandboxSetupDirectory, setup, () => {
+          console.warn('[security] Windows initial sandbox setup status unavailable');
+        });
+        app.once('will-quit', disposeStatus);
+      }
       void setup?.then((result) => {
         if (!result.ok) console.warn('[security] Windows initial sandbox setup:', result.code ?? result.exitCode);
       }).catch(() => {
@@ -1756,6 +1766,11 @@ function startWindowsPackagedGateway(port: number): void {
 
   try {
     const spawnStart = Date.now();
+    const securityRuntimeEnv = packagedSecurityRuntimeEnv();
+    const bundledRuntime = path.join(process.resourcesPath, 'ace-security-runtime.exe');
+    const setupDirectory = securityRuntimeEnv.ACE_SECURITY_RUNTIME === bundledRuntime
+      ? windowsSandboxSetupDirectory
+      : undefined;
     managedGateway = spawnOwnedGateway(launch.command, launch.args, {
       cwd: gatewayRoot,
       windowsHide: true,
@@ -1767,7 +1782,8 @@ function startWindowsPackagedGateway(port: number): void {
         GATEWAY_PORT: String(port),
         ...managedGatewayModeEnv(gatewayIdentityMode, activeGatewayCrewHome()),
         ...launch.envExtras,
-        ...packagedSecurityRuntimeEnv(),
+        ...securityRuntimeEnv,
+        ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR: setupDirectory,
         // 与开发态一致：内嵌 Python 仍可能走 GBK 控制台
         PYTHONIOENCODING: 'utf-8',
         ...(process.platform === 'win32' ? { PYTHONUTF8: '1' } : {}),

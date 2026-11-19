@@ -210,6 +210,37 @@ export async function provisionInstalledWindowsSandbox(
   return setup.ok ? verify() : setup;
 }
 
+/** Publish the automatic operation to this Desktop's owned Gateway processes. */
+export function publishWindowsSandboxSetup(
+  directory: string,
+  setup: Promise<SecuritySetupResult>,
+  onError: () => void,
+): () => void {
+  try {
+    fs.mkdirSync(directory);
+  } catch {
+    onError();
+    return () => {};
+  }
+  const publish = (ok: boolean): void => {
+    try {
+      fs.writeFileSync(path.join(directory, ok ? 'ready' : 'failed'), '', { flag: 'wx' });
+    } catch {
+      onError();
+    }
+  };
+  void setup.then((result) => publish(result.ok), () => publish(false));
+
+  return () => {
+    try {
+      for (const marker of ['ready', 'failed']) fs.rmSync(path.join(directory, marker), { force: true });
+      fs.rmdirSync(directory);
+    } catch {
+      onError();
+    }
+  };
+}
+
 interface WindowsSandboxStartup {
   platform: string;
   packaged: boolean;

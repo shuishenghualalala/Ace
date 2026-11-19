@@ -25,8 +25,9 @@ from crew.gateway.desktop_parent_lease import (
 )
 
 
-def test_opted_out_gateway_scrubs_secret_without_using_stdin(monkeypatch):
+def test_opted_out_gateway_scrubs_desktop_state_without_using_stdin(monkeypatch):
     monkeypatch.setenv(DESKTOP_PARENT_LEASE_KEY_ENV, "a1" * 32)
+    monkeypatch.setenv("ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR", "desktop-setup")
     monkeypatch.setattr(lease_module, "_active_lease", None)
 
     class _NoStdin:
@@ -36,6 +37,7 @@ def test_opted_out_gateway_scrubs_secret_without_using_stdin(monkeypatch):
     monkeypatch.setattr(lease_module.sys, "stdin", _NoStdin())
     assert bootstrap_desktop_parent_lease([]) is None
     assert DESKTOP_PARENT_LEASE_KEY_ENV not in os.environ
+    assert "ACE_DESKTOP_WINDOWS_SANDBOX_SETUP_DIR" not in os.environ
     assert lease_module.create_desktop_launch_proof(b"ab" * 32) is None
 
 

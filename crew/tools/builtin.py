@@ -562,6 +562,7 @@ async def handle_terminal(
         from crew.security.approvals import ApprovalDecision
         from crew.security.context import build_security_context
         from crew.security.launch import (
+            audit_execution_result,
             compile_process_launch,
             current_process_launch,
             packaged_runtime_argv,
@@ -574,7 +575,8 @@ async def handle_terminal(
             SandboxPermissions,
             serialize_additional_permissions,
         )
-        from crew.security.runtime_client import NativeRuntimeClient
+        from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError
+        from crew.security.windows_setup import wait_for_windows_sandbox_setup
 
         security_context = build_security_context(workspace_store)
         mode = security_service.mode_for(security_context)
@@ -806,6 +808,17 @@ async def handle_terminal(
         }
         if approval_decision:
             terminal_metadata["approval_decision"] = approval_decision
+        if launch.managed:
+            try:
+                await wait_for_windows_sandbox_setup(launch.helper_argv, timeout=effective_timeout)
+            except NativeRuntimeError as exc:
+                audit_execution_result(
+                    launch, action, tool_name="terminal", decision="error", stable_error_code=exc.code.value,
+                )
+                return json.dumps(
+                    {"success": False, "error": str(exc), "error_code": exc.code.value},
+                    ensure_ascii=False,
+                )
     elif not allowed:
         return json.dumps(
             {"success": False, "error": reason, "error_code": error_code},

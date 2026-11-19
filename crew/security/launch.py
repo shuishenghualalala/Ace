@@ -127,6 +127,7 @@ async def execute_captured(
     on_output: Callable[[Literal["stdout", "stderr"]], None] | None = None,
     external: bool = False,
     tool_name: str = "captured_process",
+    _allow_setup_wait: bool = True,
 ) -> CapturedProcessResult:
     """Run an adapter under the current conversation boundary.
 
@@ -176,8 +177,12 @@ async def execute_captured(
     if launch.managed:
         from crew.security.broker import ExecutionRequest, SecurityExecutionBroker
         from crew.security.runtime_client import NativeRuntimeClient, NativeRuntimeError
+        from crew.security.windows_setup import wait_for_windows_sandbox_setup
 
         try:
+            timeout = await wait_for_windows_sandbox_setup(
+                launch.helper_argv, timeout=timeout, allow_wait=_allow_setup_wait,
+            )
             result = await SecurityExecutionBroker(NativeRuntimeClient(launch.helper_argv)).execute(
                 ExecutionRequest(
                     command=argv,
@@ -336,6 +341,8 @@ def execute_captured_sync(
                 env=env,
                 env_overrides=env_overrides,
                 tool_name=tool_name,
+                # The worker cannot observe cancellation of its asyncio.to_thread caller.
+                _allow_setup_wait=False,
             )
         )
     raise RuntimeError("execute_captured_sync must run outside an active event loop")

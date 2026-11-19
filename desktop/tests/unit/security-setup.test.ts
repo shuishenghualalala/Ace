@@ -1,6 +1,9 @@
 import { Buffer } from 'buffer';
 import type { spawn } from 'child_process';
 import { EventEmitter } from 'events';
+import { existsSync, mkdtempSync, readdirSync, rmdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildElevatedSecuritySetup,
@@ -8,6 +11,7 @@ import {
   createWindowsSandboxSetupCoordinator,
   parseEnableLuaOutput,
   provisionInstalledWindowsSandbox,
+  publishWindowsSandboxSetup,
   securityRuntimePlatformKey,
   type SecuritySetupResult,
 } from '../../src/main/security-setup';
@@ -144,5 +148,30 @@ describe('Windows sandbox setup coordinator', () => {
     expect(coordinator.startAutomatically(visibleWindows, location)).toBeUndefined();
     await expect(coordinator.run('install', runtimePath, stateDir)).resolves.toEqual(ready);
     expect(provision).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('Windows automatic sandbox setup status', () => {
+  it.each([
+    { ok: true, marker: 'ready' },
+    { ok: false, marker: 'failed' },
+  ])('publishes pending synchronously and completes with $marker', async ({ ok, marker }) => {
+    const parent = mkdtempSync(join(tmpdir(), 'crew-setup-test-'));
+    const directory = join(parent, 'operation');
+    let finish: (result: SecuritySetupResult) => void = () => {};
+    const setup = new Promise<SecuritySetupResult>((resolve) => { finish = resolve; });
+    const onError = vi.fn();
+    const dispose = publishWindowsSandboxSetup(directory, setup, onError);
+    try {
+      expect(readdirSync(directory)).toEqual([]);
+      finish({ ok, exitCode: ok ? 0 : 1 });
+      await setup;
+      expect(readdirSync(directory)).toEqual([marker]);
+    } finally {
+      dispose();
+      rmdirSync(parent);
+    }
+    expect(existsSync(directory)).toBe(false);
+    expect(onError).not.toHaveBeenCalled();
   });
 });
