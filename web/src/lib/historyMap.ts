@@ -14,6 +14,7 @@ export interface BackendHistoryItem {
   role: string;
   content: string;
   history_id?: string;
+  outcome?: unknown;
   timestamp?: number;
   turn_started_at?: number;
   turn_duration?: number;
@@ -144,19 +145,59 @@ export function mapHistoryItem(item: BackendHistoryItem): UiMessage {
   return base;
 }
 
+const outcomeReasonText = new Map([
+  ["output_limit", "回复达到模型输出上限，已保留生成的内容。"],
+  ["max_iterations", "回合达到执行步数上限，已保留当前结果。"],
+  ["stream_interrupted", "模型响应中断，已保留收到的内容。"],
+  ["tool_reconciliation_required", "请先核对工具执行结果，再决定是否继续。"],
+]);
+
+function outcomeText(value: unknown): string | undefined {
+  return typeof value === "string" ? value.trim().slice(0, 800) || undefined : undefined;
+}
+
+export function turnOutcomeNotice(
+  value: unknown,
+  requestId?: string,
+  fallbackMessage?: unknown,
+): UiMessage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const outcome = value as Record<string, unknown>;
+  if (outcome.status !== "partial" && outcome.status !== "failed") return undefined;
+  const request = requestId || (typeof outcome.request_id === "string" ? outcome.request_id : undefined);
+  const detail = outcomeText(outcome.message)
+    ?? (typeof outcome.reason === "string" ? outcomeReasonText.get(outcome.reason) : undefined)
+    ?? outcomeText(fallbackMessage);
+  const failed = outcome.status === "failed";
+  const title = failed ? "本轮执行失败。" : "回复未完成。";
+  return {
+    id: request ? "turn-outcome:" + request : newId(),
+    role: failed ? "error" : "status",
+    requestId: request,
+    turnOutcome: outcome.status,
+    text: detail ? title + detail : title,
+  };
+}
+
 export function mapHistoryItems(items: BackendHistoryItem[]): UiMessage[] {
   const messages: UiMessage[] = [];
+  const notices = new Set<string>();
   for (const item of items) {
     const message = mapHistoryItem(item);
-    if (message.role !== "team_internal") {
-      messages.push(message);
+    if (message.role === "team_internal") {
+      messages.splice(0, messages.length, ...mergeTeamInternalMessage(
+        messages,
+        message,
+        { append: message.eventType === "team_stream" },
+      ));
       continue;
     }
-    messages.splice(0, messages.length, ...mergeTeamInternalMessage(
-      messages,
-      message,
-      { append: message.eventType === "team_stream" },
-    ));
+    messages.push(message);
+    const notice = turnOutcomeNotice(item.outcome, item.request_id);
+    if (notice && !notices.has(notice.id)) {
+      messages.push(notice);
+      notices.add(notice.id);
+    }
   }
   return messages;
 }
@@ -192,7 +233,7 @@ export function mergeHistoryWithLiveMessages(
       nextAnswer += 1;
       return messages;
     }
-    if (message.role === "user" && message.id.startsWith("followup:")
+    if ((message.turnOutcome || (message.role === "user" && message.id.startsWith("followup:")))
       && messages.some(existing => existing.id === message.id)) return messages;
     if (message.role !== "team_internal" && messages.some(existing => isDuplicateAssistantOfTeamResult(existing, message))) return messages;
     const merged = message.role === "team_internal"

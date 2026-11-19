@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { api } from "../api";
-import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails, settleFollowupAnswer, toolExitUnconfirmed, type ToolResultMetadata, type BackendHistoryItem } from "../lib/historyMap";
+import { mapHistoryItems, mergeHistoryWithLiveMessages, normalizeTurnFileChanges, preserveLocalProcessDetails, settleFollowupAnswer, toolExitUnconfirmed, turnOutcomeNotice, type ToolResultMetadata, type BackendHistoryItem } from "../lib/historyMap";
 import { backendSecondsToMs } from "../lib/backendTime";
 import { mergeStreamingText } from "../lib/agentTurnState";
 import { normalizeTeamText } from "../lib/chunkNormalize";
@@ -1202,6 +1202,7 @@ export function useChat(
       } else if (c.kind === "final") {
         const text = c.body.text ?? "";
         const timing = localTurnTiming(sid);
+        const outcome = turnOutcomeNotice(c.body.outcome, chunkRequestId, c.body.message);
         // final 表示整个回合已结束；无论 Builtin 还是 ACP，前端都不能保留 running 工具。
         // 正常路径仍由 result/error 事件先更新，这里只处理缺失尾事件的统一兜底。
         for (const tool of book.toolMap.values()) {
@@ -1244,15 +1245,18 @@ export function useChat(
           patch(sid, assistantId, { turnFileChanges });
         }
         book.prevTurnFileSignature = { ...book.fileChangeSignatures };
+        if (outcome) append(sid, outcome.role, outcome.text, outcome);
         // 轮次结束才重置聚合（忙时连发时第一轮的尾部 delta 不会误起新消息）
-        finishLocalTurn(sid, "idle");
+        finishLocalTurn(sid, outcome?.turnOutcome === "failed" ? "error" : "idle");
         if (executingPlan) void loadHistory(sid);
         afterFinalRef.current();
         // 自动消费前端本地队列
         consumePendingRef.current(sid);
       } else if (c.kind === "error") {
-        append(sid, "error", c.body.message ?? "未知错误", localTurnTiming(sid));
-        finishLocalTurn(sid, "error");
+        const outcome = turnOutcomeNotice(c.body.outcome, chunkRequestId, c.body.message);
+        if (outcome) append(sid, outcome.role, outcome.text, outcome);
+        else append(sid, "error", c.body.message ?? "未知错误", localTurnTiming(sid));
+        finishLocalTurn(sid, outcome?.turnOutcome === "partial" ? "idle" : "error");
         if (executingPlan) void loadHistory(sid);
         // 自动消费前端本地队列（stop 导致的 error 会在 stop 回调中清空队列）
         consumePendingRef.current(sid);
@@ -1622,7 +1626,13 @@ export function useChat(
       ]);
       if (!isCurrent()) return;
       const list = mapHistoryItems(items);
-      if (st && st.last_status === "failed" && st.last_error) {
+      const settled = turnOutcomeNotice(st?.last_outcome);
+      const latestMessage = list.at(-1);
+      if (settled?.requestId && st?.live === "idle"
+        && latestMessage?.requestId === settled.requestId && !list.some(message => message.id === settled.id)) {
+        list.push(settled);
+      } else if (!settled && st?.last_status === "failed" && st.last_error
+        && !(latestMessage?.turnOutcome === "failed" && latestMessage.text.endsWith(st.last_error))) {
         list.push({ id: newId(), role: "error" as MsgRole, text: st.last_error });
       }
       // 重建 planReview 卡片：定位 plan 轮——最后一条 toolCalls 含 exit_plan_mode 的

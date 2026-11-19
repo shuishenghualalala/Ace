@@ -402,6 +402,67 @@ describe("Web Gateway recovery", () => {
   });
 });
 
+describe("Web turn outcomes", () => {
+  it("keeps a partial reply and its authoritative result when history replaces the live view", async () => {
+    const ws = TestWebSocket.instances[0];
+    await act(async () => chat.send("show a partial result", sid, "agent", workspace));
+    const requestId = chat.activeRequestId!;
+    const reply = "The prefix was generated";
+    const outcome = { status: "partial", reason: "output_limit", retryable: true };
+    await act(async () => {
+      ws.receive({ ...frame("delta", 1, { text: reply }), request_id: requestId });
+      ws.receive({ ...frame("final", 2, { text: reply, outcome }), request_id: requestId });
+    });
+    const expectPartial = () => {
+      expect(chat.messages.filter((message) => message.text === reply)).toHaveLength(1);
+      expect(chat.messages.filter((message) => message.turnOutcome)).toEqual([
+        expect.objectContaining({ requestId, turnOutcome: "partial", text: expect.stringContaining("回复未完成") }),
+      ]);
+    };
+    expectPartial();
+
+    vi.mocked(api.history).mockResolvedValueOnce([
+      { role: "user", content: "show a partial result", request_id: requestId },
+      { role: "assistant", content: reply, request_id: requestId, outcome },
+    ]);
+    vi.mocked(api.sessionStatus).mockResolvedValueOnce({ ...status("idle"), last_status: "partial", last_outcome: { ...outcome, request_id: requestId } });
+    await act(async () => chat.loadHistory(sid));
+    expectPartial();
+  });
+
+  it("keeps an earlier failure with its request while a later successful reply adds no notice", async () => {
+    const ws = TestWebSocket.instances[0];
+    const failure = { status: "failed", message: "Model rejected the credentials" };
+    await act(async () => chat.send("first request", sid, "agent", workspace));
+    const oldRequest = chat.activeRequestId!;
+    await act(async () => {
+      ws.receive({ ...frame("error", 1, { message: failure.message, outcome: failure }), request_id: oldRequest });
+    });
+    expect(chat.messages.filter((message) => message.text.includes(failure.message))).toHaveLength(1);
+
+    await act(async () => chat.send("second request", sid, "agent", workspace));
+    const nextRequest = chat.activeRequestId!;
+    await act(async () => {
+      ws.receive({ ...frame("final", 2, { text: "Normal reply", outcome: { status: "completed" } }), request_id: nextRequest });
+    });
+
+    vi.mocked(api.history).mockResolvedValueOnce([
+      { role: "user", content: "first request", request_id: oldRequest, outcome: failure },
+      { role: "user", content: "second request", request_id: nextRequest },
+      { role: "assistant", content: "Normal reply", request_id: nextRequest, outcome: { status: "completed" } },
+    ]);
+    vi.mocked(api.sessionStatus).mockResolvedValueOnce({ ...status("idle"), last_status: "completed" });
+    await act(async () => chat.loadHistory(sid));
+
+    expect(chat.messages.map((message) => [message.text, message.requestId, message.turnOutcome])).toEqual([
+      ["first request", oldRequest, undefined],
+      ["本轮执行失败。Model rejected the credentials", oldRequest, "failed"],
+      ["second request", nextRequest, undefined],
+      ["Normal reply", nextRequest, undefined],
+    ]);
+  });
+});
+
 describe("Web request-scoped stop", () => {
   it("binds a pre-token stop to the clicked round, preserves queued messages and keeps an unconfirmed tool visible", async () => {
     const ws = TestWebSocket.instances[0];

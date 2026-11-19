@@ -213,8 +213,9 @@ cd web && npm run build
     </tbody>
   </table>
 
-  <h2>12. 刷新后恢复错误信息（2026-06-11）</h2>
-  <p>修复「对话中报错，刷新页面后错误信息消失」。后端把错误写入 <code>sessions.last_error</code>，前端加载时通过 <code>/api/session/{id}/status</code> 回显。</p>
+  <h2>12. 回合结局与历史恢复</h2>
+  <p>Web 从 <code>final</code> 和 <code>error</code> 的 <code>body.outcome</code> 读取部分完成和失败结局，保留已有正文，并按原请求 ID 显示一条结局说明。历史回放使用同一套映射，从 <code>/api/session/{id}</code> 返回的用户或助手条目读取 <code>outcome</code> 与 <code>request_id</code>。只有用户输入的失败回合也能在原位置显示结局。</p>
+  <p>重连合并实时和持久历史时按请求 ID 去重。独立状态接口返回的 <code>last_outcome</code> 可补齐同一条已结束请求，旧版的 <code>last_error</code> 继续提供兼容提示。普通成功保留原有回复视图。</p>
 
   <h2>13. 忙时控制：Stop + Steer 两按钮（2026-06-11）</h2>
   <table>

@@ -92,9 +92,9 @@ export default function MessageItem({
     case "tool":
       return <div className="line-tool">{msg.text}</div>;
     case "status":
-      return <div className="line-status">{msg.text}</div>;
+      return <div className="line-status" data-turn-outcome={msg.turnOutcome}>{msg.text}</div>;
     case "error":
-      return <div className="line-error">{msg.text}</div>;
+      return <div className="line-error" data-turn-outcome={msg.turnOutcome}>{msg.text}</div>;
     default:
       return null;
   }

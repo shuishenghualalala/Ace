@@ -126,6 +126,9 @@
 <p class="evidence">Ace <code>crew/agent/executor/builtin.py:509</code>、<code>:1215</code>、<code>:1339</code>，<code>crew/core/envelope.py:141</code>，<code>crew/gateway/dispatcher.py:972</code>、<code>:1100</code>，<code>desktop/src/ui/reducers/chat-reducer.ts:1262</code>。ZCode <code>packages/ui/src/v4/conversationTurnRenderUnits.ts:187</code>。</p>
 </article>
 <article id="agent-interactions">
+<p><strong>独立 Web 回合结局</strong> ZCode 的 <code>product-projection.ts</code> 单独投影结构化结局与正文，<code>transcript-hydration.ts</code> 在重开时复用失败投影。Ace 的 Web 现在用同一套映射消费终态与持久历史，按请求 ID 在原回合显示部分完成或失败，正常回复照常显示。</p>
+<p><strong>验收</strong> 两项定向回归在旧版失败，候选全量 40 个 Web 测试文件、299 项通过，TypeScript 和生产构建通过。Windows Chrome 与实际 Gateway、回环模型按序触发 HTTP 401、有正文的输出上限和普通成功。两版的 WebSocket 终态与公开历史按请求核对一致。旧版界面刷新或重开后丢失旧失败，也未显示部分完成。候选在实时、刷新和 Gateway 重开后均各显示一次失败与部分完成说明，两个回复正文各显示一次。重开模型调用数为零，四个 Gateway 实例正常退出并释放端口。</p>
+
 <h3>A10 · P1 · 追问、工具审批和 Plan 批准缺少权威提交确认</h3>
 <p>普通聊天输入已有持久发送回执。追问答复仍在发出 WebSocket 消息后立即关卡片，有的路径还会先写入一条本地用户答复并恢复生成。Gateway 可能回报过期，桌面 reducer 会清理等待项而没有保留草稿和失败反馈。在途追问依赖 Gateway 内存中的 Future。Plan 确认也需要绑定具体版本。ZCode 权限对话框会保留提交中和应答失败状态。</p>
 <p><strong>修复</strong> 关卡片与写入确认答复以服务端回执为准。交互绑定账号、会话、回合和具体内容版本，重复提交返回同一结局。过期时保留答复或说明该交互已结束，Gateway 重启后需要重新确认的审批不能直接执行。对工具执行中间件改写参数的路径，按最终调用再核对工作区与审批范围。验收覆盖接受后丢回执、重复点击、旧 Plan、新进程收到旧审批、测试工具无害参数变化。</p>

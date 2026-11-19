@@ -32,6 +32,7 @@ import type {
   WikiUploadResult,
   Workspace,
 } from "./types";
+import type { BackendHistoryItem } from "./lib/historyMap";
 
 export class ApiError extends Error {
   constructor(
@@ -234,23 +235,12 @@ export const api = {
   sessions: () => getJSON<Session[]>("/api/sessions"),
   sessionsStatus: () => getJSON<Record<string, string>>("/api/sessions/status"),
   sessionStatus: (id: string, signal?: AbortSignal) =>
-    getJSON<{ session_id: string; active_request_id?: string; live: string; queue_depth: number; last_status: string; last_error: string }>(
+    getJSON<{ session_id: string; active_request_id?: string; live: string; queue_depth: number; last_status: string; last_error: string; last_outcome?: unknown }>(
       `/api/session/${id}/status`, { signal },
     ),
   runtimeConcurrency: () => getJSON<RuntimeConcurrency>("/api/runtime/concurrency"),
   history: (id: string) =>
-    getJSON<{ role: string; content: string; timestamp?: number; turn_started_at?: number; turn_duration?: number; thinking?: string; source_session_id?: string; agent_id?: string; agent_name?: string; agent_role?: string; agent_tone?: number; is_leader?: boolean; tool_calls?: {
-      id: string;
-      name: string;
-      ui_label?: string;
-      arguments: Record<string, unknown>;
-      started_at?: number;
-      duration?: number;
-      result?: string;
-      status?: "running" | "done" | "error";
-    }[] }[]>(
-      `/api/session/${id}`,
-    ),
+    getJSON<BackendHistoryItem[]>(`/api/session/${id}`),
   historyTail: (id: string, signal?: AbortSignal) =>
     getJSON<{ items: { role: string; request_id?: string }[] }>(
       `/api/session/${encodeURIComponent(id)}/history?limit=40`, { signal },

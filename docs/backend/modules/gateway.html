@@ -71,6 +71,7 @@
   <p>实时推送的 <code>gateway.push_min_interval</code> 默认 30 毫秒。普通连续帧按同一账号和会话的发送间隔合并，序号分配并写入内存回放日志后才进入限流。工具开始、追问、Plan 评审和终态仍按原顺序先刷新待发送帧。YAML 显式间隔继续生效，配置为 <code>0</code> 时关闭间隔限流。</p>
   <p>WebSocket 重连时，Gateway 按账号和会话串行处理序号分配、回放和实时订阅。新连接先按游标接收回放，再加入实时订阅。已经进入回放缓存的限流帧会先发给原订阅者，避免新连接在回放后重复收到这些帧。</p>
   <p>会话帧包含 <code>gateway_epoch</code> 和 <code>gateway_sequence</code>。支持代次的客户端在 <code>gateway_cursors</code> 中按会话发送 <code>{epoch, sequence}</code>。Gateway 重启和账号退出都会更换对应代次。旧客户端仍可使用 <code>last_gateway_sequences</code>。</p>
+  <p>回合终态通过 WebSocket 的 <code>body.outcome</code> 发送。公开会话历史在对应用户或助手条目中提供 <code>outcome</code> 和 <code>request_id</code>，会话状态接口同时提供最近的 <code>last_outcome</code>。Web 使用原请求归属恢复部分完成或失败的说明，并保留该回合已有正文。<a href="../../frontend/web-frontend.html">Web 会话数据流</a></p>
   <p>提交的游标格式无效、代次不符或越出保留窗口时，Gateway 给请求 socket 返回 <code>gateway_resync</code>，包含当前代次、保留下界和后续实时帧的起始水位。客户端从持久历史恢复已结束的回合。恢复消息也可携带仍待答的追问，最多保留 128 个会话、每会话 8 条、每条 32 KiB。</p>
   <p>客户端可用 <code>gateway_snapshots</code> 协商在途快照。普通前台 Agent 回合在用户消息提交后捕获一页历史，按回放锁记录已过滤的增量、工具和状态。恢复响应在同一水位发送历史与在途投影，客户端重建界面并接续新帧。最多保留 16 个在途快照、每个 2 MiB 的编码数据。快照缺失、超限或回合已转后台时，客户端保留已显示的内容，在回合结束后补齐历史。</p>
   <table>

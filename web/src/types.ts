@@ -682,6 +682,7 @@ export interface TurnFileChangeSummary {
 export interface UiMessage {
   id: string;
   pendingFollowupAnswer?: boolean;
+  turnOutcome?: "partial" | "failed";
   role: MsgRole;
   text: string;
   /** 思考过程（assistant 消息） */

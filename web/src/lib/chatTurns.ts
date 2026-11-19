@@ -15,13 +15,13 @@ export function groupMessagesIntoTurns(messages: UiMessage[]): ChatTurn[] {
   let i = 0;
   while (i < messages.length) {
     const msg = messages[i];
-    if (!isAgentRole(msg.role)) {
+    if (!isAgentRole(msg.role) || msg.turnOutcome) {
       turns.push({ kind: "user", message: msg });
       i += 1;
       continue;
     }
     let j = i + 1;
-    while (j < messages.length && isAgentRole(messages[j].role)) j += 1;
+    while (j < messages.length && isAgentRole(messages[j].role) && !messages[j].turnOutcome) j += 1;
     turns.push({ kind: "agent", messages: messages.slice(i, j), turnId: msg.id });
     i = j;
   }
