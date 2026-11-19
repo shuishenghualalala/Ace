@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -150,44 +151,50 @@ def _store_factory(
     workspace_store = getattr(host, "workspace_store", None)
     if session_store is None or workspace_store is None:
         raise ValueError("Work Feature requires session_store and workspace_store")
-    service = WorkService(
-        references=WorkReferenceStore(
-            db_path,
+    with ExitStack() as cleanup:
+        def own(store: Any) -> Any:
+            cleanup.callback(store.close)
+            return store
+
+        service = WorkService(
+            references=own(WorkReferenceStore(
+                db_path,
+                session_store=session_store,
+                wal_enabled=wal_enabled,
+            )),
+            preferences=own(WorkPreferenceStore(db_path, wal_enabled=wal_enabled)),
+            items=own(WorkItemStore(db_path, wal_enabled=wal_enabled)),
+            sources=own(WorkSourceStore(
+                db_path,
+                approved_source_keys=approved_source_keys,
+                adapters=source_adapters,
+                wal_enabled=wal_enabled,
+            )),
+            briefs=own(WorkBriefStore(db_path, wal_enabled=wal_enabled)),
+            settings=own(WorkSettingsStore(
+                db_path,
+                workspace_store=workspace_store,
+                wal_enabled=wal_enabled,
+            )),
+            templates=own(WorkTemplateStore(db_path, wal_enabled=wal_enabled)),
+            knowledge=own(WorkKnowledgeStore(
+                db_path,
+                knowledge_service_acquirer=knowledge_service_acquirer,
+                organization_provider=organization_provider,
+                wal_enabled=wal_enabled,
+            )),
             session_store=session_store,
-            wal_enabled=wal_enabled,
-        ),
-        preferences=WorkPreferenceStore(db_path, wal_enabled=wal_enabled),
-        items=WorkItemStore(db_path, wal_enabled=wal_enabled),
-        sources=WorkSourceStore(
-            db_path,
-            approved_source_keys=approved_source_keys,
-            adapters=source_adapters,
-            wal_enabled=wal_enabled,
-        ),
-        briefs=WorkBriefStore(db_path, wal_enabled=wal_enabled),
-        settings=WorkSettingsStore(
-            db_path,
             workspace_store=workspace_store,
+            preference_extractor=preference_extractor,
+            preference_notifier=preference_notifier,
+            hook_registry=hook_registry,
+        )
+        _prepare_work_storage(
+            db_path=db_path,
             wal_enabled=wal_enabled,
-        ),
-        templates=WorkTemplateStore(db_path, wal_enabled=wal_enabled),
-        knowledge=WorkKnowledgeStore(
-            db_path,
-            knowledge_service_acquirer=knowledge_service_acquirer,
-            organization_provider=organization_provider,
-            wal_enabled=wal_enabled,
-        ),
-        session_store=session_store,
-        workspace_store=workspace_store,
-        preference_extractor=preference_extractor,
-        preference_notifier=preference_notifier,
-        hook_registry=hook_registry,
-    )
-    _prepare_work_storage(
-        db_path=db_path,
-        wal_enabled=wal_enabled,
-        legacy_db_path=legacy_db_path,
-    )
+            legacy_db_path=legacy_db_path,
+        )
+        cleanup.pop_all()
     return service
 
 

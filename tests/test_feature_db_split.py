@@ -24,6 +24,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from contextlib import closing
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -609,6 +610,36 @@ def _build_work_bundle(db_path, *, legacy_db_path=None):
         legacy_db_path=str(legacy_db_path) if legacy_db_path is not None else None,
         hook_registry=object(),
     )
+
+
+def test_work_closes_open_handles_on_a_later_connection_failure(tmp_path, monkeypatch):
+    work_db = tmp_path / "work.db"
+    real_connect = sqlite3.connect
+    connections = []
+
+    def fail_later_open(database, *args, **kwargs):
+        if Path(database) == work_db and len(connections) == 2:
+            raise sqlite3.OperationalError("test runtime connection failure")
+        connection = real_connect(database, *args, **kwargs)
+        if Path(database) == work_db:
+            connections.append(connection)
+        return connection
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(sqlite3, "connect", fail_later_open)
+            with pytest.raises(sqlite3.OperationalError, match="test runtime connection failure"):
+                _build_work_bundle(work_db)
+
+        assert len(connections) == 2
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+        bundle = _build_work_bundle(work_db)
+        bundle.service.close()
+    finally:
+        for connection in connections:
+            connection.close()
 
 
 def test_load_config_reads_and_normalizes_work_db_path(tmp_path, monkeypatch):
