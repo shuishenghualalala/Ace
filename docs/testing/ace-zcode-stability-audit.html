@@ -722,6 +722,10 @@
 <h4>定时任务恢复等待写锁时维持 Gateway 就绪</h4>
 <p>旧版发布就绪后在业务循环直接等待 <code>cron.db</code> 写事务。ZCode 的 <code>packages/desktop/src/host/database-startup/storagePreparationProcesses.ts</code> 使用专用 Worker 处理 SQLite 启动工作。Ace 的定时任务调度器今后先通过 SQLite 异步写入恢复遗留 Fire，再启动调度并挂载当前 Owner。同一宿主的在线更新复用首次恢复结果。</p>
 <p><strong>验收</strong> Windows 发行运行时启动实际网关，独立 SQLite 连接持有 <code>BEGIN IMMEDIATE</code> 写锁。基线 <code>2846e38c</code> 的主端口签名请求和 WebSocket 握手均超时，旁路健康端口仍通过签名校验。候选在写锁释放前完成主端口签名验证、经 WebSocket 的首聊与 HTTP 历史读取，模型使用回环 SSE 夹具。释放写锁后仅挂载一次本地 Owner，将遗留 Fire 标为 <code>abandoned</code>，保留后续定时任务。两版都重启核对历史并正常释放双端口。锁实验证明了这条阻塞路径，六次常规启动中的延迟来源还需单独测量。</p>
+<h4 id="cron-owner-mount-blocking">Cron 挂载 Owner 时等待 SQLite 写锁</h4>
+<p>在干净 <code>8fea13a7</code> Windows 发行 Gateway 中，等遗留 Fire 的实际恢复事务提交后，暂缓进入 Owner 挂载。暂停期间主端口签名和真实 WebSocket 握手均成功。另一连接持有隔离 <code>cron.db</code> 的 <code>BEGIN IMMEDIATE</code> 后放行挂载。此时已有的 <code>prepare_owner_jobs_for_mount</code> 在主线程等待写锁，主端口签名请求和 WebSocket 均超时，独立健康端口仍返回有效签名并报告就绪。</p>
+<p>释放写锁后，服务注册已有计划，真实首聊完成并保存。重启后历史和计划均保留，先前中断的 Fire 保持 <code>abandoned</code>，没有重放。两次 Gateway 正常退出，主端口、独立健康端口及模型端口均释放。现有异步恢复覆盖遗留 Fire，Owner 挂载另有独立事务。ZCode 在专用 Worker 处理 SQLite 启动准备，并在取得有效启动代次后发布结果。</p>
+<p class="evidence">Ace <code>crew/cron/scheduler.py:426</code>、<code>crew/cron/jobs.py:735</code>、<code>crew/gateway/logout.py:111</code>。ZCode <code>packages/desktop/src/host/database-startup/storagePreparationProcesses.ts:39–79</code>。</p>
 <h4 id="desktop-skills-catalog-loop">Windows 技能目录扫描与首会话就绪</h4>
 <p>Cron 修复后，在私有 Windows Electron 发行副本中完成两组首启与重开，四次均通过签名复验、WebSocket 首聊、持久历史和双端口清理。CoreReady 至发送可用为 468.6–495.1 毫秒，中位 473.8 毫秒。新旧测量使用不同物理路径和探针，整体耗时作描述性记录。</p>
 <p>连续 tick、Windows 线程 CPU 与只在超阈值采样的 Python 栈，均捕获了技能列表或商店读取中的扫描、路径核查与目录遍历。四次循环间隔为 177.4–209.0 毫秒，同期循环线程 CPU 为 171.9–203.1 毫秒。紧接着的 150.4–163.7 毫秒间隔采到 FastAPI 路由依赖与 Pydantic 模型初始化。Cron 恢复均在前面的可选启动阶段完成。这四次回环建连 3.3–16.8 毫秒，旧测量中的长升级前等待在此轮没有出现。首个物理路径读盘的先导单列。</p>
@@ -889,6 +893,16 @@
 <p>Sites 候选将 Blueprint 和原生可视化的 JSON Schema 验证器移到实际验证入口。私有两份目录和共用未改源码物理树各四对，另做两对垃圾回收定界。共用物理树的四对中，基线装配导入校验器为 194.6–211.7 毫秒，候选的普通首聊未导入。启动至首正文变化为 −319、−1,500、−463、+212 毫秒。两版都等技能 GET 完成才发送；实际发送至首正文在四对中各慢 65–111 毫秒。</p>
 <p>最后两对也等待技能 GET 完成。两次基线第 2 代 GC 均在 GET 返回后至 WS 发送前结束，耗时 129、105 毫秒。候选两次均在发送后到模型上游首段前发生，耗时 108、111 毫秒，实际发送至首正文各慢 88、66 毫秒。20 次 Sites 启动均验证真实回环首聊、持久历史、退出和端口回收。候选首次合法和非法 Blueprint artifact 及 23 项定向用例通过。当前发行保留两处原装配，整机冷启动和发送后首段继续独立测量。</p>
 <p class="evidence">Ace <code>crew/team/team_manager.py</code>、<code>crew/sites/blueprint.py</code>、<code>crew/sites/native_visual.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/workflow/expert/scheduled-phase.ts:27</code> 在执行阶段构建调度器，<code>packages/services/src/gen-ui/adapters/service.ts:34</code> 区分读取与准备验证。</p>
+<h4 id="windows-idle-scheduler-startup">无计划任务时的调度引擎装配对照</h4>
+<p>在 <code>8fea13a7</code> 的包内 Python 单次剖析中，Gateway 导入 5.735 秒，应用装配 4.798 秒。APScheduler 基类导入自身约 140 毫秒。原版按顺序启动空的 Cron 与 Blueprint 引擎。ZCode 在数据库就绪后启动独立调度进程，由进程自身恢复任务。Ace 的试验在各模块首个有效任务出现时才创建引擎，普通首聊不需要调度依赖。</p>
+<p>在同一 Windows 发行布局做三对交错启动，共六个独立全新配置。每次通过双端口签名、实际 WebSocket 首答、会话历史、SQLite 与端口释放。三次基线均加载 21 个 APScheduler 模块并启动两个引擎，候选均为零。配对耗时如下，正值表示候选更慢。</p>
+<table><thead><tr><th>阶段（毫秒）</th><th>第一对</th><th>第二对</th><th>第三对</th><th>配对中位差</th></tr></thead><tbody>
+<tr><td>双端口签名就绪</td><td>+91.4</td><td>+93.7</td><td>−545.4</td><td>+91.4</td></tr>
+<tr><td>启动至首段正文</td><td>+118.4</td><td>+97.5</td><td>−574.5</td><td>+97.5</td></tr>
+<tr><td>实际发送至首段正文</td><td>+43.5</td><td>+14.6</td><td>−40.5</td><td>+14.6</td></tr>
+</tbody></table>
+<p>另通过真实计划执行验证首个 Cron 任务能按时运行并保存终态，已有任务重启后恢复，进程退出前中断的 Fire 标为 <code>abandoned</code>。Blueprint 的手动和停用记录保持空闲，显式启用时间计划后注册实际任务，删除时移除。复核发现，已保存 Cron 任务的账号若在首次挂载时遇到引擎启动异常，异常会传到普通登录和会话准入。端到端未证实稳定提速，实验未合入。</p>
+<p class="evidence">Ace <code>crew/cron/jobs.py</code>、<code>crew/cron/scheduler.py</code>、<code>crew/sites/blueprint.py</code>、<code>crew/gateway/logout.py</code>。ZCode <code>packages/desktop/src/main/index.ts:2127–2144</code>、<code>packages/desktop/src/main/desktopCronScheduler.ts:61–69</code>、<code>packages/desktop/src/scheduler/index.ts:431–449</code>。</p>
 <h3>Windows 正式包实际可发送时间复测</h3>
 <p>复用 <code>024e03da</code> 官方发行副本，新建两个独立用户目录。测量从新进程和新用户目录开始，沿用系统文件缓存。两轮均经真实输入框发送本地 SSE 对话，核对答复和唯一用户消息落盘。</p>
 <table>
