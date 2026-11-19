@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
@@ -34,6 +34,36 @@ log = get_logger("state.session_store")
 
 T = TypeVar("T")
 HistoryRow = tuple[str, int, Message]
+
+
+def iter_history_tool_results(
+    rows: Iterable[tuple[str, Message]],
+) -> Iterator[tuple[int | None, str, str]]:
+    """Pair results with their assistant block in canonical history order."""
+    assistant_index = None
+    request_id = None
+    source_session = None
+    calls: dict[str, str] = {}
+    for index, (source, message) in enumerate(rows):
+        if source != source_session:
+            calls.clear()
+            source_session = source
+        if message.source_kind == "turn_outcome":
+            continue
+        if message.role == "assistant":
+            assistant_index = index
+            request_id = message.request_id
+            calls = {call.id: call.name for call in message.tool_calls}
+        elif message.role == "user" and not message.is_meta and not message.followup_history_id:
+            calls.clear()
+        elif message.role == "tool" and message.tool_call_id and message.content:
+            expected_name = calls.get(message.tool_call_id)
+            belongs = (
+                expected_name is not None
+                and (not message.name or message.name == expected_name)
+                and (not message.request_id or not request_id or message.request_id == request_id)
+            )
+            yield assistant_index if belongs else None, message.tool_call_id, message.content
 
 
 @dataclass(slots=True)
@@ -1378,13 +1408,10 @@ class SQLiteSessionStore(SessionStore):
         if found or (checkpoint == 0 and walked <= budget):
             # Tool results that belong to an older assistant alter an already
             # materialized row. Sending a bare append would silently lose them.
-            calls = {call.id for _, _, message in rows if message.role == "assistant" for call in message.tool_calls}
-            if any(
-                message.role == "tool" and message.content and message.tool_call_id not in calls
-                for _, _, message in rows
-            ):
-                return None
             rows.reverse()
+            tool_results = iter_history_tool_results((source, message) for source, _, message in rows)
+            if any(assistant_index is None for assistant_index, _, _ in tool_results):
+                return None
             first = next((
                 message for _, _, message in rows
                 if message.source_kind != "turn_outcome" and self._visible_history_role(message)

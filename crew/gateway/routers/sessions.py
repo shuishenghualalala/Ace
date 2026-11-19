@@ -36,6 +36,7 @@ from crew.state.session_store import (
     SessionOwnershipError,
     SessionWriteConflict,
     is_placeholder_title,
+    iter_history_tool_results,
 )
 from crew.team.team_member_model import (
     TeamMemberModelBindingError,
@@ -112,11 +113,12 @@ def _session_messages_to_history_items(
     # messages. Older assistant ToolCall rows therefore have an empty result,
     # even though the live tool_event carried one. Pair them at read time so
     # history can reconstruct UI artifacts such as exported browser images.
-    tool_results = {
-        message.tool_call_id: message.content
-        for message in msgs
-        if message.role == "tool" and message.tool_call_id and message.content
-    }
+    tool_results: dict[int, dict[str, str]] = {}
+    for assistant_index, call_id, content in iter_history_tool_results(
+        (source_session_id, message) for message in msgs
+    ):
+        if assistant_index is not None:
+            tool_results.setdefault(assistant_index, {})[call_id] = content
     for index, message in enumerate(msgs):
         if message.is_meta:
             continue  # 跳过元信息消息
@@ -159,12 +161,13 @@ def _session_messages_to_history_items(
             if message.model:
                 item["model"] = message.model
             if message.tool_calls:
+                paired_results = tool_results.get(index, {})
                 item["tool_calls"] = [
                     {
                         "id": tc.id,
                         "name": tc.name,
                         "arguments": tool_arguments_for_ui(tc.name, tc.arguments),
-                        "result": _tool_result_for_history(tc, tool_results),
+                        "result": _tool_result_for_history(tc, paired_results),
                         "status": tc.status,
                         **({"result_metadata": {
                             "code": "tool_exit_unconfirmed", "details": {"exit_confirmed": False},

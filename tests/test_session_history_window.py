@@ -524,6 +524,47 @@ def test_history_window_pairs_tools_at_a_page_boundary_and_reprojects_unsafe_app
         assert older["items"][1]["tool_calls"][0]["result"] == path
 
 
+@pytest.mark.parametrize("with_request_ids", [False, True])
+def test_history_pairs_reused_tool_ids_with_their_assistant_blocks(tmp_path, with_request_ids):
+    from crew.gateway.routers.sessions import _session_messages_to_history_items
+
+    def capture(index):
+        request_id = f"request-{index}" if with_request_ids else None
+        path = f"/tmp/.crew/accounts/acct_0123456789abcdef/task_workspaces/default/downloads/browser/{index}.png"
+        return [
+            replace(Message.user(f"Capture {index}"), request_id=request_id),
+            replace(Message.assistant(f"Capturing {index}", [
+                ToolCall("call_1", "browser_use", {"action": "screenshot"}),
+            ]), request_id=request_id),
+            replace(Message.tool("call_1", path, name="browser_use"), request_id=request_id),
+        ], path
+
+    def artifact(items, index):
+        row = next(item for item in items if item["content"] == f"Capturing {index}")
+        return row["tool_calls"][0]["result"]
+
+    first, first_path = capture(1)
+    second, second_path = capture(2)
+    with closing(SQLiteSessionStore(str(tmp_path / "crew.db"))) as store:
+        store.save("s1", first[:2], owner_account_id=OWNER)
+        partial = _versioned(store)
+        store.save("s1", [*first, *second], owner_account_id=OWNER)
+        complete = _session_messages_to_history_items(store.load("s1", owner_account_id=OWNER))
+        assert [artifact(complete, 1), artifact(complete, 2)] == [first_path, second_path]
+
+        all_rows = _versioned(store, limit=4)
+        assert [artifact(all_rows["items"], 1), artifact(all_rows["items"], 2)] == [first_path, second_path]
+
+        newest = _versioned(store)
+        older = _versioned(store, before=newest["next_before"], revision=newest["revision"])
+        assert artifact(newest["items"], 2) == second_path
+        assert artifact(older["items"], 1) == first_path
+
+        updated = _versioned(store, limit=4, after=partial["head"], revision=partial["revision"])
+        assert updated["mode"] == "snapshot"
+        assert [artifact(updated["items"], 1), artifact(updated["items"], 2)] == [first_path, second_path]
+
+
 def test_versioned_history_keeps_rows_and_revision_in_one_wal_read_snapshot(tmp_path, monkeypatch):
     db_path = str(tmp_path / "crew.db")
     with closing(SQLiteSessionStore(db_path)) as writer, closing(SQLiteSessionStore(db_path)) as reader:

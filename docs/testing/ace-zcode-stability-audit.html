@@ -194,6 +194,10 @@
 <p>原版只将特定的退出未确认错误写到助手的工具调用状态。ZCode 的产品投影从持久工具结算的结构化成功字段生成真实状态。Ace 在串并行共用的 Agent 结算入口，按已有 <code>is_error</code> 保存调用失败。历史继续读取这一权威状态，供模型的工具正文和已有披露规则保持一致。</p>
 <p><strong>验收</strong> Windows 真实 Gateway 与 Streamable HTTP 用隔离会话、一次性授权和模拟迟到的结果触发原有 <code>mcp_call_timeout</code>。两版的 WebSocket 错误及 <code>side_effect_state=unknown</code> 相同，公开历史从 <code>done</code> 变为 <code>error</code>，助手调用结果仍为空，远端各只收到一次调用。两进程正常退出并释放端口。107 项 Agent 回归通过，新增串行和并行用例在旧版均为失败。无法与同 owner、会话、请求及步骤唯一关联的旧历史仍用原保存状态。</p>
 <p class="evidence">Ace <code>crew/agent/loop/tool_runner.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/product-projection.ts:3232</code>。</p>
+<h3 id="history-tool-result-pairing">模型复用工具调用 ID 时保持各自的历史卡片</h3>
+<p>旧版从整页用调用 ID 查结果。模型在后续请求或同一请求的下一条助手消息复用 ID 时，全量历史里旧截图可被新截图覆盖，翻页大小也会改变结果。ZCode 用助手消息和调用 ID 定位工具 part。Ace 按来源会话及助手调用块配对，并核对可用的请求标识和工具名。增量窗遇到前一页的待更新结果时回送快照。</p>
+<p><strong>验收</strong> Windows 打包 Gateway 对照通过两次真实 HTTP 读取，含重启。候选的全量、宽页、窄页都保留各自的合成截图引用，覆盖不同请求、同一请求中不同助手消息、旧记录、分支与相邻会话。另一账号仍得到 404。两次进程及双端口正常回收。存储窗口、工具卡片和协作历史回归 46 项通过，Ruff 通过。本组使用合成持久历史。</p>
+<p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>crew/gateway/routers/sessions.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/tool-result-settlement.ts</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/transcript-hydration.ts</code>。</p>
 <h3>同服务 MCP 调用的有界并发</h3>
 <p>原版同一 worker 上，第一条只读调用持有任务闸门时，第二条也无法到达服务器。ZCode 以独立截止时间和取消信号向已租用的 MCP 客户端派发请求，Agent 按工具只读或幂等声明组织批次。Ace 先在每个服务上开放两个明确且声明一致的只读槽位，未知、变更及声明冲突的调用保留独占的 FIFO 顺序。每条请求继续沿用原安全审批和绝对截止时间，已派发请求在断线后仅结算原结果，排队请求可在原截止前重连派发。Agent 批内编排见下一节。</p>
 <p><strong>验收</strong> 真实 stdio 服务器的阻塞闸门验证双只读执行、第三条等待空位、独占栅栏、单独取消、队列与在途超时、断线后的重连及两代子进程退出。Streamable HTTP 使用真实 MCP SDK 和本机 ASGI 应用，较快请求在较慢请求释放前返回，两次调用的会话标识与授权上下文分别核对。目标 worktree 的 MCP 客户端、生命周期、图像、服务、安装与 Gateway 接口共 93 项回归通过。</p>
