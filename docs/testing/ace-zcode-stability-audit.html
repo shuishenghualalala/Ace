@@ -303,6 +303,11 @@
 <p>文件、待办与计划更新触发 Inspector 刷新。旧实现重建右栏正文，导致本地 HTML 的原生视图被移除后再挂回。ZCode 在布局更新时保留 <code>BrowserViewportSurface</code> 的 guest，恢复异常来宾时才切换 generation。</p>
 <p><strong>修复和验收</strong> 浏览器仍为当前面板时保留容器，并继续刷新通知和计数。合并两项浏览器修复后，8 个测试文件共 182 项通过。实际 Windows Electron 中，文件数更新至 2，HTML 文档与原生来宾保持原实例，零隐藏、移除、挂载或导航。单独应用本项也能消除会话详情刷新引起的拆挂；主动切到会话信息仍会移除浏览器。</p>
 </article>
+<article id="windows-terminal-runtime-platform">
+<h3>D7c · Windows 终端在沙箱身份就绪后仍报告运行时不可用</h3>
+<p>现场首条失败来自 <code>terminal</code>，返回 <code>sandbox_unavailable</code>，当时此预览用户目录没有身份文件。身份就绪后，第二条失败仍用同一错误码，原因是组件被误判为目标平台不符。终端桥接过滤环境时去掉处理器变量，发行包内 Python 3.11.9 的 <code>platform.machine()</code> 因此为空。ZCode 的桌面架构保护从 Electron <code>process.arch</code> 读取当前进程架构；Ace 的 Python 桥接现从解释器目标读取。</p>
+<p><strong>验收</strong> 用发行包 Python、真实 <code>build_spawn_env</code> 与原样 x64 helper 复现旧版失败，修复后原样清单完整性检查通过。分别用错误架构和错误 SHA-256 的私有清单验证仍然拒绝。相关 pytest 共 50 项通过。组合运行还暴露 4 项独立失败，其中 2 项依赖配置过的原生 helper，另 2 项检测到 Apple Silicon 已提交预编译清单的源摘要落后于 Rust 源码。隔离验证覆盖真实发行组件的完整性检查，原生终端启动需要另有配置完成的 Windows 沙箱。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>

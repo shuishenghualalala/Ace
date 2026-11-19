@@ -626,6 +626,8 @@ detect_hardline_command(command) -&gt; tuple[bool, str]</code></pre>
 
     <h3 id="protocol">4.1 原生协议与运行组件完整性</h3>
 
+    <p>终端桥接子进程使用精简环境。Windows 的运行组件架构由当前 Python 的编译目标识别，兼容 x64 与 ARM64。组件清单核对平台和目标架构，随后核对二进制 SHA-256。</p>
+
     <h4>4.1.1 每任务 stdio 协议与身份校验</h4>
     <p>Gateway 每次执行都会启动新的 helper，通过 stdio 交换 NDJSON；helper 不监听网络端口。协议版本为 v3：</p>
 

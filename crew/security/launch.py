@@ -10,6 +10,7 @@ import os
 import platform
 import shutil
 import sys
+import sysconfig
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -655,7 +656,10 @@ def runtime_platform_key(
         "windows": "win32",
         "linux2": "linux",
     }.get(system, system)
-    machine = (machine_name or platform.machine()).strip().lower()
+    if machine_name is None:
+        # Windows platform.machine() relies on variables absent in the terminal bridge.
+        machine_name = sysconfig.get_platform().removeprefix("win-") if system == "win32" else platform.machine()
+    machine = machine_name.strip().lower()
     arch = {
         "aarch64": "arm64",
         "arm64": "arm64",

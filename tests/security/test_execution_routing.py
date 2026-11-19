@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import sys
+import sysconfig
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -400,6 +401,16 @@ def test_packaged_runtime_honors_explicit_platform_artifact(monkeypatch, tmp_pat
 )
 def test_runtime_platform_key_is_stable(system_name, machine_name, expected):
     assert runtime_platform_key(system_name, machine_name) == expected
+
+
+@pytest.mark.parametrize(
+    ("python_target", "expected"),
+    [("win-amd64", "win32-x64"), ("win-arm64", "win32-arm64")],
+)
+def test_windows_runtime_target_survives_the_filtered_bridge_environment(monkeypatch, python_target, expected):
+    monkeypatch.setattr("crew.security.launch.platform.machine", lambda: "")
+    monkeypatch.setattr(sysconfig, "get_platform", lambda: python_target)
+    assert runtime_platform_key("win32") == expected
 
 
 def test_packaged_runtime_candidates_include_host_specific_prebuilt(tmp_path):
