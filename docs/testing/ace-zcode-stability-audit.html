@@ -703,6 +703,11 @@
 <p class="evidence">Ace <code>crew/app.py</code>、<code>crew/providers/openai_provider.py</code>。ZCode <code>packages/services/src/node.ts:909</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-execution.ts</code>。</p>
 <p>ZCode 的桌面宿主构建将运行服务内联到 ESM 产物，主进程仍独立启动宿主。Ace 以相同 Windows 包做了纯 Python SDK 布局实验，使用 <code>ZIP_STORED</code> 存放 SDK 的 2,089 个原始文件。版本仍为 3.55.0，实际导入的 537 个 SDK 模块均由标准 <code>zipimporter</code> 装载，无散文件回退。包含先导的十次启动均通过公开流式聊天及正常退出。四对温热样本中，原版和 ZIP 的双端口就绪中位数为 10.128、10.328 秒，启动到 WebSocket 首正文为 10.976、11.062 秒。同对中位数分别慢 302、205 毫秒，当前发行保留散文件布局。</p>
 <p class="evidence">Ace <code>deb-package/pack_exe.ps1</code>。ZCode <code>packages/desktop/tsup.config.ts:346</code>、<code>packages/desktop/src/main/desktopHostProcess.ts:251</code>。</p>
+<h3>当前 Windows 发布运行时的 OpenAI SDK 装配分段</h3>
+<p>从 <code>e9b3ff06</code> 冻结 448 个 Python 源文件，配置同一个回环模型。四对样本交替运行粗粒度控制和诊断探针，复用同一物理源码树与发行包 Python 3.11.9。八轮均通过主端口和健康端口签名、普通 WebSocket 发送回执、首正文、HTTP 与 SQLite 历史、正常退出及端口释放。</p>
+<p>诊断组 Gateway 模块导入中位数为 4,720.6 毫秒，应用装配 4,042.2 毫秒，核心就绪阶段 155.0 毫秒。OpenAI Provider 首次装配中位数为 1,705.1 毫秒。其中 OpenAI 3.55.0 导入 1,503.2 毫秒（1,468.5–1,827.6），首次共享 SSL 上下文 62.1 毫秒，首次 HTTPX 客户端 135.9 毫秒，SDK 客户端构造约 0.26 毫秒。后一轮客户端构造的 HTTPX 耗时为 0.81–1.26 毫秒。回环 HTTP 使用实际 SSL 上下文构造路径。</p>
+<p>首个控制进程双端口就绪耗时 17.083 秒，其余控制样本为 9.835–12.146 秒，诊断样本为 9.973–13.062 秒。首个样本保留，诊断仅用于归因。发行包 OpenAI SDK 目录含 2,077 个 Python 源文件和零个字节码缓存。字节码方案待同物理路径的配对测量。桌面可发送与首正文需单独从真实输入框计时。</p>
+<p class="evidence">Ace <code>crew/gateway/app.py</code>、<code>crew/app.py</code>、<code>crew/providers/openai_provider.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-execution.ts</code>、<code>packages/desktop/src/main/desktopHostProcess.ts</code>。</p>
 <h3>默认关闭的技能进化导入实验</h3>
 <p>正式 Windows 包两次导入剖析中，默认关闭的技能进化仍在 Gateway 导入时加载管理器、生成器、优化器、轨迹、日志与数据模型。六个模块自身的导入合计分别为 67.6 和 65.3 毫秒。ZCode 的 <code>packages/services/src/skills/skillsService.ts:1036</code> 将技能发现放在首次读取，<code>packages/services/src/node.ts:1973</code> 在使用可选宿主能力时才导入实现。Ace 原型将进化管理器移入启用分支，现有公共类按访问加载。</p>
 <p>五个独立进程验证默认路径、启用路径和公共类导入。原型的默认 Gateway 导入、启动、首条正文、回合保存及关闭都未加载这六个模块。启用后首轮以同样的管理器和队列写入真实轨迹，公开的 11 个名称仍指向同一实现。配置与导入回归 72 项通过。正式 Windows 包副本也通过公开配置读回、回环流式聊天和目标轨迹落盘验证。</p>
