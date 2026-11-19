@@ -434,8 +434,9 @@ class ToolRunner:
     def _append_tool_outcome(self, messages: list[Message], call: ToolCall, result: ToolResult) -> None:
         if isinstance(result.details.get("exit_confirmed"), bool):
             call.exit_confirmed = result.details["exit_confirmed"]
-        if result.code == "tool_exit_unconfirmed":
+        if result.is_error:
             call.status = "error"
+        if result.code == "tool_exit_unconfirmed":
             call.result = result.content
         messages.append(Message.tool(call.id, result.content, name=call.name))
         self._latest_outcomes[call.id, call.name] = (result, call.arguments)

@@ -2320,6 +2320,33 @@ async def test_explicit_security_rejection_fences_later_tools_in_same_batch():
     assert "approval_rejected_turn_stopped" in messages[-1].content
 
 
+@pytest.mark.parametrize("parallel", [False, True])
+async def test_tool_failure_status_is_saved_on_the_assistant_call(parallel):
+    registry = Registry()
+
+    async def read(arguments):
+        if arguments["path"] == "missing":
+            raise ToolError("missing fixture")
+        return "available fixture"
+
+    registry.register(
+        name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+        handler=read, is_async=True,
+    )
+    calls = [ToolCall("missing", "file_read", {"path": "missing"}),
+             ToolCall("available", "file_read", {"path": "available"})]
+    messages = [Message.assistant("", calls)]
+    runner = _runner(registry, parallel_enabled=parallel)
+    _ = [chunk async for chunk in runner.run_batch(calls, messages, "request", _seq_counter())]
+
+    assert [(call.status, call.result) for call in messages[0].tool_calls] == [
+        ("error", ""), ("done", ""),
+    ]
+    assert [message.tool_call_id for message in messages[1:]] == ["missing", "available"]
+    assert "missing fixture" in messages[1].content
+    assert messages[2].content == "available fixture"
+
+
 async def test_security_runtime_failure_is_a_real_tool_error():
     reg = Registry()
     reg.register(

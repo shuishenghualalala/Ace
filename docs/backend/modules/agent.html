@@ -146,7 +146,7 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
 
   <h2>工具总预算与 durable boundary（2026-09-18）</h2>
   <p><code>ToolRunner</code> 现在以 <code>_execute_total_guarded</code> 包住从 middleware、权限、执行到结果 hook 的完整管线；执行段保留更短的局部看门狗。取消只等待有限宽限期，无法及时退出的第三方 task 被登记并由完成回调清理，不再用无上限等待拖住当前回合。</p>
-  <p>工具结果统一带 <code>code</code>、<code>retryable</code>、<code>retry_delay</code>、<code>side_effect_state</code> 和 <code>details</code>，同时透传到 <code>ResponseChunk.tool_event</code> 的 <code>result_metadata</code>。持久会话在用户消息、工具执行 intent、工具结果 commit 处形成恢复边界；进程退出后有 intent 无结果的调用只标记为 <code>interrupted/unknown</code>，不自动重放副作用。</p>
+  <p>工具结果统一带 <code>code</code>、<code>retryable</code>、<code>retry_delay</code>、<code>side_effect_state</code> 和 <code>details</code>，同时透传到 <code>ResponseChunk.tool_event</code> 的 <code>result_metadata</code>。持久会话在用户消息、工具执行 intent、工具结果 commit 处形成恢复边界；进程退出后有 intent 无结果的调用只标记为 <code>interrupted/unknown</code>，不自动重放副作用。Agent 将实际工具失败写入助手消息的调用状态，串行和并发共用结算入口。正文仍由原工具消息处理，公开历史读取保存的调用状态。</p>
   <p>Gateway 创建 agent turn 时把 <code>TaskRuntime.execution_timeout</code> 注入 <code>ExecutionContext.deadline_seconds</code>，TaskRuntime 取消先触发 <code>TurnControl.interrupt</code>，再进入 worker 的硬取消宽限。直接调用 executor 时仍可使用 <code>turn_deadline_seconds</code> 作为兼容回退。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
