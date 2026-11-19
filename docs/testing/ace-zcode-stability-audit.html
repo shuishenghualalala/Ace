@@ -345,6 +345,8 @@
 <p class="evidence">Ace <code>desktop/src/main/index.ts</code>、<code>security-setup.ts</code>、<code>deb-package/pack_exe.ps1</code>。Codex <code>codex-rs/windows-sandbox-rs/src/provisioning_client.rs</code>。</p>
 <p><strong>首次工具与自动准备的竞争</strong> 旧版受管命令在获取 Windows ACL lease 前读取沙箱身份，自动准备可能还在 UAC 等待中或尚未发布身份。Codex 的 App Server 分别记录准备开始与完成，ZCode 工具执行器等待对应的准入结果。Ace 的打包桌面在自动准备前发布一次启动范围内的状态，终端在审批后、创建任务前短暂等待。成功时继续原生校验，失败和停止时当前命令未启动。独立 Gateway 不接收此信号。异步捕获进程沿用其原有的总超时，同步转换遇到准备中则立即报告未启动。</p>
 <p><strong>验收</strong> 在 Windows 隐藏 Electron 与验签 Gateway 中，基线 <code>a77de44e</code> 的首条受管终端命令在配置释放前返回 <code>sandbox_unavailable</code>。最终候选四个独立场景通过。另一会话在等待期间完成纯文本回合，准备成功后原工具只执行一次，历史显示成功。实际 WebSocket 停止、显式 1 秒等待超时、配置失败均未进入原生执行。停止和超时后发布就绪也不会重放。五个场景均正常结束和释放端口。试验使用真实状态发布器、合成模型和带清单校验的无特权 helper，未触发 UAC。后端 103 项通过、1 项跳过，桌面 37 项通过，TypeScript 与 Ruff 通过。</p>
+<p><strong>取消系统授权后重开</strong> 安装器与首次可见窗口先跑原生就绪检查。Windows 系统返回取消码 1223 时，用户状态目录保留暂缓标记。自动路径仍运行自检，缺少防护时等待安全中心主动重试。通过复查后删除标记。首次同意的正常路径继续在安装期准备并复用。</p>
+<p><strong>验收</strong> 基线及候选共启动 7 次 Windows 打包 Electron。旧版安装器入口退出 1，随后首次开窗再次发起确认。候选用真实 PowerShell 接收合成 Win32 1223，安装器入口退出 3，开窗只检查。实际设置页经 preload 和 IPC 主动重试成功，按钮消失，再次重开只跑就绪检查。独立全新配置首次同意后返回 0，下一次同样复用。试验在私有夹具模拟系统授权及防护状态。十组桌面测试共 281 项通过、2 项原有跳过，TypeScript、定向 ESLint、生产构建和安装脚本语法检查通过。</p>
 </article>
 <article id="browser-wait-visible-text">
 <h3>D7e · 重复文本会导致浏览器等待误判</h3>

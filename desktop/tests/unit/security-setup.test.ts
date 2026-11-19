@@ -1,7 +1,7 @@
 import { Buffer } from 'buffer';
 import type { spawn } from 'child_process';
 import { EventEmitter } from 'events';
-import { existsSync, mkdtempSync, readdirSync, rmdirSync } from 'fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { describe, expect, it, vi } from 'vitest';
@@ -33,6 +33,40 @@ describe('Windows security setup elevation', () => {
     );
   });
 
+  it.runIf(process.platform === 'win32')('remembers cancelled consent across provisioning attempts and permits a user retry', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'crew-setup-consent-'));
+    const runtime = join(parent, 'ace-security-runtime.exe');
+    const stateDir = join(parent, 'security');
+    writeFileSync(runtime, '');
+    const childExit = vi.fn()
+      .mockReturnValueOnce(1).mockReturnValueOnce(1223)
+      .mockReturnValueOnce(1)
+      .mockReturnValueOnce(1).mockReturnValueOnce(0).mockReturnValueOnce(0)
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(1).mockReturnValueOnce(0).mockReturnValueOnce(0);
+    const spawnProcess = vi.fn(() => {
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', childExit()));
+      return child;
+    }) as unknown as typeof spawn;
+
+    try {
+      const automatic = { automatic: true };
+      const cancelled = { ok: false, code: 'uac_cancelled' };
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject(cancelled);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject(cancelled);
+      expect(spawnProcess).toHaveBeenCalledTimes(3);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess)).resolves.toMatchObject({ ok: true });
+      expect(spawnProcess).toHaveBeenCalledTimes(6);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject({ ok: true });
+      expect(spawnProcess).toHaveBeenCalledTimes(7);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject({ ok: true });
+      expect(spawnProcess).toHaveBeenCalledTimes(10);
+    } finally {
+      rmSync(parent, { recursive: true });
+    }
+  });
+
   it('accepts native and Electron platform names for the same runtime architecture', () => {
     expect(securityRuntimePlatformKey('windows', 'AMD64')).toBe(securityRuntimePlatformKey('win32', 'x64'));
     expect(securityRuntimePlatformKey('Darwin', 'aarch64')).toBe('darwin-arm64');
@@ -53,8 +87,10 @@ describe('Windows security setup elevation', () => {
     expect(script).toContain('--windows-setup');
     expect(script).toContain('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value');
     expect(script).toContain("'--expected-owner-sid', $ownerSid");
-    expect(script).toContain('-Verb RunAs -Wait');
-    expect(script).toMatch(/-PassThru -ErrorAction Stop;\s*exit/);
+    expect(script).toContain("$start.Verb = 'runas'");
+    expect(script).toContain('$start.UseShellExecute = $true');
+    expect(script).toContain('[System.Diagnostics.Process]::Start($start)');
+    expect(script).toContain('$cause.NativeErrorCode -eq 1223');
   });
 
   it('rejects a renamed or relative executable', () => {
@@ -100,7 +136,7 @@ describe('Windows sandbox setup coordinator', () => {
     expect(provision).not.toHaveBeenCalled();
 
     await expect(coordinator.startAutomatically(visibleWindows, locate)).resolves.toEqual(ready);
-    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir);
+    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, undefined, { automatic: true });
   });
 
   it('defers checking a hidden window until it is opened and checks only once', async () => {
@@ -115,7 +151,7 @@ describe('Windows sandbox setup coordinator', () => {
     expect(coordinator.startAutomatically(hidden, locate)).toBeUndefined();
     expect(coordinator.startAutomatically(visibleWindows, locate)).toBeUndefined();
     expect(locate).toHaveBeenCalledTimes(1);
-    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir);
+    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, undefined, { automatic: true });
   });
 
   it('shares one install between a visible startup and the settings action', async () => {
@@ -132,7 +168,7 @@ describe('Windows sandbox setup coordinator', () => {
 
     resolveProvision(ready);
     await expect(first).resolves.toEqual(ready);
-    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir);
+    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, undefined, { automatic: true });
     await expect(coordinator.run('repair', runtimePath, stateDir)).resolves.toEqual(ready);
     expect(elevated).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, 'repair');
   });

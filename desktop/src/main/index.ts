@@ -4420,9 +4420,9 @@ if (process.argv.includes('--crew-provision-windows-sandbox')) {
       app.exit(2);
       return;
     }
-    const result = await provisionInstalledWindowsSandbox(runtime, stateDir);
-    if (!result.ok) console.warn('[security] Windows sandbox setup:', result.detail ?? result.exitCode);
-    app.exit(result.ok ? 0 : 1);
+    const result = await provisionInstalledWindowsSandbox(runtime, stateDir, undefined, { automatic: true });
+    if (!result.ok) console.warn('[security] Windows sandbox setup:', result.code ?? result.exitCode);
+    app.exit(result.ok ? 0 : result.code === 'uac_cancelled' ? 3 : 1);
   }).catch((error: unknown) => {
     console.error('[security] Windows sandbox setup failed:', error);
     app.exit(1);

@@ -220,6 +220,10 @@ async function setupProtection(): Promise<void> {
   try {
     const result = await window.Crew?.securitySetup?.({ action: 'install' });
     if (!stillActive()) return;
+    if (result?.code === 'uac_cancelled') {
+      notify('已取消 Windows 管理员确认。');
+      return;
+    }
     if (result?.code === 'uac_restart_required') {
       notify('请重启电脑，使 Windows 的用户账户控制设置生效。');
       return;

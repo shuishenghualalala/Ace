@@ -7,12 +7,14 @@ export type SecuritySetupResult = {
   ok: boolean;
   exitCode: number | null;
   detail?: string;
-  code?: 'uac_disabled' | 'uac_restart_required';
+  code?: 'uac_cancelled' | 'uac_disabled' | 'uac_restart_required';
 };
 export type UacEnableResult = SecuritySetupResult & { restartRequired?: boolean };
 
 const UAC_REGISTRY_KEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System';
 const POWERSHELL_UAC_REGISTRY_PATH = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System';
+const ERROR_CANCELLED = 1223;
+const DEFERRED_CONSENT_FILE = 'windows-setup-consent-deferred';
 let uacRestartRequired = false;
 
 export function securityRuntimePlatformKey(platform: string, arch: string): string | undefined {
@@ -62,10 +64,21 @@ export function buildElevatedSecuritySetup(
   const ownerArg = action === 'uninstall' ? '' : ", '--expected-owner-sid', $ownerSid";
   const script = [
     originalUser,
-    `$process = Start-Process -FilePath ${quotePowerShell(runtimePath)}`,
-    `-ArgumentList @(${quotePowerShell(runtimeArg)}, ${quotePowerShell(`"${stateDir}"`)}${ownerArg})`,
-    '-Verb RunAs -Wait -PassThru -ErrorAction Stop;',
-    'exit $process.ExitCode',
+    '$start = [System.Diagnostics.ProcessStartInfo]::new();',
+    `$start.FileName = ${quotePowerShell(runtimePath)};`,
+    `$start.Arguments = @(${quotePowerShell(runtimeArg)}, ${quotePowerShell(`"${stateDir}"`)}${ownerArg}) -join ' ';`,
+    '$start.UseShellExecute = $true;',
+    "$start.Verb = 'runas';",
+    // PowerShell's Start-Process discards the native error code from ShellExecute.
+    'try {',
+    '$process = [System.Diagnostics.Process]::Start($start);',
+    'try { $process.WaitForExit(); exit $process.ExitCode } finally { $process.Dispose() }',
+    '} catch {',
+    'for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {',
+    `if ($cause -is [System.ComponentModel.Win32Exception] -and $cause.NativeErrorCode -eq ${ERROR_CANCELLED}) { exit ${ERROR_CANCELLED} }`,
+    '}',
+    'throw',
+    '}',
   ].join(' ');
   return {
     executable: powershellPath(),
@@ -192,22 +205,55 @@ export async function runElevatedSecuritySetup(
   }
   // Native setup verifies that UAC kept the original user's Windows identity.
   fs.mkdirSync(stateDir, { recursive: true });
-  return runSetupCommand(buildElevatedSecuritySetup(runtimePath, stateDir, action), spawnProcess);
+  const result = await runSetupCommand(buildElevatedSecuritySetup(runtimePath, stateDir, action), spawnProcess);
+  if (result.exitCode === ERROR_CANCELLED) return cancelledSetup();
+  return result;
+}
+
+function cancelledSetup(): SecuritySetupResult {
+  return {
+    ok: false,
+    exitCode: ERROR_CANCELLED,
+    code: 'uac_cancelled',
+    detail: '已取消 Windows 管理员确认',
+  };
+}
+
+function saveConsentDeferral(marker: string, deferred: boolean): void {
+  try {
+    if (deferred) fs.writeFileSync(marker, '', { flag: 'wx' });
+    else fs.rmSync(marker, { force: true });
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (!(deferred && code === 'EEXIST')) console.warn('[security] Windows setup consent state:', code);
+  }
 }
 
 export async function provisionInstalledWindowsSandbox(
   runtimePath: string,
   stateDir: string,
   spawnProcess: typeof spawn = spawn,
+  { automatic = false } = {},
 ): Promise<SecuritySetupResult> {
   const verify = () => runSetupCommand({
     executable: runtimePath,
     argv: ['--windows-check-setup', stateDir],
   }, spawnProcess);
+  const marker = path.join(stateDir, DEFERRED_CONSENT_FILE);
   const before = await verify();
-  if (before.ok || before.exitCode !== 1) return before;
+  // The native check remains authoritative even after consent was deferred.
+  if (before.ok) {
+    if (fs.existsSync(marker)) saveConsentDeferral(marker, false);
+    return before;
+  }
+  if (before.exitCode !== 1) return before;
+  if (automatic && fs.existsSync(marker)) return cancelledSetup();
   const setup = await runElevatedSecuritySetup(runtimePath, stateDir, 'install', spawnProcess);
-  return setup.ok ? verify() : setup;
+  if (setup.code === 'uac_cancelled') saveConsentDeferral(marker, true);
+  if (!setup.ok) return setup;
+  const after = await verify();
+  if (after.ok && fs.existsSync(marker)) saveConsentDeferral(marker, false);
+  return after;
 }
 
 /** Publish the automatic operation to this Desktop's owned Gateway processes. */
@@ -266,7 +312,9 @@ export function createWindowsSandboxSetupCoordinator(
     promise: Promise<SecuritySetupResult>;
   } | undefined;
 
-  function run(action: SecuritySetupAction, runtimePath: string, stateDir: string): Promise<SecuritySetupResult> {
+  function run(
+    action: SecuritySetupAction, runtimePath: string, stateDir: string, automatic = false,
+  ): Promise<SecuritySetupResult> {
     if (active) {
       if (action === active.action && runtimePath === active.runtimePath && stateDir === active.stateDir) {
         return active.promise;
@@ -274,7 +322,9 @@ export function createWindowsSandboxSetupCoordinator(
       return Promise.resolve({ ok: false, exitCode: null, detail: '另一个 Windows 防护操作正在进行' });
     }
     const promise = Promise.resolve().then(() => (
-      action === 'install' ? provision(runtimePath, stateDir) : elevate(runtimePath, stateDir, action)
+      action === 'install'
+        ? provision(runtimePath, stateDir, undefined, { automatic })
+        : elevate(runtimePath, stateDir, action)
     )).finally(() => { active = undefined; });
     active = { action, runtimePath, stateDir, promise };
     return promise;
@@ -287,7 +337,7 @@ export function createWindowsSandboxSetupCoordinator(
     if (automaticAttempted || launch.platform !== 'win32' || !launch.packaged || !launch.visible || launch.ci) return;
     automaticAttempted = true;
     const location = resolveLocation();
-    return location ? run('install', location.runtimePath, location.stateDir) : undefined;
+    return location ? run('install', location.runtimePath, location.stateDir, true) : undefined;
   }
 
   return { run, startAutomatically };

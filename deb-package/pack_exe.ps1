@@ -463,7 +463,7 @@ begin
   if not ExecAsOriginalUser(DesktopPath, '--crew-provision-windows-sandbox',
       DesktopDir, SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     LogFmt('Unable to start Windows sandbox initialization: %d', [ResultCode])
-  else if ResultCode = 0 then
+  else if (ResultCode = 0) or (ResultCode = 3) then
     Exit
   else
     LogFmt('Windows sandbox initialization exited with code %d', [ResultCode]);
