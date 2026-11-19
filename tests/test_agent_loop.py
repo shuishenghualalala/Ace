@@ -1154,48 +1154,124 @@ async def test_parallel_tools_preserve_order():
     assert [m.tool_call_id for m in tool_msgs] == ["a", "b"]
 
 
-async def test_parallel_results_land_in_request_order_despite_completion_order():
-    """并发段按完成序执行、按请求序回灌：后发起的先完成也不能改变上下文顺序。"""
-    reg = Registry()
+@pytest.mark.parametrize("close_early", [False, True])
+async def test_parallel_results_stream_as_they_finish_and_keep_request_order(close_early):
+    release_slow = asyncio.Event()
+    slow_started = asyncio.Event()
+    slow_exited = asyncio.Event()
+    writes = []
+    registry = Registry()
 
-    async def delayed_read(args):
-        await asyncio.sleep({ "p1": 0.03, "p2": 0.01, "p3": 0.0 }[args["path"]])
+    async def read(args):
+        if args["path"] == "slow":
+            slow_started.set()
+            try:
+                await release_slow.wait()
+            finally:
+                slow_exited.set()
+        else:
+            await slow_started.wait()
         return tool_result(path=args["path"])
 
-    reg.register(
-        name="file_read",
-        toolset="file",
-        schema={"name": "file_read", "parameters": {}},
-        handler=delayed_read,
-        is_async=True,
+    def write(args):
+        writes.append(args["path"])
+        return tool_result(written=True)
+
+    registry.register(
+        name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+        handler=read, is_async=True,
+    )
+    registry.register(
+        name="file_write", toolset="file", schema={"name": "file_write", "parameters": {}},
+        handler=write,
     )
     calls = [
-        ToolCall("p1", "file_read", {"path": "p1"}),
-        ToolCall("p2", "file_read", {"path": "p2"}),
-        ToolCall("p3", "file_read", {"path": "p3"}),
+        ToolCall("slow", "file_read", {"path": "slow"}),
+        ToolCall("fast", "file_read", {"path": "fast"}),
+        ToolCall("write", "file_write", {"path": "after", "content": "fixture"}),
     ]
 
-    class ThreeReadsThenDone(FakeProvider):
-        def __init__(self):
-            super().__init__()
-            self._n = 0
-
+    class BatchThenDone(FakeProvider):
         async def chat(self, messages, tools=None):
             self.calls.append(list(messages))
-            self._n += 1
-            if self._n == 1:
+            if len(self.calls) == 1:
                 return ChatResponse(tool_calls=calls)
-            return ChatResponse(text="完成", finish_reason="stop")
+            return ChatResponse(text="done", finish_reason="stop")
 
-    provider = ThreeReadsThenDone()
-    ex = _executor(provider, reg)
+    provider = BatchThenDone()
+    executor = _executor(provider, registry)
     ctx = _ctx()
-    await _collect(ex, ctx)
+    result_ids = []
+    async with aclosing(executor.execute(ctx)) as stream:
+        async with asyncio.timeout(3):
+            async for chunk in stream:
+                if chunk.kind != "tool" or chunk.body["phase"] != "result":
+                    continue
+                result_ids.append(chunk.body["tool_call_id"])
+                if result_ids == ["fast"]:
+                    assert slow_started.is_set() and not slow_exited.is_set()
+                    assert not writes
+                    if close_early:
+                        break
+                    release_slow.set()
 
-    tool_msgs = [m for m in ctx.messages if m.role == "tool"]
-    assert [m.tool_call_id for m in tool_msgs] == ["p1", "p2", "p3"]
-    # 发给模型的第二轮请求视图里，toolResult 序同样 == toolCall 序
-    assert [m.tool_call_id for m in provider.calls[1] if m.role == "tool"] == ["p1", "p2", "p3"]
+    assert slow_exited.is_set()
+    tool_messages = [message for message in ctx.messages if message.role == "tool"]
+    assert [message.tool_call_id for message in tool_messages] == ["slow", "fast", "write"]
+    assert json.loads(tool_messages[1].content)["path"] == "fast"
+    if close_early:
+        assert result_ids == ["fast"]
+        assert calls[0].exit_confirmed is False
+        assert not writes and len(provider.calls) == 1
+    else:
+        assert result_ids == ["fast", "slow", "write"]
+        assert writes == ["after"]
+        assert [message.tool_call_id for message in provider.calls[1] if message.role == "tool"] == [
+            "slow", "fast", "write",
+        ]
+
+
+async def test_closing_serialized_batch_retains_a_completed_read_prewarm(monkeypatch):
+    prewarm_committed = asyncio.Event()
+    commits = []
+    executed = []
+    registry = Registry()
+
+    async def read(args):
+        executed.append(args["path"])
+        return tool_result(path=args["path"])
+
+    def record(kind, payload):
+        if kind == "tool_result_commit":
+            commits.append(payload["tool_call_id"])
+            if payload["tool_call_id"] == "warm":
+                prewarm_committed.set()
+
+    registry.register(
+        name="file_read", toolset="file", schema={"name": "file_read", "parameters": {}},
+        handler=read, is_async=True,
+    )
+    runner = _runner(registry, durable_event_sink=record)
+    first = ToolCall("first", "file_read", {"path": "first"})
+    warm = ToolCall("warm", "file_read", {"path": "warm"})
+    assert runner.prewarm(warm)
+    async with asyncio.timeout(3):
+        await prewarm_committed.wait()
+    # A new owner approval requirement can serialize the final batch after prewarm.
+    monkeypatch.setattr(runner, "_request_approval_mode", lambda: True)
+    messages: list[Message] = []
+    async with aclosing(runner.run_batch([first, warm], messages, "r", _seq_counter())) as stream:
+        async with asyncio.timeout(3):
+            async for chunk in stream:
+                if chunk.body["phase"] == "result":
+                    assert chunk.body["tool_call_id"] == "first"
+                    break
+
+    assert executed == ["warm", "first"]
+    assert commits == ["warm", "first"]
+    assert [message.tool_call_id for message in messages] == ["first", "warm"]
+    assert json.loads(messages[1].content)["path"] == "warm"
+    assert warm.exit_confirmed is not False
 
 
 async def test_parallel_tool_execution_respects_worker_cap():
@@ -2400,10 +2476,13 @@ async def test_terminal_security_failure_keeps_the_reason_and_reports_its_code(c
     assert provider.stream_calls == 1
 
 
-async def test_parallel_security_failures_keep_the_first_reported_code():
+async def test_parallel_security_failures_keep_the_first_requested_call_code():
     reg = Registry()
+    second_completed = asyncio.Event()
 
     async def read_file(args):
+        if args["path"] == "a.txt":
+            await second_completed.wait()
         raise ToolError(json.dumps({"error_code": args["failure"], "error": "fixture"}))
 
     def write_file(_args):
@@ -2423,7 +2502,15 @@ async def test_parallel_security_failures_keep_the_first_reported_code():
         ToolCall("write", "file_write", {"path": "c.txt", "content": "fixture"}),
     ])])
 
-    chunks = await _collect(_executor(provider, reg, parallel_tools=True), _ctx())
+    executor = _executor(provider, reg, parallel_tools=True)
+    chunks = []
+    async with aclosing(executor.execute(_ctx())) as stream:
+        async with asyncio.timeout(3):
+            async for chunk in stream:
+                chunks.append(chunk)
+                if chunk.kind == "tool" and chunk.body["phase"] == "result" and not second_completed.is_set():
+                    assert chunk.body["tool_call_id"] == "read-2"
+                    second_completed.set()
 
     final, = [chunk for chunk in chunks if chunk.kind == "final"]
     assert final.body["outcome"]["code"] == "network_unavailable"

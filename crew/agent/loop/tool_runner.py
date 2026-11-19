@@ -13,7 +13,7 @@ import base64
 import json
 import mimetypes
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, aclosing, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -271,20 +271,52 @@ class ToolRunner:
             "prewarmed": list(self._prewarm.keys()),
         })
         self._pending_media = []
+        batch_start = len(messages)
         try:
             for safe, calls in segments:
                 if safe and len(calls) > 1 and self._parallel_segment_is_current(calls, catalogue_revision):
-                    async for chunk in self._run_parallel_segment(
-                        calls, messages, rid, next_seq, started_ids, catalogue_revision=catalogue_revision,
-                    ):
-                        yield chunk
+                    segment = self._run_parallel_segment(
+                        calls, messages, rid, next_seq, started_ids,
+                        catalogue_revision=catalogue_revision, keep_on_close=len(messages) > batch_start,
+                    )
                 else:
-                    async for chunk in self._run_sequential_segment(calls, messages, rid, next_seq, started_ids):
+                    segment = self._run_sequential_segment(calls, messages, rid, next_seq, started_ids)
+                async with aclosing(segment):
+                    async for chunk in segment:
                         yield chunk
             await self._append_pending_media(messages)
+        except (asyncio.CancelledError, GeneratorExit):
+            await self._complete_interrupted_batch(tool_calls, messages, batch_start)
+            raise
         finally:
             # 清理本轮未被消费的 prewarm（被 plan_tool_calls 去重/裁剪掉的工具）。
             await self.cancel_prewarms()
+
+    async def _complete_interrupted_batch(
+        self, calls: list[ToolCall], messages: list[Message], batch_start: int,
+    ) -> None:
+        # Once a result is visible, keep the complete assistant/tool block in history.
+        answered = {message.tool_call_id for message in messages[batch_start:] if message.role == "tool"}
+        if not answered:
+            return
+        missing = [tc for tc in calls if tc.id not in answered]
+        pending_prewarms = [self._prewarm[tc.id][1] for tc in missing if tc.id in self._prewarm]
+        await self._cancel_tasks_with_grace(pending_prewarms, "interrupted batch prewarm")
+        for tc in missing:
+            if warmed := self._prewarm.get(tc.id):
+                original, task = warmed
+                if task.done() and not task.cancelled():
+                    result = await self._resolve(tc)
+                else:
+                    self._prewarm.pop(tc.id)
+                    result = self._unconfirmed_result(tc) if original.started_at is not None else self._cancelled_result(tc)
+            else:
+                result = self._unconfirmed_result(tc) if tc.started_at is not None else self._cancelled_result(tc)
+            self._record_security_outcome(result)
+            self._append_tool_outcome(messages, tc, result)
+            self._attach_mcp_images(tc, result, messages)
+            self._queue_media(tc, result)
+        await self._append_pending_media(messages)
 
     def _plan_segments(self, tool_calls: list) -> list[tuple[bool, list]]:
         """把工具序列规划成执行段。"""
@@ -529,11 +561,11 @@ class ToolRunner:
             result = await self._resolve(tc)
             self._record_security_outcome(result)
             status = "cancelled" if self._interrupted else ("error" if result.is_error else "ok")
-            yield self._result_event(tc, result, rid, next_seq, status=status)
             self._append_tool_outcome(messages, tc, result)
             self._attach_mcp_images(tc, result, messages)
             self._queue_media(tc, result)
             self._append_followup_answers(messages)
+            yield self._result_event(tc, result, rid, next_seq, status=status)
             if tc.name == "todo":
                 yield self._todo_snapshot_event(rid, next_seq)
             if (
@@ -558,16 +590,18 @@ class ToolRunner:
         started_tool_call_ids: set[str],
         *,
         catalogue_revision: int | None,
+        keep_on_close: bool,
     ) -> AsyncIterator[ResponseChunk]:
-        # 先发本段全部 start 帧（保持顺序），再并发执行，最后按序回灌结果。
+        # Start in request order, publish each completion, then project the canonical block.
         for tc in calls:
             if tc.id not in started_tool_call_ids:
                 yield self._start_event(tc, rid, next_seq)
         if not self._parallel_segment_is_current(calls, catalogue_revision):
             # The event consumer can yield while the catalogue or grants change.
             announced = started_tool_call_ids | {tc.id for tc in calls}
-            async for chunk in self._run_sequential_segment(calls, messages, rid, next_seq, announced):
-                yield chunk
+            async with aclosing(self._run_sequential_segment(calls, messages, rid, next_seq, announced)) as segment:
+                async for chunk in segment:
+                    yield chunk
             return
         # 并行段默认不接 file_write（非 parallel-safe，由 sequential 段处理），
         # 但保留 before 读取与 file_change 广播，防御未来放宽安全判定时漏播。
@@ -575,19 +609,50 @@ class ToolRunner:
         for tc in calls:
             if tc.name in {"file_write", "file_delete"}:
                 before_map[tc.id] = self._read_file_before(tc)
-        results = await self._resolve_parallel(calls)
-        for tc, result in zip(calls, results):
-            self._record_security_outcome(result)
-            status = (
-                "cancelled"
-                if "用户中断" in result.content or "aborted by user" in result.content
-                else ("error" if result.is_error else "ok")
-            )
-            yield self._result_event(tc, result, rid, next_seq, status=status)
-            self._append_tool_outcome(messages, tc, result)
-            self._attach_mcp_images(tc, result, messages)
-            self._queue_media(tc, result)
-            self._append_followup_answers(messages)
+        completed: asyncio.Queue[int] = asyncio.Queue()
+        tasks = [asyncio.create_task(self._resolve(tc)) for tc in calls]
+        for index, task in enumerate(tasks):
+            task.add_done_callback(lambda _, index=index: completed.put_nowait(index))
+
+        results: dict[int, ToolResult] = {}
+        unpublished: list[tuple[ToolCall, ToolResult]] = []
+        reached_boundary = False
+        try:
+            while len(results) < len(tasks) and not self._interrupted:
+                try:
+                    async with asyncio.timeout(0.05):
+                        index = await completed.get()
+                except TimeoutError:
+                    continue
+                tc = calls[index]
+                result = await self._settle_parallel_result(tc, tasks[index])
+                results[index] = result
+                yield self._parallel_result_event(tc, result, rid, next_seq)
+            reached_boundary = True
+        finally:
+            # A consumer can close the stream at a result yield as well as cancel an await.
+            await self._cancel_tasks_with_grace(tasks, "parallel")
+            if reached_boundary or results or keep_on_close:
+                for index, (tc, task) in enumerate(zip(calls, tasks)):
+                    result = results.get(index)
+                    if result is None:
+                        result = await self._settle_parallel_result(tc, task, force_closed=not reached_boundary)
+                        results[index] = result
+                        unpublished.append((tc, result))
+                    self._record_security_outcome(result)
+                    self._append_tool_outcome(messages, tc, result)
+                    self._attach_mcp_images(tc, result, messages)
+                    self._queue_media(tc, result)
+                self._append_followup_answers(messages)
+            else:
+                for task in tasks:
+                    if task.done() and not task.cancelled():
+                        task.exception()
+
+        for tc, result in unpublished:
+            yield self._parallel_result_event(tc, result, rid, next_seq)
+        for index, tc in enumerate(calls):
+            result = results[index]
             if tc.name == "todo":
                 yield self._todo_snapshot_event(rid, next_seq)
             if (
@@ -641,46 +706,32 @@ class ToolRunner:
             return result
         return await self._execute_one(tc)
 
-    async def _resolve_parallel(self, calls) -> list[ToolResult]:
-        tasks = [asyncio.create_task(self._resolve(tc)) for tc in calls]
-        pending: set[asyncio.Task] = set(tasks)
+    async def _settle_parallel_result(
+        self, tc: ToolCall, task: asyncio.Task[ToolResult], *, force_closed: bool = False,
+    ) -> ToolResult:
+        if not task.done() or task.cancelled():
+            result = (
+                self._unconfirmed_result(tc)
+                if force_closed or not task.done()
+                else self._cancelled_result(tc)
+            )
+            await self._record_tool_result_commit(tc, result, status="cancelled")
+            return result
         try:
-            while pending:
-                _, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
-                if self._interrupted and pending:
-                    for task in pending:
-                        await self._cancel_task_with_grace(task, "parallel")
-                    break
-        except asyncio.CancelledError:
-            # asyncio.wait does not propagate turn cancellation to its children.
-            await self._cancel_tasks_with_grace(tasks, "parallel")
-            raise
+            return task.result()
+        except Exception as exc:  # noqa: BLE001
+            result = ToolResult(
+                tc.id, tc.name, f"工具异常: {exc}", is_error=True,
+                code="tool_error", side_effect_state="unknown",
+            )
+            await self._record_tool_result_commit(tc, result)
+            return result
 
-        results: list[ToolResult] = []
-        for tc, task in zip(calls, tasks):
-            if task.cancelled() or not task.done():
-                result = self._cancelled_result(tc) if task.done() else self._unconfirmed_result(tc)
-                results.append(result)
-                await self._record_tool_result_commit(tc, result, status="cancelled")
-                continue
-            try:
-                results.append(task.result())
-            except asyncio.CancelledError:
-                result = self._cancelled_result(tc)
-                results.append(result)
-                await self._record_tool_result_commit(tc, result, status="cancelled")
-            except Exception as exc:  # noqa: BLE001
-                result = ToolResult(
-                    tc.id,
-                    tc.name,
-                    f"工具异常: {exc}",
-                    is_error=True,
-                    code="tool_error",
-                    side_effect_state="unknown",
-                )
-                results.append(result)
-                await self._record_tool_result_commit(tc, result)
-        return results
+    def _parallel_result_event(self, tc, result: ToolResult, rid, next_seq) -> ResponseChunk:
+        if self._security_outcome_code(result):
+            result.is_error = True
+        status = "cancelled" if result.code == "aborted" else ("error" if result.is_error else "ok")
+        return self._result_event(tc, result, rid, next_seq, status=status)
 
     # ------------------------------------------------------------------ #
     async def _check_permission(self, tc, *, waiting_clocks: Sequence[_ToolExecutionDeadline] = ()) -> str | None:
@@ -883,9 +934,11 @@ class ToolRunner:
         complete tool result before a new user message. Browser screenshots are
         therefore queued during execution and appended at the batch boundary.
         """
+        images = []
         for tool_call_id, tool_name, part in self._pending_media:
             if await self._load_tool_media(part, tool_name):
-                messages.append(Message.tool_image(tool_call_id, tool_name, part.data_url, part.alt, part.detail))
+                images.append(Message.tool_image(tool_call_id, tool_name, part.data_url, part.alt, part.detail))
+        messages.extend(images)
         self._pending_media = []
 
     @staticmethod
@@ -1520,19 +1573,23 @@ class ToolRunner:
             side_effect_state="none",
         )
 
-    def _record_security_outcome(self, result: ToolResult) -> None:
+    @staticmethod
+    def _security_outcome_code(result: ToolResult) -> str | None:
         code = result.code
         if (not code or code == "tool_error") and (result.is_error or result.name == "terminal"):
             code = structured_tool_error_code(result.content)
-        if code == "approval_rejected":
-            self.approval_rejected = True
+        return code if code in {
+            "approval_rejected", "runtime_crashed", "runtime_protocol_mismatch",
+            "sandbox_unavailable", "sandbox_denied", "network_unavailable",
+        } else None
+
+    def _record_security_outcome(self, result: ToolResult) -> None:
+        if code := self._security_outcome_code(result):
             result.is_error = True
-        elif code in {
-            "runtime_crashed", "runtime_protocol_mismatch", "sandbox_unavailable", "sandbox_denied", "network_unavailable",
-        }:
-            if self.security_boundary_failure_code is None:
+            if code == "approval_rejected":
+                self.approval_rejected = True
+            elif self.security_boundary_failure_code is None:
                 self.security_boundary_failure_code = code
-            result.is_error = True
 
     def _plan_mode_active(self) -> bool:
         from crew.core.runctx import current_owner_account_id

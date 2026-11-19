@@ -1381,14 +1381,13 @@ class BuiltinExecutor(AgentExecutor):
             continuation_prefix = ""
             #   ToolRunner 把 tool 结果 append 到 ctx.messages；同步到 view_messages（共享对象）。
             _pre_batch_len = len(ctx.messages)
-            async for ev in runner.run_batch(
-                tool_calls,
-                ctx.messages,
-                rid,
-                next_seq,
+            batch = runner.run_batch(
+                tool_calls, ctx.messages, rid, next_seq,
                 started_tool_call_ids=result.get("started_tool_call_ids"),
-            ):
-                yield ev
+            )
+            async with aclosing(batch):
+                async for ev in batch:
+                    yield ev
             view_messages.extend(ctx.messages[_pre_batch_len:])
 
             # 用户拒绝的是本轮目标的执行边界。继续把拒绝结果交给模型会诱发它改用

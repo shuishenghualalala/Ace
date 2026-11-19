@@ -171,6 +171,10 @@
 <p>Gateway 关停会直接取消活跃回合。旧版的并行等待中断时，本批工具可继续运行，回合停止后仍会写入结果。ZCode 将回合取消信号传入各工具的执行生命周期。Ace 在并行等待收到外层取消时，对本批的未完成任务发取消，按共享宽限期回收，超出宽限期的任务进入现有退出观察。正常停止和已完成批次保留原模型结果顺序。</p>
 <p><strong>验收</strong> Windows 包内解释器、真实 Dispatcher、内置执行器与 SQLite 运行两项受控异步只读工具。旧版关停返回时两项回调仍在运行，解除闸门后各写入一条成功结算。候选关停时两项已退出，SQLite 没有成功或迟到的结算。主动停止和正常完成也验证通过，快速结果先完成时，模型仍收到调用顺序的结果。该夹具覆盖 Gateway 分发和关停入口。相关四组回归 179 项通过，Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/gateway/dispatcher.py</code>、<code>crew/agent/loop/tool_runner.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/batch-runner.ts</code>、<code>call-runner.ts</code>。</p>
+<h3 id="parallel-results-as-completed">并行工具完成后立即显示结果</h3>
+<p>ZCode 在单调用收尾通过会话事件发布结果，同时以 <code>Promise.all</code> 按声明顺序返回批次。Ace 旧版等本段全部收齐才发实时结果。候选在每个调用结算后由回合主循环按完成顺序发结果，全部收齐后仍按声明顺序回填模型与历史，沿用调用 ID、事件序号、安全错误优先级和段间准入。关闭流会收尾本段任务，并保留已完成结果和已有预热结算。</p>
+<p><strong>验收</strong> Windows 包内 Gateway 使用签名 WebSocket、本机合成模型 SSE 和真实 HTTP MCP。慢调用由夹具闸门等待，旧版快回调完成后约 2.93 秒才发快结果，期间夹具超时释放慢调用。候选快回调完成约 33.5 毫秒即出帧，由该帧释放慢调用。下一次模型请求、SQLite 和重开后公开历史均按慢、快保存，停止用例在快结果到达后终止回合，没有发起下一次模型请求。远端慢调用直到回合停止后才返回，历史仍保留退出尚未确认。三个 Gateway 进程正常退出并释放端口。后端六组共 277 项通过，桌面 reducer 7 项通过，Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/agent/loop/tool_runner.py</code> 与 <code>crew/agent/executor/builtin.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/call-runner.ts:645</code>、<code>batch-runner.ts:33</code>、<code>runtime/helpers/runtime-tools.ts:160</code>。</p>
 <h3>A15 · P1 · 流式提前派发越过写入与串行配置</h3>
 <p>旧版收到完整参数就独立派发只读工具，待模型流收尾才按全批顺序返回结果。在同一次模型响应中先写新文件再读，实际读处理可能先运行。模型收到按顺序排列的写入成功和读取失败。禁用 <code>agent.parallel_tools</code> 时，旧版两条独立读取也可提前并发。</p>
 <p>ZCode 根据注册表中只读、并发、审批、交互及副作用字段决定能否提前派发。完整批次另有按依赖分组的调度器，当前 runtime 传入的通用模型调用依赖列表为空。流式路径按单调用判定。本轮对 ZCode 的行为对照来自源码。</p>
