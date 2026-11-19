@@ -49,7 +49,7 @@
     subgraph State["状态与产品面"]
       DB["SubagentStore：runs / edges / descriptors / messages"]
       ACT["Activation：锁、队列、运行状态"]
-      UI["Web/API：活动投影、发送、中断"]
+      UI["Web/API：活动投影、续跑消息、定向中断"]
     end
     A -->|StartRequest| S
     B -->|Preset request| S
@@ -244,7 +244,7 @@ subagent_id ── descriptor(spec, provider, depth, hidden session) ── suba
     <tbody>
       <tr><td><code>send_message</code></td><td>向 continuable 子身份投递消息；可选择立即开轮或先排队。</td><td>必须同时匹配当前 owner 与直接 parent session。</td></tr>
       <tr><td><code>list_agents</code></td><td>列出当前父会话的直接子身份与派生状态。</td><td>查询在 Store 层按 owner + parent 过滤。</td></tr>
-      <tr><td><code>interrupt_agent</code></td><td>中断正在执行的子轮次，或清空尚未开轮的待投递消息。</td><td>不接受任意 parent/owner 的跨身份操作。</td></tr>
+      <tr><td><code>interrupt_agent</code></td><td>中断指定子代理正在执行的轮次。续跑身份还可清空尚未开轮的待投递消息。</td><td>HTTP 入口验证持久化的账号、父会话和子代理身份，再查找同一范围内的活动记录。内建一次性子代理的公开中断不受续跑开关控制。内建执行器返回结构化中断终态后，子代理账本将该轮记录为 <code>aborted</code>。</td></tr>
     </tbody>
   </table>
   <p>Activation 状态由现场派生为 <code>running</code>、<code>ready</code>、<code>idle</code>，并通过 <code>activation_running</code>、<code>activation_ready</code>、<code>activation_idle</code> 事件投影到 Web。后台任务创建时预分配并记录 <code>task_id ↔ subagent_id</code>，任务进度、collect 结果和结算通知均保留双向定位字段。</p>
@@ -267,7 +267,7 @@ feature_event(subagent, run_started/run_settled)
   <ul>
     <li>阶段 B 已交付：run log 与六态结局折叠、四张自有表（runs/edges/descriptors/messages，first-wins descriptor + 软删除边 + 保留期清理）、深度账本（单调下界 + allow_nested 可见性真值表）、通知四态路由（消失丢弃/拆除只入队/忙 steer/空闲等恢复轮，内容单通道）、批量调度（爬坡 + 限流退避 + 定序聚合）与同构模板批量（prompt_template + items）、摘要兜底（preset 可覆盖阈值）。</li>
     <li>阶段 C 已交付：<code>product.subagent</code> Feature 统一拥有 runtime/store/background tasks、通知、工具、通用 preset、路由和生命周期事件；配置仍从现有 Config 兼容入口读取，外援以 optional Service consumer 方式在其后激活。</li>
-    <li>阶段 D1-D3 已交付：continuable 身份、隐藏 canonical session、first-wins descriptor 中的运行规格、Activation 单身份串行锁、owner/parent 双重授权，以及 <code>send_message</code> / <code>list_agents</code> / <code>interrupt_agent</code> 控制面。<code>features.subagent.continuable=false</code> 时工具保持 one-shot 且控制面不注册。</li>
+    <li>阶段 D1-D3 已交付：continuable 身份、隐藏 canonical session、first-wins descriptor 中的运行规格、Activation 单身份串行锁、owner/parent 双重授权，以及 <code>send_message</code> / <code>list_agents</code> / <code>interrupt_agent</code> 控制面。<code>features.subagent.continuable=false</code> 时委派工具保持 one-shot，续跑工具不注册。Web/API 仍可中断运行中的内建一次性子代理。</li>
     <li>阶段 D4-D6 已交付：<code>trigger_turn=false</code> 的消息写入 <code>subagent_messages</code> 并可在重启后消费；后台结算通知分离自述与账目；冷恢复校验持久身份三元组；Activation 状态事件、后台任务双 ID 账本，以及 Web 活动卡的消息/中断控制入口均已接通。</li>
     <li>阶段 E 已交付：fork 前缀快照与结构化来源净化、一次性 <code>structured_output</code>、preset <code>extends</code>/<code>subagents</code>/<code>read_only</code>，以及 Web 生命周期事件与只读活动卡贡献。fork 默认关闭，结构化输出由请求能力位显式开启。</li>
     <li>限流重试目前是"同一简报重放"（进程内 one-shot 子级无可复用轮次）；子级上下文复用型重试随阶段 D continuable 引入。</li>

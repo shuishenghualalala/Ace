@@ -396,7 +396,7 @@ class SubagentRuntime:
         for row in rows:
             subagent_id = str(row.get("subagent_id") or "")
             descriptor = self.store.read_descriptor(subagent_id) or {}
-            if not self._persisted_identity_matches(
+            if descriptor.get("lifecycle") != "continuable" or not self._persisted_identity_matches(
                 subagent_id=subagent_id,
                 parent_session_id=parent_session_id,
                 row=row,
@@ -846,15 +846,15 @@ class SubagentRuntime:
     ) -> bool:
         if self.store is None:
             return False
+        owner = normalize_owner_account_id(owner_account_id)
         row = self.store.get_run(subagent_id)
-        if row is None:
+        if row is None or normalize_owner_account_id(row.get("owner_account_id")) != owner:
             return False
-        if normalize_owner_account_id(row.get("owner_account_id")) != normalize_owner_account_id(owner_account_id):
+        descriptor = self.store.read_descriptor(subagent_id) or {}
+        lifecycle = descriptor.get("lifecycle")
+        if lifecycle not in {"one_shot", "continuable"} or row.get("mode") != lifecycle:
             return False
-        if str(row.get("parent_session_id") or "") != str(parent_session_id):
-            return False
-        descriptor = self.store.read_descriptor(subagent_id)
-        if not descriptor or not self._persisted_identity_matches(
+        if not self._persisted_identity_matches(
             subagent_id=subagent_id,
             parent_session_id=parent_session_id,
             row=row,
@@ -862,18 +862,23 @@ class SubagentRuntime:
         ):
             return False
         interrupt_child = getattr(self.active, "interrupt_child", None)
-        if callable(interrupt_child) and interrupt_child(subagent_id, message):
+        if callable(interrupt_child) and interrupt_child(
+            parent_session_id, subagent_id, owner_account_id=owner, message=message,
+        ):
             return True
+        if lifecycle != "continuable":
+            return False
         activation = self._activations.get(subagent_id)
-        if activation is not None:
-            activation.pending_messages.clear()
-            self.store.cancel_messages(
-                subagent_id,
-                owner_account_id=normalize_owner_account_id(owner_account_id),
-            )
-            self._publish_activation_state(activation)
-            return True
-        return False
+        if (
+            activation is None
+            or activation.owner_account_id != owner
+            or activation.descriptor.parent_session_id != parent_session_id
+        ):
+            return False
+        activation.pending_messages.clear()
+        self.store.cancel_messages(subagent_id, owner_account_id=owner)
+        self._publish_activation_state(activation)
+        return True
 
     async def execute_batch(
         self,
@@ -1402,9 +1407,7 @@ class SubagentRuntime:
         expected_parent = str(parent_session_id or "")
         if str(row.get("parent_session_id") or "") != expected_parent:
             return False
-        if str(descriptor.get("parent_session_id") or "") != expected_parent:
-            return False
-        return descriptor.get("lifecycle") == "continuable"
+        return str(descriptor.get("parent_session_id") or "") == expected_parent
 
     def _ensure_activation(
         self,

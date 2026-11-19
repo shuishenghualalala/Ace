@@ -101,21 +101,23 @@ class ActiveSubagents:
                 did = True
         return did
 
-    def interrupt_child(self, child_id: str, message: str | None = None) -> bool:
+    def interrupt_child(
+        self,
+        parent_session_id: str,
+        child_id: str,
+        *,
+        owner_account_id: str,
+        message: str | None = None,
+    ) -> bool:
         with self._lock:
-            records = [
-                record
-                for children in self._active.values()
-                for key, record in children.items()
-                if key == child_id
-            ]
-        did = False
-        for record in records:
-            fn = getattr(record.get("agent"), "interrupt", None)
-            if callable(fn):
-                fn(message)
-                did = True
-        return did
+            record = self._active.get(parent_session_id, {}).get(child_id)
+            if record is None or normalize_owner_account_id(record.get("owner_account_id")) != owner_account_id:
+                return False
+            interrupt = getattr(record.get("agent"), "interrupt", None)
+        if not callable(interrupt):
+            return False
+        interrupt(message)
+        return True
 
     def snapshot(
         self,

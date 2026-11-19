@@ -113,7 +113,7 @@ def _host_owner(request: Request) -> str:
 
 
 def _create_subagent_router(host: SubagentFeatureHost) -> APIRouter:
-    """Create the owner-scoped projection and continuable control endpoints."""
+    """Create the owner-scoped projection, interrupt, and continuable message endpoints."""
 
     router = APIRouter(prefix="/api/subagents", tags=["subagents"])
 

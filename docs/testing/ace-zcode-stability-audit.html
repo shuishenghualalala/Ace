@@ -179,6 +179,11 @@
 <p>旧版在审批拒绝或安全运行时故障后能跳过后续独占段，但更晚的并行只读段仍能进入执行。ZCode 在当前组产生回合停止标志后为所有后续组生成跳过结果。Ace 将已有停止条件用于并行准入，后续工具统一走逐条跳过结算，并按原调用顺序保留错误状态。</p>
 <p><strong>验收</strong> Windows 发行版解释器中的真实 Dispatcher、内置执行器和 SQLite 分别验证沙箱未就绪、审批拒绝及健康对照。旧版两种失败场景均执行后续两项回调并留下成功结算。候选保留首组和原终态码，后续三个工具的业务回调及 SQLite 执行结算均为零，五组开始和结束帧均成对，历史显示真实跳过。健康对照仍执行全部五项并进入第二次模型请求。此场景使用受控回调与合成模型。后端六组共 279 项通过，Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/agent/loop/tool_runner.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/batch-runner.ts:94–118</code>。</p>
+<h3 id="one-shot-subagent-interrupt">按父会话和账号停止指定一次性子代理</h3>
+<p>旧版公开停止入口将仍在运行的一次性子代理判定为 <code>not_running</code>。ZCode 将子任务停止信号绑定到任务 ID，并将审批投递到父会话且保留请求来源。Ace 用持久化账号、父会话和子代理 ID 校验目标，再查同一范围内的活动记录。内建执行器的结构化中断终态在子代理账本记为 <code>aborted</code>，续跑消息仍要求续跑身份。</p>
+<p><strong>验收</strong> 真实 Gateway ASGI 路由、应用运行时、签名账号 Cookie、桌面 HMAC 审批与 SQLite，使用两个受控内建子代理。旧版正确账号和父会话的停止返回 <code>not_running</code>。候选仅停止目标并落盘 <code>aborted</code>，重复停止显示已退出。另一子代理原审批仍待处理，经一次性批准后正常完成。错误账号、错误父会话和一次性身份的续跑请求均未改变目标。子代理和网关安全回归共 205 项通过，Ruff 通过。两个未修改的深度账本用例报告协程未等待警告。</p>
+<p><strong>待修复</strong> 另一个实际应用夹具确认，同一父会话中两个子代理请求相同操作时会共用审批和等待对象。通过运行句柄取消其中一个，会提前终止另一个并留下待处理审批。父回合级联的代码还按父会话 ID 找活动子代理，未传账号，跨账号重复 ID 的影响仍待独立验证。</p>
+<p class="evidence">Ace <code>crew/agent/subagent/runtime.py</code>、<code>tools.py</code>、<code>providers.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/subagent/runner.ts:565</code>、<code>runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
 <h3>A15 · P1 · 流式提前派发越过写入与串行配置</h3>
 <p>旧版收到完整参数就独立派发只读工具，待模型流收尾才按全批顺序返回结果。在同一次模型响应中先写新文件再读，实际读处理可能先运行。模型收到按顺序排列的写入成功和读取失败。禁用 <code>agent.parallel_tools</code> 时，旧版两条独立读取也可提前并发。</p>
 <p>ZCode 根据注册表中只读、并发、审批、交互及副作用字段决定能否提前派发。完整批次另有按依赖分组的调度器，当前 runtime 传入的通用模型调用依赖列表为空。流式路径按单调用判定。本轮对 ZCode 的行为对照来自源码。</p>
@@ -199,7 +204,7 @@
 <tr><td>终端、后台输出</td><td>Ace 仅在整批判定为独立只读时并发终端命令，后台任务由进程注册表跟踪。ZCode Bash 在普通批使用独占属性，后台输出另有只读入口，回传按启动会话校验。</td><td>已验证长输出游标和按请求退出。两个会话在一方等待后台进程时可独立读取日志，见下节。</td></tr>
 <tr><td>MCP</td><td>原版 Ace 独立启动各服务器，同配置共用一个串行 worker。ZCode 默认按会话租用并按请求调用，普通批次使用服务工具的只读或幂等注解。</td><td>截止时间与回收见 A16。同服务支持两条明确只读请求并发，完整模型回复按现有授权分段并发。</td></tr>
 <tr><td>浏览器</td><td>Ace 按账号串行化共享选中标签和原生引用。ZCode CLI 托管 CDP 按会话建 BrowserContext，按会话和回合取消。</td><td>同账号双标签已用原生 Electron 验证等待取消和正常等待，见 D7f、D7g。</td></tr>
-<tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已跑子 Agent 批次回归，独立退出与请求范围见 A12。并行子任务中一个等待审批、另一个被取消，仍待用两端同夹具验证。</td></tr>
+<tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已验证一个子代理等待审批时公开停止另一一次性子代理。相同操作的共享审批仍待修复，见 <a href="#one-shot-subagent-interrupt">定向停止验收</a>。</td></tr>
 </tbody></table></div>
 <p class="evidence">Ace <code>crew/agent/loop/tool_dispatch_helpers.py</code>、<code>crew/tools/process_registry.py</code>、<code>crew/browser/manager.py:306</code>、<code>crew/agent/subagent/runtime.py:839</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts:481</code>、<code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>、<code>apps/zcode-cli/packages/core/src/runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
 <h3 id="background-process-wait-cancellable">后台进程等待释放工具工作线程</h3>

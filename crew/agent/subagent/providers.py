@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
-from crew.core.envelope import Envelope
+from crew.core.envelope import Envelope, TurnOutcome
 from crew.core.runctx import (
     current_owner_account_id,
     current_structured_output_sink,
@@ -329,8 +329,11 @@ class InProcessSpawnProvider:
                             raw_structured = _chunk_value(chunk, "structured")
                             if isinstance(raw_structured, Mapping):
                                 structured_value = dict(raw_structured)
+                            outcome = TurnOutcome.from_body(_chunk_value(chunk, "outcome"))
                             reason = _chunk_value(chunk, "reason")
-                            if reason:
+                            if outcome is not None and outcome.status == "stopped" and outcome.reason == "interrupted":
+                                stop_reason = "aborted"
+                            elif reason:
                                 normalized = str(reason).strip().lower().replace("-", "_")
                                 if normalized in {"max_tokens", "refusal", "aborted"}:
                                     stop_reason = normalized
