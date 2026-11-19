@@ -563,6 +563,16 @@
 <p>Windows Graphics Capture 的两轮独立先导在私有测试窗口中取得 16 和 20 帧，以 QPC 对齐模型首段写入与合成时间。两轮均在终态前捕获到完整首段，首张阳性帧的保守上界为 172.1 和 161.2 毫秒。第一轮基线帧的合成时间区间与首写重叠，未计作有效判定。第二轮基线明确早于首写，最后阴性帧的上界为 144.6 毫秒，首张阳性帧仍跨过判定门槛。两轮的实际对话和历史落盘均通过。</p>
 <p>另用真实滚轮向上移动 520 像素，再发送一轮。在首段和终态时，上方同一历史条目的屏幕位置和滚动偏移均保持原值。ZCode 现有窗口回归同样在真实慢流中确认主动向上时继续保持阅读位置，回到底部后恢复跟随。</p>
 <p class="evidence">Ace <code>desktop/src/ui/first-text-timing.ts</code>、<code>desktop/src/ui/features/chat-controller.ts:309</code>，<code>desktop/src/ui/features/conversation-renderer.ts:924</code>。ZCode <code>packages/ui/src/v4/timelineScrollAnchor.ts:57</code>，<code>packages/desktop/test/e2e/conversation-session/conversation-session-v4-scroll.test.ts:102</code>。</p>
+<h3>Gateway 首段正文的连续推送间隔</h3>
+<p>Ace 旧默认下，思考帧刚推送时，首段正文会排到同账号、同会话的剩余节流窗口。使用原默认的合成探针测得约 47 毫秒。ZCode 桌面持续订阅采用 30 毫秒合批窗口，测试覆盖回合开始和后续首批正文按序出帧。</p>
+<p>Ace 将默认最小发送间隔由 50 毫秒改为 30 毫秒，配置层和连接管理器共用该值。原发送顺序、优先帧刷新和断线回放继续走既有路径。显式配置的间隔优先。</p>
+<p><strong>验收</strong> 两个定向回归先确认旧默认在 35 毫秒处仍缓冲正文，候选按序发出。Gateway、配置、回放、交互回执与 OpenAI 流式组合共 215 项通过，包括保留显式 0 和 50 毫秒的 YAML 配置。</p>
+<p>Windows 官方 Gateway 发行副本加载相同候选源码，基线档显式配置 50 毫秒，候选档省略该键。每种上游速率各跑 16 对交替对照，共 64 个计时请求。SSE 先发独立思考片，第一段正文约 8 毫秒后写入，客户端实际收到正文后才允许终态。下表为发出第一段 SSE 正文至 WebSocket 收到同段正文的最近秩分位数。</p>
+<table><thead><tr><th>上游速率</th><th>50 毫秒首段 P50 / P95</th><th>30 毫秒首段 P50 / P95</th><th>每轮正文帧中位数</th></tr></thead>
+<tbody><tr><td>20 片/秒</td><td>53.9 / 58.5 ms</td><td>47.1 / 57.2 ms</td><td>23 → 24</td></tr>
+<tr><td>100 片/秒</td><td>45.3 / 55.4 ms</td><td>13.5 / 26.5 ms</td><td>12 → 31</td></tr></tbody></table>
+<p>100 片/秒组每轮全部 WebSocket JSON 的 UTF-8 字节中位数从 7,612 增至 12,285。测试逐轮核对片段顺序、UTF-16 合包边界和最终历史。两档均在正常对话断线后用游标补齐两段正文，Gateway 重启后复查完成回执及历史，四个进程都正常退出并释放双端口。此组测量止于 WebSocket 接收，长会话的输入延迟、Renderer CPU 和像素首绘仍需独立实测。</p>
+<p class="evidence">Ace <code>crew/state/config.py</code>、<code>crew/gateway/connections.py</code>。ZCode <code>packages/shared/src/zcode-protocol-v4/core.ts:35</code>、<code>apps/zcode-cli/packages/bootstrap/tests/v4-gateway.test.ts:1865</code>。</p>
 <h3>配置模型的 SDK 导入实验</h3>
 <p>Windows 发行运行时的单次剖析中，已配置 OpenAI 兼容模型时，客户端装配约 1.79 秒，其中 SDK 首次导入约 1.57 秒。ZCode 在服务端装配中将若干可选依赖初始化集中到独立入口，对并发者共享同一次初始化。Ace 临时原型只在模型已配置且有密钥时并行导入 SDK，在插件装配前等待结果并沿用原客户端构造。两份副本用无密钥配置运行时均未导入 SDK。</p>
 <p>四对温热样本交替运行两份发行副本，使用回环模型端点。原版与候选的主端口就绪中位数为 9.611、9.575 秒，启动到公共 WebSocket 首正文为 10.446、10.394 秒，发送到首正文为 0.597、0.611 秒。候选在四对中三对更早收到首正文。实际重叠时间为 0.313 至 0.354 秒，启动到首正文的逐对变化却从慢 0.018 秒到快 1.774 秒。首次启动的缓存波动更大，单独保留，不计入温热组。原型还引入线程，并改变无效模型配置和 SQLite 装配的先后顺序。根据本组结果，发行代码仍采用同步构造。针对本次实际导入的 522 个 SDK 模块另估算约 1.79 MB 的哈希字节码，尚无计时结果。</p>

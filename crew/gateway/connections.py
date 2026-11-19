@@ -4,7 +4,7 @@
 把 ResponseChunk 或已格式化 payload 推送给前端。
 
 推送限流（用于 GatewayStreamConsumer 的 edit_interval 与 flood control）：
-  - 每个 session 的推送间隔不低于 min_interval（默认 50ms），避免客户端过载。
+  - 每个 session 的连续流帧按 min_interval 合批（默认 30ms），优先帧可立即刷新。
   - 连续推送失败时追踪 _consecutive_failures，超过阈值（3 次）暂时停止推送，
     降级为只落库（下次成功推送后重置计数）。
 
@@ -31,6 +31,7 @@ from fastapi import WebSocket
 from crew.core.followup import get_followup_waiter
 from crew.gateway.replay_journal import ReplayJournal
 from crew.gateway.socket_delivery import SocketDelivery
+from crew.state.config import DEFAULT_GATEWAY_PUSH_MIN_INTERVAL
 from crew.state.logging import get_logger
 
 log = get_logger("gateway.connections")
@@ -78,7 +79,7 @@ class ConnectionManager:
     def __init__(
         self,
         *,
-        min_interval: float = 0.05,
+        min_interval: float = DEFAULT_GATEWAY_PUSH_MIN_INTERVAL,
     ) -> None:
         self._conns: dict[tuple[str, str], set[WebSocket]] = defaultdict(set)
         self._owner_conns: dict[str, set[WebSocket]] = defaultdict(set)

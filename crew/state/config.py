@@ -33,6 +33,7 @@ else:
     ROOT = Path(__file__).resolve().parents[2]
 log = get_logger("config")
 _CONFIG_WRITE_LOCK = threading.Lock()
+DEFAULT_GATEWAY_PUSH_MIN_INTERVAL = 0.03
 _LEGACY_CRON_TICK_WARNING_EMITTED = False
 
 def _bundled_config_template_path() -> Path:
@@ -289,7 +290,7 @@ class Config:
     gateway_host: str = "127.0.0.1"
     gateway_port: int = 8000
     gateway_busy_mode: str = "queue"      # queue | interrupt | steer — 忙时策略
-    gateway_push_min_interval: float = 0.05  # WS 推送最小间隔（秒），0=不限流
+    gateway_push_min_interval: float = DEFAULT_GATEWAY_PUSH_MIN_INTERVAL  # WS 推送最小间隔（秒），0=不限流
     gateway_admin_accounts: list[str] = field(default_factory=list)
     gateway_dev_mode: bool = False  # 开发态旁路：loopback 请求放行开发账号身份（勿用于生产）
     gateway_dev_account: str = "dev:dev"  # 开发环境 owner ID，dev 模式下自动 admin

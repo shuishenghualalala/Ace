@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from crew.gateway.connections import ConnectionManager
 from crew.core.followup import get_followup_waiter
+from crew.gateway import connections
+from crew.gateway.connections import ConnectionManager
+from crew.state.config import Config
 
 
 class _FakeWS:
@@ -801,6 +804,31 @@ def test_merge_pending_thinking_preserves_mixed_event_order(conn: ConnectionMana
         ("status", 3),
         ("thinking", 5),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True], ids=["connection-default", "gateway-config-default"])
+async def test_default_window_delivers_first_text_after_35_ms(monkeypatch, configured):
+    now = 100.0
+    monkeypatch.setattr(connections, "time", SimpleNamespace(monotonic=lambda: now, time=time.time))
+    conn = ConnectionManager(min_interval=Config().gateway_push_min_interval) if configured else ConnectionManager()
+    ws = _FakeWS()
+    conn.register("s1", ws, owner_account_id="local")
+    try:
+        await conn.push_payload(
+            "s1", {"kind": "thinking", "request_id": "r1", "sequence": 1, "body": {"text": "analysis"}},
+            owner_account_id="local",
+        )
+        now += 0.035
+        await conn.push_payload(
+            "s1", {"kind": "delta", "request_id": "r1", "sequence": 2, "body": {"text": "answer"}},
+            owner_account_id="local",
+        )
+        assert [(frame["kind"], frame["gateway_sequence"]) for frame in ws.sent] == [
+            ("thinking", 1), ("delta", 2),
+        ]
+    finally:
+        conn.unregister("s1", ws, owner_account_id="local")
 
 
 @pytest.mark.asyncio

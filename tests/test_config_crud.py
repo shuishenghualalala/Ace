@@ -106,6 +106,17 @@ def test_add_model_basic(cfg: Config):
     assert cfg.active_model_id == "alpha"
 
 
+@pytest.mark.parametrize(
+    ("gateway", "expected"),
+    [({}, 0.03), ({"push_min_interval": 0}, 0), ({"push_min_interval": 0.05}, 0.05)],
+    ids=["default", "disabled", "explicit-50-ms"],
+)
+def test_load_config_preserves_explicit_gateway_push_interval(tmp_path: Path, gateway, expected):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"gateway": gateway}), encoding="utf-8")
+    assert load_config(config_path=str(path)).gateway_push_min_interval == expected
+
+
 def test_load_config_reads_external_security_switch(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
