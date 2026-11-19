@@ -1422,16 +1422,13 @@ function createWindow(previous?: BrowserWindow): void {
   win.on('hide', () => {
     if (mainWindow === win) browserHost?.hidePanel();
   });
-  win.on('show', () => {
-    if (!currentWindow()) return;
-    sendToMainRenderer('browser-view:layout-invalidated');
+  const prepareWindowsSandboxWhenVisible = () => {
     queueMicrotask(() => {
       if (!currentWindow()) return;
       const setup = windowsSandboxSetup.startAutomatically({
         platform: process.platform,
         packaged: app.isPackaged,
-        visible: win.isVisible() && !win.isMinimized(),
-        hiddenLaunch: shouldLaunchHidden(),
+        visible: windowShowRequested && win.isVisible() && !win.isMinimized(),
         ci: Boolean(process.env['CI']),
       }, () => {
         const { ACE_SECURITY_RUNTIME: runtimePath, ACE_SECURITY_STATE_DIR: stateDir } =
@@ -1444,7 +1441,13 @@ function createWindow(previous?: BrowserWindow): void {
         console.warn('[security] Windows initial sandbox setup could not complete');
       });
     });
+  };
+  win.on('show', () => {
+    if (!currentWindow()) return;
+    sendToMainRenderer('browser-view:layout-invalidated');
+    prepareWindowsSandboxWhenVisible();
   });
+  win.on('restore', prepareWindowsSandboxWhenVisible);
   win.on('closed', () => {
     releaseRendererTransports(senderId);
     gatewaySocketGenerations.delete(senderId);

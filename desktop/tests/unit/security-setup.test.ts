@@ -78,7 +78,7 @@ describe('Windows security setup elevation', () => {
 describe('Windows sandbox setup coordinator', () => {
   const runtimePath = 'C:\\Program Files\\Crew\\ace-security-runtime.exe';
   const stateDir = 'C:\\Users\\A\\AppData\\Roaming\\Crew\\security';
-  const visibleWindows = { platform: 'win32', packaged: true, visible: true, hiddenLaunch: false, ci: false };
+  const visibleWindows = { platform: 'win32', packaged: true, visible: true, ci: false };
   const ready = { ok: true, exitCode: 0 };
   const location = () => ({ runtimePath, stateDir });
 
@@ -86,8 +86,6 @@ describe('Windows sandbox setup coordinator', () => {
     { platform: 'darwin' },
     { platform: 'linux' },
     { packaged: false },
-    { visible: false },
-    { hiddenLaunch: true },
     { ci: true },
   ])('does not inspect the runtime or provision for an ineligible launch (%j)', async (condition) => {
     const provision = vi.fn(async () => ready);
@@ -98,6 +96,21 @@ describe('Windows sandbox setup coordinator', () => {
     expect(provision).not.toHaveBeenCalled();
 
     await expect(coordinator.startAutomatically(visibleWindows, locate)).resolves.toEqual(ready);
+    expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir);
+  });
+
+  it('defers checking a hidden window until it is opened and checks only once', async () => {
+    const provision = vi.fn(async () => ready);
+    const locate = vi.fn(location);
+    const coordinator = createWindowsSandboxSetupCoordinator(provision);
+    const hidden = { ...visibleWindows, visible: false };
+
+    expect(coordinator.startAutomatically(hidden, locate)).toBeUndefined();
+    expect(locate).not.toHaveBeenCalled();
+    await expect(coordinator.startAutomatically(visibleWindows, locate)).resolves.toEqual(ready);
+    expect(coordinator.startAutomatically(hidden, locate)).toBeUndefined();
+    expect(coordinator.startAutomatically(visibleWindows, locate)).toBeUndefined();
+    expect(locate).toHaveBeenCalledTimes(1);
     expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir);
   });
 

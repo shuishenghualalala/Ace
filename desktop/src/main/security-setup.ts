@@ -214,7 +214,6 @@ interface WindowsSandboxStartup {
   platform: string;
   packaged: boolean;
   visible: boolean;
-  hiddenLaunch: boolean;
   ci: boolean;
 }
 
@@ -254,8 +253,7 @@ export function createWindowsSandboxSetupCoordinator(
     launch: WindowsSandboxStartup,
     resolveLocation: () => WindowsSandboxLocation | undefined,
   ): Promise<SecuritySetupResult> | undefined {
-    if (automaticAttempted || launch.platform !== 'win32' || !launch.packaged || !launch.visible
-      || launch.hiddenLaunch || launch.ci) return;
+    if (automaticAttempted || launch.platform !== 'win32' || !launch.packaged || !launch.visible || launch.ci) return;
     automaticAttempted = true;
     const location = resolveLocation();
     return location ? run('install', location.runtimePath, location.stateDir) : undefined;

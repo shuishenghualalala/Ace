@@ -470,7 +470,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     <p>Linux 的 workspace-write profile 把宿主根目录 <code>ro-bind</code> 为只读，再覆盖工作空间与临时目录的可写 bind，最后施加项目元数据与 Ace 私有路径限制。子进程使用独立 user、PID namespace、受控 <code>/proc</code>、<code>no_new_privs</code> 和 seccomp。离线或代理模式另外使用独立 network namespace。WSL1 缺少所需 namespace 能力，因此直接拒绝。</p>
 
     <h4>2.6.2 Windows：低权限身份 + ACL + WFP + Job</h4>
-    <p>发行版的首个可见窗口自动检查随包组件和当前用户的沙箱身份。正式安装器已做过初始化时，此处只复用有效身份。直接启动的独立用户目录若仍缺少身份，使用与安装器相同的 Windows 授权与复查路径。首次可见启动与设置页的并发安装请求共用一次操作。登录自启和 CI 跳过自动准备；用户取消系统授权后可从设置页重试。</p>
+    <p>发行版在用户首次打开可见主窗口时自动检查随包组件和当前用户的沙箱身份。正式安装器已做过初始化时，此处只复用有效身份。直接启动的独立用户目录若仍缺少身份，使用与安装器相同的 Windows 授权与复查路径。隐藏登录自启期间不做准备。用户随后从托盘或再次启动应用打开窗口时，沿用同一套检查；同一进程内重复显示窗口不会再触发。CI 跳过自动准备，取消系统授权后可从设置页重试。</p>
     <p>Windows 保留系统与用户目录现有的访问权限。额外读取或写入使用精确 ACL 授权，进程结束后逐条清理。自检只授权临时测试范围。受管 PowerShell 会将工作区挂载为当前会话的 <code>AceCurrentWorkspace:</code>，相对路径从该工作区解析。<code>$PWD.ProviderPath</code> 返回实际文件系统路径。</p>
     <p>安装期创建专用技术账户并持久化受保护身份状态。当前 Windows 后端使用专用账号和受限令牌。各网络模式分别选用离线、代理和直连账户。每次命令在跨进程 mutex 内下发临时 ACL lease，使用 restricted token 和 capability SID 启动，只继承显式句柄，再放入 kill-on-close Job Object。可写根内的受保护元数据对账户和 capability SID 都施加精确 ACL。离线账户由 WFP 阻断联网，代理账户只能连接运行组件固定的本机代理端口。已有安装缺少直连账户时，会在「设置 → 安全」提示完成 Windows 防护配置。</p>
 
