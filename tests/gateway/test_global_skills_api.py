@@ -1,6 +1,11 @@
 """Gateway 全局 Skill 变更路由的操作者归属测试。"""
 
+import asyncio
+import threading
 from types import SimpleNamespace
+
+import httpx
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -66,3 +71,42 @@ def test_store_route_includes_local(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["local"] == [{"slug": "lark-doc", "source": "local"}]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/skills", "/api/skills/store"])
+async def test_catalog_requests_leave_gateway_loop_responsive(monkeypatch, path):
+    loop = asyncio.get_running_loop()
+    scanning = asyncio.Event()
+    release = threading.Event()
+    completed_before_release = []
+
+    def list_catalog():
+        loop.call_soon_threadsafe(scanning.set)
+        completed_before_release.append(release.wait(timeout=2))
+        return [{"slug": "scan-fixture"}]
+
+    monkeypatch.setattr(misc, "list_skills", list_catalog)
+    monkeypatch.setattr(misc, "list_optional_skills", lambda: [])
+    monkeypatch.setattr(misc, "list_local_skills", lambda: [])
+    crew = SimpleNamespace(config=SimpleNamespace(
+        evolution_auto_trigger=False, evolution_auto_full_cycle=False, evolution_visible=False,
+    ))
+    app = FastAPI()
+
+    @app.get("/ready")
+    async def ready():
+        return {"ready": True}
+
+    app.include_router(misc.create_misc_router(crew))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        request = asyncio.create_task(client.get(path))
+        try:
+            await asyncio.wait_for(scanning.wait(), 5)
+            assert (await client.get("/ready")).json() == {"ready": True}
+        finally:
+            release.set()
+        response = await request
+
+    assert completed_before_release == [True]
+    data = response.json()
+    assert (data["installed"] if path.endswith("/store") else data) == [{"slug": "scan-fixture"}]

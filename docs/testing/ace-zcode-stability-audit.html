@@ -670,6 +670,12 @@
 <h4>定时任务恢复等待写锁时维持 Gateway 就绪</h4>
 <p>旧版发布就绪后在业务循环直接等待 <code>cron.db</code> 写事务。ZCode 的 <code>packages/desktop/src/host/database-startup/storagePreparationProcesses.ts</code> 使用专用 Worker 处理 SQLite 启动工作。Ace 的定时任务调度器今后先通过 SQLite 异步写入恢复遗留 Fire，再启动调度并挂载当前 Owner。同一宿主的在线更新复用首次恢复结果。</p>
 <p><strong>验收</strong> Windows 发行运行时启动实际网关，独立 SQLite 连接持有 <code>BEGIN IMMEDIATE</code> 写锁。基线 <code>2846e38c</code> 的主端口签名请求和 WebSocket 握手均超时，旁路健康端口仍通过签名校验。候选在写锁释放前完成主端口签名验证、经 WebSocket 的首聊与 HTTP 历史读取，模型使用回环 SSE 夹具。释放写锁后仅挂载一次本地 Owner，将遗留 Fire 标为 <code>abandoned</code>，保留后续定时任务。两版都重启核对历史并正常释放双端口。锁实验证明了这条阻塞路径，六次常规启动中的延迟来源还需单独测量。</p>
+<h4 id="desktop-skills-catalog-loop">Windows 技能目录扫描与首会话就绪</h4>
+<p>Cron 修复后，在私有 Windows Electron 发行副本中完成两组首启与重开，四次均通过签名复验、WebSocket 首聊、持久历史和双端口清理。CoreReady 至发送可用为 468.6–495.1 毫秒，中位 473.8 毫秒。新旧测量使用不同物理路径和探针，整体耗时作描述性记录。</p>
+<p>连续 tick、Windows 线程 CPU 与只在超阈值采样的 Python 栈，均捕获了技能列表或商店读取中的扫描、路径核查与目录遍历。四次循环间隔为 177.4–209.0 毫秒，同期循环线程 CPU 为 171.9–203.1 毫秒。紧接着的 150.4–163.7 毫秒间隔采到 FastAPI 路由依赖与 Pydantic 模型初始化。Cron 恢复均在前面的可选启动阶段完成。这四次回环建连 3.3–16.8 毫秒，旧测量中的长升级前等待在此轮没有出现。首个物理路径读盘的先导单列。</p>
+<p>本地 ZCode 的技能适配器等异步目录发现完成再返回清单。Ace 将两条读取路由交给 Gateway 工作线程，异步索引使用已有的同步目录实现在线程中执行。提示词和包成员通过同一锁读取索引及元数据。技能商店及工具返回仍沿用原来字段和作用域。</p>
+<p><strong>验收</strong> 使用 Windows 发行解释器、真实 Gateway、签名主端口与独立健康端口、WebSocket 及本机合成模型。夹具持有实际技能扫描锁。在技能列表、商店和已预热的 <code>skills_list</code> 三组中，原版主端口与新 WebSocket 都等锁释放才应答，候选能在锁仍被持有时应答。首聊经正常准入，释放锁后继续生成提示词并完成。目录、商店及模型工具 schema 在归一化私有路径后与原版一致。两版均在关闭并重启后读取提交的历史，双端口正常回收。六组组合回归 184 项通过、8 项跳过，Ruff 通过。剩余 FastAPI 路由初始化延迟单独保留。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/misc.py</code> 与 <code>crew/agent/skills/index.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/skills.ts:31</code>、<code>apps/zcode-cli/packages/adapters/src/skills/scan.ts:62</code>。</p>
 <h4>同机 ZCode 发行版的 Composer 先导</h4>
 <p>本机发行二进制为 ZCode 3.15.3.8237，参考源码快照的包版为 3.16.2。正式包只读，使用独立 Win32 桌面、全新测试配置、私有工作区和回环模型。先导首轮核对实际 Host、数据库和模型选择，未达到发送。夹具补齐逐阶段存证及有界收尾后，第二轮经可见控件完成登录和偏好跳过、可信发送、一次匹配的流式请求、可见用户消息和助手正文。私有 SQLite 中用户输入与随机助手标记各出现一次，应用及 Host 正常退出，模型和 CDP 端口释放。</p>
 <p>第二轮含首次引导的启动到 Composer 可交互为 10.662 秒，点击发送到用户和助手正文 DOM 分别为 15.284 和 16.378 秒。正文显示后还有一次非流式请求，回环夹具返回 422，同期记录标题生成失败。这一轮用于验证真实发行版的测量入口。正式对照需统一两边引导状态、后台模型请求和采样次数。</p>

@@ -2190,6 +2190,43 @@ def test_watcher_event_invalidates_index(skills_dir):
 
 
 @pytest.mark.asyncio
+async def test_prompt_catalog_does_not_wait_for_scanner_lock_on_event_loop(skills_dir):
+    import asyncio
+    import threading
+
+    import crew.agent.skills.index as index_mod
+    from crew.agent.skills import get_skills
+
+    index_mod.skill_index().stop_watcher()
+    locked = threading.Event()
+    release = threading.Event()
+    resumed_while_locked = []
+
+    def scanner():
+        with index_mod._SCAN_LOCK:
+            locked.set()
+            resumed_while_locked.append(release.wait(timeout=2))
+
+    thread = threading.Thread(target=scanner)
+    try:
+        assert "/greet" in get_skills()
+        if index_mod.skill_index()._watcher is None:
+            pytest.skip("watchdog 不可用")
+        thread.start()
+        assert await asyncio.to_thread(locked.wait, 5)
+        prompt = asyncio.create_task(index_mod.abuild_skills_index_prompt())
+        await asyncio.sleep(0)
+        release.set()
+        assert "greet" in await asyncio.wait_for(prompt, 5)
+        assert resumed_while_locked == [True]
+    finally:
+        release.set()
+        if thread.ident is not None:
+            await asyncio.to_thread(thread.join, 5)
+        index_mod.skill_index().stop_watcher()
+
+
+@pytest.mark.asyncio
 async def test_last_app_releases_skill_watcher_and_next_lookup_rescans(skills_dir, tmp_path):
     pytest.importorskip("watchdog")
     from crew.agent.skills import get_skills, skill_index

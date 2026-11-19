@@ -204,15 +204,7 @@ class SkillIndex:
     # ── async 访问器 ─────────────────────────────────────────────────
 
     async def aget(self) -> dict[str, dict]:
-        """async 版 get：watcher 通道 revision 命中纯内存返回；其余进线程池。"""
-        watcher = self._watcher
-        if watcher is not None:
-            watcher.sync()
-            with _SCAN_LOCK:
-                key = self._catalog.revision
-                skills, stored_key = self._catalog.stored()
-                if skills and stored_key == key:
-                    return skills
+        """Keep watcher filesystem checks and scan lock acquisition off the event loop."""
         return await asyncio.to_thread(self.get)
 
     async def abody(self, info: dict) -> str:
@@ -625,7 +617,8 @@ def build_skills_index_prompt(
     - 通过 skill_package_open 展开 package 后，才暴露其内部 skills；
     - 完整 SKILL.md 必须通过 skill_view(name) 按需加载。
     """
-    return _skills_index_prompt(get_skills(), enabled, disabled, max_tokens, available_tool_names)
+    with _SCAN_LOCK:
+        return _skills_index_prompt(get_skills(), enabled, disabled, max_tokens, available_tool_names)
 
 
 async def abuild_skills_index_prompt(
@@ -635,8 +628,11 @@ async def abuild_skills_index_prompt(
     max_tokens: int = _INSTALLED_INDEX_TOKENS,
     available_tool_names: frozenset[str] | None = None,
 ) -> str:
-    """build_skills_index_prompt 的 async 变体：metadata 经 aget_skills 获取。"""
-    return _skills_index_prompt(await aget_skills(), enabled, disabled, max_tokens, available_tool_names)
+    """Build from one catalog revision while the caller remains asynchronous."""
+    return await asyncio.to_thread(
+        build_skills_index_prompt, enabled, disabled,
+        max_tokens=max_tokens, available_tool_names=available_tool_names,
+    )
 
 
 def _skills_index_prompt(
@@ -828,18 +824,20 @@ async def aget_skill_packages() -> dict[str, dict]:
 
 def get_package_info(package_slug: str) -> dict | None:
     """根据 slug 返回 package info；不存在返回 None。"""
-    get_skills()
-    return _current_packages().get(package_slug)
+    with _SCAN_LOCK:
+        get_skills()
+        return _current_packages().get(package_slug)
 
 
 def get_package_members(package_slug: str) -> list[dict]:
     """返回指定 package 内所有 skill info 列表；package 不存在返回空列表。"""
-    return _package_members_from(get_skills(), package_slug)
+    with _SCAN_LOCK:
+        return _package_members_from(get_skills(), package_slug)
 
 
 async def aget_package_members(package_slug: str) -> list[dict]:
     """get_package_members 的 async 变体。"""
-    return _package_members_from(await aget_skills(), package_slug)
+    return await asyncio.to_thread(get_package_members, package_slug)
 
 
 def _package_members_from(skills: dict[str, dict], package_slug: str) -> list[dict]:
@@ -891,7 +889,7 @@ async def alist_skills(
     disabled: list[str] | None = None,
 ) -> list[dict]:
     """list_skills 的 async 变体。"""
-    return _list_skills_from(await aget_skills(), enabled, disabled)
+    return await asyncio.to_thread(list_skills, enabled, disabled)
 
 
 def _list_skills_from(

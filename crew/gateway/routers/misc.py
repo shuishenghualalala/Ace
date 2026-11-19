@@ -166,12 +166,13 @@ def create_misc_router(crew) -> APIRouter:
         return JSONResponse(payload, status_code=status)
 
     # ---- 技能 ----
+    # Catalog reads may scan directories or wait for the shared scan lock.
     @router.get("/api/skills")
-    async def skills() -> JSONResponse:
+    def skills() -> JSONResponse:
         return JSONResponse(list_skills())
 
     @router.get("/api/skills/store")
-    async def skills_store() -> JSONResponse:
+    def skills_store() -> JSONResponse:
         cfg = crew.config
         return JSONResponse({
             "installed": list_skills(),
