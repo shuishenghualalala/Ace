@@ -193,6 +193,7 @@
 <h3>前台对话安装 MCP</h3>
 <p>ZCode 官方配置技能把对话操作接到结构化 MCP 配置，变更保存后由运行时连接、发现和注册工具。Ace 复用现有 MCP 设置的保存事务与增量连接，新增可调用的 <code>mcp_install</code>。管理员在前台对话一次确认，拒绝或取消不写配置；同名同配置保持幂等。同一会话下一轮可发现新工具。远程工具联网卡按公开会话和实际任务关联。</p>
 <p>两类本机真实传输各验证五轮。HTTP 与显式授权的宿主 stdio 均完成拒绝、批准、重复安装、同会话调用和重启后调用。面板使用的公开设置接口返回真实连接状态。HTTP 两次工具调用在公开会话完成原联网批准，四个 Gateway 和两个 stdio 进程正常退出。97 项安装、MCP 管理、生命周期和工具管线回归通过。</p>
+<p><strong>真实模型复验</strong> 通过 <code>D:\Codes\env</code> 配置的真实模型，在隔离 Gateway 发起 <code>mcp_install</code>，批准后保存并连接一个提供合成回显的本机 HTTP 服务。安装回合持久状态为 <code>completed</code>。同一会话下一轮由模型发现并调用新工具，精确结果写入历史。验证夹具末尾断言失败，第二轮完成回执仍待真实模型复验。Gateway 正常退出，两个端口可重绑。完整终态与重启仍由前述两组受控端到端覆盖。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>crew/tools/mcp_client.py</code>、<code>crew/agent/runtime.py</code>。ZCode <code>apps/zcode-cli/packages/zcode-guide-plugin/skills/diagnosing-mcp/SKILL.md:11</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/mcp.ts:41</code>。</p>
 <h3>后台进化结果的账号与会话代次</h3>
 <p>SQLite 允许两个账号各自持有相同的会话 ID。旧进化队列仅按会话 ID 保存任务和结果。真实 Windows Gateway 经公开删除接口及 WebSocket 重建同一会话后，已完成的旧结果和重建后才返回的旧结果均被新回合取出，随后因缺少响应构造返回错误。新实现从首条用户消息的同一 SQLite 写事务取得 <code>history_incarnation</code>，并把任务和答复绑定账号、会话 ID 及该代次。worker 执行和写入结果前核对代次，读取也核对后才消费。SQLite 校验中途取消时可重试读取。进化进度和结果沿用既有状态帧。</p>
