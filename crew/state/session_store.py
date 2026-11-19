@@ -3479,12 +3479,16 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         updater: Callable[[dict[str, Any]], dict[str, Any]],
         owner_account_id: str,
+        *,
+        create_session: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Atomically read, transform, and persist one Session AgentConfig."""
-
+        """Update an AgentConfig, optionally ensuring its session in the same transaction."""
         now = self._now_iso()
 
         def _write(conn):
+            if create_session is not None:
+                workspace_id, title = create_session
+                self.ensure_session_in_transaction(conn, session_id, workspace_id, title, owner_account_id)
             row = conn.execute(
                 """
                 SELECT config_json, created_at

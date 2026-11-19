@@ -7,9 +7,11 @@ import sqlite3
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from crew.agent.capabilities import CapabilityProfile
 from crew.app import build_app
 from crew.core.types import Message
 from crew.gateway.server import create_app
+from crew.sites.capabilities import register_site_capability_profiles
 from crew.state.config import Config, ModelProfile
 from crew.team.models import TeamPlan, TeamPlanNode
 from crew.team.roles import CREW_BUILTIN_AGENT_ID
@@ -19,13 +21,24 @@ OWNER_A = "A:uid-a"
 
 
 @pytest.fixture
-def api(tmp_path, monkeypatch):
+def api_crew(tmp_path, monkeypatch):
     monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
-    crew = build_app(
+    return build_app(
         config=Config(db_path=str(tmp_path / "crew.db"), cron_enabled=False),
         enable_team=False,
     )
-    return create_app(crew)
+
+
+@pytest.fixture
+def api(api_crew):
+    return create_app(api_crew)
+
+
+@pytest.fixture
+def authoring_crew(api_crew):
+    if api_crew.capability_profiles.get("blueprint.authoring") is None:
+        register_site_capability_profiles(api_crew.capability_profiles)
+    return api_crew
 
 
 def test_gateway_wires_interaction_bridge_to_team_manager(tmp_path):
@@ -69,6 +82,160 @@ async def test_api_session_context(api, auth_headers):
     assert data["available"] is True
     assert data["source"] == "preview"
     assert data["used_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_ensure_prepares_builtin_authoring_for_new_session(authoring_crew, auth_headers):
+    api = create_app(authoring_crew)
+    session_id = "new-authoring"
+    session_path = f"/api/session/{session_id}"
+    async with AsyncClient(
+        transport=ASGITransport(app=api), base_url="http://test", headers=auth_headers,
+    ) as client:
+        prepared = await client.post(
+            f"{session_path}/ensure",
+            json={
+                "workspace_id": "authoring-workspace",
+                "title": "Local preview",
+                "prepare_builtin_authoring": True,
+            },
+        )
+        stored = await client.get(f"{session_path}/agent-config")
+        sessions = await client.get("/api/sessions", params={"workspace_id": "authoring-workspace"})
+        history = await client.get(f"{session_path}/history")
+
+    assert prepared.status_code == 200
+    assert prepared.json() == {"ok": True, "session_id": session_id, "builtin_authoring_prepared": True}
+    assert stored.status_code == 200
+    assert stored.json()["executor"] == "builtin"
+    assert stored.json()["capability_profiles"] == ["blueprint.authoring"]
+    assert sessions.status_code == 200
+    assert [(item["session_id"], item["title"], item["message_count"]) for item in sessions.json()] == [
+        (session_id, "Local preview", 0),
+    ]
+    assert history.status_code == 200
+    assert history.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_without_authoring_keeps_original_response(api, auth_headers):
+    session_id = "ordinary-draft"
+    session_path = f"/api/session/{session_id}"
+    async with AsyncClient(
+        transport=ASGITransport(app=api), base_url="http://test", headers=auth_headers,
+    ) as client:
+        ensured = await client.post(f"{session_path}/ensure", json={"title": "Browser preview"})
+        config = await client.get(f"{session_path}/agent-config")
+
+    assert ensured.status_code == 200
+    assert ensured.json() == {"ok": True, "session_id": session_id}
+    assert config.status_code == 200
+    assert config.json() == {}
+
+
+@pytest.mark.asyncio
+async def test_ensure_builtin_authoring_preserves_existing_settings(authoring_crew, auth_headers):
+    api_crew = authoring_crew
+    session_id = "configured-authoring"
+    session_path = f"/api/session/{session_id}"
+    api_crew.capability_profiles.register(CapabilityProfile(id="custom.profile", feature="custom"))
+    store = api_crew.session_store
+    store.ensure_session(session_id, "original-workspace", "Original title", owner_account_id=OWNER_A)
+    store.set_agent_config(
+        session_id,
+        {
+            "executor": "builtin",
+            "model_profile_id": "selected-model",
+            "pending_model_profile_id": "queued-model",
+            "capability_profiles": ["custom.profile"],
+            "disabled_skills": ["example"],
+        },
+        owner_account_id=OWNER_A,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(api_crew)), base_url="http://test", headers=auth_headers,
+    ) as client:
+        request = {"workspace_id": "other-workspace", "title": "Other title", "prepare_builtin_authoring": True}
+        prepared = await client.post(f"{session_path}/ensure", json=request)
+        repeated = await client.post(f"{session_path}/ensure", json=request)
+        config = await client.get(f"{session_path}/agent-config")
+        sessions = await client.get("/api/sessions", params={"session_id": session_id})
+
+    assert prepared.status_code == repeated.status_code == 200
+    assert prepared.json() == repeated.json() == {
+        "ok": True, "session_id": session_id, "builtin_authoring_prepared": True,
+    }
+    assert config.status_code == 200
+    stored = config.json()
+    assert stored["executor"] == "builtin"
+    assert stored["model_profile_id"] == "selected-model"
+    assert stored["pending_model_profile_id"] == "queued-model"
+    assert stored["capability_profiles"] == ["custom.profile", "blueprint.authoring"]
+    assert stored["disabled_skills"] == ["example"]
+    assert sessions.status_code == 200
+    assert [(item["workspace_id"], item["title"]) for item in sessions.json()] == [
+        ("original-workspace", "Original title"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param({"executor": "builtin", "capability_profiles": ["sites.authoring"]}, id="sites-profile"),
+        pytest.param({"executor": "builtin", "site_creation": True}, id="sites-legacy"),
+        pytest.param(
+            {"executor": "external", "external": {"external_agent_id": "configured-agent"}},
+            id="external",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ensure_builtin_authoring_does_not_change_other_session_kinds(api_crew, auth_headers, config):
+    session_id = "non-blueprint-session"
+    store = api_crew.session_store
+    store.ensure_session(session_id, owner_account_id=OWNER_A)
+    before = store.set_agent_config(session_id, config, owner_account_id=OWNER_A)
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(api_crew)), base_url="http://test", headers=auth_headers,
+    ) as client:
+        prepared = await client.post(
+            f"/api/session/{session_id}/ensure", json={"prepare_builtin_authoring": True},
+        )
+
+    assert prepared.status_code == 200
+    assert prepared.json() == {"ok": True, "session_id": session_id, "builtin_authoring_prepared": True}
+    assert store.get_agent_config(session_id, owner_account_id=OWNER_A) == before
+
+
+@pytest.mark.asyncio
+async def test_ensure_builtin_authoring_isolates_identical_session_ids_by_owner(authoring_crew, auth_headers):
+    api_crew = authoring_crew
+    owner_b = "B:uid-b"
+    session_id = "same-authoring-id"
+    session_path = f"/api/session/{session_id}"
+    store = api_crew.session_store
+    store.ensure_session(session_id, "owner-b-workspace", "Owner B title", owner_account_id=owner_b)
+    owner_b_config = store.set_agent_config(
+        session_id, {"executor": "builtin", "model_profile_id": "owner-b-model"}, owner_account_id=owner_b,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(api_crew)), base_url="http://test", headers=auth_headers,
+    ) as client:
+        foreign = await client.get(f"{session_path}/agent-config")
+        prepared = await client.post(
+            f"{session_path}/ensure",
+            json={"title": "Owner A title", "workspace_id": "owner-a-workspace", "prepare_builtin_authoring": True},
+        )
+        owner_a_config = await client.get(f"{session_path}/agent-config")
+
+    assert foreign.status_code == 404
+    assert prepared.status_code == 200
+    assert prepared.json() == {"ok": True, "session_id": session_id, "builtin_authoring_prepared": True}
+    assert owner_a_config.status_code == 200
+    assert owner_a_config.json()["capability_profiles"] == ["blueprint.authoring"]
+    assert "model_profile_id" not in owner_a_config.json()
+    assert store.get_agent_config(session_id, owner_account_id=owner_b) == owner_b_config
+    assert store.get_workspace_id(session_id, owner_account_id=owner_b) == "owner-b-workspace"
 
 
 @pytest.mark.asyncio

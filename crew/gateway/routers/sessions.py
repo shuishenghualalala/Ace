@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from crew.agent.capabilities import canonicalize_capability_config
+from crew.agent.capabilities import canonicalize_capability_config, capability_profile_ids
 from crew.agent.external.runtime_profile import canonical_runtime_model_id, normalize_runtime_models
 from crew.agent.external.feature import EXTERNAL_AGENT_CATALOG_SERVICE_KEY
 from crew.core.errors import ToolError
@@ -468,6 +468,12 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
                     }
         return JSONResponse(items)
 
+    def _drop_session_execution_configs(session_id: str, owner: str) -> None:
+        crew.agents.drop(session_id, owner_account_id=owner)
+        drop_team = getattr(crew.team, "drop_session_team", None)
+        if callable(drop_team):
+            drop_team(session_id, owner_account_id=owner)
+
     @router.post("/api/session/{session_id}/ensure")
     def ensure_session(request: Request, session_id: str, payload: dict) -> JSONResponse:
         """Persist a renderer draft before a session-scoped feature uses it.
@@ -484,18 +490,56 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             )
         workspace_id = str(payload.get("workspace_id") or "default").strip() or "default"
         title = str(payload.get("title") or "新对话").strip() or "新对话"
+        update = getattr(crew.session_store, "update_agent_config", None)
+        prepare = payload.get("prepare_builtin_authoring") is True and callable(update)
+        changed = False
+        preparation_error: str | None = None
+
+        def _prepare_authoring(config: dict[str, Any]) -> dict[str, Any]:
+            nonlocal changed, preparation_error
+            changed = False
+            preparation_error = None
+            profiles = capability_profile_ids(config)
+            executor = str(config.get("executor") or "builtin").strip().lower()
+            if executor != "builtin" or {"blueprint.authoring", "sites.authoring"}.intersection(profiles):
+                return config
+            merged = {
+                **config,
+                "executor": "builtin",
+                "capability_profiles": [*profiles, "blueprint.authoring"],
+            }
+            if strict_security_enabled():
+                merged.pop("user_type", None)
+            try:
+                merged = canonicalize_capability_config(merged, crew.capability_profiles)
+            except ValueError as exc:
+                preparation_error = str(exc)
+                return config
+            changed = True
+            return merged
+
         try:
-            ensure(
-                session_id,
-                workspace_id=workspace_id,
-                title=title,
-                owner_account_id=owner,
-            )
+            if prepare:
+                update(
+                    session_id, _prepare_authoring, owner_account_id=owner,
+                    create_session=(workspace_id, title),
+                )
+            else:
+                ensure(
+                    session_id, workspace_id=workspace_id, title=title, owner_account_id=owner,
+                )
         except SessionOwnershipError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
-        return JSONResponse({"ok": True, "session_id": session_id})
+        if preparation_error is not None:
+            return JSONResponse({"ok": False, "error": preparation_error}, status_code=400)
+        if changed:
+            _drop_session_execution_configs(session_id, owner)
+        response = {"ok": True, "session_id": session_id}
+        if prepare:
+            response["builtin_authoring_prepared"] = True
+        return JSONResponse(response)
 
     # ---- 工作空间 ----
     @router.get("/api/workspaces")
@@ -1549,15 +1593,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         if not callable(setter):
             return JSONResponse({"ok": False, "error": "session agent config store 不可用"}, status_code=500)
         stored = setter(session_id, config, owner_account_id=owner)
-        crew.agents.drop(session_id, owner_account_id=owner)
-        team_manager = crew.team
-        drop_team = (
-            getattr(team_manager, "drop_session_team", None)
-            if team_manager is not None
-            else None
-        )
-        if callable(drop_team):
-            drop_team(session_id, owner_account_id=owner)
+        _drop_session_execution_configs(session_id, owner)
         if title and is_placeholder_title(title):
             crew.session_store.set_title(session_id, title, owner_account_id=owner)
         return JSONResponse(stored)

@@ -5,6 +5,17 @@ vi.mock('../../src/ui/backend-client', () => ({ backendApi: {
   ensureSession: vi.fn(async () => ({})), getSessionAgentConfig: vi.fn(), setSessionAgentConfig: vi.fn(),
 } }));
 beforeEach(() => vi.clearAllMocks());
+it('prepares authoring with one request when the Gateway supports the combined operation', async () => {
+  vi.mocked(backendApi.ensureSession).mockResolvedValueOnce({
+    ok: true, session_id: 's', builtin_authoring_prepared: true,
+  });
+  await ensureNativeVisualCapability('s', 'workspace', '保留标题');
+  expect(backendApi.ensureSession).toHaveBeenCalledExactlyOnceWith('s', {
+    workspace_id: 'workspace', title: '保留标题', prepare_builtin_authoring: true,
+  });
+  expect(backendApi.getSessionAgentConfig).not.toHaveBeenCalled();
+  expect(backendApi.setSessionAgentConfig).not.toHaveBeenCalled();
+});
 it('enables built-in desktop visuals while preserving model, other capabilities and session metadata', async () => {
   vi.mocked(backendApi.getSessionAgentConfig).mockResolvedValue({ executor: 'builtin', model_profile_id: 'selected', capability_profiles: ['existing'] });
   await ensureNativeVisualCapability('s', 'workspace', '原来的标题');

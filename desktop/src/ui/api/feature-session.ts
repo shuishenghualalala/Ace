@@ -1336,8 +1336,8 @@ export const sessionApi = {
       release();
     }
   },
-  ensureSession: (id: string, payload: { workspace_id: string; title?: string }) =>
-    getJSON<{ ok: boolean; session_id: string }>(`/api/session/${encodeURIComponent(id)}/ensure`, {
+  ensureSession: (id: string, payload: { workspace_id: string; title?: string; prepare_builtin_authoring?: boolean }) =>
+    getJSON<{ ok: boolean; session_id: string; builtin_authoring_prepared?: boolean }>(`/api/session/${encodeURIComponent(id)}/ensure`, {
       method: 'POST',
       ...jsonBody(payload),
     }),

@@ -2,7 +2,10 @@ import { backendApi } from '../backend-client';
 
 /** Enable the existing, authorization-filtered authoring capability for desktop built-in chat. */
 export async function ensureNativeVisualCapability(sessionId: string, workspaceId: string, title: string): Promise<void> {
-  await backendApi.ensureSession(sessionId, { workspace_id: workspaceId, title });
+  const prepared = await backendApi.ensureSession(sessionId, {
+    workspace_id: workspaceId, title, prepare_builtin_authoring: true,
+  });
+  if (prepared.builtin_authoring_prepared) return;
   const config = await backendApi.getSessionAgentConfig(sessionId);
   if (config.executor && config.executor !== 'builtin') return;
   const profiles = config.capability_profiles || [];
