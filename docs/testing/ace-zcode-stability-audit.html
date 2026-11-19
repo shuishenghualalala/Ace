@@ -167,6 +167,10 @@
 <p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts:2030</code>，<code>crew/gateway/ws.py:744</code>，<code>crew/agent/loop/tool_runner.py:859</code>。</p>
 </article>
 <article id="evolution-result-scope">
+<h3 id="parallel-children-on-turn-cancellation">回合直接取消时收尾自己启动的并行工具</h3>
+<p>Gateway 关停会直接取消活跃回合。旧版的并行等待中断时，本批工具可继续运行，回合停止后仍会写入结果。ZCode 将回合取消信号传入各工具的执行生命周期。Ace 在并行等待收到外层取消时，对本批的未完成任务发取消，按共享宽限期回收，超出宽限期的任务进入现有退出观察。正常停止和已完成批次保留原模型结果顺序。</p>
+<p><strong>验收</strong> Windows 包内解释器、真实 Dispatcher、内置执行器与 SQLite 运行两项受控异步只读工具。旧版关停返回时两项回调仍在运行，解除闸门后各写入一条成功结算。候选关停时两项已退出，SQLite 没有成功或迟到的结算。主动停止和正常完成也验证通过，快速结果先完成时，模型仍收到调用顺序的结果。该夹具覆盖 Gateway 分发和关停入口。相关四组回归 179 项通过，Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/gateway/dispatcher.py</code>、<code>crew/agent/loop/tool_runner.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/batch-runner.ts</code>、<code>call-runner.ts</code>。</p>
 <h3>A15 · P1 · 流式提前派发越过写入与串行配置</h3>
 <p>旧版收到完整参数就独立派发只读工具，待模型流收尾才按全批顺序返回结果。在同一次模型响应中先写新文件再读，实际读处理可能先运行。模型收到按顺序排列的写入成功和读取失败。禁用 <code>agent.parallel_tools</code> 时，旧版两条独立读取也可提前并发。</p>
 <p>ZCode 根据注册表中只读、并发、审批、交互及副作用字段决定能否提前派发。完整批次另有按依赖分组的调度器，当前 runtime 传入的通用模型调用依赖列表为空。流式路径按单调用判定。本轮对 ZCode 的行为对照来自源码。</p>

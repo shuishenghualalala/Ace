@@ -788,6 +788,59 @@ async def test_tool_interrupt_aborts_inflight_tool_with_grace_window():
     assert hang_cancelled, "优雅窗口到期后 hang 工具应收到 cancel"
 
 
+@pytest.mark.parametrize("delayed_exit", [False, True])
+async def test_cancelling_parallel_batch_stops_its_active_reads(delayed_exit):
+    entered = {key: asyncio.Event() for key in ("a", "b")}
+    exited = {key: asyncio.Event() for key in entered}
+    stop_seen = set()
+    release = asyncio.Event()
+
+    async def read(args):
+        key = args["path"]
+        entered[key].set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            stop_seen.add(key)
+            if delayed_exit and key == "a":
+                await release.wait()
+            raise
+        finally:
+            exited[key].set()
+        return key
+
+    registry = Registry()
+    registry.register(
+        name="file_read", toolset="file",
+        schema={"name": "file_read", "parameters": {"type": "object"}},
+        handler=read, is_async=True,
+    )
+    runner = _watchdog_runner(registry, tool_timeout=0)
+    messages = []
+    calls = [ToolCall(key, "file_read", {"path": key}) for key in entered]
+    batch = asyncio.create_task(_drive_batch(runner, calls, messages))
+    try:
+        async with asyncio.timeout(5):
+            for event in entered.values():
+                await event.wait()
+            batch.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await batch
+        assert stop_seen == {"a", "b"}
+        assert exited["a"].is_set() is not delayed_exit
+        assert exited["b"].is_set()
+        assert messages == []
+    finally:
+        release.set()
+        if not batch.done():
+            batch.cancel()
+            await asyncio.gather(batch, return_exceptions=True)
+        async with asyncio.timeout(5):
+            for key, event in exited.items():
+                if entered[key].is_set():
+                    await event.wait()
+
+
 async def test_tool_interrupt_parallel_batch_keeps_completed_results():
     """并行段被 interrupt：在途工具走 aborted 语义，已完成工具结果原样保留。"""
     from crew.agent.loop.control import TurnControl

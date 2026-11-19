@@ -644,14 +644,17 @@ class ToolRunner:
     async def _resolve_parallel(self, calls) -> list[ToolResult]:
         tasks = [asyncio.create_task(self._resolve(tc)) for tc in calls]
         pending: set[asyncio.Task] = set(tasks)
-        while pending:
-            done, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
-            if self._interrupted and pending:
-                for task in pending:
-                    await self._cancel_task_with_grace(task, "parallel")
-                break
-            if not done and not pending:
-                break
+        try:
+            while pending:
+                _, pending = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
+                if self._interrupted and pending:
+                    for task in pending:
+                        await self._cancel_task_with_grace(task, "parallel")
+                    break
+        except asyncio.CancelledError:
+            # asyncio.wait does not propagate turn cancellation to its children.
+            await self._cancel_tasks_with_grace(tasks, "parallel")
+            raise
 
         results: list[ToolResult] = []
         for tc, task in zip(calls, tasks):
@@ -978,27 +981,37 @@ class ToolRunner:
 
     async def _cancel_task_with_grace(self, task: asyncio.Task[Any], label: str) -> bool:
         """协作取消后有限等待；第三方吞掉 CancelledError 时不阻塞当前回合。"""
-        if task.done():
+        return await self._cancel_tasks_with_grace((task,), label)
+
+    async def _cancel_tasks_with_grace(self, tasks: Sequence[asyncio.Task[Any]], label: str) -> bool:
+        pending = {task for task in tasks if not task.done()}
+        if not pending:
             return True
-        task.cancel()
-        done, pending = await asyncio.wait({task}, timeout=_CLEANUP_GRACE_SECONDS)
-        if pending:
-            from crew.core.runctx import observe_tool_exit
+        for task in pending:
+            task.cancel()
+        try:
+            _, pending = await asyncio.wait(pending, timeout=_CLEANUP_GRACE_SECONDS)
+        finally:
+            for task in pending:
+                if not task.done() and task not in self._leaked_tasks:
+                    self._observe_unfinished_tool(task, label)
+        return not pending
 
-            observe_tool_exit(task.done)
-            self._leaked_tasks.add(task)
+    def _observe_unfinished_tool(self, task: asyncio.Task[Any], label: str) -> None:
+        from crew.core.runctx import observe_tool_exit
 
-            def _forget(done_task: asyncio.Task[Any]) -> None:
-                self._leaked_tasks.discard(done_task)
-                try:
-                    done_task.exception()
-                except (asyncio.CancelledError, Exception):
-                    pass
+        observe_tool_exit(task.done)
+        self._leaked_tasks.add(task)
 
-            task.add_done_callback(_forget)
-            log.warning("工具子任务未在取消宽限期内退出 tool=%s label=%s", label, label)
-            return False
-        return bool(done)
+        def _forget(done_task: asyncio.Task[Any]) -> None:
+            self._leaked_tasks.discard(done_task)
+            try:
+                done_task.exception()
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        task.add_done_callback(_forget)
+        log.warning("工具子任务未在取消宽限期内退出 tool=%s label=%s", label, label)
 
     async def _execute_total_guarded(self, tc, invoke, deadline: _ToolExecutionDeadline | None) -> ToolResult:
         """完整工具管线看门狗：总预算与 interrupt 竞争。"""
