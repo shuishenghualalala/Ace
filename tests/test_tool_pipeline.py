@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from crew.core.errors import ToolError
 from crew.core.runctx import (
     current_agent_workdir,
     current_owner_account_id,
@@ -863,6 +864,52 @@ async def test_tool_interrupt_parallel_batch_keeps_completed_results():
     assert set(by_id) == {"w1", "b1"}  # 整批结果配对完整，无孤儿 tool_call
     assert by_id["b1"] == "quick-ok"   # 已完成工具不受 interrupt 影响
     assert "aborted by user after" in by_id["w1"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "skipped"),
+    [
+        ("approval_rejected", "approval_rejected_turn_stopped"),
+        ("sandbox_unavailable", "security_boundary_failed_turn_stopped"),
+    ],
+)
+async def test_boundary_failure_skips_all_later_tool_segments(failure, skipped):
+    executed = []
+
+    async def read(args):
+        name = args["path"]
+        executed.append(name)
+        if name == "denied":
+            raise ToolError(json.dumps({"error_code": failure, "error": "fixture"}))
+        return "read-ok"
+
+    def write(args):
+        executed.append(args["path"])
+        return "write-ok"
+
+    registry = Registry()
+    for name, handler in (("file_read", read), ("file_write", write)):
+        registry.register(
+            name=name, toolset="file", schema={"name": name, "parameters": {}},
+            handler=handler, is_async=name == "file_read",
+        )
+
+    runner = _watchdog_runner(registry, tool_timeout=0)
+    calls = [
+        ToolCall("1", "file_read", {"path": "denied"}),
+        ToolCall("2", "file_read", {"path": "admitted"}),
+        ToolCall("3", "file_write", {"path": "exclusive", "content": "fixture"}),
+        ToolCall("4", "file_read", {"path": "later-a"}),
+        ToolCall("5", "file_read", {"path": "later-b"}),
+    ]
+    messages = []
+    events = await _drive_batch(runner, calls, messages)
+
+    assert set(executed) == {"denied", "admitted"}
+    assert [message.tool_call_id for message in messages] == ["1", "2", "3", "4", "5"]
+    assert all(json.loads(message.content)["error_code"] == skipped for message in messages[2:])
+    result_ids = [event.body["tool_call_id"] for event in events if event.body["phase"] == "result"]
+    assert set(result_ids) == {"1", "2", "3", "4", "5"} and len(result_ids) == 5
 
 
 async def test_tool_completed_during_grace_window_keeps_result():

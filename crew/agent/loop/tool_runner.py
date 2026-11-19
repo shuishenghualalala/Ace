@@ -328,7 +328,7 @@ class ToolRunner:
         return segment_consecutive_safe(tool_calls, mcp_parallel_read=mcp_parallel_read)
 
     def _parallel_segment_is_current(self, calls: list, catalogue_revision: int | None) -> bool:
-        if self._request_approval_mode():
+        if self.approval_rejected or self.security_boundary_failed or self._request_approval_mode():
             return False
         if (
             catalogue_revision != getattr(self.registry, "mcp_catalog_revision", None)
@@ -542,8 +542,8 @@ class ToolRunner:
                 if tc.id not in started_tool_call_ids:
                     yield self._start_event(tc, rid, next_seq)
                 self._mark_tool_finished(tc)
+                self._append_tool_outcome(messages, tc, result)
                 yield self._result_event(tc, result, rid, next_seq, status="cancelled")
-                messages.append(Message.tool(tc.id, result.content, name=tc.name))
                 continue
             if self._interrupted:
                 result = self._cancelled_result(tc)
