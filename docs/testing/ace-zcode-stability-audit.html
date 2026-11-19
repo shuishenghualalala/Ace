@@ -204,6 +204,10 @@
 <p><strong>验收</strong> 两个截止时间回归在旧版失败。使用实际 stdio 子进程运行 ToolRunner 并重开 SQLite，两类候选失败分别确认零次和一次实际派发。原错误正文、工具结果事件和持久回执一致，均不可自动重试且各提交一次。等待期间的另一个调用继续成功，单个取消与 stdio 回收均通过。MCP 生命周期、MCP 功能和工具执行管线的 83 项回归通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/tools/registry.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/mcp/pool.ts:532</code>、<code>apps/zcode-cli/packages/adapters/src/mcp/index.ts:1118</code>、<code>apps/zcode-cli/packages/core/src/mcp/index.ts:129</code>。</p>
 
+<h3 id="work-item-model-context-gap">Work 事项引用尚未接入本轮模型上下文</h3>
+<p>Ace 桌面先把 <code>@work_item:&lt;id&gt;</code> 写入输入框，再异步保存引用。经签名 Gateway 提交后，Work 的入口只把标记留在普通用户消息。目前 Work 的 Feature 装配注册服务、路由和轮后钩子，事项引用尚未进入既有模型上下文通道。桌面的本次偏好排除字段也未进入实际 Work 模型执行路径。</p>
+<p>两组 Windows 包态尝试均通过真实 Work 引用保存和首轮对话。受控模型收到原始事项标记，系统提示词缺少已引用事项标题。该行为在原 Work 装配和数据库顺序候选中一致。ZCode 从消息解析本轮引用，给模型提供使用 <code>ReadSessionContext</code> 按需读取的提示，并按已有会话身份查询。Ace 验收应覆盖有效引用、本轮送达、跨账号与工作区边界、删除、重发和原始历史。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/composer-mention.ts:921</code>、<code>crew/gateway/ws.py:741</code>、<code>packages/crew-work/src/crew/work/service.py:239</code>。ZCode <code>apps/zcode-cli/packages/core/src/session-context/references.ts:3</code>、<code>runtime/methods/turn.ts:1146</code>、<code>tool/handlers/read-session-context.ts:175</code>。</p>
 <h3>工具并发与异步的补充对照</h3>
 <div class="table"><table>
 <thead><tr><th>工具</th><th>Ace 与 ZCode 的已核对行为</th><th>验收范围</th></tr></thead>
