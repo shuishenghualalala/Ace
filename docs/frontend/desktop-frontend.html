@@ -459,6 +459,7 @@
   </section>
   <section>
     <h2>内置浏览器接管确认与加载失败遮罩（2026-08-05）</h2>
+    <p>同一会话与标签页切换 AI 或人工控制时，浏览器保留当前页面和原生视图，只更新输入权限。主进程用当前控制状态校验布局帧；同一视图收到控制方式切换前发出的布局帧时保留现有挂载，等待后续布局。</p>
     <ul>
       <li>滚轮不再算接管手势：AI 控制期间 <code>before-mouse-event</code> 只对 <code>mouseDown</code> 发起接管请求，<code>mouseWheel</code> 仍被 preventDefault 拦截但不再触发接管——白屏/加载中页面上的一次随手滚动不会把控制权从 AI 手里抢走。</li>
       <li>页面内首个真实输入不再静默接管：宿主 <code>user-interaction-requested</code> 到达后，面板在工具栏下方挂一条非模态确认条「检测到页面操作，是否接管浏览器？」（接管 / 忽略）；点「接管」才走原有 <code>ensureHumanControl('page')</code>，点「忽略」或 AI 后续动作成功（<code>action</code> 事件）都会自动收起。确认条放在 chrome 区而非 stage 浮层——stage 上的 HTML 会被原生 WebContentsView 盖住。地址栏（address）与工具栏（chrome）来源本来就是显式 UI 动作，保持直接接管。</li>

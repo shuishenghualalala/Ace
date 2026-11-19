@@ -374,6 +374,63 @@ describe('browser panel control recovery', () => {
     await vi.waitFor(() => expect(banner?.hidden).toBe(true));
   });
 
+  it('keeps the same local page mounted through AI and human ownership changes', async () => {
+    const current = pageState({
+      tab_id: 'local-html',
+      tab_label: 'session-local-html',
+      url: 'file:///C:/private-fixture/index.html',
+      title: 'Local fixture',
+      running: true,
+    });
+    const sessionId = 'session-local-handoff';
+    const hide = vi.fn().mockResolvedValue({ ok: true });
+    const setPanel = vi.fn().mockResolvedValue({ ok: true });
+    const socketEvents: Array<(event: { type: string; sessionId: string; data: string }) => void> = [];
+    Object.defineProperty(window, 'Crew', {
+      configurable: true,
+      value: {
+        browserWsConnect: vi.fn().mockResolvedValue({ ok: true }),
+        browserWsClose: vi.fn().mockResolvedValue({ ok: true }),
+        browserViewHide: hide,
+        browserViewSetPanel: setPanel,
+        onBrowserWsEvent: vi.fn((callback) => {
+          socketEvents.push(callback);
+          return () => undefined;
+        }),
+      },
+    });
+    vi.stubGlobal('ResizeObserver', class { observe(): void {} disconnect(): void {} });
+    vi.spyOn(backendApi, 'browserState').mockResolvedValue({ ok: true, state: current });
+    const control = vi.spyOn(backendApi, 'browserControl');
+    setActiveSessionId(sessionId);
+    document.body.innerHTML = renderBrowserPanel();
+    const stage = document.querySelector<HTMLElement>('[data-browser-stage]')!;
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 320, 300));
+    bindBrowserPanel();
+    await vi.waitFor(() => {
+      expect(setPanel).toHaveBeenLastCalledWith(expect.objectContaining({
+        sessionId, tabLabel: current.tab_label, mode: 'ai',
+      }));
+      expect(document.querySelector<HTMLElement>('[data-browser-empty]')?.hidden).toBe(true);
+    });
+    hide.mockClear();
+
+    for (const mode of ['human', 'ai'] as const) {
+      socketEvents[0]({ type: 'message', sessionId, data: JSON.stringify({
+        type: 'state',
+        state: { ...current, mode },
+      }) });
+      await vi.waitFor(() => {
+        expect(setPanel).toHaveBeenLastCalledWith(expect.objectContaining({
+          sessionId, tabLabel: current.tab_label, mode,
+        }));
+      });
+      expect(hide).not.toHaveBeenCalled();
+      expect(document.querySelector('[data-browser-stage]')).toBe(stage);
+    }
+    expect(control).not.toHaveBeenCalled();
+  });
+
   it('dismisses the takeover prompt on 忽略 without requesting a takeover', async () => {
     const interactionEvents: Array<(event: {
       tabLabel: string;

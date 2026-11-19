@@ -1452,13 +1452,18 @@ export class BrowserHost extends EventEmitter {
     // 就会被拒（inactive_panel_tab）。requirePanelTab 已按 sessionHash 校验过该 tab
     // 属于请求的会话，会话隔离仍然成立；挂载本身会让该 view 渲染，也不需要它是
     // 原生「当前」tab。各会话的 agent 在自己动作前会通过 _select 重新选中自己的 tab。
+    const window = this.getWindow();
     if (tab.mode !== mode) {
+      // Layout can be one state update behind the mode transition. Keep an
+      // already-mounted verified view as-is, without giving stale input focus.
+      if (window && !window.isDestroyed() && request.visible
+        && this.panel?.owner === owner && this.panel.tab === tab && this.panel.window === window
+        && this.clampBounds(request.bounds, window)) return;
       if (this.panel?.tab === tab) this.hidePanel();
       throw new BrowserHostError('浏览器面板控制模式与宿主状态不一致', {
         code: 'panel_mode_mismatch',
       });
     }
-    const window = this.getWindow();
     if (!request.visible || !window || window.isDestroyed()) {
       this.hidePanel();
       return;

@@ -887,7 +887,11 @@ async function sendControl(action: string, value = ''): Promise<void> {
 }
 
 function applyPageState(nextState: BrowserPageState): void {
-  if (pageState?.tab_label !== nextState.tab_label) zoomFactor = 1;
+  const tabChanged = pageState?.tab_label !== nextState.tab_label
+    || pageState?.tab_id !== nextState.tab_id
+    || pageState?.session_hash !== nextState.session_hash
+    || pageState?.owner_hash !== nextState.owner_hash;
+  if (tabChanged) zoomFactor = 1;
   const shouldAutoOpen = Boolean(
     nextState.tab_id
     && nextState.mode === 'ai'
@@ -896,9 +900,8 @@ function applyPageState(nextState: BrowserPageState): void {
     && !document.body.classList.contains('browser-workbench-open')
     && !sessionOverride
   );
-  if (pageState?.tab_label !== nextState.tab_label || pageState?.mode !== nextState.mode) {
-    detachNativeView();
-  }
+  // A mode change updates input ownership on the current view.
+  if (tabChanged) detachNativeView();
   pageState = nextState;
   patchChrome();
   window.dispatchEvent(new CustomEvent('browser-panel:state-changed', {

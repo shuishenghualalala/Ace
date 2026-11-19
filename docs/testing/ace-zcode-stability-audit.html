@@ -292,6 +292,12 @@
 <p><strong>Linux 原生诊断导出 · <code>93631f3d</code></strong> UOS 正式包的 Electron 43.1 在 Debian 12.15 / WSL2 的独立 Xvfb、普通用户和原 Chromium 沙箱下运行。对四个不同的实际渲染进程逐个注入崩溃。前三次分别在 1.374、1.847、2.643 秒恢复，双端口均通过同一 Gateway 的实例校验。第四次出现原生错误对话框，从中选取导出，使用 GTK 保存窗口将诊断写入临时目录。2,917 字节的 JSON 含四次失败、三次重试、一次耗尽，总计 16 条事件，与主进程恢复日志逐项一致。通过原生按钮退出后，桌面及 Gateway 均返回 0，双端口可重新绑定。最小 Debian 测试环境缺少中文字体，原生按钮中的中文以缺字框显示。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1164</code>、<code>:1189</code>、<code>:1199</code>。ZCode <code>packages/desktop/src/main/desktopCrashCapture.ts:360</code>、<code>:422</code>，<code>desktopStabilityTelemetry.ts:864</code>。</p>
 </article>
+<article id="browser-control-handoff">
+<h3>D7a · 同一浏览器标签切换控制权时页面闪烁</h3>
+<p>现场记录在本地时间 11:51:56 出现一次前台渲染器心跳超时和窗口重建。Windows Electron 43.1 另复现同一内嵌 HTML 标签由人工切换到 AI 时，原生视图被隐藏、移除并重新挂载。ZCode 用稳定的 guest generation 保留浏览器视图，控制权由浏览器管理器更新。</p>
+<p><strong>修复和验收</strong> 同标签同会话的模式切换保留原生视图。迟到的旧模式布局只在身份与视图仍匹配时保留挂载，输入权限仍取主进程当前状态。120 项桌面回归通过。隔离 Windows Electron 使用实际 WebContentsView 和本地 HTML，接管往返及迟到布局均为零隐藏、零移除、零挂载、零导航。主动切出标签仍会移除原生视图。现场窗口心跳超时的具体来源尚待核实。</p>
+<p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code> 与 <code>browser-panel.ts</code>。ZCode <code>BrowserViewportSurface.tsx</code> 与 <code>browserGuestManager.ts</code>。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>

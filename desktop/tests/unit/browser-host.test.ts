@@ -2386,6 +2386,46 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
+  it('ignores a stale ownership request while keeping the same verified view mounted', async () => {
+    const window = fakeWindow();
+    const host = new BrowserHost(() => window);
+    try {
+      const created: any = await createTab(host);
+      const view = electron.views[0];
+      const request = {
+        runtimeKey: RUNTIME_KEY,
+        sessionId: SESSION_ID,
+        tabLabel: TAB_LABEL,
+        bounds: { x: 0, y: 0, width: 400, height: 300 },
+        visible: true,
+      };
+      host.setPanel({ ...request, mode: 'ai' });
+      await setMode(host, created.data.targetId, 'human');
+      expect(() => host.setPanel({
+        ...request, mode: 'ai', bounds: { ...request.bounds, width: 410 },
+      })).not.toThrow();
+      expect(window.contentView.removeChildView).not.toHaveBeenCalled();
+      expect(view.visible).toBe(true);
+      expect(view.bounds).toEqual(request.bounds);
+
+      host.setPanel({ ...request, mode: 'human' });
+      expect(window.contentView.addChildView).toHaveBeenCalledTimes(1);
+      await setMode(host, created.data.targetId, 'ai');
+      const blocked = { preventDefault: vi.fn() };
+      host.setPanel({ ...request, mode: 'human' });
+      view.webContents.emit('before-input-event', blocked, {});
+      expect(blocked.preventDefault).toHaveBeenCalledOnce();
+      expect(window.contentView.removeChildView).not.toHaveBeenCalled();
+      expect(view.visible).toBe(true);
+
+      host.setPanel({ ...request, mode: 'ai', visible: false });
+      expect(window.contentView.removeChildView).toHaveBeenCalledWith(view);
+      expect(view.visible).toBe(false);
+    } finally {
+      await host.dispose();
+    }
+  });
+
   it('leases only Playwright input dispatch, releases idempotently, and rejects human/cross-owner views', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const created: any = await createTab(host);
