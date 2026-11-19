@@ -43,13 +43,25 @@ pub struct SandboxCredentials {
     pub password: String,
 }
 
+pub enum SetupError {
+    OwnerMismatch,
+    Provision(String),
+}
+
 /// Installer-only elevated setup. Runtime never invokes this automatically.
-pub fn setup(state_dir: &Path, expected_owner_sid: Option<&str>) -> Result<(), String> {
+pub fn setup(state_dir: &Path, expected_owner_sid: Option<&str>) -> Result<(), SetupError> {
+    if let Some(expected_sid) = expected_owner_sid {
+        let same_owner = setup_owner_matches(expected_sid).map_err(SetupError::Provision)?;
+        if !same_owner {
+            return Err(SetupError::OwnerMismatch);
+        }
+    }
+    provision(state_dir).map_err(SetupError::Provision)
+}
+
+fn provision(state_dir: &Path) -> Result<(), String> {
     if !state_dir.is_absolute() {
         return Err("security state directory must be absolute".to_string());
-    }
-    if let Some(expected_owner_sid) = expected_owner_sid {
-        verify_setup_owner(expected_owner_sid)?;
     }
     let _lock = super::acl::acquire_mutex()?;
     super::state::prepare_directory(state_dir)?;
@@ -126,14 +138,11 @@ pub fn check_setup(state_dir: &Path) -> Result<(), String> {
     super::wfp::verify_installed(&online.username, true)
 }
 
-fn verify_setup_owner(expected_sid: &str) -> Result<(), String> {
+fn setup_owner_matches(expected_sid: &str) -> Result<bool, String> {
     let expected = super::token::LocalSid::from_string(expected_sid)
         .map_err(|_| "invalid --expected-owner-sid value".to_string())?;
     let mut current = super::state::current_user_sid()?;
-    if unsafe { EqualSid(current.as_mut_ptr().cast(), expected.as_ptr()) } == 0 {
-        return Err("windows_setup_owner_mismatch: elevate using the Windows account that started Ace setup".to_string());
-    }
-    Ok(())
+    Ok(unsafe { EqualSid(current.as_mut_ptr().cast(), expected.as_ptr()) } != 0)
 }
 
 fn provision_direct_identity(path: &Path, mut stored: StoredIdentity) -> Result<(), String> {
@@ -484,8 +493,10 @@ mod tests {
     fn mismatched_setup_owner_does_not_create_security_state() {
         let parent = tempfile::tempdir().unwrap();
         let state = parent.path().join("untouched");
-        let error = setup(&state, Some("S-1-1-0")).unwrap_err();
-        assert!(error.starts_with("windows_setup_owner_mismatch:"));
+        assert!(matches!(
+            setup(&state, Some("S-1-1-0")),
+            Err(SetupError::OwnerMismatch)
+        ));
         assert!(!state.exists());
     }
 
@@ -493,8 +504,10 @@ mod tests {
     fn malformed_setup_owner_does_not_create_security_state() {
         let parent = tempfile::tempdir().unwrap();
         let state = parent.path().join("untouched");
-        let error = setup(&state, Some("invalid")).unwrap_err();
-        assert!(error.contains("invalid --expected-owner-sid value"));
+        assert!(matches!(
+            setup(&state, Some("invalid")),
+            Err(SetupError::Provision(error)) if error.contains("invalid --expected-owner-sid value")
+        ));
         assert!(!state.exists());
     }
 

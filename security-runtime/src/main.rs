@@ -60,7 +60,11 @@ fn main() {
                 println!("Windows sandbox identity setup completed");
                 return;
             }
-            Err(error) => {
+            Err(windows::identity::SetupError::OwnerMismatch) => {
+                eprintln!("Windows sandbox identity setup requires the Windows account that started Ace setup");
+                std::process::exit(4);
+            }
+            Err(windows::identity::SetupError::Provision(error)) => {
                 eprintln!("Windows sandbox identity setup failed: {error}");
                 std::process::exit(1);
             }

@@ -411,6 +411,13 @@
 <p><strong>原生候选与验收矩阵</strong> 已在私有副本实现按沙箱 SID 和规则角色定键的候选，独立的新版 provider 与 sublayer 对应仍保留的旧规则。新规则自检通过后继续使用普通宿主权限。卸载通过事务仅清理本身份规则。Windows Release 编译、5 项原生逻辑单测以及旧版基线编译通过。候选补丁 <code>c42793e2131fc252de481c3f0eaddd85ee6502e43d7484e74c30bba7a20a918f</code> 配套扩展仓库既有 Windows 2025 安全流水线，覆盖双目录交替安装和修复、同目录迁移与两种独立配置卸载顺序。共享分支当前仍使用原生原版，实际 WFP 规则验证、跨 Windows 账号及重启用例仍待隔离宿主。</p>
 <p class="evidence">Ace <code>security-runtime/src/windows/identity.rs</code>、<code>wfp.rs</code>。Codex <code>codex-rs/windows-sandbox-rs/src/setup.rs</code>、<code>wfp.rs</code>、<code>identity.rs</code>。</p>
 </article>
+<article id="windows-sandbox-owner-mismatch">
+<h3>D7k · Windows 沙箱自动准备在提权账号不匹配后重复弹窗</h3>
+<p>本地 Codex 使用固定的机器级沙箱身份，先验证就绪，自动准备优先调用已装服务。Ace 使用安装时为当前用户准备的沙箱身份，原生组件确认提权没有更换账号。旧版把账号不匹配归为普通失败，安装程序之后每次启动都可能再次请求同样的管理员确认。</p>
+<p>Ace 现在把实际 SID 不匹配报告为退出码 4，在当前用户状态目录单独记录。安装器与后续桌面进程均先检查原生状态，根据标记跳过重复自动提权。原生检查成功后清除标记。手动重试仍可用，仍要求提权前后的 Windows 账号一致。现有普通 Windows 用户通过另一管理员账号首次准备的约束仍然存在，多个数据目录的 WFP 验收见 <a href="#windows-sandbox-profile-ownership">D7j</a>。</p>
+<p><strong>验收</strong> 旧版发行 helper 和候选 Release helper 在普通权限下用不同的有效 SID 触发拒绝，分别返回 1 和 4，均未创建目标状态目录。复用已就绪的隔离预览配置，两者原生自检都返回 0，身份文件内容和时间戳均不变。Windows 发行包内的 Electron 对照共六次启动，使用真实预检和原生拒绝，以非提权进程模拟不同账号结果。旧版在安装后和首次打开均尝试提权，候选首次打开和重开只预检，安全设置中的显式点击可再次触发且收到明确结果。原生账号和 CLI 共 6 项、桌面 39 项通过，完整 TypeScript、Rust 格式检查通过。实际 UAC 与防火墙未参与本项试验。</p>
+<p class="evidence">Ace <code>desktop/src/main/security-setup.ts</code>、<code>security-runtime/src/windows/identity.rs</code>。Codex <code>codex-rs/windows-sandbox-rs/src/setup.rs:53</code>、<code>identity.rs:437</code>。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>

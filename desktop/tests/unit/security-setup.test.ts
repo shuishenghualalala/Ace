@@ -33,14 +33,19 @@ describe('Windows security setup elevation', () => {
     );
   });
 
-  it.runIf(process.platform === 'win32')('remembers cancelled consent across provisioning attempts and permits a user retry', async () => {
+  it.runIf(process.platform === 'win32').each([
+    [1223, 'uac_cancelled'],
+    [4, 'windows_setup_owner_mismatch'],
+  ])('remembers exit %i across automatic attempts and permits a user retry', async (exitCode, code) => {
     const parent = mkdtempSync(join(tmpdir(), 'crew-setup-consent-'));
     const runtime = join(parent, 'ace-security-runtime.exe');
     const stateDir = join(parent, 'security');
     writeFileSync(runtime, '');
     const childExit = vi.fn()
-      .mockReturnValueOnce(1).mockReturnValueOnce(1223)
+      .mockReturnValueOnce(1).mockReturnValueOnce(exitCode)
       .mockReturnValueOnce(1)
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(1).mockReturnValueOnce(exitCode)
       .mockReturnValueOnce(1).mockReturnValueOnce(0).mockReturnValueOnce(0)
       .mockReturnValueOnce(0)
       .mockReturnValueOnce(1).mockReturnValueOnce(0).mockReturnValueOnce(0);
@@ -52,16 +57,20 @@ describe('Windows security setup elevation', () => {
 
     try {
       const automatic = { automatic: true };
-      const cancelled = { ok: false, code: 'uac_cancelled' };
-      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject(cancelled);
-      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject(cancelled);
+      const deferred = { ok: false, exitCode, code };
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject(deferred);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject(deferred);
       expect(spawnProcess).toHaveBeenCalledTimes(3);
-      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess)).resolves.toMatchObject({ ok: true });
-      expect(spawnProcess).toHaveBeenCalledTimes(6);
       await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject({ ok: true });
-      expect(spawnProcess).toHaveBeenCalledTimes(7);
+      expect(spawnProcess).toHaveBeenCalledTimes(4);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject(deferred);
+      expect(spawnProcess).toHaveBeenCalledTimes(6);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess)).resolves.toMatchObject({ ok: true });
+      expect(spawnProcess).toHaveBeenCalledTimes(9);
       await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject({ ok: true });
       expect(spawnProcess).toHaveBeenCalledTimes(10);
+      await expect(provisionInstalledWindowsSandbox(runtime, stateDir, spawnProcess, automatic)).resolves.toMatchObject({ ok: true });
+      expect(spawnProcess).toHaveBeenCalledTimes(13);
     } finally {
       rmSync(parent, { recursive: true });
     }

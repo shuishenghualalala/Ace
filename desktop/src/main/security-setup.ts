@@ -7,14 +7,17 @@ export type SecuritySetupResult = {
   ok: boolean;
   exitCode: number | null;
   detail?: string;
-  code?: 'uac_cancelled' | 'uac_disabled' | 'uac_restart_required';
+  code?: 'uac_cancelled' | 'uac_disabled' | 'uac_restart_required' | 'windows_setup_owner_mismatch';
 };
 export type UacEnableResult = SecuritySetupResult & { restartRequired?: boolean };
 
 const UAC_REGISTRY_KEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System';
 const POWERSHELL_UAC_REGISTRY_PATH = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System';
 const ERROR_CANCELLED = 1223;
+// Exit status from the bundled native helper's --windows-setup command.
+const SETUP_OWNER_MISMATCH = 4;
 const DEFERRED_CONSENT_FILE = 'windows-setup-consent-deferred';
+const OWNER_MISMATCH_FILE = 'windows-setup-owner-mismatch';
 let uacRestartRequired = false;
 
 export function securityRuntimePlatformKey(platform: string, arch: string): string | undefined {
@@ -207,7 +210,17 @@ export async function runElevatedSecuritySetup(
   fs.mkdirSync(stateDir, { recursive: true });
   const result = await runSetupCommand(buildElevatedSecuritySetup(runtimePath, stateDir, action), spawnProcess);
   if (result.exitCode === ERROR_CANCELLED) return cancelledSetup();
+  if (action !== 'uninstall' && result.exitCode === SETUP_OWNER_MISMATCH) return ownerMismatchSetup();
   return result;
+}
+
+function ownerMismatchSetup(): SecuritySetupResult {
+  return {
+    ok: false,
+    exitCode: SETUP_OWNER_MISMATCH,
+    code: 'windows_setup_owner_mismatch',
+    detail: 'Windows 沙箱须由启动 Ace 的同一 Windows 账号授权。当前安装需要有管理员权限的 Windows 账号完成设置。',
+  };
 }
 
 function cancelledSetup(): SecuritySetupResult {
@@ -239,20 +252,28 @@ export async function provisionInstalledWindowsSandbox(
     executable: runtimePath,
     argv: ['--windows-check-setup', stateDir],
   }, spawnProcess);
-  const marker = path.join(stateDir, DEFERRED_CONSENT_FILE);
+  const consent = path.join(stateDir, DEFERRED_CONSENT_FILE);
+  const ownerMismatch = path.join(stateDir, OWNER_MISMATCH_FILE);
+  const clearDeferrals = () => {
+    for (const marker of [consent, ownerMismatch]) {
+      if (fs.existsSync(marker)) saveConsentDeferral(marker, false);
+    }
+  };
   const before = await verify();
-  // The native check remains authoritative even after consent was deferred.
+  // The native check remains authoritative even after automatic elevation was deferred.
   if (before.ok) {
-    if (fs.existsSync(marker)) saveConsentDeferral(marker, false);
+    clearDeferrals();
     return before;
   }
   if (before.exitCode !== 1) return before;
-  if (automatic && fs.existsSync(marker)) return cancelledSetup();
+  if (automatic && fs.existsSync(ownerMismatch)) return ownerMismatchSetup();
+  if (automatic && fs.existsSync(consent)) return cancelledSetup();
   const setup = await runElevatedSecuritySetup(runtimePath, stateDir, 'install', spawnProcess);
-  if (setup.code === 'uac_cancelled') saveConsentDeferral(marker, true);
+  if (setup.code === 'uac_cancelled') saveConsentDeferral(consent, true);
+  if (setup.code === 'windows_setup_owner_mismatch') saveConsentDeferral(ownerMismatch, true);
   if (!setup.ok) return setup;
   const after = await verify();
-  if (after.ok && fs.existsSync(marker)) saveConsentDeferral(marker, false);
+  if (after.ok) clearDeferrals();
   return after;
 }
 
