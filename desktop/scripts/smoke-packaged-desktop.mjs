@@ -116,7 +116,7 @@ function launchEnv() {
     LOCALAPPDATA: path.join(home, 'local'), PROGRAMDATA: path.join(home, 'programdata'),
     XDG_DATA_HOME: path.join(home, 'data'), XDG_CONFIG_HOME: path.join(home, 'config'), XDG_CACHE_HOME: path.join(home, 'cache'),
     XDG_RUNTIME_DIR: xdgRuntime, TMP: temp, TEMP: temp, TMPDIR: temp, CREW_HOME: crewHome, ACE_RELEASE_MODEL_KEY: key,
-    CREW_OFFLINE: '1', CREW_RIPGREP_INSTALLER: 'system', HTTP_PROXY: 'http://127.0.0.1:9', HTTPS_PROXY: 'http://127.0.0.1:9',
+    CI: '1', CREW_OFFLINE: '1', CREW_RIPGREP_INSTALLER: 'system', HTTP_PROXY: 'http://127.0.0.1:9', HTTPS_PROXY: 'http://127.0.0.1:9',
     ALL_PROXY: 'http://127.0.0.1:9', NO_PROXY: '127.0.0.1,localhost,::1' };
 }
 
