@@ -89,9 +89,20 @@ class ActiveSubagents:
             if not children:
                 self._active.pop(parent_session_id, None)
 
-    def interrupt(self, parent_session_id: str, message: str | None = None) -> bool:
+    def interrupt(
+        self,
+        parent_session_id: str,
+        message: str | None = None,
+        *,
+        owner_account_id: str,
+    ) -> bool:
+        owner = normalize_owner_account_id(owner_account_id)
         with self._lock:
-            records = list(self._active.get(parent_session_id, {}).values())
+            records = [
+                record
+                for record in self._active.get(parent_session_id, {}).values()
+                if normalize_owner_account_id(record.get("owner_account_id")) == owner
+            ]
         did = False
         for rec in records:
             agent = rec.get("agent")

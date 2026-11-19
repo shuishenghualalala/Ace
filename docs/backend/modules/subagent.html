@@ -244,7 +244,7 @@ subagent_id ── descriptor(spec, provider, depth, hidden session) ── suba
     <tbody>
       <tr><td><code>send_message</code></td><td>向 continuable 子身份投递消息；可选择立即开轮或先排队。</td><td>必须同时匹配当前 owner 与直接 parent session。</td></tr>
       <tr><td><code>list_agents</code></td><td>列出当前父会话的直接子身份与派生状态。</td><td>查询在 Store 层按 owner + parent 过滤。</td></tr>
-      <tr><td><code>interrupt_agent</code></td><td>中断指定子代理正在执行的轮次。续跑身份还可清空尚未开轮的待投递消息。</td><td>HTTP 入口验证持久化的账号、父会话和子代理身份，再查找同一范围内的活动记录。内建一次性子代理的公开中断不受续跑开关控制。内建执行器返回结构化中断终态后，子代理账本将该轮记录为 <code>aborted</code>。</td></tr>
+      <tr><td><code>interrupt_agent</code></td><td>中断指定子代理正在执行的轮次。续跑身份还可清空尚未开轮的待投递消息。</td><td>HTTP 入口验证持久化的账号、父会话和子代理身份，再查找同一范围内的活动记录。内建一次性子代理的公开中断不受续跑开关控制。内建执行器返回结构化中断终态后，子代理账本将该轮记录为 <code>aborted</code>。停止父回合时只级联到同一账号和父会话下的活动子代理。</td></tr>
     </tbody>
   </table>
   <p>Activation 状态由现场派生为 <code>running</code>、<code>ready</code>、<code>idle</code>，并通过 <code>activation_running</code>、<code>activation_ready</code>、<code>activation_idle</code> 事件投影到 Web。后台任务创建时预分配并记录 <code>task_id ↔ subagent_id</code>，任务进度、collect 结果和结算通知均保留双向定位字段。</p>

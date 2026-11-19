@@ -2386,7 +2386,9 @@ class CrewApp:
         # 看不到自己的标志，故需主动下发；配合子任务超时兜底）。
         if self.subagent_active is not None:
             try:
-                interrupted = self.subagent_active.interrupt(session_id, message) or interrupted
+                interrupted = self.subagent_active.interrupt(
+                    session_id, message, owner_account_id=owner_account_id,
+                ) or interrupted
             except Exception:  # noqa: BLE001
                 log.exception("subagent interrupt 失败 session=%s", session_id)
         return interrupted

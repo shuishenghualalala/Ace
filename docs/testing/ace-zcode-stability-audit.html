@@ -182,8 +182,12 @@
 <h3 id="one-shot-subagent-interrupt">按父会话和账号停止指定一次性子代理</h3>
 <p>旧版公开停止入口将仍在运行的一次性子代理判定为 <code>not_running</code>。ZCode 将子任务停止信号绑定到任务 ID，并将审批投递到父会话且保留请求来源。Ace 用持久化账号、父会话和子代理 ID 校验目标，再查同一范围内的活动记录。内建执行器的结构化中断终态在子代理账本记为 <code>aborted</code>，续跑消息仍要求续跑身份。</p>
 <p><strong>验收</strong> 真实 Gateway ASGI 路由、应用运行时、签名账号 Cookie、桌面 HMAC 审批与 SQLite，使用两个受控内建子代理。旧版正确账号和父会话的停止返回 <code>not_running</code>。候选仅停止目标并落盘 <code>aborted</code>，重复停止显示已退出。另一子代理原审批仍待处理，经一次性批准后正常完成。错误账号、错误父会话和一次性身份的续跑请求均未改变目标。子代理和网关安全回归共 205 项通过，Ruff 通过。两个未修改的深度账本用例报告协程未等待警告。</p>
-<p><strong>待修复</strong> 另一个实际应用夹具确认，同一父会话中两个子代理请求相同操作时会共用审批和等待对象。通过运行句柄取消其中一个，会提前终止另一个并留下待处理审批。父回合级联的代码还按父会话 ID 找活动子代理，未传账号，跨账号重复 ID 的影响仍待独立验证。</p>
+<p><strong>待修复</strong> 另一个实际应用夹具确认，同一父会话中两个子代理请求相同操作时会共用审批和等待对象。通过运行句柄取消其中一个，会提前终止另一个并留下待处理审批。</p>
 <p class="evidence">Ace <code>crew/agent/subagent/runtime.py</code>、<code>tools.py</code>、<code>providers.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/subagent/runner.ts:565</code>、<code>runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
+<h3 id="parent-child-stop-owner-scope">父会话停止按账号级联</h3>
+<p>ZCode 将每个子运行的取消控制器与发起它的父级信号相连。Ace 旧版在父回合停止时只按会话 ID 找子代理。网关已取得可信账号，现由 CrewApp 将账号传给活动子代理注册表，按账号和父会话筛选后发送中断。</p>
+<p><strong>验收</strong> 实际 Gateway WebSocket 使用签名 Cookie 认证。两个不同账号在 SQLite 各有相同 ID 的父会话，同时运行独立子代理。旧版账号 A 发会话 Stop 后，两个子代理均收到中断。候选仅将 A 的子代理记为 <code>aborted</code>，B 的子代理保持活动，独立完成后记为 <code>completed</code>。使用受控子运行。四组子代理、账号及 Dispatcher 回归共 81 项通过，Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/app.py</code>、<code>crew/agent/subagent/tools.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/subagent/runner.ts:203</code>、<code>:624</code>。</p>
 <h3>A15 · P1 · 流式提前派发越过写入与串行配置</h3>
 <p>旧版收到完整参数就独立派发只读工具，待模型流收尾才按全批顺序返回结果。在同一次模型响应中先写新文件再读，实际读处理可能先运行。模型收到按顺序排列的写入成功和读取失败。禁用 <code>agent.parallel_tools</code> 时，旧版两条独立读取也可提前并发。</p>
 <p>ZCode 根据注册表中只读、并发、审批、交互及副作用字段决定能否提前派发。完整批次另有按依赖分组的调度器，当前 runtime 传入的通用模型调用依赖列表为空。流式路径按单调用判定。本轮对 ZCode 的行为对照来自源码。</p>

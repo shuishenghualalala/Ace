@@ -200,6 +200,91 @@ def test_gateway_active_children_view_is_owner_scoped():
     ) == [{"child_id": "child-a", "owner_account_id": "owner-a"}]
 
 
+def test_gateway_parent_stop_only_interrupts_children_of_signed_owner(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    from starlette.testclient import TestClient
+
+    from crew.app import build_app
+    from crew.core.envelope import TurnOutcome
+    from crew.gateway.auth import REMOTE_AUTH_COOKIE, create_remote_session_token
+    from crew.gateway.server import create_app
+    from crew.state.config import Config
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path))
+    monkeypatch.setenv("CREW_OFFLINE", "1")
+    crew = build_app(config=Config(
+        db_path=str(tmp_path / "crew.db"), cron_enabled=False, plugins_enabled=[],
+        auth_mode="remote", auth_provider_id="test",
+    ), enable_team=False)
+    parent_id = "shared-parent"
+    owners = ("test:uid-a", "test:uid-b")
+    runtime = crew.subagent_runtime
+    provider = runtime.providers.get(runtime.default_provider, owner_account_id=owners[0])
+    children = {}
+
+    class Child:
+        def __init__(self, spec):
+            self.owner = spec["fixture_owner"]
+            self.entered = asyncio.Event()
+            self.finish = asyncio.Event()
+            self.interrupted = False
+            children[self.owner] = self
+
+        def interrupt(self, _message=None):
+            self.interrupted = True
+            self.finish.set()
+
+        async def run(self, envelope):
+            self.id = envelope.params["subagent_id"]
+            self.entered.set()
+            await self.finish.wait()
+            if self.interrupted:
+                yield ResponseChunk.final("child", "", outcome=TurnOutcome("stopped", reason="interrupted"))
+            else:
+                yield ResponseChunk.final("child", "child completed independently")
+
+    monkeypatch.setattr(provider, "_build_child", Child)
+    for owner in owners:
+        crew.session_store.save(parent_id, [Message.user(owner)], owner_account_id=owner)
+
+    async def launch_children():
+        runs = [
+            asyncio.create_task(runtime.execute(StartRequest(
+                label="fixture", goal_text="fixture", parent_session_id=parent_id,
+                owner_account_id=owner, user_id=owner, workspace_id="default",
+                spec={"fixture_owner": owner},
+            )))
+            for owner in owners
+        ]
+        await asyncio.sleep(0)
+        for owner in owners:
+            await asyncio.wait_for(children[owner].entered.wait(), 2)
+        return runs
+
+    async def settled(run):
+        return await asyncio.wait_for(asyncio.shield(run), 2)
+
+    with TestClient(create_app(crew)) as client:
+        deadline = time.monotonic() + 5
+        while client.get("/api/health").json()["readiness"]["status"] != "ready":
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        first, second = client.portal.call(launch_children)
+        token = create_remote_session_token("test", "uid-a", ttl_seconds=600)
+        with client.websocket_connect("/ws", headers={"Cookie": f"{REMOTE_AUTH_COOKIE}={token}"}) as socket:
+            socket.send_json({"action": "stop", "session_id": parent_id})
+            assert client.portal.call(settled, first).stop_reason == "aborted"
+            assert not children[owners[1]].interrupted
+            assert not second.done()
+            client.portal.call(children[owners[1]].finish.set)
+            assert client.portal.call(settled, second).output == "child completed independently"
+        assert [crew.subagent_store.get_run(children[owner].id)["stop_reason"] for owner in owners] == [
+            "aborted", "completed",
+        ]
+
+
 @pytest.mark.asyncio
 async def test_fork_provider_seeds_child_with_completed_parent_prefix(tmp_path):
     store = SQLiteSessionStore(str(tmp_path / "sessions.db"))

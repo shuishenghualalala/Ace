@@ -430,7 +430,7 @@ def test_active_subagents_interrupt_cascade():
     active.register("s1", "c1", {"child_id": "c1", "label": "x", "agent": child})
     assert active.snapshot("s1")[0]["label"] == "x"      # 快照不含 agent 句柄
     assert "agent" not in active.snapshot("s1")[0]
-    assert active.interrupt("s1") is True
+    assert active.interrupt("s1", owner_account_id="local") is True
     assert child.interrupted is True
     active.unregister("s1", "c1")
     assert active.snapshot("s1") == []
