@@ -400,6 +400,7 @@
 <p>每个桌面用户数据目录保存自己的 Windows 沙箱身份。原生安装与修复用固定的六个过滤器 GUID 替换机器级 WFP 规则，规则再按本次安装的沙箱账号 SID 匹配。准备另一份配置会把这些规则绑定到另一组 SID，前一份配置可能再次要求管理员确认。</p>
 <p><strong>实机证据</strong> 普通 Windows 用户用同一个已随包发布的 x64 运行组件执行只读 <code>--windows-check-setup</code>。隔离预览配置返回就绪，常用桌面配置返回防火墙规则与沙箱账号不匹配。自检期间没有执行安装、修复、卸载或改写防火墙，现场错误另见 <a href="#security-turn-error-diagnostics">D7i</a>。</p>
 <p><strong>修复门槛</strong> 本地 Codex 以固定机器级身份复用对应规则。Ace 目前保留独立身份。后续应让 WFP 规则按身份独立归属，验证现有安装迁移、交替修复、卸载与重启，并保留运行前的规则校验。实机验证需要可独立修改防火墙的 Windows 环境。</p>
+<p><strong>原生候选与验收矩阵</strong> 已在私有副本实现按沙箱 SID 和规则角色定键的候选，独立的新版 provider 与 sublayer 对应仍保留的旧规则。新规则自检通过后继续使用普通宿主权限。卸载通过事务仅清理本身份规则。Windows Release 编译、5 项原生逻辑单测以及旧版基线编译通过。候选补丁 <code>c42793e2131fc252de481c3f0eaddd85ee6502e43d7484e74c30bba7a20a918f</code> 配套扩展仓库既有 Windows 2025 安全流水线，覆盖双目录交替安装和修复、同目录迁移与两种独立配置卸载顺序。共享分支当前仍使用原生原版，实际 WFP 规则验证、跨 Windows 账号及重启用例仍待隔离宿主。</p>
 <p class="evidence">Ace <code>security-runtime/src/windows/identity.rs</code>、<code>wfp.rs</code>。Codex <code>codex-rs/windows-sandbox-rs/src/setup.rs</code>、<code>wfp.rs</code>、<code>identity.rs</code>。</p>
 </article>
 <article id="release">
