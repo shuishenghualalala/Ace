@@ -332,6 +332,8 @@ def extract_discovered_tool_names(
     """Restore ToolSearch discoveries from canonical message history."""
     _, deferred = classify_tool_schemas(original_tool_schemas, config)
     allowed = {function_name(schema) for schema in deferred}
+    if not allowed:
+        return set()
     discovered: set[str] = set()
 
     for message in messages:

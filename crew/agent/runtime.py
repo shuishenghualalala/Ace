@@ -767,6 +767,7 @@ class SingleAgent(Agent):
                 tool_schemas,
                 session_id,
                 ToolDisclosureMode.DIRECT if plan_active else self.tool_disclosure_mode,
+                canonical_history=history,
                 consume_transient=False,
             )
             request_view, _ = await self.executor.finalize_request_view(
@@ -1137,6 +1138,7 @@ class SingleAgent(Agent):
             request_id=envelope.request_id,
             system_prompt=system_static,
             messages=llm_messages,
+            canonical_history=history,
             query=user_text,
             attachments=[
                 dict(attachment)

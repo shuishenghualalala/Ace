@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -244,6 +245,76 @@ async def test_context_preview_counts_same_l1_view_used_before_send():
 
     assert preview is not None
     assert preview["used_tokens"] < estimate_tokens(history)
+
+
+async def test_compacted_request_restores_discovered_tools_from_canonical_history(monkeypatch):
+    store = InMemorySessionStore()
+    session_id = "mcp-discovery-after-compact"
+    visible_tool = "example__echo"
+    excluded_tool = "example__excluded"
+    search_result = json.dumps({
+        "matches": [
+            {"name": visible_tool, "description": "echo description " * 40},
+            {"name": excluded_tool, "description": "excluded description " * 40},
+        ],
+    })
+    store.save(session_id, [
+        Message.user("Find the example tools"),
+        Message.assistant(tool_calls=[
+            ToolCall("search-1", "tool_search", {"query": "example"}, status="done"),
+        ]),
+        Message.tool("search-1", search_result, name="tool_search"),
+        Message.assistant("Found the tools"),
+    ], owner_account_id="local")
+
+    provider = FakeProvider(script=[
+        ChatResponse(tool_calls=[ToolCall("echo-1", visible_tool, {})]),
+        ChatResponse(text="completed"),
+    ])
+    compactor = ContextCompactor(
+        FakeProvider(), token_budget=1_000_000, max_tool_result_chars=180,
+    )
+    agent = _agent(
+        provider, session_store=store, compactor=compactor, enable_title=False,
+        tool_filter=[visible_tool],
+    )
+    invocations = []
+
+    def echo(arguments):
+        invocations.append(arguments)
+        return tool_result(echo="ok")
+
+    for name in (visible_tool, excluded_tool):
+        agent.registry.register(
+            name=name, toolset="mcp:example", is_mcp=True, should_defer=True,
+            schema={"name": name, "description": "Echo", "parameters": {"type": "object"}},
+            handler=echo,
+        )
+
+    finalized = []
+    original_finalize = agent.executor.finalize_request_view
+
+    async def capture(view, **kwargs):
+        names = {tool["function"]["name"] for tool in (view.tools or ())}
+        result = next((m.content for m in view.messages if m.tool_call_id == "search-1"), "")
+        finalized.append((names, result))
+        return await original_finalize(view, **kwargs)
+
+    monkeypatch.setattr(agent.executor, "finalize_request_view", capture)
+    assert await agent.preview_context("other-session", owner_account_id="local") is not None
+    assert finalized[-1] == ({"tool_search"}, "")
+
+    assert await agent.preview_context(session_id, owner_account_id="local") is not None
+    chunks = [chunk async for chunk in agent.run(Envelope.of("Call echo", session_id=session_id))]
+
+    assert invocations == [{}]
+    assert chunks[-1].kind == "final"
+    assert all(names == {"tool_search", visible_tool} for names, _ in finalized[1:])
+    assert all("已截断" in result for _, result in finalized[1:])
+    assert any(
+        message.content == search_result
+        for message in store.load(session_id, owner_account_id="local")
+    )
 
 
 async def test_agent_streaming_yields_delta():

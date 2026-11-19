@@ -8,6 +8,7 @@ AgentExecutor 只消费 ExecutionContext，产出统一的 ResponseChunk 流。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -51,6 +52,8 @@ class ExecutionContext:
     plan_mode_at_start: bool = False
     # 回合内关键 durable boundary 的异步写入口；None 表示 CLI/轻量执行器不落盘。
     durable_event_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
+    # Read-only source for tool discovery, which may be missing from the compacted messages.
+    canonical_history: Sequence[Message] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

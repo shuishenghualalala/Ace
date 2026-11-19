@@ -13,6 +13,8 @@ canonical 历史契约：本 executor 只 **append** 到 ctx.messages（SingleAg
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import asyncio
 import inspect
 import random
@@ -431,6 +433,7 @@ class BuiltinExecutor(AgentExecutor):
         tool_disclosure_mode: ToolDisclosureMode = ToolDisclosureMode.PROGRESSIVE,
         *,
         tool_search_assembly: Any = None,
+        canonical_history: Sequence[Message] | None = None,
         discovered_tool_names: Any = None,
         consume_transient: bool = True,
         retained_todo_reminder: str | None = None,
@@ -450,7 +453,7 @@ class BuiltinExecutor(AgentExecutor):
         deferred_tools_message = available_deferred_tools_message(assembly)
         if discovered_tool_names is None:
             discovered_tool_names = extract_discovered_tool_names(
-                messages,
+                messages if canonical_history is None else canonical_history,
                 original_tool_schemas=assembly.original_tool_schemas,
                 config=assembly.config,
             )
@@ -616,7 +619,7 @@ class BuiltinExecutor(AgentExecutor):
         # PROGRESSIVE 才按全局 ToolSearch 配置装配。
         tool_search_assembly = self._assemble_tool_search(original_tools, ctx.tool_disclosure_mode)
         discovered_tool_names = extract_discovered_tool_names(
-            ctx.messages,
+            ctx.messages if ctx.canonical_history is None else ctx.canonical_history,
             original_tool_schemas=tool_search_assembly.original_tool_schemas,
             config=tool_search_assembly.config,
         )
