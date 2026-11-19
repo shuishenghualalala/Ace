@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 
 class CrewErrorKind(StrEnum):
@@ -224,11 +224,13 @@ class StructuredToolError(ToolError):
         code: str,
         next_action: str | None = None,
         details: dict[str, Any] | None = None,
+        side_effect_state: Literal["none", "unknown", "committed"] = "none",
     ) -> None:
         super().__init__(message)
         self.code = code
         self.next_action = next_action
         self.details = dict(details) if details is not None else {}
+        self.side_effect_state = side_effect_state
 
 
 class ToolNotFoundError(ToolError):

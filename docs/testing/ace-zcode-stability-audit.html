@@ -173,6 +173,23 @@
 <p>Ace 沿用既有并发安全判定和完整批次执行器。OpenAI 的声明下标和 Anthropic 最终工具列表的位置传给执行器，流式提前派发只覆盖从零开始连续就绪的只读前缀。前序未知、存在写入或命令、显式关闭并发时，相应工具留到完整批次执行。缺少位置的提供方仍及时发出工具进度。请求审批模式继续走顺序执行。断流只接续已派发的实际结果。</p>
 <p><strong>验收</strong> 新增回归在基线确认模型收到原内容，即使结果消息按声明顺序排列。Windows 包内 Gateway 以旧版、候选各开并发和关并发，共四套私有配置，跑十六轮公开 WebSocket 对话。覆盖新建后读、先读后建、读取参数早于写入参数到达，以及两个独立文件并行读。旧版四次新建后读均返回不存在，候选四次均读到实际写入。反向调用均先得到不存在再写入。旧版开关两档的独立读取都在流结束前重叠；候选打开时重叠，关闭时两次读取在流结束后依次执行。每轮核对提供方收到的精确工具结果、公开历史、只读 SQLite 和真实文件内容。四套 Gateway 均正常退出并释放端口。执行器、工具管线、两类 provider 及子 Agent 批处理共 233 项通过。</p>
 <p class="evidence">Ace <code>crew/agent/executor/builtin.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/providers/openai_provider.py</code>、<code>crew/providers/anthropic_provider.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/streaming-tool-coordinator.ts:122</code>、<code>:373</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/tools.ts:49</code>。</p>
+<h3>A16 · P1 · MCP 截止时间错误被记为工具成功</h3>
+<p>源代码及真实本机 stdio 复现了同服务器队列的等待。慢调用挂起时，另一会话的快调用未抵达服务端，放开后才执行。用实际 MCP SDK 直连同一夹具，慢调用仍在等待时快调用已能完成。独立快调用可以在排队时超过截止，服务端收到零次。取消慢调用后，服务端确认该调用退出，快调用随后成功。ZCode 默认按会话租用 MCP 连接，工作区共享需要显式配置，连接就绪后每个调用分别携带取消与超时。</p>
+<p>旧版将排队和执行中两种截止时间错误作为普通结果返回，模型正文虽有错误，工具事件与 SQLite 回执均标记成功。现在复用既有结构化工具错误。排队截止为 <code>mcp_queue_timeout</code>，副作用状态 <code>none</code>。派发后截止为 <code>mcp_call_timeout</code>，副作用状态 <code>unknown</code>。两类都保留原错误正文和绝对截止时间，交由模型看到失败结果。队列并发仍为单独待验收项。</p>
+<p><strong>验收</strong> 两个截止时间回归在旧版失败。使用实际 stdio 子进程运行 ToolRunner 并重开 SQLite，两类候选失败分别确认零次和一次实际派发。原错误正文、工具结果事件和持久回执一致，均不可自动重试且各提交一次。等待期间的另一个调用继续成功，单个取消与 stdio 回收均通过。MCP 生命周期、MCP 功能和工具执行管线的 83 项回归通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/tools/registry.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/mcp/pool.ts:532</code>、<code>apps/zcode-cli/packages/adapters/src/mcp/index.ts:1118</code>、<code>apps/zcode-cli/packages/core/src/mcp/index.ts:129</code>。</p>
+
+<h3>工具并发与异步的补充对照</h3>
+<div class="table"><table>
+<thead><tr><th>工具</th><th>Ace 与 ZCode 的已核对行为</th><th>验收范围</th></tr></thead>
+<tbody>
+<tr><td>文件、搜索、写入</td><td>Ace 按已有只读白名单和混合批顺序调度。ZCode 用 registry 并发属性区分读、搜索和写入。</td><td>符合同批顺序、乱序参数和开关并发的实测见 A15。搜索功能验收见 A1、A5。</td></tr>
+<tr><td>终端、后台输出</td><td>Ace 仅在整批判定为独立只读时并发终端命令，后台任务由进程注册表跟踪。ZCode Bash 在普通批使用独占属性，后台输出另有只读入口，回传按启动会话校验。</td><td>已验证长输出游标和按请求退出。多会话并发读取后台输出待同夹具验证。</td></tr>
+<tr><td>MCP</td><td>Ace 独立启动各服务器，同配置复用单个顺序 worker。ZCode 默认按会话租用并按请求调用，普通批次使用服务工具的只读或幂等注解。</td><td>实测同 worker 的等待、截止、取消和回收见 A16。并发调度仍待核对各工具的副作用顺序。</td></tr>
+<tr><td>浏览器</td><td>Ace 按账号串行化共享选中标签和原生引用。ZCode CLI 托管 CDP 按会话建 BrowserContext，按会话和回合取消。</td><td>源码及既有排队超时测试已核对。同账号双会话、双标签的真实交互待复验。</td></tr>
+<tr><td>子 Agent、审批</td><td>Ace 的纯队友委派批次仅在成员各不相同时并行，子任务拥有独立的限额和取消身份。ZCode 父会话代理子任务审批，取消信号传到对应子任务。</td><td>已跑子 Agent 批次回归，独立退出与请求范围见 A12。并行子任务中一个等待审批、另一个被取消，仍待用两端同夹具验证。</td></tr>
+</tbody></table></div>
+<p class="evidence">Ace <code>crew/agent/loop/tool_dispatch_helpers.py</code>、<code>crew/tools/process_registry.py</code>、<code>crew/browser/manager.py:306</code>、<code>crew/agent/subagent/runtime.py:839</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts:481</code>、<code>apps/zcode-cli/packages/adapters/src/browser/index.ts:70</code>、<code>apps/zcode-cli/packages/core/src/runtime/helpers/subagent-interaction-broker.ts:17</code>。</p>
 <h3>后台进化结果的账号与会话代次</h3>
 <p>SQLite 允许两个账号各自持有相同的会话 ID。旧进化队列仅按会话 ID 保存任务和结果。真实 Windows Gateway 经公开删除接口及 WebSocket 重建同一会话后，已完成的旧结果和重建后才返回的旧结果均被新回合取出，随后因缺少响应构造返回错误。新实现从首条用户消息的同一 SQLite 写事务取得 <code>history_incarnation</code>，并把任务和答复绑定账号、会话 ID 及该代次。worker 执行和写入结果前核对代次，读取也核对后才消费。SQLite 校验中途取消时可重试读取。进化进度和结果沿用既有状态帧。</p>
 <p><strong>运行时对照</strong> 在 Windows 正式运行时上，两组隔离会话的实际 DELETE 和同 ID 重建都产生新代次。两个新回合都正常结束、保存新历史且没有取得各自的旧进化标记。各自下一回合收到且仅收到一次本代次的结果状态，再正常结束。六次模型调用都来自回环测试端点。Gateway 正常退出，双端口释放。</p>

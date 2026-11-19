@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from crew.core.errors import ToolError
+from crew.core.errors import StructuredToolError, ToolError
 from crew.core.observability import (
     ObservationContext,
     attach_context,
@@ -622,13 +622,7 @@ class _ServerWorker:
             if request.future.done():
                 continue
             if request.deadline <= asyncio.get_running_loop().time():
-                self._complete(
-                    request,
-                    tool_error(
-                        f"MCP server {self.name} 调用在执行前已超过截止时间；"
-                        "远端未被调用"
-                    ),
-                )
+                self._fail(request, self._deadline_error(request))
                 continue
             self._current = request
             request.started = True
@@ -684,7 +678,7 @@ class _ServerWorker:
                                 message = str(json.loads(extracted).get("error") or extracted)
                             except (AttributeError, json.JSONDecodeError):
                                 message = extracted
-                            self._fail(request, message)
+                            self._fail(request, ToolError(message))
                         else:
                             # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
                             truncated, _ = truncate_output(extracted)
@@ -695,13 +689,7 @@ class _ServerWorker:
                 raise
             except TimeoutError:
                 consecutive_errors = 0
-                self._complete(
-                    request,
-                    tool_error(
-                        f"MCP server {self.name} 调用超过绝对截止时间；"
-                        "远端最终副作用状态可能未知，系统不会自动重试"
-                    ),
-                )
+                self._fail(request, self._deadline_error(request))
             except Exception as exc:  # noqa: BLE001 - 需先判活再决定 tool_error 还是断线
                 consecutive_errors += 1
                 if (
@@ -723,10 +711,23 @@ class _ServerWorker:
             request.future.set_result(result)
 
     @staticmethod
-    def _fail(request: _CallRequest, message: str) -> None:
-        """把远端 MCP 错误保留为 Crew ToolResult.is_error，而非成功文本。"""
+    def _fail(request: _CallRequest, error: ToolError) -> None:
+        """完成请求并保留工具错误类型，不改变 worker 的连接状态。"""
         if not request.future.done():
-            request.future.set_exception(ToolError(message))
+            request.future.set_exception(error)
+
+    def _deadline_error(self, request: _CallRequest) -> StructuredToolError:
+        if not request.started:
+            return StructuredToolError(
+                f"MCP server {self.name} 调用在执行前已超过截止时间；远端未被调用",
+                code="mcp_queue_timeout",
+            )
+        return StructuredToolError(
+            f"MCP server {self.name} 调用超过绝对截止时间；"
+            "远端最终副作用状态可能未知，系统不会自动重试",
+            code="mcp_call_timeout",
+            side_effect_state="unknown",
+        )
 
     def _drain_queue(self, reason: str) -> None:
         """完成所有尚未执行的排队请求，明确保证远端未被调用。"""
@@ -859,16 +860,7 @@ class _ServerWorker:
                 async with asyncio.timeout_at(request.deadline):
                     return await asyncio.shield(future)
             except TimeoutError:
-                if request.started:
-                    result = tool_error(
-                        f"MCP server {self.name} 调用超过绝对截止时间；"
-                        "远端最终副作用状态可能未知，系统不会自动重试"
-                    )
-                else:
-                    result = tool_error(
-                        f"MCP server {self.name} 调用在执行前已超过截止时间；远端未被调用"
-                    )
-                self._complete(request, result)
+                self._fail(request, self._deadline_error(request))
                 return future.result()
             except asyncio.CancelledError:
                 # Cancelling the SDK request signals abandonment to the server; remote exit needs its own evidence.

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from crew.core.errors import StructuredToolError
 from crew.core.observability import bind_observation, install_sink
 from crew.state.observability import ObservationRecorder
 from crew.state.trace_store import TraceStore
@@ -114,9 +115,12 @@ async def test_expired_queued_request_never_calls_remote(monkeypatch):
     await session.call_started.wait()
 
     worker._call_timeout = 0.02
-    second_result = await worker._make_handler("second")({})
-    assert "执行前" in _error(second_result)
-    assert "远端未被调用" in _error(second_result)
+    with pytest.raises(StructuredToolError) as failure:
+        await worker._make_handler("second")({})
+    assert "执行前" in str(failure.value)
+    assert "远端未被调用" in str(failure.value)
+    assert failure.value.code == "mcp_queue_timeout"
+    assert failure.value.side_effect_state == "none"
     assert session.calls == ["first"]
 
     await worker.stop()
@@ -127,11 +131,13 @@ async def test_expired_queued_request_never_calls_remote(monkeypatch):
 async def test_inflight_timeout_is_not_retried_and_reports_unknown_state(monkeypatch):
     worker, session = await _started_worker(monkeypatch, call_timeout=0.02)
 
-    result = await worker._make_handler("mutate")({})
-
+    with pytest.raises(StructuredToolError) as failure:
+        await worker._make_handler("mutate")({})
     assert session.calls == ["mutate"]
-    assert "状态可能未知" in _error(result)
-    assert "不会自动重试" in _error(result)
+    assert "状态可能未知" in str(failure.value)
+    assert "不会自动重试" in str(failure.value)
+    assert failure.value.code == "mcp_call_timeout"
+    assert failure.value.side_effect_state == "unknown"
     await worker.stop()
 
 

@@ -53,7 +53,7 @@ def _structured_error_result(call_id: str, name: str, error: StructuredToolError
         fields["details"] = error.details
     return ToolResult(
         call_id, name, tool_error(str(error), **fields),
-        is_error=True, code=error.code, details=error.details,
+        is_error=True, code=error.code, details=error.details, side_effect_state=error.side_effect_state,
     )
 
 
