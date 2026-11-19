@@ -451,6 +451,12 @@
 <p><strong>同包键入配对</strong> 用相同的 2,000 轮混合历史及固定键入序列，两档各交替运行两对，每批 60 键。480 个前景可信事件均取得 Chromium Event Timing、<code>beforeinput</code> 和 <code>input</code>，八条正文在持久历史逐字节一致。每秒 20 片时，两对总时延 P95 都从 80 降到 64 毫秒，聚合 P50 从 72 降到 56 毫秒。每秒 100 片时，两对 P95 分别为 80→48 和 48→64 毫秒，聚合 P50/P95 为 48/80→48/64 毫秒，样本尚不足以确认该档持续改善。两档 <code>input</code> 从捕获到文档冒泡的 P95 分别为 6.4→6.1 和 5.9→5.5 毫秒。总时延按 8 毫秒量化。两套应用均正常退出，双端口释放。50 毫秒目标在配对的聚合数据中仍未达到。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/composer-view.ts</code>、<code>desktop/src/ui/features/conversation-panel.ts</code>、<code>desktop/src/ui/reducers/store-bus.ts</code>。ZCode <code>packages/ui/src/LexicalChatInput.tsx:853</code>、<code>packages/ui/src/v4/ConversationTimeline.tsx:1340</code>。</p>
 </article>
+<article id="live-turn-timer">
+<h3>F12a · 流片重复写入同一回合计时</h3>
+<p>普通 assistant 的流片更新同时刷新回合计时；显示秒数相同时，旧版仍替换标签的文本节点。ZCode 的 <code>ConversationTurnGroup</code> 将格式化计时作为文本由组件协调更新。Ace 在流片和秒级 ticker 共用的标签入口核对显示文字，变化时才写入。</p>
+<p><strong>验收</strong> 隔离 Windows Electron 43.1 通过实际 renderer 的 <code>applyChunk</code> 送入 32 个思考增量。固定显示秒数期间，标签 DOM 变更从 55 次降至零，32 段仍依次呈现且原标签文本节点保持。随后推进计时，验证 ticker 更新与最终回复结算。两组窗口均未显示或获得焦点。87 项渲染与滚动回归和完整桌面 TypeScript 检查通过。此处测量 DOM 操作次数，输入时延和像素呈现仍需各自计时。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts</code>。ZCode <code>packages/ui/src/v4/ConversationTurnGroup.tsx:638</code>。</p>
+</article>
 <article id="evolution-worker-lifecycle">
 <h3>F13 · 后台进化完成后仍保留空闲队列和 worker</h3>
 <p>启用后台技能进化后，旧代码一次处理完 18 个会话，仍保留 18 个空队列和 18 个等待新任务的 worker，直到应用关闭。ZCode 的 Gen UI 存储按目标串行写入，当前队尾完成后从注册表移除。Ace 在会话队列排空时同步注销持有该队列的 worker。新任务可启动下一个 worker，后续回合仍能按原顺序读取结果。</p>

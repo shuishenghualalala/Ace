@@ -576,7 +576,8 @@ function patchStreamingTurnLabel({ dom, messages, index: idx }: StreamingTurnTar
 
   const durationMs = resolveTurnDurationMs(batch, { isLive: true });
   // 顶部计时头统一「已工作 X 分 X 秒」；Liveness 由 spinner + --live 样式表达。
-  labelEl.textContent = resolveTurnHeaderLabel(durationMs);
+  const label = resolveTurnHeaderLabel(durationMs);
+  if (labelEl.textContent !== label) labelEl.textContent = label;
   return true;
 }
 

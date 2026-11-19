@@ -172,6 +172,8 @@
     <li><code>pet-gateway-schema.ts</code> 将 <code>generating</code> 映射为宠物侧 tool start 信号，并优先使用 <code>ui_label</code>，保持桌面宠物反馈不晚于主窗口。</li>
   </ul>
 
+  <p>回合计时继续从消息批次的开始时间计算。正文或思考流片与秒级计时器使用同一更新入口，显示文案变化时才更新标签文本，结束帧照常结算。</p>
+
   <h3>3.9 看板 / Inspector 视觉</h3>
   <ul>
     <li>右侧入口 <code>#task-board-toggle</code>：图标 + 竖排「看板」标签；颜色走 <code>--shell-primary</code> / <code>--surface</code> / <code>--border-subtle</code>，随亮暗主题切换。</li>

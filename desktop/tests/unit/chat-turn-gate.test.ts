@@ -105,12 +105,16 @@ describe('applyChunk turn identity gate', () => {
     });
     renderChat();
     const spinner = document.querySelector('.msg__fold-spinner');
+    const label = document.querySelector('.msg__fold-label');
+    const elapsedText = label?.firstChild;
+    expect(elapsedText).toBeDefined();
 
     applyChunk(chunk('thinking', 'req-thinking', { text: '第二段思考' }));
     await vi.advanceTimersByTimeAsync(20);
 
     expect(document.querySelector('.msg__fold-spinner')).toBe(spinner);
     expect(document.querySelector('.process-timeline__thinking')?.textContent).toBe('第一段思考第二段思考');
+    expect(label?.firstChild).toBe(elapsedText);
   });
 
   it('final 封口后思考块显示最终时长，计时头定格', async () => {
