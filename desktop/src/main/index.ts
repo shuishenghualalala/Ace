@@ -254,6 +254,9 @@ const rendererRecovery = new RendererRecovery({
     exhaustedRenderer = { documentId, failure };
     showRendererRecoveryDialog();
   },
+  probeHeartbeat: (documentId) => {
+    if (rendererDocumentId === documentId) sendToMainRenderer('renderer:heartbeat-probe');
+  },
   watchHeartbeat: (documentId) => {
     const win = mainWindow;
     return !isQuitting && rendererDocumentId === documentId && win !== null && !win.isDestroyed()

@@ -34,6 +34,10 @@ interface BackendStatusSnapshot {
 
 let rendererHeartbeat: ReturnType<typeof setInterval> | undefined;
 
+ipcRenderer.on('renderer:heartbeat-probe', () => {
+  ipcRenderer.send('renderer:heartbeat', 'probe');
+});
+
 async function rendererInitialStateReady(): Promise<{ ok: true }> {
   const ready = await ipcRenderer.invoke('app:renderer-initial-state-ready') as { ok: true };
   rendererHeartbeat ??= setInterval(() => {

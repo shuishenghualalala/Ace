@@ -41,6 +41,7 @@ export class RendererRecovery {
       restart(documentId: number): void;
       exhausted(documentId: number, failure: RendererFailure): void;
       watchHeartbeat?(documentId: number): boolean;
+      probeHeartbeat?(documentId: number): void;
     },
     private readonly timings = recoveryTimings,
   ) {}
@@ -137,6 +138,7 @@ export class RendererRecovery {
     if (!watch) return;
     const intervalMs = this.timings.heartbeatMs / 4;
     let lastCheckAt = performance.now();
+    let probePending = false;
     this.heartbeatAt = lastCheckAt;
     this.heartbeatTimer = setInterval(() => {
       if (!this.isReady(id)) return;
@@ -147,11 +149,19 @@ export class RendererRecovery {
       // After sleep or a main-process stall, give both processes time to resume.
       if (mainWasPaused || !watch(id)) {
         this.heartbeatAt = now;
+        probePending = false;
         return;
       }
-      if (now - this.heartbeatAt >= this.timings.heartbeatMs) {
-        this.fail(id, { reason: 'unresponsive', signal: 'heartbeat' });
+      if (now - this.heartbeatAt < this.timings.heartbeatMs) {
+        probePending = false;
+        return;
       }
+      if (!probePending && this.callbacks.probeHeartbeat) {
+        probePending = true;
+        this.callbacks.probeHeartbeat(id);
+        return;
+      }
+      this.fail(id, { reason: 'unresponsive', signal: 'heartbeat' });
     }, intervalMs);
   }
 
