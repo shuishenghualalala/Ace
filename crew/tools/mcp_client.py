@@ -618,7 +618,9 @@ class _ServerWorker:
                         consecutive_errors += 1
                         if not await self._probe_once(session) or consecutive_errors >= MCP_MAX_CONSECUTIVE_CALL_ERRORS:
                             raise
-                        self._complete(request, tool_error(f"MCP 调用失败: {exc}"))
+                        self._fail(request, StructuredToolError(
+                            f"MCP 调用失败: {exc}", code="mcp_call_failed", side_effect_state="unknown",
+                        ))
                     else:
                         consecutive_errors = 0
                     del self._inflight[task]
@@ -735,10 +737,10 @@ class _ServerWorker:
 
     def _settle_inflight(self, reason: str) -> None:
         for request in self._inflight.values():
-            self._complete(
-                request,
-                tool_error(f"{reason}；远端最终副作用状态可能未知，系统不会自动重试"),
-            )
+            self._fail(request, StructuredToolError(
+                f"{reason}；远端最终副作用状态可能未知，系统不会自动重试",
+                code="mcp_connection_lost", side_effect_state="unknown",
+            ))
 
     @staticmethod
     def _complete(request: _CallRequest, result: str) -> None:
@@ -767,15 +769,20 @@ class _ServerWorker:
 
     def _drain_queue(self, reason: str) -> None:
         """完成所有尚未执行的排队请求，明确保证远端未被调用。"""
+        def fail_queued(request: _CallRequest) -> None:
+            self._fail(request, StructuredToolError(
+                f"{reason}；排队请求未调用远端", code="mcp_unavailable",
+            ))
+
         if self._pending is not None:
-            self._complete(self._pending, tool_error(f"{reason}；排队请求未调用远端"))
+            fail_queued(self._pending)
             self._pending = None
         while True:
             try:
                 request = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
-            self._complete(request, tool_error(f"{reason}；排队请求未调用远端"))
+            fail_queued(request)
 
     def _register_tools(self) -> int:
         count = 0
@@ -917,11 +924,11 @@ class _ServerWorker:
                 except ToolError as exc:
                     return tool_error(str(exc))
             if self._permanent_error is not None:
-                return tool_error(
-                    f"MCP server {self.name} 连接已放弃：{self._permanent_error}"
+                raise StructuredToolError(
+                    f"MCP server {self.name} 连接已放弃：{self._permanent_error}", code="mcp_unavailable",
                 )
             if self._closing or self._task is None or self._task.done():
-                return tool_error(f"MCP server {self.name} 连接已断开")
+                raise StructuredToolError(f"MCP server {self.name} 连接已断开", code="mcp_unavailable")
             loop = asyncio.get_running_loop()
             future: asyncio.Future[str] = loop.create_future()
             request = _CallRequest(

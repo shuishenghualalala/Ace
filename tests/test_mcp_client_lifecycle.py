@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from crew.core.errors import StructuredToolError
+from crew.core.types import ToolCall
 from crew.core.observability import bind_observation, install_sink
 from crew.state.observability import ObservationRecorder
 from crew.state.trace_store import TraceStore
@@ -89,7 +90,8 @@ async def test_queue_full_fails_immediately_without_displacing_existing_requests
     assert worker._queue.qsize() == 2
 
     worker.force_abort("test cleanup")
-    await asyncio.gather(first, second)
+    errors = await asyncio.gather(first, second, return_exceptions=True)
+    assert all(isinstance(error, StructuredToolError) and error.code == "mcp_unavailable" for error in errors)
     await asyncio.sleep(0)
 
 
@@ -197,7 +199,9 @@ async def test_expired_queued_request_never_calls_remote(monkeypatch):
     assert session.calls == ["first"]
 
     await worker.stop()
-    assert "状态可能未知" in _error(await first)
+    with pytest.raises(StructuredToolError, match="状态可能未知") as failure:
+        await first
+    assert failure.value.side_effect_state == "unknown"
 
 
 @pytest.mark.asyncio
@@ -250,9 +254,14 @@ async def test_mcp_worker_attaches_queue_context_and_records_payload_refs(monkey
 )
 async def test_disconnect_completes_inflight_and_queued_futures(monkeypatch, disconnect, first_error):
     worker, session = await _started_worker(monkeypatch, call_timeout=1.0)
-    first = asyncio.create_task(worker._make_handler("first")({}))
+    for name in ("first", "second"):
+        worker.registry.register(
+            name=name, toolset="mcp:fake", schema={"name": name, "parameters": {"type": "object"}},
+            handler=worker._make_handler(name), is_async=True,
+        )
+    first = asyncio.create_task(worker.registry.execute(ToolCall("one", "first", {})))
     await session.call_started.wait()
-    second = asyncio.create_task(worker._make_handler("second")({}))
+    second = asyncio.create_task(worker.registry.execute(ToolCall("two", "second", {})))
     while worker._queue.empty():
         await asyncio.sleep(0)
 
@@ -263,9 +272,15 @@ async def test_disconnect_completes_inflight_and_queued_futures(monkeypatch, dis
         await worker.stop()
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert first_error in _error(first_result)
-    assert "状态可能未知" in _error(first_result)
-    assert "排队请求未调用远端" in _error(second_result)
+    assert first_result.is_error and first_result.code == "mcp_connection_lost"
+    assert first_result.side_effect_state == "unknown" and not first_result.retryable
+    assert first_error in _error(first_result.content)
+    assert "状态可能未知" in _error(first_result.content)
+    assert second_result.is_error and second_result.code == "mcp_unavailable"
+    assert second_result.side_effect_state == "none" and not second_result.retryable
+    assert "排队请求未调用远端" in _error(second_result.content)
+    late = await worker.registry.execute(ToolCall("late", "second", {}))
+    assert late.is_error and late.code == "mcp_unavailable" and late.side_effect_state == "none"
     assert session.calls == ["first"]
 
 
@@ -413,6 +428,35 @@ async def _scripted_worker(monkeypatch, cfg, sessions, delays):
 
 
 @pytest.mark.asyncio
+async def test_one_failed_call_keeps_the_healthy_mcp_connection(monkeypatch):
+    calls = []
+
+    async def call(name):
+        calls.append(name)
+        if len(calls) == 1:
+            raise ConnectionError("lost tool response")
+        return await _ok_call(name)
+
+    async def ping():
+        return None
+
+    delays = []
+    session = _attach_ping(_ScriptedSession(call_behavior=call), ping)
+    worker = await _scripted_worker(monkeypatch, {}, [session], delays)
+    assert await worker.start()
+    try:
+        first = await worker.registry.execute(ToolCall("first", "flaky__t1", {}))
+        assert first.is_error and first.code == "mcp_call_failed"
+        assert first.side_effect_state == "unknown" and not first.retryable
+        assert worker.is_connected and calls == ["t1"]
+        second = await worker.registry.execute(ToolCall("second", "flaky__t1", {}))
+        assert not second.is_error and second.content == "ok:t1"
+        assert calls == ["t1", "t1"] and not delays
+    finally:
+        await worker.stop()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_after_disconnect_with_exponential_backoff(monkeypatch):
     delays: list[float] = []
     dying = _attach_ping(_ScriptedSession(call_behavior=_dead_call), _dead_ping)
@@ -420,8 +464,8 @@ async def test_reconnect_after_disconnect_with_exponential_backoff(monkeypatch):
     worker = await _scripted_worker(monkeypatch, {}, [dying, healthy], delays)
 
     assert await worker.start()
-    first = await worker._make_handler("t1")({})
-    assert "连接已断开" in _error(first)
+    with pytest.raises(StructuredToolError, match="连接已断开"):
+        await worker._make_handler("t1")({})
 
     await _wait_for(lambda: worker.is_connected)
     second = await worker._make_handler("t1")({})
@@ -439,11 +483,12 @@ async def test_queued_call_survives_reconnect_within_deadline(monkeypatch):
 
     assert await worker.start()
     first = asyncio.create_task(worker._make_handler("t1")({}))
-    await _wait_for(lambda: "连接已断开" in (first.done() and _error(first.result()) or ""))
+    await _wait_for(first.done)
+    with pytest.raises(StructuredToolError, match="连接已断开"):
+        await first
     # 退避期间发起的调用排队等待，重连成功后在截止时间前被服务。
     second = asyncio.create_task(worker._make_handler("t1")({}))
     assert "ok:t1" in await second
-    await first
     await worker.stop()
 
 
@@ -462,13 +507,15 @@ async def test_budget_exhaustion_unregisters_tools_and_fails_explicitly(monkeypa
 
     assert await worker.start()
     assert "flaky__t1" in registry.names()
-    await worker._make_handler("t1")({})  # 触发断线进入重连循环
+    with pytest.raises(StructuredToolError, match="连接已断开"):
+        await worker._make_handler("t1")({})
 
     await _wait_for(lambda: worker._task is not None and worker._task.done())
     assert "flaky__t1" not in registry.names()
     assert "预算" in worker.error and "重载" in worker.error
-    result = await worker._make_handler("t1")({})
-    assert "连接已放弃" in _error(result)
+    with pytest.raises(StructuredToolError, match="连接已放弃") as failure:
+        await worker._make_handler("t1")({})
+    assert failure.value.code == "mcp_unavailable" and failure.value.side_effect_state == "none"
     assert delays == [0.5, 1.0]  # 500ms 翻倍；第三次失败超出预算直接放弃
 
 
@@ -495,7 +542,8 @@ async def test_stable_uptime_past_max_delay_resets_attempt_budget(monkeypatch):
 
     assert await worker.start()
     for _ in range(4):
-        await worker._make_handler("t1")({})
+        with pytest.raises(StructuredToolError, match="连接已断开"):
+            await worker._make_handler("t1")({})
 
     await _wait_for(lambda: worker._task is not None and worker._task.done())
     # 第 2 代连接稳定超窗 → 预算重置：退避序列从头开始，第 4 次断线才耗尽。

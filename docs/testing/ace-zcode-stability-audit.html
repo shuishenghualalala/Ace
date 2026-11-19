@@ -198,6 +198,10 @@
 <p>原版同一 worker 上，第一条只读调用持有任务闸门时，第二条也无法到达服务器。ZCode 以独立截止时间和取消信号向已租用的 MCP 客户端派发请求，Agent 按工具只读或幂等声明组织批次。Ace 先在每个服务上开放两个明确且声明一致的只读槽位，未知、变更及声明冲突的调用保留独占的 FIFO 顺序。每条请求继续沿用原安全审批和绝对截止时间，已派发请求在断线后仅结算原结果，排队请求可在原截止前重连派发。Agent 批内编排见下一节。</p>
 <p><strong>验收</strong> 真实 stdio 服务器的阻塞闸门验证双只读执行、第三条等待空位、独占栅栏、单独取消、队列与在途超时、断线后的重连及两代子进程退出。Streamable HTTP 使用真实 MCP SDK 和本机 ASGI 应用，较快请求在较慢请求释放前返回，两次调用的会话标识与授权上下文分别核对。目标 worktree 的 MCP 客户端、生命周期、图像、服务、安装与 Gateway 接口共 93 项回归通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/mcp/index.ts:197</code>、<code>core/src/tool/scheduler.ts:173</code>、<code>adapters/src/mcp/index.ts:770</code>。</p>
+<h3>MCP 连接退出时保留调用失败和派发状态</h3>
+<p>原版将断线或清退时的错误 JSON 当作普通成功结果交给工具注册器。ZCode 的 MCP adapter 将 SDK 传输异常记为 failed 后继续抛出。Ace 通过现有结构化工具错误结算已派发请求和未派发队列，两个状态分别为 <code>unknown</code> 与 <code>none</code>。连接探活成功时，仅结算出错的调用，后续继续使用连接。</p>
+<p><strong>验收</strong> 两个隔离会话经真实 Windows Gateway、一次性授权、Streamable HTTP MCP 和正式管理删除入口，同时包含一个已派发请求与一个排队请求。原版 Registry 及历史均显示成功。候选 WS 与 Registry 分别显示 <code>mcp_connection_lost/unknown</code> 与 <code>mcp_unavailable/none</code>，两个历史调用均为 <code>error</code>。已派发的远端任务在删除后仍写入一次合成结果，队列请求始终为零次；两版端口正常回收。独立真实 stdio 对照也分别核对一次与零次派发、子进程退出。组合回归 61 项通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/mcp/index.ts:1250</code>。</p>
 <h3>同一模型响应中的 MCP 并发</h3>
 <p>ZCode 让只读或幂等工具进入连续并发段，独占调用分隔各段。Ace 在完整响应阶段从当前 MCP 清单读取明确只读资格，沿用 Agent 分段、并发上限和结果顺序。远程调用在 Full Access 或 AutoReview 已获对应端点的会话授权时可并发。逐次审批和默认未授权都按序进入正式审批。已发送工具开始帧后重新核对资格，失效时串行收尾，实际执行始终逐次授权。</p>
 <p><strong>验收</strong> 真实 Windows Gateway、Streamable HTTP MCP 和可控模型在同一响应发出慢读、快读、写、后读。旧版先等慢读结束。新版两种已获授权情形的快读均在慢读闸门打开前完成，写与后读按序执行，模型按原次序取得四项结果。默认未授权 AutoReview 和显式 Request Approval 各只产生一条未决审批，服务端收到零次调用。四项端到端与 167 项组合回归通过，覆盖已发开始帧后撤销资格，以及保留流式预派发边界。</p>

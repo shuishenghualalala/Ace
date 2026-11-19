@@ -383,6 +383,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <h2>MCP 同服务调用调度</h2>
   <p>每个已配置服务在同一连接上最多同时执行两条明确标注为只读且声明一致的请求。调度按当前工具清单分类，变更、未知、冲突声明和重复工具名统一独占，队首独占请求等待其他调用收尾，后续只读请求继续排队。原队列容量包含尚未派发的队首。每次请求沿用自己的安全审批、上下文和绝对截止时间，断线后只恢复尚未派发且未过期的请求。</p>
   <p>完整模型响应进入 Agent 分段时读取当前服务清单。远程 MCP 在 Full Access 或 AutoReview 已有覆盖该端点的会话授权时可进入只读并发段。已声明独占的工具仍单独串行。启动帧发出后再复核清单及授权，执行仍逐次走现有权限入口。未授权和逐次审批流程按序推进。</p>
+  <p>连接关闭时，已派发调用以 <code>mcp_connection_lost</code> 结算，副作用状态为 <code>unknown</code>。被清退的队列及已停止连接的新请求返回 <code>mcp_unavailable</code>，副作用状态为 <code>none</code>。单次调用响应异常但连接探活成功时，本次用 <code>mcp_call_failed</code> 结算，其他调用继续共享该连接。</p>
   <h2>本次更新：工具与 MCP 观测（2026-09-23）</h2>
   <p>工具执行边界记录逻辑调用、实际工具输入输出和错误状态；MCP 队列项携带不可变 observation context，常驻 worker 出队后 attach，完成后 reset，避免跨请求串线。搜索、浏览器、渠道和外部 agent 边界保留 coverage/black-box 标记，未把不可见的第三方内部状态伪装成细粒度 span。</p>
 
