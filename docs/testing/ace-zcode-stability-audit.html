@@ -376,6 +376,13 @@
 <p><strong>原截图溯源</strong> 在预览版 <code>5b647266</code> 本地安全审计、会话历史和浏览器追踪中核对了同一回合。11:51:01 文件写入成功，11:51:03 浏览器导航成功。11:51:15 用户批准后，权限规则允许受管终端启动。11:51:17.714，原生运行时返回退出码 125 和 <code>sandbox_unavailable</code>，旧客户端显示通用的 <code>security_boundary_failed</code>。11:57:40 重试时，终端再次返回相同稳定错误码。两次终端错误之前均有授权记录。11:51:56 的渲染器窗口重建发生在截图之后。原始记录位于当次预览的私有用户目录。</p>
 <p class="evidence">Ace <code>crew/agent/loop/tool_runner.py</code>、<code>crew/agent/executor/builtin.py</code>、<code>desktop/src/ui/chat-render.ts</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/permission-flow.ts</code>。</p>
 </article>
+<article id="windows-sandbox-profile-ownership">
+<h3>D7j · 多份 Windows 配置共用机器级防火墙规则</h3>
+<p>每个桌面用户数据目录保存自己的 Windows 沙箱身份。原生安装与修复用固定的六个过滤器 GUID 替换机器级 WFP 规则，规则再按本次安装的沙箱账号 SID 匹配。准备另一份配置会把这些规则绑定到另一组 SID，前一份配置可能再次要求管理员确认。</p>
+<p><strong>实机证据</strong> 普通 Windows 用户用同一个已随包发布的 x64 运行组件执行只读 <code>--windows-check-setup</code>。隔离预览配置返回就绪，常用桌面配置返回防火墙规则与沙箱账号不匹配。自检期间没有执行安装、修复、卸载或改写防火墙，现场错误另见 <a href="#security-turn-error-diagnostics">D7i</a>。</p>
+<p><strong>修复门槛</strong> 本地 Codex 以固定机器级身份复用对应规则。Ace 目前保留独立身份。后续应让 WFP 规则按身份独立归属，验证现有安装迁移、交替修复、卸载与重启，并保留运行前的规则校验。实机验证需要可独立修改防火墙的 Windows 环境。</p>
+<p class="evidence">Ace <code>security-runtime/src/windows/identity.rs</code>、<code>wfp.rs</code>。Codex <code>codex-rs/windows-sandbox-rs/src/setup.rs</code>、<code>wfp.rs</code>、<code>identity.rs</code>。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>
