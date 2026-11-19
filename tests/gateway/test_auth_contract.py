@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -343,6 +346,68 @@ def test_optional_services_do_not_gate_core_readiness(api):
             assert client.get("/api/scenarios").status_code == 200
         finally:
             optional_release.set()
+
+
+def test_cron_recovery_wait_does_not_block_local_admission(api, monkeypatch):
+    from crew.state import recovery
+
+    monkeypatch.setattr(recovery, "_entries", [])
+    crew = api.state.crew
+    store = crew.cron_store
+    job = store.create(
+        name="interrupted",
+        schedule="in 0s",
+        query="do not replay",
+        session_id="stale-session",
+        owner_account_id="local",
+    )
+    fire = store.claim_scheduled_fire(job["id"], owner_account_id="local", now=job["next_run_at"] + 1)
+    assert fire is not None
+    about_to_write = threading.Event()
+    allow_recovery = threading.Event()
+    mounted = threading.Event()
+    mounts = []
+    execute_once = store._writer._execute_once
+    prepare_owner = store.prepare_owner_jobs_for_mount
+
+    def observe_first_write(operation):
+        if not about_to_write.is_set():
+            about_to_write.set()
+            assert allow_recovery.wait(timeout=5)
+        return execute_once(operation)
+
+    def observe_mount(owner):
+        jobs = prepare_owner(owner)
+        mounts.append(owner)
+        mounted.set()
+        return jobs
+
+    monkeypatch.setattr(store._writer, "_execute_once", observe_first_write)
+    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount", observe_mount)
+
+    def open_core_chat(client):
+        assert client.get("/api/health").json()["readiness"]["status"] == "ready"
+        with client.websocket_connect("/ws"):
+            return crew.active_owner.get("local") is not None
+
+    with TestClient(api) as client, closing(sqlite3.connect(store._path)) as blocker:
+        with ThreadPoolExecutor(max_workers=1) as requests:
+            try:
+                assert about_to_write.wait(timeout=5)
+                blocker.execute("BEGIN IMMEDIATE")
+                allow_recovery.set()
+                request = requests.submit(open_core_chat, client)
+                assert request.result(timeout=2)
+                assert not mounted.is_set()
+            finally:
+                blocker.rollback()
+                allow_recovery.set()
+
+        assert mounted.wait(timeout=5)
+        with client.websocket_connect("/ws"):
+            assert mounts == ["local"]
+        assert store.get_job_runs(job["id"])[0]["status"] == "abandoned"
+        assert store.get_due(owner_account_id="local") == []
 
 
 def test_process_recovery_and_checkpoint_precede_ready_even_with_optional_services_blocked(api, monkeypatch):

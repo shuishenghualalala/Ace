@@ -489,6 +489,32 @@ def test_recover_running_fire_marks_abandoned_without_replay(tmp_path):
     assert store.get_due(owner_account_id=OWNER) == []
 
 
+async def test_cron_feature_restart_does_not_recover_live_fires_in_the_same_store(tmp_path):
+    store = CronJobStore(str(tmp_path / "cron.db"))
+
+    async def runner(_envelope):
+        pytest.fail("this test must not execute a fire")
+
+    original = CronService(store, runner)
+    await original.start()
+    await original.stop()
+    job = store.create(
+        name="another owner's active fire",
+        schedule="in 0s",
+        query="leave running",
+        session_id="another-session",
+        owner_account_id=OWNER,
+    )
+    assert store.claim_scheduled_fire(job["id"], owner_account_id=OWNER, now=job["next_run_at"] + 1)
+    replacement = CronService(store, runner)
+    try:
+        await replacement.start()
+        assert store.get_job_runs(job["id"])[0]["status"] == "running"
+    finally:
+        await replacement.stop()
+        store.close()
+
+
 def test_retry_fire_is_linked_and_rejects_non_retryable_or_wrong_owner(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
     job = store.create(

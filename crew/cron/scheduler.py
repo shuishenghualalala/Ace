@@ -91,6 +91,7 @@ class CronService:
         self._scheduler: AsyncIOScheduler | None = None
         self._running = False
         self._start_error = ""
+        self._lifecycle_lock = asyncio.Lock()
         self._mounted_owners: set[str] = set()
         self._mounted_job_ids: set[str] = set()
         self._mounted_job_ids_by_owner: dict[str, set[str]] = {}
@@ -403,29 +404,24 @@ class CronService:
     async def start(self) -> None:
         """Start the empty scheduler and record a reusable health failure on error."""
 
-        if self._running:
-            return
-        try:
-            scheduler = self._ensure_scheduler()
-            # D5：running fires 恢复注册进统一启动恢复序列，由 CrewApp 启动流程执行；
-            # 重复 start 因同名去重不会重复注册。
-            from crew.state.recovery import register_startup_recovery
-
-            register_startup_recovery(
-                "cron.running_fires",
-                self._store.recover_running_fires_as_abandoned,
-            )
-            scheduler.start()
-        except Exception as exc:
-            self._start_error = str(exc) or type(exc).__name__
-            if self._scheduler is not None:
-                with suppress(Exception):
-                    self._scheduler.shutdown(wait=False)
-                self._scheduler = None
-            raise
-        self._start_error = ""
-        self._running = True
-        log.info("CronService 引擎已启动，等待 Active Owner")
+        async with self._lifecycle_lock:
+            if self._running:
+                return
+            try:
+                # Clear interrupted runs before any Owner can mount jobs.
+                await self._store.recover_running_fires_on_startup()
+                scheduler = self._ensure_scheduler()
+                scheduler.start()
+            except Exception as exc:
+                self._start_error = str(exc) or type(exc).__name__
+                if self._scheduler is not None:
+                    with suppress(Exception):
+                        self._scheduler.shutdown(wait=False)
+                    self._scheduler = None
+                raise
+            self._start_error = ""
+            self._running = True
+            log.info("CronService 引擎已启动，等待 Active Owner")
 
     def mount_owner(self, owner_account_id: str) -> int:
         """Mount one Owner without unmounting any other Owner."""
@@ -490,10 +486,11 @@ class CronService:
         return len(tasks)
 
     async def stop(self) -> None:
-        for owner in list(self._mounted_owners):
-            await self.unmount_owner(owner, terminal_status="abandoned")
-        self._running = False
-        if self._scheduler is not None:
-            self._scheduler.shutdown(wait=False)
-            self._scheduler = None
-        log.info("CronService 已停止")
+        async with self._lifecycle_lock:
+            for owner in list(self._mounted_owners):
+                await self.unmount_owner(owner, terminal_status="abandoned")
+            self._running = False
+            if self._scheduler is not None:
+                self._scheduler.shutdown(wait=False)
+                self._scheduler = None
+            log.info("CronService 已停止")

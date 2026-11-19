@@ -657,6 +657,9 @@
 <p><strong>签名复验</strong> 六轮中三次从 Gateway 进入 HTTP ASGI 到开始响应延迟 183.9–229.1 毫秒，同期事件循环定时回调间隔为 169.3–217.2 毫秒。另两处响应头后的 45.6 和 49.8 毫秒等待，对应 Gateway 发出响应头后分别约 37 和 40 毫秒的循环回调间隔。Gateway 计算签名响应最多 1.56 毫秒。客户端在收到完整响应体后 0.19–0.46 毫秒开始解析，JSON 解析最多 0.026 毫秒，两次 HMAC 校验合计最多 0.146 毫秒。</p>
 <p><strong>WebSocket 升级</strong> 六次从进入 Gateway ASGI 到开始鉴权相隔 141.7–337.9 毫秒，中位 167.4 毫秒，和同时观测到的事件循环回调间隔重合。实际鉴权最多 0.116 毫秒。另有三次从客户端构造连接到 Gateway 解析升级请求的校时区间分别为 261–271、367–374 和 536–547 毫秒，这一段仍包含回环连接和服务端接收调度。Gateway 发布就绪后会在同一事件循环继续启动可选服务。具体占用来源仍待定位。</p>
 <p class="evidence">Ace <code>crew/gateway/app.py</code>、<code>crew/gateway/routers/misc.py</code>、<code>crew/gateway/ws.py</code>、<code>desktop/src/main/gateway-instance-auth.ts</code>。</p>
+<h4>定时任务恢复等待写锁时维持 Gateway 就绪</h4>
+<p>旧版发布就绪后在业务循环直接等待 <code>cron.db</code> 写事务。ZCode 的 <code>packages/desktop/src/host/database-startup/storagePreparationProcesses.ts</code> 使用专用 Worker 处理 SQLite 启动工作。Ace 的定时任务调度器今后先通过 SQLite 异步写入恢复遗留 Fire，再启动调度并挂载当前 Owner。同一宿主的在线更新复用首次恢复结果。</p>
+<p><strong>验收</strong> Windows 发行运行时启动实际网关，独立 SQLite 连接持有 <code>BEGIN IMMEDIATE</code> 写锁。基线 <code>2846e38c</code> 的主端口签名请求和 WebSocket 握手均超时，旁路健康端口仍通过签名校验。候选在写锁释放前完成主端口签名验证、经 WebSocket 的首聊与 HTTP 历史读取，模型使用回环 SSE 夹具。释放写锁后仅挂载一次本地 Owner，将遗留 Fire 标为 <code>abandoned</code>，保留后续定时任务。两版都重启核对历史并正常释放双端口。锁实验证明了这条阻塞路径，六次常规启动中的延迟来源还需单独测量。</p>
 <h4>同机 ZCode 发行版的 Composer 先导</h4>
 <p>本机发行二进制为 ZCode 3.15.3.8237，参考源码快照的包版为 3.16.2。正式包只读，使用独立 Win32 桌面、全新测试配置、私有工作区和回环模型。先导首轮核对实际 Host、数据库和模型选择，未达到发送。夹具补齐逐阶段存证及有界收尾后，第二轮经可见控件完成登录和偏好跳过、可信发送、一次匹配的流式请求、可见用户消息和助手正文。私有 SQLite 中用户输入与随机助手标记各出现一次，应用及 Host 正常退出，模型和 CDP 端口释放。</p>
 <p>第二轮含首次引导的启动到 Composer 可交互为 10.662 秒，点击发送到用户和助手正文 DOM 分别为 15.284 和 16.378 秒。正文显示后还有一次非流式请求，回环夹具返回 422，同期记录标题生成失败。这一轮用于验证真实发行版的测量入口。正式对照需统一两边引导状态、后台模型请求和采样次数。</p>

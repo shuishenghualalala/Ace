@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sqlite3
 
@@ -1279,29 +1278,6 @@ def test_startup_recovery_sequence_dedupes_and_isolates_failures():
         assert calls == ["a"]  # 同名步骤只注册一次
         assert results["step.a"] == 1
         assert results["step.b"] is None  # 单步失败不阻断、不外抛
-    finally:
-        recovery.clear_startup_recovery()
-
-
-def test_cron_start_registers_recovery_into_unified_sequence(tmp_path):
-    from crew.cron.jobs import CronJobStore
-    from crew.cron.scheduler import CronService
-    from crew.state import recovery
-
-    recovery.clear_startup_recovery()
-    store = CronJobStore(str(tmp_path / "cron.db"))
-    service = CronService(store, runner=None)
-
-    async def _run() -> dict:
-        await service.start()
-        try:
-            return recovery.run_startup_recovery()
-        finally:
-            await service.stop()
-
-    try:
-        results = asyncio.run(_run())
-        assert "cron.running_fires" in results
     finally:
         recovery.clear_startup_recovery()
 

@@ -10,6 +10,7 @@ trigger 规格。支持：
 
 from __future__ import annotations
 
+import asyncio
 import re
 import sqlite3
 import threading
@@ -418,6 +419,8 @@ class CronJobStore:
         self._lock = threading.Lock()
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
+        self._startup_recovery_lock = asyncio.Lock()
+        self._startup_recovery_complete = False
         self._writer.execute(self._init_schema)
         if legacy_db_path is not None:
             self._migrate_legacy_rows(Path(legacy_db_path))
@@ -1021,39 +1024,46 @@ class CronJobStore:
 
     def recover_running_fires_as_abandoned(self) -> int:
         """将上次进程遗留的 running Fire 收敛为 abandoned，且绝不重放。"""
+        return self._writer.execute(self._recover_running_fires)
 
+    async def recover_running_fires_on_startup(self) -> None:
+        """Recover interrupted fires once for this host's store lifetime."""
+        async with self._startup_recovery_lock:
+            if self._startup_recovery_complete:
+                return
+            await self._writer.execute_async(self._recover_running_fires)
+            self._startup_recovery_complete = True
+
+    @staticmethod
+    def _recover_running_fires(conn: sqlite3.Connection) -> int:
         recovered_at = time.time()
-
-        def _recover(conn: sqlite3.Connection) -> int:
-            rows = conn.execute(
-                "SELECT id, job_id FROM cron_job_runs WHERE status = 'running'"
-            ).fetchall()
-            if not rows:
-                return 0
-            cursor = conn.execute(
+        rows = conn.execute(
+            "SELECT id, job_id FROM cron_job_runs WHERE status = 'running'"
+        ).fetchall()
+        if not rows:
+            return 0
+        cursor = conn.execute(
+            """
+            UPDATE cron_job_runs
+            SET finished_at = ?, status = 'abandoned',
+                error_message = CASE
+                    WHEN error_message = '' THEN 'process_restarted_before_terminal_state'
+                    ELSE error_message
+                END
+            WHERE status = 'running'
+            """,
+            (recovered_at,),
+        )
+        job_ids = {str(row["job_id"]) for row in rows}
+        for job_id in job_ids:
+            conn.execute(
                 """
-                UPDATE cron_job_runs
-                SET finished_at = ?, status = 'abandoned',
-                    error_message = CASE
-                        WHEN error_message = '' THEN 'process_restarted_before_terminal_state'
-                        ELSE error_message
-                    END
-                WHERE status = 'running'
+                UPDATE cron_jobs SET last_status = 'abandoned'
+                WHERE id = ? AND last_status = 'running'
                 """,
-                (recovered_at,),
+                (job_id,),
             )
-            job_ids = {str(row["job_id"]) for row in rows}
-            for job_id in job_ids:
-                conn.execute(
-                    """
-                    UPDATE cron_jobs SET last_status = 'abandoned'
-                    WHERE id = ? AND last_status = 'running'
-                    """,
-                    (job_id,),
-                )
-            return int(cursor.rowcount)
-
-        return self._writer.execute(_recover)
+        return int(cursor.rowcount)
 
     def mark_fire_finished(self, job_id: str, run_id: int, status: str) -> None:
         """Update Job summary only when this Fire remains the latest claim."""

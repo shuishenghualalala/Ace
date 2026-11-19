@@ -92,6 +92,7 @@ await contribute_cron_trigger_reminder(envelope)
 bundle = build_cron_feature(host, registry, store, enabled=True, max_parallel_jobs=2)
 app.declare_managed_feature(bundle.definition)
 await app.update_managed_feature(next_bundle.definition)</code></pre>
+  <p>启动时，Cron 先通过 SQLite 异步写入收口进程退出前遗留的 <code>running</code> Fire，统一标记为 <code>abandoned</code>。数据库等待由写入线程承担，Gateway 事件循环仍可接收本地会话。从恢复完成到调度器启动，当前 Feature 按顺序执行，随后重新读取 Active Owner 并挂载待执行任务。恢复期间已登录或已连接的 Owner 一并挂载。同一宿主复用持久 Store 的在线重启沿用首次恢复结果，避免把后续正在执行的 Fire 当成遗留记录。恢复失败时调度器尚未启动，由 FeatureRuntime 公布启动失败并回收本代资源。</p>
   <p>只有 <code>channel=cron</code> 的 Envelope 产生 fragment；任务名来自 <code>cron_job_name</code>。<code>product.cron</code> 在宿主事件循环中激活，六个工具和每次 Fire 都持有本 Generation Lease。更新采用 <code>restart</code>：先取消并清理旧代，再启动新 Scheduler，最后重新挂载当前 Active Owner；失败由 FeatureRuntime 恢复旧定义。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
