@@ -46,7 +46,10 @@ from crew.core.followup import (
 )
 from crew.core.interfaces import ToolRegistry
 from crew.core.observability import capture_payload, event, span
-from crew.core.types import MediaPart, Message, ToolCall, ToolPermissionDecision, ToolResult, tool_arguments_for_ui
+from crew.core.types import (
+    MediaPart, Message, ToolCall, ToolPermissionDecision, ToolResult,
+    tool_arguments_for_history, tool_arguments_for_ui,
+)
 from crew.plugins.manager import PluginManager
 from crew.state.logging import get_logger, llm_trace
 from crew.tools.pipeline import (
@@ -1252,8 +1255,13 @@ class ToolRunner:
                         return self._timeout_result(exec_tc, timeout)
                     await self._record_durable_event(
                         "tool_execution_intent",
-                        {"tool_call_id": exec_tc.id, "name": exec_tc.name, "arguments": exec_tc.arguments,
-                         "side_effect_state": "unknown"},
+                        {
+                            "tool_call_id": exec_tc.id,
+                            "name": exec_tc.name,
+                            "arguments": tool_arguments_for_history(exec_tc.name, exec_tc.arguments)
+                            if exec_tc.name == "mcp_install" else exec_tc.arguments,
+                            "side_effect_state": "unknown",
+                        },
                     )
                     if self._interrupted:
                         return self._aborted_result(exec_tc, time.perf_counter() - t)

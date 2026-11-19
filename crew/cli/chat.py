@@ -232,6 +232,7 @@ async def _render(app: Any, envelope: Envelope, session: PromptSession) -> None:
     async def ask(message: str) -> str:
         return await _prompt(session, message)
 
+    envelope.params["_allow_mcp_install"] = True
     async with conversation_followups(envelope, ask, input_lock):
         await consume_conversation_turn(app, envelope, _render_chunk, prompt=prompt_tool_approval)
 

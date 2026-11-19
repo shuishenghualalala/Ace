@@ -17,7 +17,7 @@ import base64
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
 from crew.core.runctx import (
@@ -25,6 +25,7 @@ from crew.core.runctx import (
     current_agent_workdir,
     current_agent_id,
     current_display_session_id,
+    current_mcp_install_allowed,
     current_owner_account_id,
     current_session_id,
     current_session_source,
@@ -232,6 +233,7 @@ class SingleAgent(Agent):
         *,
         system_prompt: str = DEFAULT_AGENT_IDENTITY,
         tool_filter: list[str] | None = None,
+        tool_filter_resolver: Callable[[], list[str] | None] | None = None,
         max_iterations: int = 20,
         executor: AgentExecutor | None = None,
         compactor: ContextCompactor | None = None,
@@ -264,6 +266,7 @@ class SingleAgent(Agent):
         self.plugins = plugins
         self.system_prompt = system_prompt
         self.tool_filter = tool_filter  # None=全部工具；否则只暴露子集
+        self._tool_filter_resolver = tool_filter_resolver
         self.max_iterations = max_iterations
         # 未注入 executor 时默认走自带循环，保持向后兼容（Team 即走此路径）。
         # compactor 同步注入默认 executor：否则溢出兜底与每轮 compact_view 静默关闭。
@@ -606,19 +609,20 @@ class SingleAgent(Agent):
 
         未激活时剔除 Plan 模式入口/切换工具，避免模型误调用。
         """
+        tool_filter = self._tool_filter_resolver() if self._tool_filter_resolver else self.tool_filter
         # Plan 模式优先
         if self.plan_manager is not None and self.plan_manager.is_active(
             session_id, owner_account_id=owner_account_id
         ):
             from crew.agent.plan import PLAN_MODE_TOOLS
 
-            if self.tool_filter is None:
+            if tool_filter is None:
                 return list(PLAN_MODE_TOOLS)
-            allowed = set(self.tool_filter)
+            allowed = set(tool_filter)
             return [t for t in PLAN_MODE_TOOLS if t in allowed]
 
         # 普通模式：隐藏 Plan 模式入口工具。
-        base = self.tool_filter if self.tool_filter is not None else self.registry.names()
+        base = tool_filter if tool_filter is not None else self.registry.names()
         return [t for t in base if t not in {"enter_plan_mode", "exit_plan_mode"}]
 
     def _request_tool_schemas(
@@ -628,6 +632,9 @@ class SingleAgent(Agent):
             session_id, owner_account_id=owner_account_id,
         )
         names = [] if readonly else self._effective_tool_filter(session_id, owner_account_id)
+        if self.lightweight or not current_mcp_install_allowed.get():
+            if names is not None:
+                names = [name for name in names if name != "mcp_install"]
         return self.registry.list_schemas(names), names, plan_active
 
     def _resolve_agent_workdir(self, envelope: Envelope, *, task_session_id: str = "") -> str:
@@ -912,6 +919,12 @@ class SingleAgent(Agent):
         from crew.security.launch import current_process_launch
 
         current_process_launch.set(envelope.params.get("_security_process_launch"))
+        current_mcp_install_allowed.set(
+            not self.lightweight
+            and envelope.channel in {"web", "cli"}
+            and not envelope.params.get("internal_task_resume")
+            and envelope.params.get("_allow_mcp_install") is True
+        )
         t0 = time.perf_counter()
 
         # 装配期模型回退：只打日志用户无感，首轮推 status 让 UI「执行过程」可见。

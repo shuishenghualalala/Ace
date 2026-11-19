@@ -27,7 +27,7 @@ from crew.core.runctx import current_active_skill_packages
 from crew.core.envelope import Envelope, TurnOutcome
 from crew.channels.channel_sessions import is_channel_session_id
 from crew.features import FeatureEventContributionFailedError
-from crew.gateway.auth import AuthenticationError, authenticate_websocket
+from crew.gateway.auth import AuthenticationError, authenticate_websocket, require_admin
 from crew.gateway.send_inbox import DesktopSendInbox, SendExecution, SendKey, SendReceipt, current_send_execution
 from crew.gateway.followup_receipts import (
     FollowupKey, FollowupReceipt, FollowupReceiptJournal, followup_decision_hash,
@@ -437,8 +437,16 @@ def create_ws_router(
             )
 
             is_channel = is_channel_session_id(envelope.session_id)
+            envelope.params["_allow_mcp_install"] = False
             if is_channel:
                 build_outbound_channel_envelope(crew, envelope, owner=owner)
+            else:
+                try:
+                    require_admin(account, crew.config)
+                except AuthenticationError:
+                    pass
+                else:
+                    envelope.params["_allow_mcp_install"] = True
             final_text = ""
             try:
                 # 消费 dispatch 流 + 逐帧广播给该会话的 WS 观察者（含断线回放缓存）；共享实现见 broadcast.py。

@@ -1587,39 +1587,52 @@ class CrewApp:
                 self.agent_presets.reserved_skills(),
             )
 
-        authorization_ceiling = self._single_agent_tool_filter(
-            executor_kind,
-            ac,
-            exclude_reserved=False,
-        )
-        capability_ceiling = self.capability_profiles.filter_authorized_tools(
-            self.registry,
-            authorization_ceiling,
-            session_capabilities,
-        )
-        capability_scoped_tools = exclude_toolsets(
-            self.registry,
-            capability_ceiling,
-            exact=self.agent_presets.reserved_toolsets(),
-        )
-        tool_filter = (
-            self._apply_preset_tool_policy(
-                capability_scoped_tools,
-                preset_spec,
-                addition_ceiling=capability_ceiling,
+        def calculate_tool_filter() -> list[str] | None:
+            authorization_ceiling = self._single_agent_tool_filter(
+                executor_kind,
+                ac,
+                exclude_reserved=False,
             )
-            if preset_spec is not None
-            else capability_scoped_tools
-        )
+            capability_ceiling = self.capability_profiles.filter_authorized_tools(
+                self.registry,
+                authorization_ceiling,
+                session_capabilities,
+            )
+            capability_scoped_tools = exclude_toolsets(
+                self.registry,
+                capability_ceiling,
+                exact=self.agent_presets.reserved_toolsets(),
+            )
+            tool_filter = (
+                self._apply_preset_tool_policy(
+                    capability_scoped_tools,
+                    preset_spec,
+                    addition_ceiling=capability_ceiling,
+                )
+                if preset_spec is not None
+                else capability_scoped_tools
+            )
+            if not browser_effective and tool_filter is not None:
+                # 插件关闭时从允许工具中剔除 browser_use（skill 过滤见上）
+                tool_filter = [name for name in tool_filter if name != "browser_use"]
+            tool_filter = self._apply_model_capability_filter(
+                tool_filter,
+                provider_profile.capabilities if provider_profile is not None else None,
+            )
+            return tool_filter
+
+        catalog_revision = self.registry.mcp_catalog_revision
+        tool_filter = calculate_tool_filter()
+
+        def resolve_tool_filter() -> list[str] | None:
+            nonlocal catalog_revision, tool_filter
+            if self.registry.mcp_catalog_revision != catalog_revision:
+                tool_filter = calculate_tool_filter()
+                catalog_revision = self.registry.mcp_catalog_revision
+            return tool_filter
+
         if preset_spec is None:
             system_prompt_override = session_capabilities.prompt or None
-        if not browser_effective and tool_filter is not None:
-            # 插件关闭时从允许工具中剔除 browser_use（skill 过滤见上）
-            tool_filter = [name for name in tool_filter if name != "browser_use"]
-        tool_filter = self._apply_model_capability_filter(
-            tool_filter,
-            provider_profile.capabilities if provider_profile is not None else None,
-        )
 
         return self._build_single_agent(
             provider=provider,
@@ -1627,6 +1640,7 @@ class CrewApp:
             executor_config=executor_config,
             max_iterations=cfg.max_iterations,
             tool_filter=tool_filter,
+            tool_filter_resolver=resolve_tool_filter,
             user_type=user_type,
             profile_path=ac.get("prompt_profile_path"),
             system_prompt=system_prompt_override,
@@ -1658,6 +1672,7 @@ class CrewApp:
         executor_config: dict | None,
         max_iterations: int,
         tool_filter: list[str] | None,
+        tool_filter_resolver: Callable[[], list[str] | None] | None = None,
         user_type: str = "internal",
         profile_path: str | None = None,
         system_prompt: str | None = None,
@@ -1796,6 +1811,8 @@ class CrewApp:
             kwargs["evolution_full_cycle"] = cfg.evolution_auto_full_cycle
             kwargs["evolution_visible"] = cfg.evolution_visible
             kwargs["evolution_queue"] = self._evolution_queue
+        if tool_filter_resolver is not None:
+            kwargs['tool_filter_resolver'] = tool_filter_resolver
         return SingleAgent(**kwargs)
 
     # ---- subagent（主 agent 通过 delegate_task / run_agent 调用的子 agent）----
@@ -4430,7 +4447,10 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     # MCP Client：连接外部 MCP server（在 startup 时实际连接）
     from crew.tools.mcp_client import MCPClientManager
+    from crew.tools.mcp_management import register_mcp_install
+
     app.mcp_manager = MCPClientManager(cfg.mcp_servers)
+    register_mcp_install(app)
 
     from crew.dynamickanban.feature import build_dynamic_kanban_feature
 

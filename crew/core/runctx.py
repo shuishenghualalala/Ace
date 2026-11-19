@@ -65,6 +65,8 @@ def normalize_owner_account_id(value: str | None) -> str:
 current_owner_account_id: ContextVar[str] = ContextVar(
     "current_owner_account_id", default=LOCAL_OWNER_ACCOUNT_ID
 )
+# Host-authorized foreground turns may propose a local MCP settings change.
+current_mcp_install_allowed: ContextVar[bool] = ContextVar("current_mcp_install_allowed", default=False)
 current_agent_workdir: ContextVar[str] = ContextVar("current_agent_workdir", default="")
 current_workspace_guard: ContextVar[dict[str, Any] | None] = ContextVar("current_workspace_guard", default=None)
 current_agent_id: ContextVar[str] = ContextVar("current_agent_id", default="")

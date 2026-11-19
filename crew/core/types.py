@@ -133,6 +133,16 @@ def tool_arguments_for_ui(name: str, arguments: dict[str, Any] | None) -> dict[s
         return {key: value for key, value in arguments.items() if key != "source_id"}
     if name == "wiki_batch_ingest":
         return {key: value for key, value in arguments.items() if key != "source_ids"}
+    if name == "mcp_install":
+        from crew.tools.redact import redact_url_for_display
+
+        safe = {key: arguments[key] for key in ("name", "transport", "command", "args") if key in arguments}
+        if "url" in arguments:
+            safe["url"] = redact_url_for_display(str(arguments.get("url") or ""))
+        for field in ("env", "headers"):
+            if isinstance(arguments.get(field), dict):
+                safe[field] = {key: "***" for key in arguments[field]}
+        return safe
     if name in {"file_write", "write_file"}:
         return {key: arguments[key] for key in _FILE_WRITE_UI_ARG_KEYS if key in arguments}
     if name in {"browser_type", "browser_dialog"}:
@@ -188,6 +198,7 @@ def tool_arguments_for_history(name: str, arguments: dict[str, Any] | None) -> d
         "browser_select",
         "browser_tabs",
         "browser_use",
+        "mcp_install",
     }:
         return tool_arguments_for_ui(name, arguments)
     return arguments

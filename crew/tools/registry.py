@@ -218,6 +218,7 @@ class FunctionTool(Tool):
 class Registry(ToolRegistry):
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self.mcp_catalog_revision = 0
         # alias -> canonical name（Crew Stage 1 别名查找）
         self._aliases: dict[str, str] = {}
 
@@ -258,7 +259,10 @@ class Registry(ToolRegistry):
             raise ToolError(f"工具缺少 name: {tool!r}")
         if tool.name in self._tools and not kwargs.get("override", False):
             raise ToolError(f"工具已注册: {tool.name}")
+        previous = self._tools.get(tool.name)
         self._tools[tool.name] = tool
+        if getattr(tool, "is_mcp", False) or getattr(previous, "is_mcp", False):
+            self.mcp_catalog_revision += 1
         # 索引别名（冲突时保留先注册的——内置优先于 MCP）
         for alias in getattr(tool, "aliases", None) or []:
             alias = str(alias).strip()
@@ -280,6 +284,8 @@ class Registry(ToolRegistry):
         if expected is not None and current is not expected:
             return False
         removed = self._tools.pop(name, None) is not None
+        if removed and getattr(current, "is_mcp", False):
+            self.mcp_catalog_revision += 1
         # 清理指向该 name 的别名
         stale_aliases = [a for a, c in self._aliases.items() if c == name]
         for a in stale_aliases:

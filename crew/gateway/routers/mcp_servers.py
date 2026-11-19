@@ -18,11 +18,10 @@ import asyncio
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-# 合法 server 名：防注入 Registry 命名 {server}__{tool}，且作 yaml key 安全。
-_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+from crew.tools.mcp_management import SERVER_NAME_RE as _NAME_RE
+from crew.tools.mcp_management import add_mcp_server, validate_server_payload as _validate_server_payload
 # env key 命中这些后缀（不区分大小写）视为敏感，GET 脱敏。
 _SECRET_KEY_RE = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)$", re.IGNORECASE)
-_VALID_TRANSPORTS = {"stdio", "http", "sse"}
 
 
 def _redact_env(env: Any) -> dict[str, Any]:
@@ -40,36 +39,6 @@ def _redact_config(cfg: dict[str, Any]) -> dict[str, Any]:
     out = dict(cfg)
     out["env"] = _redact_env(cfg.get("env"))
     return out
-
-
-def _validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    """校验新增/编辑 payload，返回 (规范化配置, 错误信息)。"""
-    cfg: dict[str, Any] = {}
-    command = str(payload.get("command") or "").strip()
-    url = str(payload.get("url") or "").strip()
-    transport = str(payload.get("transport") or "stdio").strip().lower()
-
-    if command:
-        cfg["command"] = command
-        cfg["args"] = list(payload.get("args") or [])
-        # transport 仅作记录，stdio 时忽略
-    elif url:
-        if transport not in _VALID_TRANSPORTS:
-            return None, f"transport 必须是 {sorted(_VALID_TRANSPORTS)} 之一"
-        cfg["url"] = url
-        cfg["transport"] = transport
-        headers = payload.get("headers")
-        if headers is not None:
-            cfg["headers"] = dict(headers)
-    else:
-        return None, "必须提供 command（stdio）或 url（http/sse）"
-
-    env = payload.get("env")
-    if env is not None:
-        if not isinstance(env, dict):
-            return None, "env 必须是对象"
-        cfg["env"] = {str(k): str(v) for k, v in env.items()}
-    return cfg, None
 
 
 def create_mcp_servers_router(crew) -> APIRouter:
@@ -120,21 +89,11 @@ def create_mcp_servers_router(crew) -> APIRouter:
         # 统一配置事务（Config.add_mcp_server）：候选值 → 持久化 → 发布。
         # 持久化失败时内存与磁盘一致保留旧值，必须先于任何运行资源操作返回。
         try:
-            crew.config.add_mcp_server(name, cfg)
+            await add_mcp_server(crew, name, cfg)
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": f"持久化失败: {exc}"}, status_code=500)
-
-        # 增量启动单 server（后台连接，不阻塞响应）：worker.start() 最多等 30s
-        # 启动超时，若同步等待会让前端 create 请求 hang 30s，弹层不关、列表不刷新。
-        # 改为 fire-and-forget：配置已持久化，立即返回 201，连接在后台进行；前端刷新
-        # 列表时该 server 会以 connected=false 出现，连上后下次 status() 轮询转为 true。
-        # 此时连接失败属于"已保存但连接失败"，status 的 error 字段如实反映。
-        await _ensure_mgr_started()
-        if crew.mcp_manager is not None:
-            crew.mcp_manager.register_pending(name, cfg)
-            asyncio.create_task(crew.mcp_manager.add_server(name, cfg))
 
         return JSONResponse({"ok": True, "servers": _servers_view()}, status_code=201)
 

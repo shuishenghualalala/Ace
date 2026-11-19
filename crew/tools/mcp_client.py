@@ -28,7 +28,7 @@ import re
 import shutil
 import sys
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -298,6 +298,21 @@ def _is_method_not_found(exc: BaseException) -> bool:
     return getattr(getattr(exc, "error", None), "code", None) == -32601
 
 
+def host_stdio_block_reason() -> str | None:
+    """Return the host process policy shared by connection and installation."""
+    from crew.security.launch import current_process_launch
+
+    launch = current_process_launch.get()
+    if launch is not None and getattr(launch, "managed", False):
+        return "managed profile disables MCP stdio host spawn"
+    if os.environ.get("ACE_ALLOW_HOST_MCP_STDIO") != "1":
+        return (
+            "MCP stdio host process is disabled; use a managed transport "
+            "or explicitly approved host configuration"
+        )
+    return None
+
+
 class _ServerWorker:
     """单个 MCP server 的常驻连接 + 调用编组。"""
 
@@ -365,21 +380,8 @@ class _ServerWorker:
             # 那是绕过 broker 的执行面（决策 #13、spec §7.2）。只有真正 disabled
             #（或无 launch 上下文的 dev/装机场景）在操作者显式
             # ACE_ALLOW_HOST_MCP_STDIO=1 时放行。
-            from crew.security.launch import current_process_launch
-
-            launch = current_process_launch.get()
-            managed = launch is not None and getattr(launch, "managed", False)
-            host_stdio_allowed = (
-                os.environ.get("ACE_ALLOW_HOST_MCP_STDIO") == "1"
-                and not managed
-            )
-            if not host_stdio_allowed:
-                reason = (
-                    "managed profile disables MCP stdio host spawn"
-                    if managed
-                    else "MCP stdio host process is disabled; use a managed transport "
-                    "or explicitly approved host configuration"
-                )
+            reason = host_stdio_block_reason()
+            if reason is not None:
                 raise ValueError(reason)
             # Mark the worker so per-call handlers can refuse reuse by a later managed
             # conversation (H-21): the spawn context is non-managed, but a subsequent
@@ -809,6 +811,7 @@ class _ServerWorker:
                     )
             configured_url = str(self.cfg.get("url") or "").strip()
             if configured_url:
+                from crew.core.runctx import current_session_id, current_task_runtime_id
                 from crew.security.launch import current_process_launch
                 from crew.tools.security_guard import authorize_configured_mcp_call
 
@@ -827,7 +830,12 @@ class _ServerWorker:
                         tool_name=qualified_name,
                         args=args,
                         security_service=launch.approval_service,
-                        security_context=launch.security_context,
+                        # Approval is pending on the public turn's session and task.
+                        security_context=replace(
+                            launch.security_context,
+                            session_id=current_session_id.get() or launch.security_context.session_id,
+                            task_id=current_task_runtime_id.get() or launch.security_context.task_id,
+                        ),
                     )
                 except ToolError as exc:
                     return tool_error(str(exc))
