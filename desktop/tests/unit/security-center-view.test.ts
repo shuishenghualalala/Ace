@@ -8,6 +8,7 @@ const stateMock = vi.hoisted(() => ({
   sessions: [] as Array<{ id: string; workspaceId: string }>,
 }));
 const showConfirmDialogMock = vi.hoisted(() => vi.fn(async () => true));
+const notifyMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../../src/ui/state', () => ({
   $: (selector: string) => document.querySelector(selector),
@@ -17,7 +18,7 @@ vi.mock('../../src/ui/state', () => ({
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;'),
-  notify: vi.fn(),
+  notify: notifyMock,
   state: stateMock,
 }));
 vi.mock('../../src/ui/ui-feedback', () => ({
@@ -373,20 +374,19 @@ describe('Security Center integration', () => {
     expect(securitySetup).not.toHaveBeenCalled();
     document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.click();
 
-    await vi.waitFor(() => expect(securitySetup).toHaveBeenCalledWith({ action: 'repair' }));
+    await vi.waitFor(() => expect(securitySetup).toHaveBeenCalledExactlyOnceWith({ action: 'install' }));
     expect(showConfirmDialogMock).not.toHaveBeenCalled();
     expect(document.querySelector<HTMLButtonElement>('[data-security-action="install"]')?.disabled)
       .toBe(true);
     finishSetup?.({ ok: true, exitCode: 0 });
-    await vi.waitFor(() => expect(securitySetup).toHaveBeenCalledWith({ action: 'repair' }));
     await vi.waitFor(() => expect(document.querySelector('[data-security-action="install"]')).toBeNull());
     expect(document.body.textContent).toContain('本机防护已就绪');
   });
 
-  it('does not modify UAC or launch setup when Windows reports UAC off', async () => {
-    const securityUacStatus = vi.fn(async () => ({ enabled: false }));
+  it('explains when Windows needs UAC for setup without changing system settings', async () => {
+    const securityUacStatus = vi.fn();
     const securityEnableUac = vi.fn();
-    const securitySetup = vi.fn();
+    const securitySetup = vi.fn(async () => ({ ok: false, exitCode: null, code: 'uac_disabled' }));
     Object.assign(window, {
       Crew: {
         securityCapabilities: vi.fn(async () => ({ ok: true, body: setupRequiredCapabilities })),
@@ -401,10 +401,11 @@ describe('Security Center integration', () => {
     await initSecurityPage();
     const currentInstall = () => document.querySelector<HTMLButtonElement>('[data-security-action="install"]');
     currentInstall()?.click();
-    await vi.waitFor(() => expect(securityUacStatus).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(currentInstall()?.disabled).toBe(false));
+    await vi.waitFor(() => expect(notifyMock).toHaveBeenCalledWith('请先在 Windows 中开启用户账户控制（UAC），然后再试。'));
+    expect(currentInstall()?.disabled).toBe(false);
+    expect(securitySetup).toHaveBeenCalledExactlyOnceWith({ action: 'install' });
+    expect(securityUacStatus).not.toHaveBeenCalled();
     expect(securityEnableUac).not.toHaveBeenCalled();
-    expect(securitySetup).not.toHaveBeenCalled();
     expect(showConfirmDialogMock).not.toHaveBeenCalled();
   });
 

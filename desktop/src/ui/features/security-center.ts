@@ -218,17 +218,7 @@ async function setupProtection(): Promise<void> {
   snapshot = { ...snapshot, settingUp: true };
   render();
   try {
-    const uac = await window.Crew?.securityUacStatus?.();
-    if (!stillActive()) return;
-    if (uac?.restartRequired) {
-      notify('请重启电脑，使 Windows 的用户账户控制设置生效。');
-      return;
-    }
-    if (uac?.enabled === false) {
-      notify('请先在 Windows 中开启用户账户控制（UAC），然后再试。');
-      return;
-    }
-    const result = await window.Crew?.securitySetup?.({ action: 'repair' });
+    const result = await window.Crew?.securitySetup?.({ action: 'install' });
     if (!stillActive()) return;
     if (result?.code === 'uac_restart_required') {
       notify('请重启电脑，使 Windows 的用户账户控制设置生效。');
