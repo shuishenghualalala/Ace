@@ -219,8 +219,22 @@ async def test_inflight_timeout_is_not_retried_and_reports_unknown_state(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_mcp_worker_attaches_queue_context_and_records_payload_refs(monkeypatch, tmp_path):
+@pytest.mark.parametrize("structured", [False, True])
+async def test_mcp_worker_attaches_queue_context_and_records_payload_refs(monkeypatch, tmp_path, structured):
+    if structured:
+        mcp_types = pytest.importorskip("mcp.types")
     worker, session = await _started_worker(monkeypatch, call_timeout=0.5)
+    if structured:
+        call_tool = session.call_tool
+
+        async def reply(name, args):
+            await call_tool(name, args)
+            return mcp_types.CallToolResult(
+                content=[mcp_types.TextContent(type="text", text=name)],
+                structured_content={"status": "ready", "password": "fixture-private-value"},
+            )
+
+        monkeypatch.setattr(session, "call_tool", reply)
     store = TraceStore(tmp_path / "observability.sqlite3")
     recorder = ObservationRecorder(store)
     install_sink(recorder)
@@ -239,7 +253,12 @@ async def test_mcp_worker_attaches_queue_context_and_records_payload_refs(monkey
     events = store.list_events(owner_account_id="owner", trace_id=traces[0]["trace_id"])
     completed = next(item for item in events if item["name"] == "mcp.call.completed")
     assert completed["attributes"]["request_payload_id"]
-    assert completed["attributes"]["response_payload_id"]
+    response_id = completed["attributes"]["response_payload_id"]
+    assert response_id
+    if structured:
+        assert "fixture-private-value" in result
+        response = store.get_payload(owner_account_id="owner", payload_id=response_id)
+        assert response["content"]["structured_content"] == {"status": "ready", "password": "<secret_redacted>"}
     recorder.close()
     store.close()
 

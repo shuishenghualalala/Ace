@@ -42,7 +42,8 @@ from crew.core.observability import (
     span,
 )
 from crew.state.logging import get_logger
-from crew.tools.output_filters import truncate_output
+from crew.tools.output_filters import fit_json_text, get_max_output_chars, truncate_output
+from crew.tools.pipeline import DEFAULT_MAX_RESULT_SIZE_CHARS
 from crew.tools.registry import Registry, tool_error
 
 log = get_logger("tools.mcp")
@@ -239,8 +240,20 @@ def _stdio_env(cfg_env: dict[str, Any] | None) -> dict[str, str] | None:
     return env
 
 
-def _extract_text(result: Any) -> str:
-    """从 MCP call_tool 返回里抽取文本与图片。
+def _append_structured_content(text: str, content: dict[str, Any]) -> str:
+    serialized = json.dumps(content, ensure_ascii=False, sort_keys=True)
+    if text.lstrip().startswith("{"):
+        try:
+            if json.dumps(json.loads(text), ensure_ascii=False, sort_keys=True) == serialized:
+                return text
+        except (ValueError, RecursionError):
+            pass
+    structured_text = f"Structured content:\n{serialized}"
+    return f"{text}\n\n{structured_text}" if text else structured_text
+
+
+def _extract_text(result: Any, *, media_budget: int | None = None) -> str:
+    """从 MCP call_tool 返回里抽取文本、结构化结果与图片。
 
     兼容纯文本结果与混合内容（TextContent + ImageContent）。
     无图片时保持原有行为返回拼接文本；有图片时返回 JSON：
@@ -283,16 +296,26 @@ def _extract_text(result: Any) -> str:
                 text_parts.append(str(text))
 
     joined = "\n".join(text_parts)
+    structured = getattr(result, "structured_content", None)
+    if structured:
+        joined = _append_structured_content(joined, structured)
     if getattr(result, "is_error", False):
         return tool_error(joined or "MCP 工具返回错误")
 
     if not image_parts:
         return joined or "(空结果)"
 
-    return json.dumps(
-        {"text": joined, "images": image_parts},
-        ensure_ascii=False,
-    )
+    payload = {"text": joined, "images": image_parts}
+    encoded = json.dumps(payload, ensure_ascii=False)
+    if media_budget is None or len(encoded) <= media_budget:
+        return encoded
+
+    payload["text"] = ""
+    remaining = media_budget - len(json.dumps(payload, ensure_ascii=False))
+    if remaining < 0:
+        return f"[MCP 图片超过输出上限]\n{joined}".rstrip()
+    payload["text"] = fit_json_text(joined, remaining)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _is_method_not_found(exc: BaseException) -> bool:
@@ -699,10 +722,16 @@ class _ServerWorker:
                     async with asyncio.timeout_at(request.deadline):
                         result = await session.call_tool(request.tool_name, request.args or {})
                         request.replied = True
-                    extracted = _extract_text(result)
+                    max_chars = get_max_output_chars()
+                    extracted = _extract_text(result, media_budget=min(max_chars, DEFAULT_MAX_RESULT_SIZE_CHARS))
+                    diagnostic_result = extracted
+                    if getattr(result, "structured_content", None):
+                        diagnostic_result = result.model_dump(
+                            mode="json", include={"content", "structured_content", "is_error"},
+                        )
                     response_capture = capture_payload(
                         "mcp.response",
-                        extracted,
+                        diagnostic_result,
                         attributes={
                             "capture_layer": "mcp.worker",
                             "service": self.name,
@@ -727,10 +756,11 @@ class _ServerWorker:
                             message = str(json.loads(extracted).get("error") or extracted)
                         except (AttributeError, json.JSONDecodeError):
                             message = extracted
-                        self._fail(request, ToolError(message))
+                        truncated, _ = truncate_output(message, max_chars)
+                        self._fail(request, ToolError(truncated))
                     else:
                         # 成功结果过长时按 terminal 同款头尾截断，避免超大结果灌进上下文与 UI
-                        truncated, _ = truncate_output(extracted)
+                        truncated, _ = truncate_output(extracted, max_chars)
                         self._complete(request, truncated)
         except TimeoutError:
             self._fail(request, self._deadline_error(request))

@@ -4,6 +4,7 @@
 """
 
 from mcp.server import MCPServer
+from mcp.types import CallToolResult
 
 mcp = MCPServer("echo", version="2.0-test")
 
@@ -12,6 +13,12 @@ mcp = MCPServer("echo", version="2.0-test")
 def echo(text: str) -> str:
     """原样回显输入。"""
     return f"echo: {text}"
+
+
+@mcp.tool()
+def structured(text: str) -> CallToolResult:
+    """Return the value only through MCP structured content."""
+    return CallToolResult(content=[], structured_content={"value": text, "count": 7})
 
 
 @mcp.tool()

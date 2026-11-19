@@ -8,6 +8,7 @@ terminal_tool 的 40/60 头尾截断），集中到一个子模块，供 termina
 
 from __future__ import annotations
 
+import json
 import re
 
 # ---------------------------------------------------------------------------
@@ -97,3 +98,21 @@ def truncate_output(text: str, max_chars: int | None = None) -> tuple[str, bool]
         f"共 {len(text):,} 字符]...\n\n"
     )
     return text[:head_chars] + notice + text[-tail_chars:], True
+
+
+def fit_json_text(text: str, max_chars: int) -> str:
+    """Fit text into an escaped JSON string budget, excluding enclosing quotes."""
+    if len(json.dumps(text, ensure_ascii=False)) - 2 <= max_chars:
+        return text
+
+    best = ""
+    low, high = 1, min(len(text), max_chars)
+    while low <= high:
+        width = (low + high) // 2
+        preview, _ = truncate_output(text, width)
+        if len(json.dumps(preview, ensure_ascii=False)) - 2 <= max_chars:
+            best = preview
+            low = width + 1
+        else:
+            high = width - 1
+    return best

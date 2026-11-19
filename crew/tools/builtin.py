@@ -35,7 +35,7 @@ from crew.tools.file_utils import (
     MAX_READ_FILE_BYTES,
     ReadControl,
 )
-from crew.tools.output_filters import strip_ansi, truncate_output
+from crew.tools.output_filters import fit_json_text, strip_ansi, truncate_output
 from crew.tools.pipeline import DEFAULT_MAX_RESULT_SIZE_CHARS
 from crew.tools.process_registry import current_shell_kind
 from crew.tools.redact import redact_sensitive_text
@@ -508,15 +508,7 @@ def _terminal_result_json(result: dict[str, Any], *, log_hint: str) -> str:
 
     result.update(output="", truncated=True, hint=log_hint)
     budget = DEFAULT_MAX_RESULT_SIZE_CHARS - len(json.dumps(result, ensure_ascii=False))
-    low, high = 1, min(len(output), budget)
-    while low <= high:
-        width = (low + high) // 2
-        preview, _ = truncate_output(output, width)
-        if len(json.dumps(preview, ensure_ascii=False)) - 2 <= budget:
-            result["output"] = preview
-            low = width + 1
-        else:
-            high = width - 1
+    result["output"] = fit_json_text(output, budget)
     return json.dumps(result, ensure_ascii=False)
 
 

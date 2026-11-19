@@ -238,6 +238,10 @@
 <h3>同一模型响应中的 MCP 并发</h3>
 <p>ZCode 让只读或幂等工具进入连续并发段，独占调用分隔各段。Ace 在完整响应阶段从当前 MCP 清单读取明确只读资格，沿用 Agent 分段、并发上限和结果顺序。远程调用在 Full Access 或 AutoReview 已获对应端点的会话授权时可并发。逐次审批和默认未授权都按序进入正式审批。已发送工具开始帧后重新核对资格，失效时串行收尾，实际执行始终逐次授权。</p>
 <p><strong>验收</strong> 真实 Windows Gateway、Streamable HTTP MCP 和可控模型在同一响应发出慢读、快读、写、后读。旧版先等慢读结束。新版两种已获授权情形的快读均在慢读闸门打开前完成，写与后读按序执行，模型按原次序取得四项结果。默认未授权 AutoReview 和显式 Request Approval 各只产生一条未决审批，服务端收到零次调用。四项端到端与 167 项组合回归通过，覆盖已发开始帧后撤销资格，以及保留流式预派发边界。</p>
+<h3 id="mcp-structured-tool-result">MCP 工具结构化结果保留到模型</h3>
+<p>ZCode 把非空 <code>structuredContent</code> 投影到模型，服务业务错误也保留相关详情。Ace 旧版只读取文本和图片，只含结构字段时交给模型的是空结果。现在将有效结构字段编码到工具正文，已经包含相同 JSON 对象的正文保持原样。真正的图片继续来自 MCP 协议图片块。图片组合在预算内先保留图片再截取转义后的文本，避免截断后整包无法解析。MCP Worker 诊断采集沿用结构字段的按键脱敏。</p>
+<p><strong>验收</strong> 真实 MCP SDK 的 stdio 回归在基线失败。真实 Streamable HTTP 在修复前还复现了加入大段结构字段后外层图片 JSON 被切坏。Windows 包内解释器经真实签名 Gateway、公开 WebSocket、默认延迟发现和一次性批准，以本机 MCP 与脚本模型对照运行。基线六轮复现三类结构数据丢失，最终七轮验证结构化正文、结构与普通文本并存、重复及空对象、真图片、业务错误与超限转义内容。含超限内容的一轮仍将完整图片送到模型，并保留正文头尾和截断标记。模型实际收到结果，各调用只派发一次，重启后七轮历史均可读，监听均释放。MCP、Agent、工具流水线和终端组合回归 270 项及 Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/tools/output_filters.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/mcp/index.ts:425</code>、<code>:442</code>。</p>
 <h3>前台对话安装 MCP</h3>
 <p>ZCode 官方配置技能把对话操作接到结构化 MCP 配置，变更保存后由运行时连接、发现和注册工具。Ace 复用现有 MCP 设置的保存事务与增量连接，新增可调用的 <code>mcp_install</code>。管理员在前台对话一次确认，拒绝或取消不写配置；同名同配置保持幂等。同一会话下一轮可发现新工具。远程工具联网卡按公开会话和实际任务关联。</p>
 <p>两类本机真实传输各验证五轮。HTTP 与显式授权的宿主 stdio 均完成拒绝、批准、重复安装、同会话调用和重启后调用。面板使用的公开设置接口返回真实连接状态。HTTP 两次工具调用在公开会话完成原联网批准，四个 Gateway 和两个 stdio 进程正常退出。97 项安装、MCP 管理、生命周期和工具管线回归通过。</p>

@@ -1,6 +1,7 @@
 """MCP 2 Client（连真 stdio server）+ MCPServer 工具。"""
 
 import asyncio
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -77,6 +78,11 @@ async def test_mcp_client_connects_and_calls(monkeypatch):
         assert not res.is_error
         assert "echo: hi" in res.content
 
+        structured = await reg.execute(ToolCall("structured-1", "echo__structured", {"text": "测试"}))
+        assert not structured.is_error
+        assert structured.content.startswith("Structured content:\n")
+        assert json.loads(structured.content.removeprefix("Structured content:\n")) == {"value": "测试", "count": 7}
+
         failed = await reg.execute(ToolCall("2", "echo__fail", {"message": "expected failure"}))
         assert failed.is_error
         assert "fail" in failed.content  # MCP 2 masks unhandled server exception details.
@@ -89,12 +95,38 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch, tmp_pa
     """HTTP 分支使用 MCP 2 的 streamable_http_client、httpx2 和双元素流。"""
     import httpx2
     from mcp.server import MCPServer
+    from mcp.types import CallToolResult, ImageContent, TextContent
 
     server = MCPServer("http-echo", version="2.0-test")
 
     @server.tool()
     def http_echo(text: str) -> str:
         return f"http echo: {text}"
+
+    duplicate = '{ "status": "ready", "count": 3 }'
+    image = ImageContent(type="image", mime_type="image/png", data="iVBORw0KGgo=")
+    structured = {"status": "ready", "count": 3}
+    results = {
+        "mixed": CallToolResult(
+            content=[TextContent(type="text", text="Summary"), image], structured_content=structured,
+        ),
+        "large_mixed": CallToolResult(
+            content=[TextContent(type="text", text="Large summary"), image],
+            structured_content={"body": '"line"\n' * 10_000, "end": "last field"},
+        ),
+        "duplicate": CallToolResult(
+            content=[TextContent(type="text", text=duplicate)], structured_content=structured,
+        ),
+        "empty": CallToolResult(content=[TextContent(type="text", text="unchanged")], structured_content={}),
+        "error": CallToolResult(
+            content=[TextContent(type="text", text="cannot continue"), image],
+            structured_content={"state": "incomplete"}, is_error=True,
+        ),
+    }
+
+    @server.tool()
+    def http_result(shape: str) -> CallToolResult:
+        return results[shape]
 
     app = server.streamable_http_app(stateless_http=True, json_response=True)
     original_async_client = httpx2.AsyncClient
@@ -157,6 +189,33 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch, tmp_pa
                 assert not result.is_error
                 assert "http echo: hi" in result.content
                 assert seen["security_context"] == context
+
+                async def call(shape):
+                    return await reg.execute(ToolCall(shape, "remote__http_result", {"shape": shape}))
+
+                mixed = await call("mixed")
+                assert not mixed.is_error
+                mixed_content = json.loads(mixed.content)
+                summary, details = mixed_content["text"].split("\n\nStructured content:\n")
+                assert summary == "Summary"
+                assert json.loads(details) == structured
+                assert mixed_content["images"][0]["url"] == "data:image/png;base64,iVBORw0KGgo="
+
+                large = await call("large_mixed")
+                assert not large.is_error
+                assert len(large.content) <= 50_000
+                large_content = json.loads(large.content)
+                assert large_content["images"] == mixed_content["images"]
+                assert large_content["text"].startswith("Large summary\n\nStructured content:\n")
+                assert '"end": "last field"' in large_content["text"]
+                assert "输出已截断" in large_content["text"]
+
+                assert (await call("duplicate")).content == duplicate
+                assert (await call("empty")).content == "unchanged"
+                failed = await call("error")
+                assert failed.is_error
+                assert 'cannot continue\n\nStructured content:\n{"state": "incomplete"}' in failed.content
+                assert "iVBORw0KGgo=" not in failed.content
             finally:
                 await mgr.aclose()
     finally:
