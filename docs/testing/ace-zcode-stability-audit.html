@@ -621,6 +621,11 @@
 </tbody>
 </table></div>
 <p>30 对中有 27 对新配置更晚可发送，配对差中位数为 760.5 毫秒。Renderer 观察到 Gateway 就绪至可发送的中位数为 498.2 和 509.2 毫秒。新配置可发送 P95 为 11.120 秒，仍高于 5 秒的待校准目标。重建物理包路径的先导首轮和重开分别用了 38.688 与 9.460 秒才可发送；先导保留为独立记录，预先约定的重复组另列如上。</p>
+<h4>Windows Gateway 就绪到 Composer 可发送的分段</h4>
+<p>用同一原生启动包的私有探针记录 main、preload 和 renderer，三对新配置与重开均完成签名、真实 WebSocket 聊天、历史和端口释放。跨进程时钟对齐区间宽 0.272–0.500 毫秒。先导首次读物理副本并与另一隔离测试有重叠，重开采样超时，独立保留；下列统计来自其余六轮。</p>
+<p>Renderer 收到 <code>CoreReady</code> 到有草稿的发送按钮可用，中位数 506.4 毫秒，范围 487.5–672.3。已就绪状态从主进程推到 renderer 约 1–3 毫秒，renderer 从状态处理到发起连接中位 39.4 毫秒。签名复验中位 259.7 毫秒，WebSocket 构造到 <code>open</code> 中位 193.3 毫秒，合计中位 449.5 毫秒，占各次间隔 82%–89%。六轮各一次连接和一次成功复验，无重试；缓存绑定等待 0.017–0.031 毫秒。收到确认能力后，outbox 就绪到发送按钮可用为 0–0.1 毫秒。</p>
+<p>复验收到 HTTP 响应头中位 54.6 毫秒，完成校验中位 259.7 毫秒。当前探针把其余时间归到响应体读取、解析、校验和 JS 调度的合段。ZCode 主进程向本地宿主和 renderer 交付 MessagePort，数据库就绪且启动身份匹配后建立 RPC。Ace 的桌面链路包含对回环 Gateway 的签名复验和 WebSocket 升级。</p>
+<p class="evidence">Ace <code>desktop/src/main/index.ts</code>、<code>desktop/src/main/gateway-instance-auth.ts</code>、<code>desktop/src/ui/api/feature-session.ts</code>。ZCode <code>packages/desktop/src/main/desktopHostProcess.ts</code>、<code>databaseStartupAdmission.ts</code>。</p>
 <h4>同机 ZCode 发行版的 Composer 先导</h4>
 <p>本机发行二进制为 ZCode 3.15.3.8237，参考源码快照的包版为 3.16.2。正式包只读，使用独立 Win32 桌面、全新测试配置、私有工作区和回环模型。先导首轮核对实际 Host、数据库和模型选择，未达到发送。夹具补齐逐阶段存证及有界收尾后，第二轮经可见控件完成登录和偏好跳过、可信发送、一次匹配的流式请求、可见用户消息和助手正文。私有 SQLite 中用户输入与随机助手标记各出现一次，应用及 Host 正常退出，模型和 CDP 端口释放。</p>
 <p>第二轮含首次引导的启动到 Composer 可交互为 10.662 秒，点击发送到用户和助手正文 DOM 分别为 15.284 和 16.378 秒。正文显示后还有一次非流式请求，回环夹具返回 422，同期记录标题生成失败。这一轮用于验证真实发行版的测量入口。正式对照需统一两边引导状态、后台模型请求和采样次数。</p>
