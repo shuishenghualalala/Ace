@@ -697,6 +697,11 @@
 <h4>复用 Work 启动准备连接</h4>
 <p>ZCode 的 <code>packages/services/src/project-storage/startup.ts:31</code> 在同一准备连接上分步执行 schema 和迁移。Ace 的 Work 装配复用一个目标库连接，保留版本写入和旧表整批迁移各自的事务。公开启动路径遇到畸形旧表时整批回滚，仍保存 schema 版本，修正旧数据后可以重试。</p>
 <p>正式 Windows 运行时中，新用户目录与合成旧库各两对。每次准备连接从 2 降至 1，Work 阶段逐对减少 16.9、18.5、25.7、10.6 毫秒。八次均验证真实 WebSocket、回环模型回复、回执、历史、旧 Work 数据和双端口回收。定向回归 17 项通过。首次基线存在一次超过 30 秒的启动异常，其他三对从启动至首正文的变化为 +0.4、−4.0、+314.4 毫秒，整体启动改善仍无证据。</p>
+<h4>按需装配 Team 计划器与 Sites 校验器的启动对照</h4>
+<p>在冻结 <code>b1458653</code> 源码的 Windows 正式运行时副本，Team 候选让图计划器在使用时才初始化。普通首聊的四对共八次都完成真实回环对话、会话落盘和双端口回收。旧版导入计划器耗时 47.0–64.6 毫秒，候选的普通首聊未导入。启动至首正文的候选变化逐对为 +4,592、−152、+122、−40 毫秒。首次解开候选读盘遇到明显总启动异常，保留在原样本中。该项总启动收益未稳定复现。</p>
+<p>Sites 候选将 Blueprint 和原生可视化的 JSON Schema 验证器移到实际验证入口。私有两份目录和共用未改源码物理树各四对，另做两对垃圾回收定界。共用物理树的四对中，基线装配导入校验器为 194.6–211.7 毫秒，候选的普通首聊未导入。启动至首正文变化为 −319、−1,500、−463、+212 毫秒。两版都等技能 GET 完成才发送；实际发送至首正文在四对中各慢 65–111 毫秒。</p>
+<p>最后两对也等待技能 GET 完成。两次基线第 2 代 GC 均在 GET 返回后至 WS 发送前结束，耗时 129、105 毫秒。候选两次均在发送后到模型上游首段前发生，耗时 108、111 毫秒，实际发送至首正文各慢 88、66 毫秒。20 次 Sites 启动均验证真实回环首聊、持久历史、退出和端口回收。候选首次合法和非法 Blueprint artifact 及 23 项定向用例通过。当前发行保留两处原装配，整机冷启动和发送后首段继续独立测量。</p>
+<p class="evidence">Ace <code>crew/team/team_manager.py</code>、<code>crew/sites/blueprint.py</code>、<code>crew/sites/native_visual.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/workflow/expert/scheduled-phase.ts:27</code> 在执行阶段构建调度器，<code>packages/services/src/gen-ui/adapters/service.ts:34</code> 区分读取与准备验证。</p>
 <h3>Windows 正式包实际可发送时间复测</h3>
 <p>复用 <code>024e03da</code> 官方发行副本，新建两个独立用户目录。测量从新进程和新用户目录开始，沿用系统文件缓存。两轮均经真实输入框发送本地 SSE 对话，核对答复和唯一用户消息落盘。</p>
 <table>
