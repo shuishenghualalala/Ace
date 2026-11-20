@@ -697,3 +697,96 @@ async def test_mcp_status_tool_requires_management_context_and_lists_safe_status
     assert payload["servers"][0]["connected"] is True
     assert payload["servers"][0]["tools"] == ["echo"]
     assert "hidden" not in result.content
+
+
+async def test_mcp_remove_requires_one_time_approval_and_deletes_config():
+    from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
+    from crew.tools.mcp_management import register_mcp_tools
+
+    registry = Registry()
+    servers = {"echo": {"command": "echo-server"}}
+
+    class ConfigStub:
+        config_path = "config.yaml"
+        mcp_servers = servers
+
+        def delete_mcp_server(self, name):
+            self.mcp_servers.pop(name)
+
+    class ManagerStub:
+        def __init__(self):
+            self.removed = []
+
+        async def remove_server(self, name):
+            self.removed.append(name)
+
+    manager = ManagerStub()
+    app = SimpleNamespace(config=ConfigStub(), mcp_manager=manager, registry=registry)
+    register_mcp_tools(app)
+
+    authority = current_mcp_install_allowed.set(True)
+    call_id = current_tool_call_id.set("remove-call")
+    try:
+        tool = registry.get("mcp_remove")
+        decision = tool.permission_resolver({"name": "echo"})
+        assert decision.behavior == "ask"
+        assert decision.allow_always is False
+        assert decision.approval_token
+        assert tool.permission_approver(decision.approval_token, {"name": "echo"}) is True
+        result = await registry.execute(ToolCall("remove-1", "mcp_remove", {"name": "echo"}))
+        absent = await registry.execute(ToolCall("remove-2", "mcp_remove", {"name": "echo"}))
+    finally:
+        current_tool_call_id.reset(call_id)
+        current_mcp_install_allowed.reset(authority)
+
+    assert not result.is_error
+    payload = json.loads(result.content)
+    assert payload == {
+        "name": "echo",
+        "removed": True,
+        "already_absent": False,
+        "disconnected": True,
+    }
+    assert "echo" not in servers
+    assert manager.removed == ["echo"]
+    assert json.loads(absent.content)["already_absent"] is True
+
+
+async def test_mcp_remove_rejects_stale_approval_and_missing_management_context():
+    from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
+    from crew.tools.mcp_management import register_mcp_tools
+
+    registry = Registry()
+    servers = {"echo": {"command": "echo-server"}}
+
+    class ConfigStub:
+        config_path = "config.yaml"
+        mcp_servers = servers
+
+        def delete_mcp_server(self, name):
+            self.mcp_servers.pop(name)
+
+    app = SimpleNamespace(
+        config=ConfigStub(),
+        mcp_manager=SimpleNamespace(remove_server=lambda _name: asyncio.sleep(0)),
+        registry=registry,
+    )
+    register_mcp_tools(app)
+
+    denied = await registry.execute(ToolCall("remove-denied", "mcp_remove", {"name": "echo"}))
+    assert denied.is_error
+
+    authority = current_mcp_install_allowed.set(True)
+    call_id = current_tool_call_id.set("remove-stale")
+    try:
+        tool = registry.get("mcp_remove")
+        decision = tool.permission_resolver({"name": "echo"})
+        servers["echo"] = {"command": "different-server"}
+        assert tool.permission_approver(decision.approval_token, {"name": "echo"}) is False
+        stale = await registry.execute(ToolCall("remove-stale", "mcp_remove", {"name": "echo"}))
+    finally:
+        current_tool_call_id.reset(call_id)
+        current_mcp_install_allowed.reset(authority)
+    assert stale.is_error
+    assert "一次性批准" in stale.content
+    assert servers["echo"] == {"command": "different-server"}

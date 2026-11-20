@@ -29,6 +29,7 @@ from crew.tools.registry import tool_result
 log = get_logger("tools.mcp_management")
 MCP_INSTALL_TOOL = "mcp_install"
 MCP_STATUS_TOOL = "mcp_status"
+MCP_REMOVE_TOOL = "mcp_remove"
 SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _VALID_TRANSPORTS = {"stdio", "http", "sse"}
 _STATUS_MAX_TOOLS = 50
@@ -82,12 +83,13 @@ async def add_mcp_server(app: Any, name: str, config: dict[str, Any]) -> asyncio
 
 
 @dataclass(slots=True)
-class _ApprovedInstall:
+class _OneShotApproval:
     digest: str
     consumed: bool = False
 
 
-_approved_install: ContextVar[_ApprovedInstall | None] = ContextVar("approved_mcp_install", default=None)
+_approved_install: ContextVar[_OneShotApproval | None] = ContextVar("approved_mcp_install", default=None)
+_approved_remove: ContextVar[_OneShotApproval | None] = ContextVar("approved_mcp_remove", default=None)
 
 
 def _proposal(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -146,6 +148,24 @@ def _approval_digest(config_path: str, name: str, config: dict[str, Any]) -> str
     scope = (
         current_owner_account_id.get(), current_session_id.get(), current_request_id.get(),
         current_tool_call_id.get(), config_path, name, config,
+    )
+    encoded = json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _removal_name(args: dict[str, Any]) -> str:
+    if not current_mcp_install_allowed.get() or not current_tool_call_id.get():
+        raise StructuredToolError("请在有管理权限的前台对话中移除 MCP。", code="permission_denied")
+    name = str(args.get("name") or "").strip()
+    if not SERVER_NAME_RE.fullmatch(name):
+        raise StructuredToolError("MCP 名称只能使用字母、数字、下划线或连字符。", code="invalid_arguments")
+    return name
+
+
+def _removal_digest(config_path: str, name: str, config: dict[str, Any]) -> str:
+    scope = (
+        current_owner_account_id.get(), current_session_id.get(), current_request_id.get(),
+        current_tool_call_id.get(), config_path, "remove", name, config,
     )
     encoded = json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -259,7 +279,7 @@ def register_mcp_tools(app: Any) -> None:
             return False
         if digest != _approval_digest(app.config.config_path, name, config):
             return False
-        _approved_install.set(_ApprovedInstall(digest))
+        _approved_install.set(_OneShotApproval(digest))
         return True
 
     async def install(args: dict[str, Any]) -> str:
@@ -360,4 +380,96 @@ def register_mcp_tools(app: Any) -> None:
         handler=list_status,
         is_async=True,
         display_name="查看 MCP 状态",
+    )
+
+    def describe_remove_permission(args: dict[str, Any]) -> ToolPermissionDecision:
+        try:
+            name = _removal_name(args)
+        except StructuredToolError as exc:
+            return ToolPermissionDecision("deny", str(exc))
+        existing = app.config.mcp_servers.get(name)
+        if existing is None:
+            return ToolPermissionDecision("allow")
+        return ToolPermissionDecision(
+            "ask",
+            f"将从此 Ace 实例移除 MCP 服务 {name}，并断开它的连接。",
+            allow_always=False,
+            approval_token=_removal_digest(app.config.config_path, name, existing),
+        )
+
+    def confirm_remove_permission(digest: str, args: dict[str, Any]) -> bool:
+        try:
+            name = _removal_name(args)
+        except StructuredToolError:
+            return False
+        existing = app.config.mcp_servers.get(name)
+        if existing is None or digest != _removal_digest(app.config.config_path, name, existing):
+            return False
+        _approved_remove.set(_OneShotApproval(digest))
+        return True
+
+    async def remove(args: dict[str, Any]) -> str:
+        name = _removal_name(args)
+        existing = app.config.mcp_servers.get(name)
+        if existing is None:
+            return tool_result(name=name, removed=False, already_absent=True)
+        approved = _approved_remove.get()
+        if (
+            approved is None or approved.consumed
+            or approved.digest != _removal_digest(app.config.config_path, name, existing)
+        ):
+            raise StructuredToolError("此 MCP 移除缺少有效的一次性批准。", code="approval_required")
+        approved.consumed = True
+        try:
+            app.config.delete_mcp_server(name)
+        except KeyError:
+            return tool_result(name=name, removed=False, already_absent=True)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("MCP 配置删除失败 name=%s", name)
+            raise StructuredToolError("MCP 配置删除失败。", code="mcp_delete_failed") from exc
+
+        disconnected = True
+        warning = ""
+        manager = getattr(app, "mcp_manager", None)
+        if manager is not None:
+            try:
+                await manager.remove_server(name)
+            except Exception:  # noqa: BLE001
+                # Configuration is already gone; report the stale runtime honestly.
+                disconnected = False
+                warning = "配置已删除，但运行实例移除失败；重启后生效。"
+                log.exception("MCP 配置已删除，但运行实例移除失败 name=%s", name)
+        result: dict[str, Any] = {
+            "name": name,
+            "removed": True,
+            "already_absent": False,
+            "disconnected": disconnected,
+        }
+        if warning:
+            result["warning"] = warning
+        return tool_result(**result)
+
+    app.registry.register(
+        name=MCP_REMOVE_TOOL,
+        toolset="mcp_management",
+        schema={
+            "name": MCP_REMOVE_TOOL,
+            "description": (
+                "Remove an MCP server from this Ace instance after the user approves "
+                "the exact server. Deleting an already absent server is a no-op."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Exact server name to remove"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+        handler=remove,
+        is_async=True,
+        display_name="移除 MCP",
+        permission_resolver=describe_remove_permission,
+        permission_approver=confirm_remove_permission,
     )
