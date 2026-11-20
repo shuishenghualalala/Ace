@@ -436,7 +436,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
       </tbody>
     </table>
     <div class="callout warn"><strong>拒绝不是换工具的提示：</strong>结构化文件工具与 terminal 是两条都受安全服务控制的执行路径。前者由 Gateway 对单个动作实施路径策略，后者由 Native Runtime 对整个进程树实施操作系统隔离。用户明确拒绝任一安全审批后，当前 turn 建立统一拒绝栅栏并停止；后续 <code>glob</code>、<code>file_read</code>、Wiki、Skill、MCP 或 terminal 调用不会再执行。请求批准模式还会关闭工具预热与安全调用并发，防止另一个读取工具在审批结果到达前先完成。</div>
-    <p>批准后若 Native Runtime 返回 <code>runtime_crashed</code>、<code>runtime_protocol_mismatch</code> 或 <code>sandbox_unavailable</code>，这属于安全基础设施故障，不表示路径“在沙箱外”。终端把这些结果标记为真实工具错误并结束当前 turn，Agent 不得改用结构化文件工具掩盖故障。Desktop 的受管启动桥把宿主组装的工具链 <code>PATH</code> 从普通环境覆盖中分离：模型仍不能覆盖 PATH，但批准后的进程能够使用随包 Python/Node 与系统命令目录。</p>
+    <p>批准后若 Native Runtime 返回 <code>runtime_crashed</code>、<code>runtime_protocol_mismatch</code> 或 <code>sandbox_unavailable</code>，这属于安全基础设施故障，不表示路径“在沙箱外”。终端把这些结果标记为真实工具错误并结束当前 turn，Agent 不得改用结构化文件工具掩盖故障。客户端遇到当前协议未定义的原生错误码时，按 <code>runtime_protocol_mismatch</code> 处理并把原始码写入安全日志；不会降级为可重试的 <code>sandbox_denied</code>，以免把基础设施故障误报成权限拒绝。Desktop 的受管启动桥把宿主组装的工具链 <code>PATH</code> 从普通环境覆盖中分离：模型仍不能覆盖 PATH，但批准后的进程能够使用随包 Python/Node 与系统命令目录。</p>
 
     <h4>2.5.3 进程内 HTTP 支持上游代理级联</h4>
     <p><code>outbound.py</code> 的安全口径与 Native Runtime 受管代理一致。判断通过后，默认把流量级联到用户已有的上游代理，由代理负责到达目标；没有上游代理时才直连。代理解析优先级（高到低）：调用方显式传入 → 配置 <code>network.upstream_proxy</code>（<code>load_config</code> 加载后注入为进程级默认）→ 环境变量 <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>/<code>ALL_PROXY</code>（大小写都读）。支持 <code>http://</code>、<code>https://</code>、<code>socks5://</code>、<code>socks5h://</code>，纯标准库实现，三平台行为一致。</p>
@@ -718,6 +718,7 @@ helper 响应
       <tr><td>2026-11-18</td><td>安全审批支持丢回执和重启后的精确查询，持久规则与审批审计同事务提交。</td><td>安全服务、Gateway 和桌面审批面板</td></tr>
       <tr><td>2026-11-18</td><td>把模式对照、自动审批、授权执行链、三平台沙箱、控制面、审计和验证流程整合进模块文档。</td><td>桌面端、Gateway、内置工具、原生运行组件与外援</td></tr>
       <tr><td>2026-11-20</td><td>Windows 防护通用准备失败后暂缓重复自动提权，安全中心仍可显式重试。</td><td>桌面安全准备与 Windows 沙箱初始化</td></tr>
+      <tr><td>2026-11-20</td><td>未知原生错误码改按协议不匹配处理，保留原始码到安全日志，不再误标为可重试的沙箱拒绝。</td><td>Native Runtime 错误映射、终端工具结果与聊天终态</td></tr>
     </tbody>
   </table>
 

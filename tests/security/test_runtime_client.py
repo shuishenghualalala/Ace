@@ -161,6 +161,15 @@ elif mode == "error-before-start":
         "code": "sandbox_denied",
         "message": "sandbox denied execution",
     }]
+elif mode == "unknown-error-code":
+    frames = [{
+        "version": 3,
+        "nonce": nonce,
+        "seq": 0,
+        "type": "error",
+        "code": "future_runtime_fault",
+        "message": "future runtime failed before start",
+    }]
 elif mode == "repeated-output":
     frames.insert(2, {
         "version": 3,
@@ -448,6 +457,16 @@ async def test_error_is_valid_terminal_before_started(tmp_path):
             command=("ignored",), cwd=tmp_path, timeout=1
         )
     assert caught.value.code is RuntimeErrorCode.SANDBOX_DENIED
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_error_code_is_protocol_mismatch_not_denial(tmp_path):
+    with pytest.raises(NativeRuntimeError) as caught:
+        await _helper(tmp_path, "unknown-error-code").execute(
+            command=("ignored",), cwd=tmp_path, timeout=1
+        )
+    assert caught.value.code is RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH
+    assert "future runtime failed before start" in str(caught.value)
 
 
 @pytest.mark.asyncio

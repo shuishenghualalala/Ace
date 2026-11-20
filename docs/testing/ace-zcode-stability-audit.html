@@ -422,7 +422,9 @@
 <p>此前五种稳定错误共用一个终态提示。Ace 保留通用安全终态类别，并从已有工具错误取第一个触发终止的已知码。实时状态和持久历史共用该结构，桌面按中英文翻译表显示。旧记录和未知码沿用固定通用提示。ZCode 的权限执行流也通过结构化字段报告拒绝原因。</p>
 <p><strong>验收</strong> 隔离的 Windows 打包 Gateway 通过真实一次性审批接受合成请求，缺少 helper 时拒绝受管终端，目标标记未创建，回合没有继续。实时 WebSocket 与公开 HTTP 历史的终态均为 <code>failed / security_boundary_failed / sandbox_unavailable</code>。随后用真实 Electron 43.1 运行生产渲染组件，确认相同数据的中文、英文及旧终态回退分别显示一条说明。Gateway 正常退出并释放双端口。后端 146 项、桌面 158 项、TypeScript 与 Ruff 检查通过。浏览器闪烁的独立修复见 <a href="#browser-control-handoff">D7a</a>、<a href="#browser-inspector-refresh">D7b</a>、<a href="#renderer-heartbeat-probe">D7h</a>。</p>
 <p><strong>原截图溯源</strong> 在预览版 <code>5b647266</code> 本地安全审计、会话历史和浏览器追踪中核对了同一回合。11:51:01 文件写入成功，11:51:03 浏览器导航成功。11:51:15 用户批准后，权限规则允许受管终端启动。11:51:17.714，原生运行时返回退出码 125 和 <code>sandbox_unavailable</code>，旧客户端显示通用的 <code>security_boundary_failed</code>。11:57:40 重试时，终端再次返回相同稳定错误码。两次终端错误之前均有授权记录。11:51:56 的渲染器窗口重建发生在截图之后。原始记录位于当次预览的私有用户目录。</p>
-<p class="evidence">Ace <code>crew/agent/loop/tool_runner.py</code>、<code>crew/agent/executor/builtin.py</code>、<code>desktop/src/ui/chat-render.ts</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/permission-flow.ts</code>。</p>
+<p><strong>残留路径</strong> 原生运行时返回当前客户端未定义错误码时，客户端原先把未知值映射为 <code>sandbox_denied</code>。该码被视为可重试并提示申请更精确权限，实际含义却是客户端与原生运行时协议不一致。未知码现按 <code>runtime_protocol_mismatch</code> 失败关闭，原始码写入安全日志，工具结果保留原生错误正文；终态不再建议重试或扩大权限。</p>
+<p><strong>验收</strong> 原生协议模拟器在握手前返回 <code>future_runtime_fault</code>，客户端得到 <code>runtime_protocol_mismatch</code> 并保留原错误正文；已知 <code>sandbox_denied</code> 路径继续得到拒绝语义。Runtime Client 与 Gateway 安全接口 93 项通过、1 项跳过；安全套件 529 项通过、8 项跳过，另有 4 项既有环境失败：2 项缺少本机 Windows 预编译组件，2 项为 Apple Silicon 清单源码哈希。Ruff 通过。该路径未在真实 Windows 原生组件上制造未知码。</p>
+<p class="evidence">Ace <code>crew/security/runtime_client.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/agent/executor/builtin.py</code>、<code>desktop/src/ui/chat-render.ts</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/permission-flow.ts</code>。</p>
 </article>
 <article id="windows-sandbox-profile-ownership">
 <h3>D7j · 多份 Windows 配置共用机器级防火墙规则</h3>

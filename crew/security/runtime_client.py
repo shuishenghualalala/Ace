@@ -1037,7 +1037,16 @@ def _remaining(deadline: float | None) -> float | None:
 
 
 def _runtime_error_code(value: Any) -> RuntimeErrorCode:
+    """Map a native error code; an unrecognized value is a protocol mismatch.
+
+    ``sandbox_denied`` is retryable and invites a permission request.  An
+    unknown code instead means the client cannot interpret the native
+    runtime's answer, so mapping it to a denial would misreport an
+    infrastructure failure and could push callers to escalate.
+    """
+    raw = str(value)
     try:
-        return RuntimeErrorCode(str(value))
+        return RuntimeErrorCode(raw)
     except ValueError:
-        return RuntimeErrorCode.SANDBOX_DENIED
+        _LOGGER.warning("native runtime returned unrecognized error code %r", raw[:80])
+        return RuntimeErrorCode.RUNTIME_PROTOCOL_MISMATCH

@@ -66,7 +66,7 @@
 - **L7｜_ApprovalWaiter.register 与 decide 竞态**：service.py:298 vs 831——decide 先落地、register 后登记 → 等待方 300s 超时按拒绝（fail-closed 但 UX 损坏；窗口极小）。
 - **L8｜is_likely_sandbox_denied 关键词可被输出操纵**：runtime_client.py:70-94——命令输出含 “permission denied” 即被归类 sandbox_denied（仅影响元数据）。
 - **L9｜background_runner _write_result 的 result_path 无校验**：background_runner.py:84-93——payload 信任；当前仅宿主构造，未来若 payload 可注入即任意文件写。
-- **L10｜_runtime_error_code 未知名错误码默认映射 sandbox_denied**：runtime_client.py:1019-1023——错误诊断语义误导。
+- **L10｜_runtime_error_code 未知名错误码默认映射 sandbox_denied**：runtime_client.py:1019-1023——错误诊断语义误导。已修复：未知码按 `runtime_protocol_mismatch` 失败关闭，并记录原始码到安全日志。
 - **L11｜execute_captured_sync 在线程中 asyncio.run**：launch.py:295-318——contextvar 继承依赖线程上下文，线程未继承时 fail-closed（方向正确）。
 ### 1.4 与 Rust 运行时通信协议（总体评价 + 残余项）
 
