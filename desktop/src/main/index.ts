@@ -1529,6 +1529,11 @@ function packagedSecurityRuntimeEnv({ bundledOnly = false } = {}): Record<string
   const devStateDir = IS_DEV_LAUNCH && !app.isPackaged ? process.env['ACE_SECURITY_STATE_DIR']?.trim() : undefined;
   const stateDir = devStateDir && path.isAbsolute(devStateDir) ? devStateDir : path.join(app.getPath('userData'), 'security');
   const strictSecurity = isStrictSecurityEnabled() ? '1' : '0';
+  const baseEnv: Record<string, string> = {
+    ...(app.isPackaged ? { ACE_SECURITY_RUNTIME_BUNDLED_ONLY: '1' } : {}),
+    ACE_SECURITY_STATE_DIR: stateDir,
+    ACE_STRICT_SECURITY: strictSecurity,
+  };
   const configured = bundledOnly ? '' : String(process.env['ACE_SECURITY_RUNTIME'] ?? '').trim();
   const runtimeName = process.platform === 'win32'
     ? 'ace-security-runtime.exe'
@@ -1544,15 +1549,13 @@ function packagedSecurityRuntimeEnv({ bundledOnly = false } = {}): Record<string
           path.join(repoRoot(), 'security-runtime', 'bin', runtimeName),
         ];
   const runtime = runtimeCandidates.find((candidate) => path.isAbsolute(candidate) && fs.existsSync(candidate)) ?? '';
+  const bundled = bundledOnly || app.isPackaged;
   if (!runtime || !path.isAbsolute(runtime) || !fs.existsSync(runtime)) {
-    return {
-      ACE_SECURITY_STATE_DIR: stateDir,
-      ACE_STRICT_SECURITY: strictSecurity,
-    };
+    return baseEnv;
   }
   const manifestPath = path.join(path.dirname(runtime), 'runtime-manifest.json');
-  if (bundledOnly && !fs.existsSync(manifestPath)) {
-    return { ACE_SECURITY_STATE_DIR: stateDir, ACE_STRICT_SECURITY: strictSecurity };
+  if (bundled && !fs.existsSync(manifestPath)) {
+    return baseEnv;
   }
   if (fs.existsSync(manifestPath)) {
     try {
@@ -1565,45 +1568,35 @@ function packagedSecurityRuntimeEnv({ bundledOnly = false } = {}): Record<string
         arch?: string;
       };
       if (
-        bundledOnly && (
+        bundled && (
           manifest.schema !== 2 || !manifest.platform || !manifest.arch
           || (manifest.binary_name && manifest.binary_name !== runtimeName)
         )
       ) {
-        return { ACE_SECURITY_STATE_DIR: stateDir, ACE_STRICT_SECURITY: strictSecurity };
+        return baseEnv;
       }
       const declaresPlatform = Boolean(manifest.platform || manifest.arch);
       if (
         declaresPlatform
         && (!platformKey || securityRuntimePlatformKey(manifest.platform ?? '', manifest.arch ?? '') !== platformKey)
       ) {
-        return {
-          ACE_SECURITY_STATE_DIR: stateDir,
-          ACE_STRICT_SECURITY: strictSecurity,
-        };
+        return baseEnv;
       }
       const fileDigest = manifest.files?.find((item) => item.name === runtimeName)?.sha256;
-      const expected = bundledOnly
+      const expected = bundled
         ? manifest.binary_sha256?.trim() || fileDigest
         : fileDigest ?? (manifest.binary_name === runtimeName ? manifest.binary_sha256 : undefined);
       const actual = createHash('sha256').update(fs.readFileSync(runtime)).digest('hex');
       if (!expected || actual !== expected) {
-        return {
-          ACE_SECURITY_STATE_DIR: stateDir,
-          ACE_STRICT_SECURITY: strictSecurity,
-        };
+        return baseEnv;
       }
     } catch {
-      return {
-        ACE_SECURITY_STATE_DIR: stateDir,
-        ACE_STRICT_SECURITY: strictSecurity,
-      };
+      return baseEnv;
     }
   }
   const result: Record<string, string> = {
+    ...baseEnv,
     ACE_SECURITY_RUNTIME: runtime,
-    ACE_SECURITY_STATE_DIR: stateDir,
-    ACE_STRICT_SECURITY: strictSecurity,
   };
   if (fs.existsSync(manifestPath)) {
     try {

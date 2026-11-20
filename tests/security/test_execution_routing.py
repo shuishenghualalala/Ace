@@ -390,8 +390,7 @@ def test_packaged_runtime_honors_explicit_platform_artifact(monkeypatch, tmp_pat
     assert packaged_runtime_argv() == (str(runtime.resolve()),)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows packaged Gateway contract")
-def test_windows_bundle_requires_the_desktop_validated_helper(monkeypatch, tmp_path):
+def test_bundled_runtime_requires_the_desktop_validated_helper(monkeypatch, tmp_path):
     runtime = tmp_path / "ace-security-runtime.exe"
     runtime.write_bytes(b"runtime")
     monkeypatch.setenv("ACE_SECURITY_RUNTIME_BUNDLED_ONLY", "1")

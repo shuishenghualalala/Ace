@@ -688,8 +688,15 @@ def packaged_runtime_candidates(repo_root: Path, name: str) -> tuple[Path, ...]:
     return tuple(candidates)
 
 
-def _windows_runtime_bundle_required() -> bool:
-    return os.name == "nt" and os.environ.get("ACE_SECURITY_RUNTIME_BUNDLED_ONLY") == "1"
+def _bundled_runtime_required() -> bool:
+    """True when the desktop launched this Gateway with a verified bundled helper.
+
+    The desktop sets this marker for packaged builds on every platform, so a
+    missing or malformed manifest must fail closed instead of falling back to a
+    source-tree candidate.
+    """
+
+    return os.environ.get("ACE_SECURITY_RUNTIME_BUNDLED_ONLY") == "1"
 
 
 def packaged_runtime_argv() -> tuple[str, ...]:
@@ -697,12 +704,12 @@ def packaged_runtime_argv() -> tuple[str, ...]:
 
     Priority: ACE_SECURITY_RUNTIME env (absolute) → Desktop 本地 staging 目录 → 当前
     平台/架构的仓库预编译产物。所有候选都固定在
-    仓库根目录，不搜索任务 cwd。Windows 打包桌面只传递已校验的随包组件。
+    仓库根目录，不搜索任务 cwd。打包桌面只传递已校验的随包组件。
     """
     configured = os.environ.get("ACE_SECURITY_RUNTIME", "").strip()
     if configured:
         candidate = Path(configured).expanduser().resolve(strict=False)
-    elif _windows_runtime_bundle_required():
+    elif _bundled_runtime_required():
         return ()
     else:
         name = "ace-security-runtime.exe" if os.name == "nt" else "ace-security-runtime"
@@ -749,7 +756,7 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
     `ACE_SECURITY_RUNTIME` env path no longer bypasses integrity entirely.
     A missing binary is NOT raised here--the subsequent spawn's FileNotFoundError
     already maps to SANDBOX_UNAVAILABLE. A missing manifest is allowed for
-    development. The Windows Desktop bundle requires a readable manifest
+    development. The packaged Desktop bundle requires a readable manifest
     with an explicit platform and architecture. Manifest schema and digest
     must match the helper. A source
     tree may carry one entry per platform in the same manifest.
@@ -759,7 +766,7 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
         return
     manifest = _manifest_for(path)
     if manifest is None:
-        if _windows_runtime_bundle_required():
+        if _bundled_runtime_required():
             raise HelperIntegrityError("bundled security runtime manifest is unavailable")
         return
     if manifest.get("schema") != 2:
@@ -767,7 +774,7 @@ def verify_helper_integrity(helper_path: str | Path) -> None:
     declared_platform = str(manifest.get("platform", "")).strip()
     declared_arch = str(manifest.get("arch", "")).strip()
     if bool(declared_platform) != bool(declared_arch) or (
-        _windows_runtime_bundle_required() and not declared_platform
+        _bundled_runtime_required() and not declared_platform
     ):
         raise HelperIntegrityError("native security runtime manifest target is incomplete")
     if declared_platform and declared_arch:

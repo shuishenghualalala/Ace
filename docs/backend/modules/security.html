@@ -663,7 +663,7 @@ helper 响应
       <li><code>security-runtime/prebuilt/&lt;platform&gt;-&lt;arch&gt;</code> 的仓库预编译目录。</li>
     </ol>
 
-    <p>manifest 存在时必须匹配 schema、平台、架构、文件名和二进制 SHA-256。源码树中的预编译产物还记录 <code>source_hash</code>：Rust 源码、测试、Cargo.toml 或 Cargo.lock 变化但未重建时，安全中心报告 runtime stale，不把旧二进制声明为可用防护。</p>
+    <p>打包态必须使用 Desktop 校验通过的随包 helper，并携带可读的 manifest：schema、平台、架构、文件名和二进制 SHA-256 全部匹配后才把路径交给 Gateway。打包态缺少 manifest 时失败关闭，不退回源码树候选；开发态源码树允许缺失，但 manifest 存在时仍按同一规则校验。源码树中的预编译产物还记录 <code>source_hash</code>：Rust 源码、测试、Cargo.toml 或 Cargo.lock 变化但未重建时，安全中心报告 runtime stale，不把旧二进制声明为可用防护。</p>
   <h3 id="gateway-api">4.2 Desktop 安全 API</h3>
   <p>这些接口位于 <code>/api/security</code>。模式和审批写入从已认证上下文中校验 owner、工作区及会话。<a href="#control-plane">桌面端身份校验</a></p>
   <table>
@@ -719,6 +719,7 @@ helper 响应
       <tr><td>2026-11-18</td><td>把模式对照、自动审批、授权执行链、三平台沙箱、控制面、审计和验证流程整合进模块文档。</td><td>桌面端、Gateway、内置工具、原生运行组件与外援</td></tr>
       <tr><td>2026-11-20</td><td>Windows 防护通用准备失败后暂缓重复自动提权，安全中心仍可显式重试。</td><td>桌面安全准备与 Windows 沙箱初始化</td></tr>
       <tr><td>2026-11-20</td><td>未知原生错误码改按协议不匹配处理，保留原始码到安全日志，不再误标为可重试的沙箱拒绝。</td><td>Native Runtime 错误映射、终端工具结果与聊天终态</td></tr>
+      <tr><td>2026-11-20</td><td>打包态运行组件强制使用 Desktop 校验过的随包 helper 和 manifest；缺失时失败关闭，不再回退源码树候选。</td><td>Windows、macOS、Linux 打包 Gateway 与安全执行边界</td></tr>
     </tbody>
   </table>
 

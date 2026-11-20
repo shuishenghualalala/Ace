@@ -32,6 +32,7 @@
 
 **M1｜verify_helper_integrity：manifest 缺失/损坏即放行（fail-open），无签名** — crew/security/launch.py:634-698
 - manifest 不存在 → return None（643-644）；JSON 解析失败 → return None（646-648）；**只有 manifest 存在且 digest 不匹配才 fail-closed**。生产包若 manifest 被删或损坏，完整性门禁静默失效。
+- 已修复打包态：Desktop 对 Windows、macOS、Linux 的打包 Gateway 设置 `ACE_SECURITY_RUNTIME_BUNDLED_ONLY=1`，Python 强制要求经桌面校验的 helper 与 manifest，缺失时不再回退源码树候选。开发态源码树仍允许缺失。
 - ACE_SECURITY_RUNTIME 环境变量可指向任意绝对路径（616-627），配合自写 manifest 即可完全绕过（需本地写权限，但安装目录通常可写）。docstring 自认 “a signed package is the real fix”。
 - 建议：打包态强制 manifest（缺失即失败），仅未构建的 dev 树放宽；中期上代码签名。
 
