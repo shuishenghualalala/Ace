@@ -390,6 +390,8 @@ def register_mcp_tools(app: Any) -> None:
         existing = app.config.mcp_servers.get(name)
         if existing is None:
             return ToolPermissionDecision("allow")
+        if not app.config.config_path:
+            return ToolPermissionDecision("deny", "当前配置没有可写入的配置文件。")
         return ToolPermissionDecision(
             "ask",
             f"将从此 Ace 实例移除 MCP 服务 {name}，并断开它的连接。",

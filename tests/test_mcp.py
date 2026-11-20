@@ -790,3 +790,28 @@ async def test_mcp_remove_rejects_stale_approval_and_missing_management_context(
     assert stale.is_error
     assert "一次性批准" in stale.content
     assert servers["echo"] == {"command": "different-server"}
+
+
+def test_mcp_remove_denies_when_configuration_cannot_be_written():
+    from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
+    from crew.tools.mcp_management import register_mcp_tools
+
+    registry = Registry()
+    app = SimpleNamespace(
+        config=SimpleNamespace(
+            config_path="",
+            mcp_servers={"echo": {"command": "echo-server"}},
+        ),
+        mcp_manager=None,
+        registry=registry,
+    )
+    register_mcp_tools(app)
+    authority = current_mcp_install_allowed.set(True)
+    call_id = current_tool_call_id.set("remove-no-config")
+    try:
+        decision = registry.get("mcp_remove").permission_resolver({"name": "echo"})
+    finally:
+        current_tool_call_id.reset(call_id)
+        current_mcp_install_allowed.reset(authority)
+    assert decision.behavior == "deny"
+    assert "配置文件" in decision.reason
