@@ -628,6 +628,7 @@ def test_mcp_status_projection_redacts_configuration_secrets():
         "name": "remote-docs",
         "transport": "http",
         "connected": False,
+        "state": "failed",
         "error": (
             "failed https://user:pass@mcp.example.com/secret-path?token=abc "
             "with sk-live-123 and Bearer header-secret"
@@ -645,6 +646,7 @@ def test_mcp_status_projection_redacts_configuration_secrets():
     assert public["name"] == "remote-docs"
     assert public["target"] == "https://mcp.example.com"
     assert public["connected"] is False
+    assert public["state"] == "failed"
     assert public["enabled"] is True
     assert public["tool_count"] == 2
     assert public["tools"] == ["echo", "lookup"]
@@ -664,6 +666,7 @@ async def test_mcp_status_tool_requires_management_context_and_lists_safe_status
         "name": "remote-docs",
         "transport": "http",
         "connected": True,
+        "state": "connected",
         "error": "",
         "tools": ["echo"],
         "config": {
@@ -695,6 +698,7 @@ async def test_mcp_status_tool_requires_management_context_and_lists_safe_status
     assert payload["count"] == 1
     assert payload["servers"][0]["name"] == "remote-docs"
     assert payload["servers"][0]["connected"] is True
+    assert payload["servers"][0]["state"] == "connected"
     assert payload["servers"][0]["tools"] == ["echo"]
     assert "hidden" not in result.content
 

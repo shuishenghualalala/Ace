@@ -214,6 +214,10 @@ def _public_server_status(row: dict[str, Any]) -> dict[str, Any]:
         "transport": str(row.get("transport") or config.get("transport") or ""),
         "target": target,
         "connected": bool(row.get("connected")),
+        "state": str(
+            row.get("state")
+            or ("connected" if row.get("connected") else "not_started")
+        ),
         "tool_count": len(raw_tools) if isinstance(raw_tools, (list, tuple)) else 0,
         "tools": tools,
     }

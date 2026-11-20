@@ -936,6 +936,19 @@ class _ServerWorker:
         return str(self._error) if self._error is not None else ""
 
     @property
+    def state(self) -> str:
+        """Report whether the worker is connected, retrying, or abandoned."""
+        if self._connected:
+            return "connected"
+        if self._permanent_error is not None:
+            return "failed"
+        if self._task is not None and not self._task.done():
+            return "reconnecting"
+        if self._error is not None:
+            return "failed"
+        return "starting"
+
+    @property
     def tool_names(self) -> list[str]:
         return [getattr(t, "name", "") for t in self._tools]
 
@@ -1273,6 +1286,7 @@ class MCPClientManager:
                 "name": w.name,
                 "transport": self._transport_of(w.cfg),
                 "connected": w.is_connected,
+                "state": w.state,
                 "error": w.error,
                 "tools": list(w.tool_names),
                 "config": dict(w.cfg),
@@ -1285,6 +1299,7 @@ class MCPClientManager:
                 "name": name,
                 "transport": self._transport_of(cfg),
                 "connected": False,
+                "state": "not_started",
                 "error": "",
                 "tools": [],
                 "config": dict(cfg),
