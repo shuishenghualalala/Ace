@@ -194,6 +194,43 @@ def payload_for(gateway, call_id):
     return json.loads(matches[0].content)
 
 
+async def test_gateway_admin_removes_installed_server_after_one_approval(gateway):
+    session_id = "mcp-remove-fixture"
+    async with open_ws(gateway.app) as (send, receive):
+        await begin_install(gateway, send, "seed", session_id=session_id)
+        card, frames = await read_until(
+            receive, lambda row: is_permission_card(row) or row.get("is_final"),
+        )
+        assert is_permission_card(card), frames
+        await reply_permission(send, session_id, "seed", card)
+        final, frames = await read_until(receive, lambda row: row.get("is_final") is True)
+        assert final["kind"] == "final", frames
+        assert config_servers(gateway)[ARGS["name"]]["url"] == URL
+        assert f"{ARGS['name']}__echo" in gateway.crew.registry.names()
+
+        query = "fixture requests chat MCP remove"
+        gateway.provider.script[query] = ToolCall("remove-1", "mcp_remove", {"name": ARGS["name"]})
+        await send({
+            "session_id": session_id, "request_id": "remove", "query": query, "mode": "agent",
+            "workspace_id": "default", "plan_active": False,
+        })
+        card, frames = await read_until(
+            receive, lambda row: is_permission_card(row) or row.get("is_final"),
+        )
+        assert is_permission_card(card), frames
+        question = next(item for item in card["body"]["questions"] if item["id"] == "perm")
+        assert {item["value"] for item in question["options"]} == {"allow_once", "deny"}
+        assert ARGS["name"] in config_servers(gateway)
+        await reply_permission(send, session_id, "remove", card)
+        final, frames = await read_until(receive, lambda row: row.get("is_final") is True)
+        assert final["kind"] == "final", frames
+        removed = payload_for(gateway, "remove-1")
+        assert removed["removed"] is True
+        assert removed["disconnected"] is True
+        assert ARGS["name"] not in config_servers(gateway)
+        assert f"{ARGS['name']}__echo" not in gateway.crew.registry.names()
+
+
 async def test_gateway_admin_confirms_install_once_and_repeat_reuses_config(gateway):
     original = gateway.config_file.read_bytes()
     session_id = "mcp-install-fixture"
