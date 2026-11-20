@@ -1003,6 +1003,49 @@ async def test_mount_owner_reuses_prepared_rows_without_reading_each_job(tmp_pat
     await service.stop()
 
 
+async def test_async_write_cancellation_stops_retries_before_the_next_attempt(monkeypatch):
+    from crew.state.sqlite import SQLiteWriteCancelled, SQLiteWriteHelper
+
+    helper = SQLiteWriteHelper(sqlite3.connect(":memory:"), threading.Lock())
+    conn = helper._conn
+    attempts = 0
+
+    def locked(_fn):
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(helper, "_execute_once", locked)
+    try:
+        with pytest.raises(SQLiteWriteCancelled):
+            await helper.execute_async(lambda _conn: None, cancelled=lambda: attempts > 0)
+    finally:
+        conn.close()
+    assert attempts == 1
+
+
+async def test_async_write_retry_still_succeeds_without_cancellation(monkeypatch):
+    from crew.state.sqlite import SQLiteWriteHelper
+
+    helper = SQLiteWriteHelper(sqlite3.connect(":memory:"), threading.Lock())
+    conn = helper._conn
+    attempts = 0
+
+    def flaky(_fn):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return 7
+
+    monkeypatch.setattr(helper, "_execute_once", flaky)
+    try:
+        assert await helper.execute_async(lambda _conn: None) == 7
+    finally:
+        conn.close()
+    assert attempts == 2
+
+
 async def test_async_owner_mount_coalesces_and_reconciles_pending_job_changes(tmp_path, monkeypatch):
     store = CronJobStore(str(tmp_path / "cron.db"))
 

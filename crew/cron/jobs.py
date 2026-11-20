@@ -30,7 +30,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from crew.state._migration import CRON_DB_TABLES, backfill_empty_owner_rows
 from crew.state.logging import get_logger
 from crew.state.schema_version import copy_legacy_feature_rows, stamp_baseline
-from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
+from crew.state.sqlite import SQLiteWriteCancelled, SQLiteWriteHelper, connect_sqlite
 
 log = get_logger("cron")
 BJ_TZ = ZoneInfo("Asia/Shanghai")
@@ -773,8 +773,11 @@ class CronJobStore:
             if revoked is not None and revoked.is_set():
                 return []
             try:
-                return await self._writer.execute_async(prepare)
-            except _OwnerMountRevoked:
+                return await self._writer.execute_async(
+                    prepare,
+                    cancelled=None if revoked is None else revoked.is_set,
+                )
+            except (_OwnerMountRevoked, SQLiteWriteCancelled):
                 return []
 
     async def wait_for_preparation(self) -> None:

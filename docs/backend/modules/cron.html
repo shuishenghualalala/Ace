@@ -101,7 +101,7 @@ await app.update_managed_feature(next_bundle.definition)</code></pre>
   <ul class="todo">
     <li>HTTP Route 仍由 Gateway 内置路由表装配；下一步迁入 Cron Bundle 的 Route Contribution。</li>
     <li>持久 Store 当前作为停用后仍可访问的数据平面由 Host 关闭；后续引入稳定数据服务契约后再移除 <code>CrewApp.cron_store</code> 兼容字段。</li>
-    <li>挂载准备按 Store 串行；外部进程长期持有 <code>cron.db</code> 写锁时，Cron 读取、工具调用和 Gateway 关闭时的挂载收尾会等待 SQLite busy 重试上限。跨进程写锁的超时策略仍待评估。</li>
+    <li>挂载准备按 Store 串行；外部进程长期持有 <code>cron.db</code> 写锁时，Cron 读取和工具调用仍等待 SQLite busy 超时。注销会中止后续写重试，Gateway 关闭收尾最多等待当前一次 <code>BEGIN IMMEDIATE</code> 的 busy 超时，不再累计 15 次重试。跨进程写锁的超时策略仍待评估。</li>
   </ul>
 
   <h2>6. 扩展点</h2>

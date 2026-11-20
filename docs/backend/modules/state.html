@@ -131,7 +131,7 @@
   <h2>llm_trace 队列落盘与运行期超时配置（2026-09-17）</h2>
   <p>模型追踪与会话调试接口通过 <code>llm_trace_path</code> 解析同一文件。默认位置是当前 Crew Home 的 <code>logs/llm.jsonl</code>。显式配置 <code>runtime.log_file</code> 时使用该日志的同级目录。调试接口按当前 owner 和会话 ID 过滤记录。打包态使用内嵌 Gateway 时，启动工作目录可以是只读安装目录。</p>
   <p><code>llm_trace</code> 开启时热路径（每次工具 start/result）只做 <code>queue.put</code>：json 序列化与 .jsonl 文件写入都在 <code>QueueListener</code> 后台线程完成。队列为带排空等待的 <code>_TraceQueue</code>（put 计数 + task_done 条件通知），<code>flush</code> 可等全部已入队记录真正落盘；listener 随日志装配建立、atexit 收尾。工具媒体读盘、prompt 文件读取等其余热路径 I/O 治理见 agent 模块文档。</p>
-  <p>SQLite 同步写路径（BEGIN IMMEDIATE + busy 重试）的睡眠收进模块级 <code>_busy_retry_sleep</code>（可注入，测试替换为 no-op）：<strong>只允许在非事件循环线程执行</strong>——<code>execute()</code> 是同步 API，事件循环上的写必须走 <code>execute_async</code>（内部 asyncio.sleep + to_thread）；个别存量同步 store（如任务看板 TaskManager）的写方法会被事件循环直接调用，消除方式是把调用方挪到 <code>asyncio.to_thread</code>（后台子任务已治理，见 agent 模块）。</p>
+  <p>SQLite 同步写路径（BEGIN IMMEDIATE + busy 重试）的睡眠收进模块级 <code>_busy_retry_sleep</code>（可注入，测试替换为 no-op）：<strong>只允许在非事件循环线程执行</strong>——<code>execute()</code> 是同步 API，事件循环上的写必须走 <code>execute_async</code>（内部 asyncio.sleep + to_thread）；个别存量同步 store（如任务看板 TaskManager）的写方法会被事件循环直接调用，消除方式是把调用方挪到 <code>asyncio.to_thread</code>（后台子任务已治理，见 agent 模块）。<code>execute_async</code> 另接受 <code>cancelled</code> 回调，在每次重试开始前检查；注销或关闭时可中止排队写入，避免写锁持有者消失后继续累计重试。</p>
   <pre><code>runtime.tool_execution_timeout_seconds  # 单工具执行段看门狗，默认 600，0=关闭
 runtime.turn_deadline_seconds           # 整回合 deadline，默认 0=不限
 runtime.interaction_timeout_seconds     # 追问/权限默认等待上限，默认 3600，0=默认不限
@@ -146,6 +146,7 @@ runtime.health_port                     # 独立线程 health 服务端口，默
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-20</td><td>SQLite 异步写重试支持 <code>cancelled</code> 回调；Cron 注销/关闭在每次重试前中止排队写入，关闭收尾最多等待当前一次 busy 超时。</td><td><code>crew/state/sqlite.py</code>、<code>crew/cron/jobs.py</code> 与关闭路径。</td></tr>
       <tr><td>2026-11-18</td><td>10,000 个正常结束的工具会话中，5,000 个仅有引擎终态，其余 5,000 个另有 Gateway 终态。冷恢复扫描五次中位数从 1.160 秒降至 0.046 秒，已结束会话的正文读取数降至零。另加一个开放分叉启动 Gateway，仅解码并恢复该分叉，HTTP 历史保留其未确认状态与账号隔离。</td><td>工具检查点冷恢复、分叉和侧栏首屏等待。</td></tr>
       <tr><td>2026-11-18</td><td><code>tests/test_state_memory.py</code> 覆盖结构升级与正文回填各自在提交前、提交后进程退出，以及 <code>PRAGMA max_page_count</code> 触发 <code>SQLITE_FULL</code>。Windows 发布暂存目录的内嵌 Python 在带中文和重音字符的临时用户目录执行这五例。随后六次启动正式 Gateway，<code>GET /api/session/old/history</code> 均返回一条旧正文。重开后结构为 v3，账号为 <code>local</code>，事件仅一条。</td><td>三列旧会话库升级、重试与重启。</td></tr>
       <tr><td>2026-11-18</td><td>会话摘要增加稳定分页索引，收窄断点及配置批查范围。</td><td>账号、工作空间和旧会话目录。</td></tr>

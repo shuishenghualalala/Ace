@@ -103,6 +103,10 @@ def connect_sqlite(path: str | Path, *, wal_enabled: bool = True, row_factory: b
     return conn
 
 
+class SQLiteWriteCancelled(Exception):
+    """A caller revoked a queued write before its next retry started."""
+
+
 class SQLiteWriteHelper:
     """Crew BEGIN IMMEDIATE + jitter retry write wrapper."""
 
@@ -149,9 +153,16 @@ class SQLiteWriteHelper:
                 raise
         raise last_err or sqlite3.OperationalError("database is locked after max retries")
 
-    async def execute_async(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+    async def execute_async(
+        self,
+        fn: Callable[[sqlite3.Connection], T],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> T:
         last_err: Optional[Exception] = None
         for attempt in range(_WRITE_MAX_RETRIES):
+            if cancelled is not None and cancelled():
+                raise SQLiteWriteCancelled
             try:
                 return await asyncio.to_thread(self._execute_once, fn)
             except sqlite3.OperationalError as exc:
