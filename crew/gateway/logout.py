@@ -116,11 +116,15 @@ class LogoutCoordinator:
             return
         token = current_owner_account_id.set(owner)
         try:
-            cron_service = self._current_cron_service()
-            if cron_service is not None and cron_service.is_running:
-                cron_service.mount_owner(owner)
             self._dispatcher.activate_owner(owner)
             self._task_runtime.activate_owner(owner)
+            cron_service = self._current_cron_service()
+            if cron_service is not None and cron_service.is_running:
+                request_mount = getattr(cron_service, "request_owner_mount", None)
+                if callable(request_mount):
+                    request_mount(owner)
+                else:
+                    cron_service.mount_owner(owner)
             task = self._activation_tasks.get(owner)
             if owner in self._channel_owners or (task is not None and not task.done()):
                 return

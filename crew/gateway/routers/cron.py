@@ -143,10 +143,11 @@ def _workspace_for_session(crew, session_id: str, owner_account_id: str) -> str:
 def create_cron_router(crew) -> APIRouter:
     router = APIRouter()
 
-    def _store():
+    async def _store():
         store = getattr(crew, "cron_store", None)
         if store is None:
             raise RuntimeError("cron store 未初始化")
+        await store.wait_for_preparation()
         return store
 
     def _service():
@@ -180,7 +181,7 @@ def create_cron_router(crew) -> APIRouter:
     ) -> JSONResponse:
         """列出定时任务。可按 session / kind(interval|once) / enabled(1|0) 过滤。"""
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError:
             return JSONResponse({"ok": True, "jobs": [], "count": 0, "timezone": "Asia/Shanghai"})
         owner = _owner(request)
@@ -237,7 +238,7 @@ def create_cron_router(crew) -> APIRouter:
     async def cron_get_job(request: Request, job_id: str, limit: int = 20) -> JSONResponse:
         """查看单个定时任务详情及最近执行记录。"""
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
         job = store.get(job_id, owner_account_id=_owner(request))
@@ -257,7 +258,7 @@ def create_cron_router(crew) -> APIRouter:
     async def cron_stats(request: Request) -> JSONResponse:
         """KPI 数据源：前端用做首页 4 张 KPI 卡。"""
         try:
-            store = _store()
+            store = await _store()
             jobs = store.list(owner_account_id=_owner(request))
         except RuntimeError:
             return JSONResponse({
@@ -270,7 +271,7 @@ def create_cron_router(crew) -> APIRouter:
     @router.post("/api/cron/jobs")
     async def cron_create_job(request: Request, payload: dict) -> JSONResponse:
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
         name = str(payload.get("name") or "").strip()
@@ -320,7 +321,7 @@ def create_cron_router(crew) -> APIRouter:
     async def cron_pause_job(request: Request, job_id: str) -> JSONResponse:
         """暂停一个 cron 任务，并把对应 trigger 从 APScheduler 移除。"""
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
         owner = _owner(request)
@@ -336,7 +337,7 @@ def create_cron_router(crew) -> APIRouter:
     async def cron_resume_job(request: Request, job_id: str) -> JSONResponse:
         """恢复一个被暂停的 cron 任务，并重新挂到 APScheduler。"""
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
         owner = _owner(request)
@@ -351,7 +352,7 @@ def create_cron_router(crew) -> APIRouter:
     @router.delete("/api/cron/jobs/{job_id}")
     async def cron_delete_job(request: Request, job_id: str) -> JSONResponse:
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
         owner = _owner(request)
@@ -366,7 +367,7 @@ def create_cron_router(crew) -> APIRouter:
     async def cron_run_job(request: Request, job_id: str) -> JSONResponse:
         """Create one independent manual Fire and execute it in the background."""
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
         owner = _owner(request)
@@ -376,6 +377,11 @@ def create_cron_router(crew) -> APIRouter:
         cron_service = _service()
         if cron_service is None:
             return JSONResponse({"ok": False, "error": "CronService 未启用"}, status_code=503)
+        if owner not in cron_service.mounted_owners:
+            return JSONResponse(
+                {"ok": False, "error": "当前账号未挂载到 CronService"},
+                status_code=409,
+            )
 
         async def _kick() -> None:
             try:
@@ -393,7 +399,7 @@ def create_cron_router(crew) -> APIRouter:
         """Create a linked Fire; never mutate or replay the source Fire."""
 
         try:
-            store = _store()
+            store = await _store()
         except RuntimeError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
         owner = _owner(request)

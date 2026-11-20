@@ -404,6 +404,10 @@ def parse_schedule(schedule: str, *, now: datetime | None = None) -> dict[str, A
 # SQLite 任务存储
 # ---------------------------------------------------------------------------
 
+class _OwnerMountRevoked(Exception):
+    """Abort a stale preparation before committing its schedule changes."""
+
+
 class CronJobStore:
     """cron 任务的持久化存储。表：cron_jobs、cron_job_runs（独立库 crew_data/cron.db）。"""
 
@@ -420,6 +424,7 @@ class CronJobStore:
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled, row_factory=True)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._startup_recovery_lock = asyncio.Lock()
+        self._preparation_lock = asyncio.Lock()
         self._startup_recovery_complete = False
         self._writer.execute(self._init_schema)
         if legacy_db_path is not None:
@@ -733,61 +738,92 @@ class CronJobStore:
         self._writer.execute(_write)
 
     def prepare_owner_jobs_for_mount(
+        self, owner_account_id: str, *, now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Skip offline occurrences and return the Owner's mountable Jobs."""
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            return []
+        return self._writer.execute(lambda conn: self._prepare_owner_jobs(conn, owner, now))
+
+    async def prepare_owner_jobs_for_mount_async(
         self,
         owner_account_id: str,
         *,
         now: float | None = None,
+        revoked: threading.Event | None = None,
     ) -> list[dict[str, Any]]:
-        """Skip offline occurrences and return this Owner's mountable Jobs.
+        """Prepare an Owner on a worker without occupying the Gateway loop.
 
-        This operation never creates a Fire.  Recurring Jobs advance to the
-        first occurrence strictly after login; expired one-time Jobs are
-        disabled so APScheduler cannot treat them as catch-up work.
+        A revoked mount rolls its schedule changes back and returns no rows.
         """
-
         owner = str(owner_account_id or "").strip()
         if not owner:
             return []
-        now_dt = datetime.fromtimestamp(time.time() if now is None else float(now), tz=BJ_TZ)
 
-        def _prepare(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-            rows = conn.execute(
-                """
-                SELECT * FROM cron_jobs
-                WHERE owner_account_id = ? AND enabled = 1
-                ORDER BY created_at
-                """,
-                (owner,),
-            ).fetchall()
-            mountable: list[dict[str, Any]] = []
-            for row in rows:
-                trigger_type, payload = self._extract_trigger(row)
-                next_fire = get_first_future_fire_at(trigger_type, payload, now=now_dt)
-                if next_fire is None:
-                    conn.execute(
-                        """
-                        UPDATE cron_jobs
-                        SET enabled = 0, next_run_at = 0
-                        WHERE id = ? AND owner_account_id = ?
-                        """,
-                        (str(row["id"]), owner),
-                    )
-                    continue
-                next_run_at = next_fire.timestamp()
+        def prepare(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            if revoked is not None and revoked.is_set():
+                return []
+            rows = self._prepare_owner_jobs(conn, owner, now)
+            if revoked is not None and revoked.is_set():
+                raise _OwnerMountRevoked
+            return rows
+
+        async with self._preparation_lock:
+            if revoked is not None and revoked.is_set():
+                return []
+            try:
+                return await self._writer.execute_async(prepare)
+            except _OwnerMountRevoked:
+                return []
+
+    async def wait_for_preparation(self) -> None:
+        """Yield while startup recovery or Owner preparation owns the shared connection."""
+        if self._preparation_lock.locked():
+            async with self._preparation_lock:
+                pass
+
+    def _prepare_owner_jobs(
+        self, conn: sqlite3.Connection, owner: str, now: float | None,
+    ) -> list[dict[str, Any]]:
+        # A lock wait can span a scheduled time. Evaluate against the wall
+        # clock after BEGIN so those elapsed occurrences are not replayed.
+        now_dt = datetime.fromtimestamp(time.time() if now is None else float(now), tz=BJ_TZ)
+        rows = conn.execute(
+            """
+            SELECT * FROM cron_jobs
+            WHERE owner_account_id = ? AND enabled = 1
+            ORDER BY created_at
+            """,
+            (owner,),
+        ).fetchall()
+        mountable: list[dict[str, Any]] = []
+        for row in rows:
+            trigger_type, payload = self._extract_trigger(row)
+            next_fire = get_first_future_fire_at(trigger_type, payload, now=now_dt)
+            if next_fire is None:
                 conn.execute(
                     """
                     UPDATE cron_jobs
-                    SET next_run_at = ?
+                    SET enabled = 0, next_run_at = 0
                     WHERE id = ? AND owner_account_id = ?
                     """,
-                    (next_run_at, str(row["id"]), owner),
+                    (str(row["id"]), owner),
                 )
-                data = self._row_to_dict(row)
-                data["next_run_at"] = next_run_at
-                mountable.append(data)
-            return mountable
-
-        return self._writer.execute(_prepare)
+                continue
+            next_run_at = next_fire.timestamp()
+            conn.execute(
+                """
+                UPDATE cron_jobs
+                SET next_run_at = ?
+                WHERE id = ? AND owner_account_id = ?
+                """,
+                (next_run_at, str(row["id"]), owner),
+            )
+            data = self._row_to_dict(row)
+            data["next_run_at"] = next_run_at
+            mountable.append(data)
+        return mountable
 
     # ---- Fire / 执行记录 ----
     @staticmethod
@@ -1031,7 +1067,8 @@ class CronJobStore:
         async with self._startup_recovery_lock:
             if self._startup_recovery_complete:
                 return
-            await self._writer.execute_async(self._recover_running_fires)
+            async with self._preparation_lock:
+                await self._writer.execute_async(self._recover_running_fires)
             self._startup_recovery_complete = True
 
     @staticmethod

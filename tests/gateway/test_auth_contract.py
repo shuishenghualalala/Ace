@@ -368,7 +368,7 @@ def test_cron_recovery_wait_does_not_block_local_admission(api, monkeypatch):
     mounted = threading.Event()
     mounts = []
     execute_once = store._writer._execute_once
-    prepare_owner = store.prepare_owner_jobs_for_mount
+    prepare_owner = store.prepare_owner_jobs_for_mount_async
 
     def observe_first_write(operation):
         if not about_to_write.is_set():
@@ -376,14 +376,14 @@ def test_cron_recovery_wait_does_not_block_local_admission(api, monkeypatch):
             assert allow_recovery.wait(timeout=5)
         return execute_once(operation)
 
-    def observe_mount(owner):
-        jobs = prepare_owner(owner)
+    async def observe_mount(owner, **kwargs):
+        jobs = await prepare_owner(owner, **kwargs)
         mounts.append(owner)
         mounted.set()
         return jobs
 
     monkeypatch.setattr(store._writer, "_execute_once", observe_first_write)
-    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount", observe_mount)
+    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount_async", observe_mount)
 
     def open_core_chat(client):
         assert client.get("/api/health").json()["readiness"]["status"] == "ready"
@@ -408,6 +408,53 @@ def test_cron_recovery_wait_does_not_block_local_admission(api, monkeypatch):
             assert mounts == ["local"]
         assert store.get_job_runs(job["id"])[0]["status"] == "abandoned"
         assert store.get_due(owner_account_id="local") == []
+
+
+def test_cron_owner_mount_wait_does_not_block_local_admission(api, monkeypatch):
+    from crew.state import recovery
+
+    monkeypatch.setattr(recovery, "_entries", [])
+    crew = api.state.crew
+    store = crew.cron_store
+    job = store.create(
+        name="future",
+        schedule="every 1h",
+        query="later",
+        session_id="future-session",
+        owner_account_id="local",
+    )
+    mount_waiting = threading.Event()
+    release_mount = threading.Event()
+    prepare = store.prepare_owner_jobs_for_mount_async
+
+    async def hold_mount(owner, **kwargs):
+        mount_waiting.set()
+        assert await asyncio.to_thread(release_mount.wait, 5)
+        return await prepare(owner, **kwargs)
+
+    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount_async", hold_mount)
+
+    with TestClient(api) as client, closing(sqlite3.connect(store._path)) as blocker:
+        assert _wait_readiness(client, "ready")["status"] == "ready"
+        try:
+            with client.websocket_connect("/ws"):
+                assert mount_waiting.wait(timeout=5)
+                blocker.execute("BEGIN IMMEDIATE")
+                release_mount.set()
+                # Preparation is now waiting for the write lock.  Core admission
+                # must still accept a signed request and a second WebSocket.
+                assert client.get("/api/health").status_code == 200
+                with client.websocket_connect("/ws"):
+                    assert "local" not in crew.cron_service.mounted_owners
+        finally:
+            blocker.rollback()
+            release_mount.set()
+
+        end = time.monotonic() + 5
+        while time.monotonic() < end and "local" not in crew.cron_service.mounted_owners:
+            time.sleep(0.02)
+        assert "local" in crew.cron_service.mounted_owners
+        assert crew.cron_service.scheduler.get_job(job["id"]) is not None
 
 
 def test_process_recovery_and_checkpoint_precede_ready_even_with_optional_services_blocked(api, monkeypatch):

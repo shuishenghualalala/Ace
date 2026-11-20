@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -309,8 +310,17 @@ def build_cron_feature(
         except Exception:
             start_failed = True
             raise
-        for owner_lease in host.active_owner.list():
-            active_service.mount_owner(owner_lease.owner_account_id)
+        # Register every snapshot before yielding so logout can invalidate all
+        # tickets.  One Owner's locked store must not fail the shared Feature;
+        # its task is retried when that Owner next activates.
+        mounts = [
+            active_service.request_owner_mount(lease.owner_account_id)
+            for lease in host.active_owner.list()
+        ]
+        await asyncio.gather(
+            *(asyncio.shield(task) for task in mounts if task is not None),
+            return_exceptions=True,
+        )
 
     definition = FeatureDefinition(
         CRON_FEATURE_ID,

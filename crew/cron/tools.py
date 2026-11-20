@@ -228,6 +228,7 @@ def build_cron_tools(
             # 让模型读到真实投递目标，避免向用户误承诺「投递到当前会话」。
             deliver = "new_session"
             deliver_note = "来源是本地会话，origin 不可用，投递目标已改为 new_session（任务专属会话）。"
+        await store.wait_for_preparation()
         try:
             job = store.create(
                 name=name,
@@ -263,6 +264,7 @@ def build_cron_tools(
 
     async def handle_list(args: dict[str, Any]) -> str:
         owner = current_owner_account_id.get()
+        await store.wait_for_preparation()
         if args.get("all"):
             jobs = store.list(owner_account_id=owner)
         elif "session_id" in args:
@@ -294,6 +296,7 @@ def build_cron_tools(
         if not job_id:
             return tool_error("id 不能为空")
         owner = current_owner_account_id.get()
+        await store.wait_for_preparation()
         job = store.get(job_id, owner_account_id=owner)
         if job is None:
             return tool_error(f"任务不存在: {job_id}")
@@ -312,6 +315,7 @@ def build_cron_tools(
     async def handle_delete(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
         owner = current_owner_account_id.get()
+        await store.wait_for_preparation()
         ok = store.delete(job_id, owner_account_id=owner)
         if ok and service is not None:
             service.sync_job(job_id, owner_account_id=owner)
@@ -319,6 +323,7 @@ def build_cron_tools(
 
     async def handle_pause(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
+        await store.wait_for_preparation()
         ok = store.set_enabled(job_id, False, owner_account_id=current_owner_account_id.get())
         if ok and service is not None:
             service.sync_job(job_id, owner_account_id=current_owner_account_id.get())
@@ -327,6 +332,7 @@ def build_cron_tools(
     async def handle_resume(args: dict[str, Any]) -> str:
         job_id = str(args.get("id", "")).strip()
         owner = current_owner_account_id.get()
+        await store.wait_for_preparation()
         ok = store.set_enabled(job_id, True, owner_account_id=owner)
         if ok and service is not None:
             service.sync_job(job_id, owner_account_id=current_owner_account_id.get())

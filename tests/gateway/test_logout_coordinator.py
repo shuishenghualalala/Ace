@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
 
 from crew.core.runctx import LOCAL_OWNER_ACCOUNT_ID, current_owner_account_id
+from crew.cron.jobs import CronJobStore
+from crew.cron.scheduler import CronService
 from crew.gateway.logout import LogoutCleanupError, LogoutCoordinator
 
 
@@ -91,7 +97,7 @@ class _Channels:
         self.failed = failed
         self.channels: dict[str, object] = {"feishu": object()} if requires_restart else {}
 
-    async def start_all(self, handler) -> None:
+    async def start_all(self, handler, *, owner_account_id: str) -> None:
         self.events.append("start-channels")
 
     async def stop_all(self, *, reason: str = "disconnected") -> list[str]:
@@ -122,6 +128,7 @@ def _coordinator(
     *,
     channel_failure: bool = False,
     requires_restart: bool = False,
+    cron_service: CronService | None = None,
 ):
     lease = _Lease(events)
     coordinator = LogoutCoordinator(
@@ -135,7 +142,7 @@ def _coordinator(
         ),
         connections=_Connections(events),
         channel_handler=object(),
-        cron_service=_Cron(events),
+        cron_service=cron_service if cron_service is not None else _Cron(events),
         team_manager=_Team(events),
         interaction_bridge=_InteractionBridge(events),
     )
@@ -248,13 +255,93 @@ async def test_owner_activation_is_nonblocking_and_reopens_local_admission():
     await asyncio.sleep(0)
 
     assert events[:3] == [
-        "mount-cron:A:uid-a",
         "activate-dispatcher:A:uid-a",
         "activate-tasks:A:uid-a",
+        "mount-cron:A:uid-a",
     ]
     assert seen == ["A:uid-a"]
     assert current_owner_account_id.get() == LOCAL_OWNER_ACCOUNT_ID
     await coordinator.shutdown()
+
+
+def test_cron_mount_write_wait_does_not_delay_admission_or_survive_logout(tmp_path, monkeypatch):
+    owner = "A:uid-a"
+    events: list[str] = []
+    db = tmp_path / "cron.db"
+    started = threading.Event()
+    writer_locked = threading.Event()
+    preparation_started = threading.Event()
+    preparation_finished = threading.Event()
+    logout_finished = threading.Event()
+
+    async def run_job(_envelope):
+        pytest.fail("a future job ran unexpectedly")
+
+    with closing(CronJobStore(db)) as store, closing(sqlite3.connect(db)) as writer:
+        job = store.create(
+            name="future job",
+            schedule="every 1h",
+            query="kept across logout",
+            session_id="remaining-session",
+            owner_account_id=owner,
+        )
+        cron = CronService(store, run_job)
+        coordinator, lease = _coordinator(events, cron_service=cron)
+        execute_once = store._writer._execute_once
+
+        def observe_mount_write(operation):
+            if not writer_locked.is_set():
+                return execute_once(operation)
+            preparation_started.set()
+            try:
+                return execute_once(operation)
+            finally:
+                preparation_finished.set()
+
+        monkeypatch.setattr(store._writer, "_execute_once", observe_mount_write)
+
+        async def admit_and_logout():
+            await cron.start()
+            try:
+                started.set()
+                assert await asyncio.to_thread(writer_locked.wait, 5)
+                coordinator.activate_owner(owner)
+                assert await asyncio.to_thread(preparation_started.wait, 5)
+                assert f"activate-dispatcher:{owner}" in events
+                assert f"activate-tasks:{owner}" in events
+                assert coordinator.allows_work(owner)
+                assert owner not in cron.mounted_owners
+                assert not preparation_finished.is_set()
+                pending_mount = cron.request_owner_mount(owner)
+                assert pending_mount is not None
+
+                result = await coordinator.logout(owner)
+                assert result.released
+                assert lease.current() is None
+                assert events[-1] == "release"
+                assert not preparation_finished.is_set()
+                logout_finished.set()
+
+                assert await asyncio.to_thread(preparation_finished.wait, 5)
+                assert await asyncio.wait_for(pending_mount, timeout=5) == 0
+                assert owner not in cron.mounted_owners
+                assert not coordinator.allows_work(owner)
+                assert store.get(job["id"], owner_account_id=owner) == job
+            finally:
+                await coordinator.shutdown()
+                await cron.stop()
+
+        with ThreadPoolExecutor(max_workers=1) as gateway:
+            scenario = gateway.submit(asyncio.run, admit_and_logout())
+            try:
+                assert started.wait(timeout=5)
+                writer.execute("BEGIN IMMEDIATE")
+                writer_locked.set()
+                assert logout_finished.wait(timeout=3), "Cron writer blocked owner admission or logout"
+            finally:
+                writer.rollback()
+                writer_locked.set()
+            scenario.result(timeout=5)
 
 
 @pytest.mark.asyncio

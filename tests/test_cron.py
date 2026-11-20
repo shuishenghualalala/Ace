@@ -188,6 +188,50 @@ async def test_cron_feature_start_failure_rolls_back_all_contributions(
         await app.shutdown()
 
 
+async def test_cron_feature_keeps_running_when_one_owner_mount_fails(tmp_path, monkeypatch):
+    from crew.app import build_app
+    from crew.state.config import Config
+
+    monkeypatch.setenv("CREW_HOME", str(tmp_path / ".crew"))
+    app = build_app(
+        Config(
+            db_path=str(tmp_path / "crew.db"),
+            memory_db_path=str(tmp_path / "memory.db"),
+            cron_db_path=str(tmp_path / "cron.db"),
+            cron_enabled=True,
+            api_key="",
+        ),
+        enable_team=False,
+    )
+    app.active_owner.claim(OWNER)
+    runtime = app.plugins.feature_runtime
+    prepare = CronJobStore.prepare_owner_jobs_for_mount_async
+    attempts = 0
+
+    async def fail_once(self, owner, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return await prepare(self, owner, **kwargs)
+
+    monkeypatch.setattr(CronJobStore, "prepare_owner_jobs_for_mount_async", fail_once)
+
+    try:
+        activated = await runtime.activate(runtime.get(CRON_FEATURE_ID).definition)
+        assert activated.state is FeatureState.ACTIVE
+        service = app.cron_service
+        assert service is not None and service.is_running
+        assert service.mounted_owners == frozenset()
+
+        await service.mount_owner_async(OWNER)
+
+        assert service.mounted_owners == {OWNER}
+        assert attempts == 2
+    finally:
+        await app.shutdown()
+
+
 async def test_scheduler_fires_job():
     hits = []
 
@@ -957,6 +1001,140 @@ async def test_mount_owner_reuses_prepared_rows_without_reading_each_job(tmp_pat
     assert reads == []
     assert len(service.scheduler.get_jobs()) == 3
     await service.stop()
+
+
+async def test_async_owner_mount_coalesces_and_reconciles_pending_job_changes(tmp_path, monkeypatch):
+    store = CronJobStore(str(tmp_path / "cron.db"))
+
+    def create(name):
+        return store.create(
+            name=name,
+            schedule="every 1h",
+            query="go",
+            session_id="s1",
+            owner_account_id=OWNER,
+        )["id"]
+
+    kept = create("keep")
+    resumed = create("resume")
+    paused = create("pause")
+    deleted = create("delete")
+    assert store.set_enabled(resumed, False, owner_account_id=OWNER)
+    prepared = asyncio.Event()
+    release = asyncio.Event()
+    snapshots = []
+    prepare = store.prepare_owner_jobs_for_mount_async
+
+    async def hold_after_prepare(owner, **kwargs):
+        rows = await prepare(owner, **kwargs)
+        snapshots.append({row["id"] for row in rows})
+        prepared.set()
+        await release.wait()
+        return rows
+
+    async def runner(_envelope):
+        pass
+
+    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount_async", hold_after_prepare)
+    service = CronService(store, runner)
+    waiters = []
+    try:
+        await service.start()
+        service.request_owner_mount(OWNER)
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        assert snapshots == [{kept, paused, deleted}]
+        assert OWNER not in service.mounted_owners
+
+        service.request_owner_mount(OWNER)
+        waiters = [asyncio.create_task(service.mount_owner_async(OWNER)) for _ in range(2)]
+        await asyncio.sleep(0)
+        created = create("create during mount")
+        service.sync_job(created, owner_account_id=OWNER)
+        assert store.set_enabled(resumed, True, owner_account_id=OWNER)
+        service.sync_job(resumed, owner_account_id=OWNER)
+        assert store.set_enabled(paused, False, owner_account_id=OWNER)
+        service.sync_job(paused, owner_account_id=OWNER)
+        assert store.delete(deleted, owner_account_id=OWNER)
+        service.sync_job(deleted, owner_account_id=OWNER)
+
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*waiters), timeout=5)
+        assert snapshots == [{kept, paused, deleted}]
+        assert service.mounted_owners == {OWNER}
+        jobs = {job.id: job for job in service.scheduler.get_jobs()}
+        assert jobs.keys() == {kept, created, resumed}
+        for job_id, job in jobs.items():
+            stored = store.get(job_id, owner_account_id=OWNER)
+            assert job.next_run_time.timestamp() == pytest.approx(stored["next_run_at"], abs=0.001)
+    finally:
+        release.set()
+        await asyncio.gather(*waiters, return_exceptions=True)
+        await service.stop()
+        store.close()
+
+
+async def test_unmount_discards_async_owner_mount_snapshot_and_allows_remount(tmp_path, monkeypatch):
+    store = CronJobStore(str(tmp_path / "cron.db"))
+    job = store.create(
+        name="future job",
+        schedule="every 1h",
+        query="go",
+        session_id="s1",
+        owner_account_id=OWNER,
+    )
+    prepared = asyncio.Event()
+    release = asyncio.Event()
+    prepare = store.prepare_owner_jobs_for_mount_async
+
+    async def hold_first_snapshot(owner, **kwargs):
+        rows = await prepare(owner, **kwargs)
+        if not prepared.is_set():
+            prepared.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+        return rows
+
+    async def runner(_envelope):
+        pass
+
+    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount_async", hold_first_snapshot)
+    service = CronService(store, runner)
+    first_mount = None
+    try:
+        await service.start()
+        scheduler = service.scheduler
+        add_job = scheduler.add_job
+        scheduled_ids = []
+
+        def record_add(*args, **kwargs):
+            scheduled_ids.append(kwargs["id"])
+            return add_job(*args, **kwargs)
+
+        monkeypatch.setattr(scheduler, "add_job", record_add)
+        first_mount = asyncio.create_task(service.mount_owner_async(OWNER))
+        await asyncio.wait_for(prepared.wait(), timeout=5)
+        logout = asyncio.create_task(service.unmount_owner(OWNER))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(logout, timeout=5)
+        await asyncio.wait_for(asyncio.gather(first_mount, return_exceptions=True), timeout=5)
+
+        assert OWNER not in service.mounted_owners
+        assert scheduled_ids == []
+        assert scheduler.get_jobs() == []
+        assert store.get_job_runs(job["id"]) == []
+
+        await service.mount_owner_async(OWNER)
+        assert service.scheduler is scheduler
+        assert service.mounted_owners == {OWNER}
+        assert scheduled_ids == [job["id"]]
+        assert [scheduled.id for scheduled in scheduler.get_jobs()] == [job["id"]]
+    finally:
+        release.set()
+        if first_mount is not None:
+            await asyncio.gather(first_mount, return_exceptions=True)
+        await service.stop()
+        store.close()
 
 
 async def test_unmount_owner_cancels_running_scheduled_fire(tmp_path):

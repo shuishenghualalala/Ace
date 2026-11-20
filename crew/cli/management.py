@@ -921,7 +921,7 @@ async def _cron_run(args: Any, ctx: CliContext) -> CliResult:
         service = getattr(app, "cron_service", None)
         if service is None or not service.is_running:
             raise CliError("CronService 未启用")
-        _mount_cron_owner(service, ctx.owner)
+        await _mount_cron_owner(service, ctx.owner)
         result = await service.run_now(args.job_id, owner_account_id=ctx.owner)
         return CliResult(data={"ok": True, "job": _cron_job_view(job), "result": result})
 
@@ -937,16 +937,16 @@ async def _cron_retry(args: Any, ctx: CliContext) -> CliResult:
         service = getattr(app, "cron_service", None)
         if service is None or not service.is_running:
             raise CliError("CronService 未启用")
-        _mount_cron_owner(service, ctx.owner)
+        await _mount_cron_owner(service, ctx.owner)
         await service.retry_fire(args.fire_id, owner_account_id=ctx.owner)
         return CliResult(data={"ok": True, "source_fire_id": args.fire_id})
 
 
-def _mount_cron_owner(service: Any, owner: str) -> None:
+async def _mount_cron_owner(service: Any, owner: str) -> None:
     if owner in service.mounted_owners:
         return
     try:
-        service.mount_owner(owner)
+        await service.mount_owner_async(owner)
     except RuntimeError as exc:
         raise CliError(str(exc)) from exc
 

@@ -62,6 +62,7 @@
       <tr><td>自然语言计划</td><td>解析 interval、once 等用户输入并构造 trigger。</td><td>已落地</td></tr>
       <tr><td>Trigger Context</td><td><code>cron.trigger.reminder</code> 为触发轮贡献瞬时 prompt fragment。</td><td>已落地</td></tr>
       <tr><td>Cron Runtime Feature</td><td><code>product.cron</code> 统一拥有 Scheduler、Tools、Context、Host Binding、Owner mount 与 restart 更新。</td><td>已落地</td></tr>
+      <tr><td>Owner 异步挂载</td><td>登录只登记挂载票据；准备在 SQLite 写线程完成，注销可回滚未提交的 schedule 变化。</td><td>已落地</td></tr>
       <tr><td>Cron 数据平面</td><td>持久任务数据独立于运行代；停用撤销运行能力但不删除任务记录。</td><td>已落地</td></tr>
       <tr><td>Route Contribution</td><td>HTTP 路由进入 Cron Bundle 与 Route Registry。</td><td>待迁移</td></tr>
     </tbody>
@@ -93,12 +94,14 @@ bundle = build_cron_feature(host, registry, store, enabled=True, max_parallel_jo
 app.declare_managed_feature(bundle.definition)
 await app.update_managed_feature(next_bundle.definition)</code></pre>
   <p>启动时，Cron 先通过 SQLite 异步写入收口进程退出前遗留的 <code>running</code> Fire，统一标记为 <code>abandoned</code>。数据库等待由写入线程承担，Gateway 事件循环仍可接收本地会话。从恢复完成到调度器启动，当前 Feature 按顺序执行，随后重新读取 Active Owner 并挂载待执行任务。恢复期间已登录或已连接的 Owner 一并挂载。同一宿主复用持久 Store 的在线重启沿用首次恢复结果，避免把后续正在执行的 Fire 当成遗留记录。恢复失败时调度器尚未启动，由 FeatureRuntime 公布启动失败并回收本代资源。</p>
+  <p>Owner 挂载与登录准入解耦。WebSocket 或本地登录只调用 <code>request_owner_mount</code> 登记票据，准备事务在 SQLite 写线程推进；主端口签名请求、聊天准入和注销都不等待 <code>cron.db</code> 写锁。同一 Owner 的重复请求复用同一个挂载任务。准备期间发生的创建、暂停、恢复和删除记入票据，安装前重读这些 Job 后一次合并，避免装入准备开始前的旧快照。注销立即让票据失效；尚未提交的准备事务回滚，已经准备好的快照不再安装。单个 Owner 挂载失败只记录日志，<code>product.cron</code> 保持运行，该 Owner 下次激活时重试。工具、HTTP 路由、会话删除和 Fire 收尾在访问共享 Store 前等待同一准备屏障，避免读到挂载事务提交前的任务集合。</p>
   <p>只有 <code>channel=cron</code> 的 Envelope 产生 fragment；任务名来自 <code>cron_job_name</code>。<code>product.cron</code> 在宿主事件循环中激活，六个工具和每次 Fire 都持有本 Generation Lease。更新采用 <code>restart</code>：先取消并清理旧代，再启动新 Scheduler，最后重新挂载当前 Active Owner；失败由 FeatureRuntime 恢复旧定义。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
   <ul class="todo">
     <li>HTTP Route 仍由 Gateway 内置路由表装配；下一步迁入 Cron Bundle 的 Route Contribution。</li>
     <li>持久 Store 当前作为停用后仍可访问的数据平面由 Host 关闭；后续引入稳定数据服务契约后再移除 <code>CrewApp.cron_store</code> 兼容字段。</li>
+    <li>挂载准备按 Store 串行；外部进程长期持有 <code>cron.db</code> 写锁时，Cron 读取、工具调用和 Gateway 关闭时的挂载收尾会等待 SQLite busy 重试上限。跨进程写锁的超时策略仍待评估。</li>
   </ul>
 
   <h2>6. 扩展点</h2>
@@ -114,6 +117,7 @@ await app.update_managed_feature(next_bundle.definition)</code></pre>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-09-03</td><td>定时任务触发文案迁入 Prompt Context Contributor，并绑定 Cron 开关与 FeatureScope。</td><td>Agent Runtime、Cron 启停边界和请求上下文。</td></tr>
       <tr><td>2026-09-04</td><td>完成 <code>product.cron</code> Runtime Feature：Scheduler、Tools、Context、Owner mount 和 Host Binding 统一归属 Generation，支持 restart 更新与失败回滚。</td><td>Cron 生命周期、CrewApp 启停清单、Gateway Logout 动态服务解析。</td></tr>
+      <tr><td>2026-11-20</td><td>Owner 挂载改为异步票据：登录准入不等待 <code>cron.db</code> 写锁，准备中的 Job 变更差量合并，注销回滚未安装快照；单 Owner 挂载失败不再使 Feature 失败。</td><td>Cron 调度、Gateway 登录与注销、会话删除、CLI 手动执行。</td></tr>
     </tbody>
   </table>
 

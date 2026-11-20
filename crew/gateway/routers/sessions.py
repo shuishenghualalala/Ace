@@ -343,17 +343,25 @@ async def _teardown_session_resources(
     delete_jobs = getattr(store, "delete_jobs_for_session", None) if store is not None else None
     if callable(delete_jobs):
         try:
+            await _wait_for_cron_preparation(store)
             delete_jobs(session_id, owner_account_id=owner)
         except Exception as exc:  # noqa: BLE001
             log.warning("删除会话 %s 时清理 cron 元数据失败: %s", session_id, exc)
 
 
-def _session_has_blocking_cron(crew, session_id: str, owner: str) -> str | None:
+async def _wait_for_cron_preparation(store) -> None:
+    wait = getattr(store, "wait_for_preparation", None)
+    if callable(wait):
+        await wait()
+
+
+async def _session_has_blocking_cron(crew, session_id: str, owner: str) -> str | None:
     """若该会话仍有未停止的定时任务，返回给用户的提示文案；否则 None。"""
     store = getattr(crew, "cron_store", None)
     if store is None:
         return None
     try:
+        await _wait_for_cron_preparation(store)
         jobs = store.list(session_id=session_id, owner_account_id=owner)
     except Exception as exc:  # noqa: BLE001
         log.warning("检查会话 %s 定时任务失败: %s", session_id, exc)
@@ -592,7 +600,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
             preview = []
         session_ids = [str(row.get("session_id") or "") for row in preview if row.get("session_id")]
         for sid in session_ids:
-            block = _session_has_blocking_cron(crew, sid, owner)
+            block = await _session_has_blocking_cron(crew, sid, owner)
             if block:
                 return JSONResponse(
                     {"ok": False, "error": block, "code": "cron_active", "session_id": sid},
@@ -1681,7 +1689,7 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         owner = _owner(request)
         if not _session_owned(session_id, owner):
             return _not_found(session_id)
-        block = _session_has_blocking_cron(crew, session_id, owner)
+        block = await _session_has_blocking_cron(crew, session_id, owner)
         if block:
             return JSONResponse(
                 {"ok": False, "error": block, "code": "cron_active"},

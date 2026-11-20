@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Awaitable, Callable
 
@@ -75,6 +76,13 @@ class IntervalScheduler(Scheduler):
 JobRunner = Callable[[Envelope], Awaitable[None]]
 
 
+@dataclass
+class _OwnerMount:
+    scheduler: AsyncIOScheduler
+    revoked: threading.Event = field(default_factory=threading.Event)
+    changed_jobs: set[str] = field(default_factory=set)
+
+
 class CronService:
     """定时任务引擎：把持久化任务注册给 APScheduler 并执行。"""
 
@@ -93,6 +101,8 @@ class CronService:
         self._start_error = ""
         self._lifecycle_lock = asyncio.Lock()
         self._mounted_owners: set[str] = set()
+        self._pending_mounts: dict[str, tuple[_OwnerMount, asyncio.Task[int]]] = {}
+        self._mount_tasks: set[asyncio.Task[int]] = set()
         self._mounted_job_ids: set[str] = set()
         self._mounted_job_ids_by_owner: dict[str, set[str]] = {}
         self._owner_tasks: dict[str, set[asyncio.Task]] = {}
@@ -157,6 +167,10 @@ class CronService:
         if not owner:
             row = self._store.get(job_id)
             owner = str((row or {}).get("owner_account_id") or "").strip()
+        pending = self._pending_mounts.get(owner)
+        if pending is not None:
+            pending[0].changed_jobs.add(job_id)
+            return
         if not owner or owner not in self._mounted_owners:
             return
         row = self._store.get(job_id, owner_account_id=owner)
@@ -219,6 +233,7 @@ class CronService:
     async def _execute_job(self, job_id: str, owner_account_id: str) -> bool:
         task = self._track_current_task(owner_account_id)
         try:
+            await self._store.wait_for_preparation()
             if owner_account_id not in self._mounted_owners:
                 return False
             claim = self._store.claim_scheduled_fire(
@@ -238,6 +253,7 @@ class CronService:
         owner = str(owner_account_id or "").strip()
         task = self._track_current_task(owner)
         try:
+            await self._store.wait_for_preparation()
             if not owner or owner not in self._mounted_owners:
                 return None
             claim = self._store.claim_manual_fire(
@@ -262,6 +278,7 @@ class CronService:
         owner = str(owner_account_id or "").strip()
         task = self._track_current_task(owner)
         try:
+            await self._store.wait_for_preparation()
             if not owner or owner not in self._mounted_owners:
                 return None
             claim = self._store.claim_retry_fire(
@@ -328,13 +345,18 @@ class CronService:
                 error_message = str(exc)
                 log.exception("定时任务 %s 执行失败", job_id)
             finally:
-                if self._store.finish_job_run(
-                    run_id,
-                    status,
-                    error_message=error_message,
-                ):
-                    self._store.mark_fire_finished(job_id, run_id, status)
-                self._emit_run_finished(row, status, error_message)
+                finalization = asyncio.create_task(self._finish_fire(row, run_id, status, error_message))
+                try:
+                    await asyncio.shield(finalization)
+                except asyncio.CancelledError:
+                    await finalization
+                    raise
+
+    async def _finish_fire(self, row: dict, run_id: int, status: str, error_message: str) -> None:
+        await self._store.wait_for_preparation()
+        if self._store.finish_job_run(run_id, status, error_message=error_message):
+            self._store.mark_fire_finished(str(row["id"]), run_id, status)
+        self._emit_run_finished(row, status, error_message)
 
     def _emit_run_finished(self, row: dict, status: str, error_message: str) -> None:
         """向装配层回调 Fire 终态。任何回调异常只记日志，不影响 cron 引擎本身。"""
@@ -375,6 +397,7 @@ class CronService:
     async def tick(self, owner_account_id: str | None = None) -> int:
         """Test/compatibility hook that runs due Jobs for mounted Owners."""
 
+        await self._store.wait_for_preparation()
         requested_owner = str(owner_account_id or "").strip()
         owners = (
             [requested_owner]
@@ -434,7 +457,65 @@ class CronService:
         if owner in self._mounted_owners:
             return len(self._mounted_job_ids_by_owner.get(owner, set()))
 
+        if owner in self._pending_mounts:
+            raise RuntimeError("CronService 正在异步挂载该 Owner")
         jobs = self._store.prepare_owner_jobs_for_mount(owner)
+        return self._install_owner_jobs(owner, jobs)
+
+    def request_owner_mount(self, owner_account_id: str) -> asyncio.Task[int] | None:
+        """Schedule optional activation without delaying ordinary Owner admission."""
+        owner = str(owner_account_id or "").strip()
+        if not owner:
+            raise ValueError("owner_account_id 必填")
+        if not self._running or self._scheduler is None:
+            raise RuntimeError("CronService 尚未启动")
+        if owner in self._mounted_owners:
+            return None
+        pending = self._pending_mounts.get(owner)
+        if pending is not None:
+            return pending[1]
+
+        mount = _OwnerMount(self._scheduler)
+        task = asyncio.create_task(self._complete_owner_mount(owner, mount), name=f"cron-mount:{owner}")
+        self._pending_mounts[owner] = (mount, task)
+        self._mount_tasks.add(task)
+        task.add_done_callback(self._owner_mount_finished)
+        return task
+
+    def _owner_mount_finished(self, task: asyncio.Task[int]) -> None:
+        self._mount_tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            log.error("CronService Owner 挂载失败", exc_info=error)
+
+    async def mount_owner_async(self, owner_account_id: str) -> int:
+        """Await the same mount as Gateway admission, even if this waiter is cancelled."""
+        owner = str(owner_account_id or "").strip()
+        task = self.request_owner_mount(owner)
+        if task is None:
+            return len(self._mounted_job_ids_by_owner.get(owner, set()))
+        return await asyncio.shield(task)
+
+    async def _complete_owner_mount(self, owner: str, mount: _OwnerMount) -> int:
+        try:
+            jobs = await self._store.prepare_owner_jobs_for_mount_async(owner, revoked=mount.revoked)
+            # Other Owners may have started preparation on the shared connection.
+            if mount.changed_jobs:
+                await self._store.wait_for_preparation()
+            if mount.revoked.is_set() or not self._running or self._scheduler is not mount.scheduler:
+                return 0
+            if mount.changed_jobs:
+                jobs = [row for row in jobs if row["id"] not in mount.changed_jobs]
+                for job_id in sorted(mount.changed_jobs):
+                    current = self._store.get(job_id, owner_account_id=owner)
+                    if current is not None and current["enabled"]:
+                        jobs.append(current)
+            return self._install_owner_jobs(owner, jobs)
+        finally:
+            pending = self._pending_mounts.get(owner)
+            if pending is not None and pending[0] is mount:
+                del self._pending_mounts[owner]
+
+    def _install_owner_jobs(self, owner: str, jobs: list[dict]) -> int:
         self._mounted_owners.add(owner)
         self._mounted_job_ids_by_owner.setdefault(owner, set())
         try:
@@ -461,6 +542,9 @@ class CronService:
         owner = str(owner_account_id or "").strip()
         if terminal_status not in {"cancelled_by_logout", "abandoned"}:
             raise ValueError(f"非法 Cron 取消终态: {terminal_status}")
+        pending = self._pending_mounts.pop(owner, None)
+        if pending is not None:
+            pending[0].revoked.set()
         if not owner or owner not in self._mounted_owners:
             return 0
         self._mounted_owners.discard(owner)
@@ -487,9 +571,11 @@ class CronService:
 
     async def stop(self) -> None:
         async with self._lifecycle_lock:
-            for owner in list(self._mounted_owners):
-                await self.unmount_owner(owner, terminal_status="abandoned")
             self._running = False
+            for owner in set(self._mounted_owners).union(self._pending_mounts):
+                await self.unmount_owner(owner, terminal_status="abandoned")
+            if self._mount_tasks:
+                await asyncio.gather(*(asyncio.shield(task) for task in self._mount_tasks), return_exceptions=True)
             if self._scheduler is not None:
                 self._scheduler.shutdown(wait=False)
                 self._scheduler = None
