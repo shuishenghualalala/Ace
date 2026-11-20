@@ -355,6 +355,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-20</td><td>新增只读 <code>mcp_status</code>：管理员前台可列出服务连接状态、脱敏目标和工具数，用于对话内 MCP 诊断；不返回配置凭据，子 Agent、Plan 和普通账号不可见。</td><td><code>crew/tools/mcp_management.py</code>、工具注册表可见性、MCP 管理测试。</td></tr>
       <tr><td>2026-09-01</td><td>文档初始建立</td><td>—</td></tr>
       <tr><td>2026-09-01</td><td>统一整读上限 <code>MAX_READ_FILE_BYTES=512 MiB</code>；<code>file_read</code> / <code>patch</code> / <code>file_write</code> / <code>grep</code> 读前拒绝超大文件；<code>patch</code> 的读 / 写改 <code>asyncio.to_thread</code></td><td><code>crew/tools/file_utils.py</code>、<code>builtin.py</code>、<code>file_tools.py</code></td></tr>
       <tr><td>2026-09-01</td><td>附件读取 <code>_read_attachment</code> / <code>_read_image_as_data_url</code> 异步化 + 读前上限，路径 resolve 后读取</td><td><code>crew/agent/runtime.py</code></td></tr>
@@ -380,6 +381,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <p>配置工具 <code>mcp_install</code> 接收服务名和结构化传输配置。Gateway 从已认证的管理员连接授予前台回合资格。CLI 交互会话使用原有权限确认。线程级任务、子 Agent、Plan 和普通账号的前台请求继续按原工具边界运行。</p>
   <p>工具在执行前通过既有会话权限卡确认一次。确认绑定账号、会话、请求、调用、配置文件和内容摘要。保存复用 <code>Config.add_mcp_server</code>，完成后仅连接新增服务。响应给出保存、连接与工具数，同名同配置复用，同名冲突保留已存在配置。工具卡和工具历史隐藏 <code>env</code> 与 <code>headers</code> 的值。</p>
   <p>默认可使用 HTTP 或 SSE。stdio 仍要求宿主启动已被显式启用，且会话使用允许宿主进程的既有模式。注册表更新后，下轮重新计算当前会话的工具范围。连接到远程 MCP 后，首次调用仍走原有联网权限；审批归属于公开的真实请求会话和宿主任务。</p>
+  <p>只读工具 <code>mcp_status</code> 列出当前已配置服务的名称、传输、脱敏目标、连接状态、工具数与有限错误正文，用于对话内诊断。它不返回 <code>env</code>、<code>headers</code> 或完整 URL；仅在管理员前台上下文中可见，子 Agent、Plan 和普通账号的前台请求继续隐藏。</p>
   <h2 id="mcp-structured-result">MCP 工具结果</h2>
   <p>Worker 从 MCP SDK 中读取文本、图片和结构化字段。非空结构进入模型的工具正文，标记为 <code>Structured content</code>。当原文本已包含同一 JSON 对象时保留原文。结构字段保持文本载荷，图片仍由协议图片块提供。MCP <code>isError</code> 响应继续结算为工具失败，正文同时保留可用的结构化错误详情。</p>
   <p>混合结果先为完整图片保留外层 JSON 的预算，再按转义后的字符数截取文字的首尾。图片组本身放不进预算时，正文显示原因且省略该图片组。Worker 诊断采集将结构字段传为映射，复用既有敏感键脱敏。模型、历史和回执仍通过原工具结果的权限及持久化链路。</p>

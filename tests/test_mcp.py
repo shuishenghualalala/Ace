@@ -619,3 +619,81 @@ async def test_interaction_team_routes_use_control_session_id():
     assert seen["mention"][0] == "web_s1::turn::req_1"
     assert seen["mention"][1]["member_id"] == "leader"
     assert seen["mention"][1]["task_payload_meta"]["active_skills"][0]["skill_id"] == "directory-search"
+
+
+def test_mcp_status_projection_redacts_configuration_secrets():
+    from crew.tools.mcp_management import _public_server_status
+
+    public = _public_server_status({
+        "name": "remote-docs",
+        "transport": "http",
+        "connected": False,
+        "error": (
+            "failed https://user:pass@mcp.example.com/secret-path?token=abc "
+            "with sk-live-123 and Bearer header-secret"
+        ),
+        "tools": ["echo", "lookup"],
+        "config": {
+            "url": "https://user:pass@mcp.example.com/secret-path?token=abc",
+            "transport": "http",
+            "enabled": True,
+            "env": {"API_KEY": "sk-live-123"},
+            "headers": {"Authorization": "Bearer header-secret"},
+        },
+    })
+    blob = json.dumps(public)
+    assert public["name"] == "remote-docs"
+    assert public["target"] == "https://mcp.example.com"
+    assert public["connected"] is False
+    assert public["enabled"] is True
+    assert public["tool_count"] == 2
+    assert public["tools"] == ["echo", "lookup"]
+    assert "sk-live-123" not in blob
+    assert "header-secret" not in blob
+    assert "pass@" not in blob
+    assert "secret-path" not in blob
+    assert "token=abc" not in blob
+
+
+async def test_mcp_status_tool_requires_management_context_and_lists_safe_status():
+    from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
+    from crew.tools.mcp_management import register_mcp_tools
+
+    registry = Registry()
+    rows = [{
+        "name": "remote-docs",
+        "transport": "http",
+        "connected": True,
+        "error": "",
+        "tools": ["echo"],
+        "config": {
+            "url": "https://mcp.example.com/v1",
+            "transport": "http",
+            "headers": {"Authorization": "Bearer hidden"},
+        },
+    }]
+    app = SimpleNamespace(
+        mcp_manager=SimpleNamespace(status=lambda: rows),
+        config=SimpleNamespace(mcp_servers={}),
+        registry=registry,
+    )
+    register_mcp_tools(app)
+
+    denied = await registry.execute(ToolCall("status-1", "mcp_status", {}))
+    assert denied.is_error
+    assert "管理权限" in denied.content
+
+    authority = current_mcp_install_allowed.set(True)
+    call_id = current_tool_call_id.set("status-call")
+    try:
+        result = await registry.execute(ToolCall("status-2", "mcp_status", {"name": "remote-docs"}))
+    finally:
+        current_tool_call_id.reset(call_id)
+        current_mcp_install_allowed.reset(authority)
+    assert not result.is_error
+    payload = json.loads(result.content)
+    assert payload["count"] == 1
+    assert payload["servers"][0]["name"] == "remote-docs"
+    assert payload["servers"][0]["connected"] is True
+    assert payload["servers"][0]["tools"] == ["echo"]
+    assert "hidden" not in result.content

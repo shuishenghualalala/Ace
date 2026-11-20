@@ -4449,10 +4449,10 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
 
     # MCP Client：连接外部 MCP server（在 startup 时实际连接）
     from crew.tools.mcp_client import MCPClientManager
-    from crew.tools.mcp_management import register_mcp_install
+    from crew.tools.mcp_management import register_mcp_tools
 
     app.mcp_manager = MCPClientManager(cfg.mcp_servers)
-    register_mcp_install(app)
+    register_mcp_tools(app)
 
     from crew.dynamickanban.feature import build_dynamic_kanban_feature
 

@@ -8,6 +8,7 @@ import json
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -22,12 +23,16 @@ from crew.core.runctx import (
 from crew.core.types import ToolPermissionDecision
 from crew.state.logging import get_logger
 from crew.tools.mcp_client import host_stdio_block_reason
+from crew.tools.redact import redact_secret_values, redact_sensitive_text
 from crew.tools.registry import tool_result
 
 log = get_logger("tools.mcp_management")
 MCP_INSTALL_TOOL = "mcp_install"
+MCP_STATUS_TOOL = "mcp_status"
 SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _VALID_TRANSPORTS = {"stdio", "http", "sse"}
+_STATUS_MAX_TOOLS = 50
+_STATUS_MAX_ERROR_CHARS = 500
 
 
 def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -161,8 +166,68 @@ def _install_status(app: Any, name: str, config: dict[str, Any], *, already: boo
     )
 
 
-def register_mcp_install(app: Any) -> None:
-    """Add an interactive, one-use first-party MCP tool to the regular registry."""
+def _public_server_status(row: dict[str, Any]) -> dict[str, Any]:
+    """Project one manager status row without configuration secrets."""
+    config = row.get("config") if isinstance(row.get("config"), dict) else {}
+    secret_values: list[str] = []
+    for field in ("env", "headers"):
+        values = config.get(field)
+        if isinstance(values, dict):
+            secret_values.extend(str(value) for value in values.values() if str(value))
+    command = str(config.get("command") or "").strip()
+    url = str(config.get("url") or "").strip()
+    target = Path(command).name if command else _public_url_origin(url)
+    error = str(row.get("error") or "").strip()
+    if error:
+        if url and target and url in error:
+            error = error.replace(url, target)
+        error = redact_secret_values(error, secret_values) or error
+        error = redact_sensitive_text(error, force=True)[:_STATUS_MAX_ERROR_CHARS]
+    raw_tools = row.get("tools")
+    tools = (
+        [str(name)[:120] for name in raw_tools[:_STATUS_MAX_TOOLS]]
+        if isinstance(raw_tools, (list, tuple))
+        else []
+    )
+    result: dict[str, Any] = {
+        "name": str(row.get("name") or ""),
+        "transport": str(row.get("transport") or config.get("transport") or ""),
+        "target": target,
+        "connected": bool(row.get("connected")),
+        "tool_count": len(raw_tools) if isinstance(raw_tools, (list, tuple)) else 0,
+        "tools": tools,
+    }
+    if isinstance(config.get("enabled"), bool):
+        result["enabled"] = bool(config["enabled"])
+    if error:
+        result["error"] = error
+    return result
+
+
+def _public_url_origin(url: str) -> str:
+    """Keep only scheme, host and port; paths and query tokens stay private."""
+    if not url:
+        return ""
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or ""
+    except ValueError:
+        return ""
+    if not host or not parsed.scheme:
+        return ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return f"{parsed.scheme}://{host}{port}"
+
+
+def _require_management_context() -> None:
+    if not current_mcp_install_allowed.get() or not current_tool_call_id.get():
+        raise StructuredToolError("请在有管理权限的前台对话中查看 MCP 状态。", code="permission_denied")
+
+
+def register_mcp_tools(app: Any) -> None:
+    """Add the interactive MCP install and read-only status tools."""
 
     def describe_permission(args: dict[str, Any]) -> ToolPermissionDecision:
         try:
@@ -258,4 +323,41 @@ def register_mcp_install(app: Any) -> None:
         display_name="安装 MCP",
         permission_resolver=describe_permission,
         permission_approver=confirm_permission,
+    )
+
+    async def list_status(args: dict[str, Any]) -> str:
+        _require_management_context()
+        manager = getattr(app, "mcp_manager", None)
+        rows = manager.status() if manager is not None else []
+        wanted = str(args.get("name") or "").strip()
+        if wanted:
+            rows = [row for row in rows if str(row.get("name") or "") == wanted]
+        servers = [_public_server_status(row) for row in rows]
+        return tool_result(count=len(servers), servers=servers)
+
+    app.registry.register(
+        name=MCP_STATUS_TOOL,
+        toolset="mcp_management",
+        schema={
+            "name": MCP_STATUS_TOOL,
+            "description": (
+                "List configured MCP servers and their actual connection state. "
+                "Use this to diagnose why a server or its tools are unavailable. "
+                "Read-only: it never changes configuration. Configuration values and "
+                "credentials are not returned."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Optional exact server name to inspect",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        handler=list_status,
+        is_async=True,
+        display_name="查看 MCP 状态",
     )

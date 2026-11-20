@@ -634,7 +634,10 @@ class SingleAgent(Agent):
         names = [] if readonly else self._effective_tool_filter(session_id, owner_account_id)
         if self.lightweight or not current_mcp_install_allowed.get():
             if names is not None:
-                names = [name for name in names if name != "mcp_install"]
+                names = [
+                    name for name in names
+                    if name not in {"mcp_install", "mcp_status"}
+                ]
         return self.registry.list_schemas(names), names, plan_active
 
     def _resolve_agent_workdir(self, envelope: Envelope, *, task_session_id: str = "") -> str:
