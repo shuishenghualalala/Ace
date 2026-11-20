@@ -462,6 +462,7 @@
 <p><code>ACE_SECURITY_RUNTIME_BUNDLED_ONLY</code> 原先只在 Windows 生效。macOS/Linux 打包 Gateway 收到 Desktop 传入的运行时路径后，若清单被删除或损坏，Python 仍允许缺失清单并继续使用该 helper；打包布局里若残留源码树候选，还可能绕过 Desktop 的校验结果。</p>
 <p><strong>修复</strong> Desktop 对 Windows、macOS、Linux 的打包 Gateway 都设置随包标记，并只在清单 schema、平台、架构和摘要全部匹配时传入 <code>ACE_SECURITY_RUNTIME</code>。Python 在标记存在时要求清单在场且目标完整，缺失时失败关闭并拒绝回退源码树候选。开发态源码树仍允许清单缺失。</p>
 <p><strong>验证</strong> Python 安全路由与 Runtime Client 104 项通过、1 项跳过；原先仅 Windows 执行的随包清单用例改为三平台同一契约。桌面安全设置 20 项通过，完整 TypeScript 检查通过。Ruff 与差异检查通过。macOS/Linux 打包产物上的缺失清单场景未在本轮执行，留待各平台发布验收。</p>
+<p><strong>真实模型回归</strong> 使用 <code>D:\Codes\env</code> 的 <code>deepseek-flash</code>，经真实 Gateway 和 WebSocket 完成一次 <code>file_read</code>：模型收到工作区随机标记并原样回复，公开历史包含同一标记，未产生额外错误帧。凭据和接口未写入记录。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts</code>、<code>crew/security/launch.py</code>、<code>tests/security/test_execution_routing.py</code>。ZCode 与 Codex 的安装布局解析和清单校验见 D7m。</p>
 </article>
 <article id="windows-sandbox-generic-failure-retry">
