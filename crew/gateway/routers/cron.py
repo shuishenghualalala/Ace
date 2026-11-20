@@ -168,6 +168,25 @@ def create_cron_router(crew) -> APIRouter:
     def _owner(request: Request) -> str:
         return account_from_request(request).owner_account_id
 
+    def _owner_not_mounted(cron_service, owner: str) -> JSONResponse:
+        if owner in cron_service.pending_mount_owners:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "定时任务正在为当前账号准备，请稍后重试",
+                    "code": "cron_owner_mount_pending",
+                },
+                status_code=409,
+            )
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "当前账号尚未激活定时任务，请重新连接会话后重试",
+                "code": "cron_owner_not_mounted",
+            },
+            status_code=409,
+        )
+
     def _session_owned(session_id: str, owner: str) -> bool:
         belongs = getattr(crew.session_store, "session_belongs_to", None)
         return bool(callable(belongs) and belongs(session_id, owner))
@@ -378,10 +397,7 @@ def create_cron_router(crew) -> APIRouter:
         if cron_service is None:
             return JSONResponse({"ok": False, "error": "CronService 未启用"}, status_code=503)
         if owner not in cron_service.mounted_owners:
-            return JSONResponse(
-                {"ok": False, "error": "当前账号未挂载到 CronService"},
-                status_code=409,
-            )
+            return _owner_not_mounted(cron_service, owner)
 
         async def _kick() -> None:
             try:
@@ -422,10 +438,7 @@ def create_cron_router(crew) -> APIRouter:
         if cron_service is None:
             return JSONResponse({"ok": False, "error": "CronService 未启用"}, status_code=503)
         if owner not in cron_service.mounted_owners:
-            return JSONResponse(
-                {"ok": False, "error": "当前账号未挂载到 CronService"},
-                status_code=409,
-            )
+            return _owner_not_mounted(cron_service, owner)
 
         async def _retry() -> None:
             try:

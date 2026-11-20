@@ -117,11 +117,15 @@ async def test_manual_run_waits_for_mounted_owner_before_reporting_acceptance(tm
 
     try:
         await service.start()
-        service.request_owner_mount("local")
-        await asyncio.wait_for(prepared.wait(), timeout=5)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(path_fragment)
             assert response.status_code == 409
+            assert response.json()["code"] == "cron_owner_not_mounted"
+            service.request_owner_mount("local")
+            await asyncio.wait_for(prepared.wait(), timeout=5)
+            response = await client.post(path_fragment)
+            assert response.status_code == 409
+            assert response.json()["code"] == "cron_owner_mount_pending"
             assert store.get_job_runs(job["id"]) == []
             release.set()
             await service.mount_owner_async("local")

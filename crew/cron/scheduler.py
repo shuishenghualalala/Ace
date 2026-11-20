@@ -134,6 +134,12 @@ class CronService:
 
         return frozenset(self._mounted_owners)
 
+    @property
+    def pending_mount_owners(self) -> frozenset[str]:
+        """Return Owners whose asynchronous mount is still preparing."""
+
+        return frozenset(self._pending_mounts)
+
     def _ensure_scheduler(self) -> AsyncIOScheduler:
         if self._scheduler is None:
             self._scheduler = AsyncIOScheduler(timezone=BJ_TZ)
