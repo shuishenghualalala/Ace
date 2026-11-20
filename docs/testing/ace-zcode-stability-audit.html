@@ -910,7 +910,7 @@
 <tr><td>启动至首段正文</td><td>+118.4</td><td>+97.5</td><td>−574.5</td><td>+97.5</td></tr>
 <tr><td>实际发送至首段正文</td><td>+43.5</td><td>+14.6</td><td>−40.5</td><td>+14.6</td></tr>
 </tbody></table>
-<p>另通过真实计划执行验证首个 Cron 任务能按时运行并保存终态，已有任务重启后恢复，进程退出前中断的 Fire 标为 <code>abandoned</code>。Blueprint 的手动和停用记录保持空闲，显式启用时间计划后注册实际任务，删除时移除。复核发现，已保存 Cron 任务的账号若在首次挂载时遇到引擎启动异常，异常会传到普通登录和会话准入。端到端未证实稳定提速，实验未合入。</p>
+<p>另通过真实计划执行验证首个 Cron 任务能按时运行并保存终态，已有任务重启后恢复，进程退出前中断的 Fire 标为 <code>abandoned</code>。Blueprint 的手动和停用记录保持空闲，显式启用时间计划后注册实际任务，删除时移除。复核发现的首次挂载异常传到登录和会话准入的问题，已在<a href="#cron-owner-mount-blocking">挂载写锁一节</a>单独修复；调度引擎延迟创建的提速实验仍未合入。</p>
 <p class="evidence">Ace <code>crew/cron/jobs.py</code>、<code>crew/cron/scheduler.py</code>、<code>crew/sites/blueprint.py</code>、<code>crew/gateway/logout.py</code>。ZCode <code>packages/desktop/src/main/index.ts:2127–2144</code>、<code>packages/desktop/src/main/desktopCronScheduler.ts:61–69</code>、<code>packages/desktop/src/scheduler/index.ts:431–449</code>。</p>
 <h3>Windows 正式包实际可发送时间复测</h3>
 <p>复用 <code>024e03da</code> 官方发行副本，新建两个独立用户目录。测量从新进程和新用户目录开始，沿用系统文件缓存。两轮均经真实输入框发送本地 SSE 对话，核对答复和唯一用户消息落盘。</p>
