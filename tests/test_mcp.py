@@ -796,6 +796,28 @@ async def test_mcp_remove_rejects_stale_approval_and_missing_management_context(
     assert servers["echo"] == {"command": "different-server"}
 
 
+def test_mcp_worker_state_distinguishes_starting_from_reconnecting():
+    from crew.tools.mcp_client import _ServerWorker
+
+    worker = _ServerWorker("echo", {"url": "https://example.invalid"}, Registry())
+
+    class _PendingTask:
+        def done(self) -> bool:
+            return False
+
+    assert worker.state == "starting"
+    worker._task = _PendingTask()
+    assert worker.state == "starting"
+    worker._ready.set()
+    worker._error = RuntimeError("connect failed")
+    assert worker.state == "reconnecting"
+    worker._permanent_error = RuntimeError("reconnect budget exhausted")
+    assert worker.state == "failed"
+    worker._permanent_error = None
+    worker._connected = True
+    assert worker.state == "connected"
+
+
 def test_mcp_remove_denies_when_configuration_cannot_be_written():
     from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
     from crew.tools.mcp_management import register_mcp_tools

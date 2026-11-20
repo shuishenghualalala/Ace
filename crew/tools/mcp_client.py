@@ -937,11 +937,13 @@ class _ServerWorker:
 
     @property
     def state(self) -> str:
-        """Report whether the worker is connected, retrying, or abandoned."""
+        """Report whether the worker is connected, starting, retrying, or abandoned."""
         if self._connected:
             return "connected"
         if self._permanent_error is not None:
             return "failed"
+        if not self._ready.is_set():
+            return "starting"
         if self._task is not None and not self._task.done():
             return "reconnecting"
         if self._error is not None:
