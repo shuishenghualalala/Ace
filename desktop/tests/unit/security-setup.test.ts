@@ -112,6 +112,56 @@ describe('Windows security setup elevation', () => {
     }
   });
 
+  it.runIf(process.platform === 'win32')('defers automatic retries after a generic setup failure and allows an explicit retry', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'crew-setup-retry-'));
+    const runtime = join(parent, 'ace-security-runtime.exe');
+    const stateDir = join(parent, 'security');
+    const failureMarker = join(stateDir, 'windows-setup-failure-deferred');
+    writeFileSync(runtime, '');
+    const childExit = vi.fn()
+      .mockReturnValueOnce(1).mockReturnValueOnce(5)
+      .mockReturnValueOnce(1)
+      .mockReturnValueOnce(1).mockReturnValueOnce(0).mockReturnValueOnce(0)
+      .mockReturnValueOnce(0);
+    const spawnProcess = vi.fn(() => {
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', childExit()));
+      return child;
+    }) as unknown as typeof spawn;
+    const provision = (runtimePath: string, targetStateDir: string, _spawnProcess: typeof spawn, options: { automatic: boolean }) =>
+      provisionInstalledWindowsSandbox(runtimePath, targetStateDir, spawnProcess, options);
+    const launch = { platform: 'win32', packaged: true, visible: true, ci: false };
+    const location = () => ({ runtimePath: runtime, stateDir });
+
+    try {
+      const firstLaunch = createWindowsSandboxSetupCoordinator(provision).startAutomatically(launch, location);
+      if (!firstLaunch) throw new Error('expected automatic Windows setup');
+      await expect(firstLaunch).resolves.toMatchObject({ ok: false, exitCode: 5 });
+      expect(existsSync(failureMarker)).toBe(true);
+
+      const afterRestart = createWindowsSandboxSetupCoordinator(provision);
+      const repeatedLaunch = afterRestart.startAutomatically(launch, location);
+      if (!repeatedLaunch) throw new Error('expected automatic Windows setup after restart');
+      await expect(repeatedLaunch).resolves.toMatchObject({
+        ok: false,
+        code: 'windows_setup_retry_deferred',
+        detail: expect.stringContaining('显式重试'),
+      });
+      expect(spawnProcess).toHaveBeenCalledTimes(3);
+
+      await expect(afterRestart.run('install', runtime, stateDir)).resolves.toMatchObject({ ok: true });
+      expect(existsSync(failureMarker)).toBe(false);
+      expect(spawnProcess).toHaveBeenCalledTimes(6);
+
+      const afterRecovery = createWindowsSandboxSetupCoordinator(provision).startAutomatically(launch, location);
+      if (!afterRecovery) throw new Error('expected an automatic native readiness check after recovery');
+      await expect(afterRecovery).resolves.toMatchObject({ ok: true });
+      expect(spawnProcess).toHaveBeenCalledTimes(7);
+    } finally {
+      rmSync(parent, { recursive: true });
+    }
+  });
+
   it('accepts native and Electron platform names for the same runtime architecture', () => {
     expect(securityRuntimePlatformKey('windows', 'AMD64')).toBe(securityRuntimePlatformKey('win32', 'x64'));
     expect(securityRuntimePlatformKey('Darwin', 'aarch64')).toBe('darwin-arm64');

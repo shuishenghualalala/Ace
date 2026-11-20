@@ -7,7 +7,7 @@ export type SecuritySetupResult = {
   ok: boolean;
   exitCode: number | null;
   detail?: string;
-  code?: 'uac_cancelled' | 'uac_disabled' | 'uac_restart_required' | 'windows_setup_owner_mismatch';
+  code?: 'uac_cancelled' | 'uac_disabled' | 'uac_restart_required' | 'windows_setup_owner_mismatch' | 'windows_setup_retry_deferred';
 };
 export type UacEnableResult = SecuritySetupResult & { restartRequired?: boolean };
 
@@ -18,6 +18,7 @@ const ERROR_CANCELLED = 1223;
 const SETUP_OWNER_MISMATCH = 4;
 const DEFERRED_CONSENT_FILE = 'windows-setup-consent-deferred';
 const OWNER_MISMATCH_FILE = 'windows-setup-owner-mismatch';
+const SETUP_FAILURE_FILE = 'windows-setup-failure-deferred';
 let uacRestartRequired = false;
 
 export function securityRuntimePlatformKey(platform: string, arch: string): string | undefined {
@@ -255,14 +256,26 @@ function cancelledSetup(): SecuritySetupResult {
   };
 }
 
-function saveConsentDeferral(marker: string, deferred: boolean): void {
+function saveSetupDeferral(marker: string, deferred: boolean): void {
   try {
-    if (deferred) fs.writeFileSync(marker, '', { flag: 'wx' });
+    if (deferred) {
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, '', { flag: 'wx' });
+    }
     else fs.rmSync(marker, { force: true });
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
-    if (!(deferred && code === 'EEXIST')) console.warn('[security] Windows setup consent state:', code);
+    if (!(deferred && code === 'EEXIST')) console.warn('[security] Windows setup retry state:', code);
   }
+}
+
+function deferredSetupFailure(): SecuritySetupResult {
+  return {
+    ok: false,
+    exitCode: 1,
+    code: 'windows_setup_retry_deferred',
+    detail: 'Windows 防护上次自动准备未完成。可在「设置 → 安全」查看状态并显式重试。',
+  };
 }
 
 export async function provisionInstalledWindowsSandbox(
@@ -277,9 +290,10 @@ export async function provisionInstalledWindowsSandbox(
   }, spawnProcess);
   const consent = path.join(stateDir, DEFERRED_CONSENT_FILE);
   const ownerMismatch = path.join(stateDir, OWNER_MISMATCH_FILE);
+  const setupFailure = path.join(stateDir, SETUP_FAILURE_FILE);
   const clearDeferrals = () => {
-    for (const marker of [consent, ownerMismatch]) {
-      if (fs.existsSync(marker)) saveConsentDeferral(marker, false);
+    for (const marker of [consent, ownerMismatch, setupFailure]) {
+      if (fs.existsSync(marker)) saveSetupDeferral(marker, false);
     }
   };
   const before = await verify();
@@ -291,12 +305,15 @@ export async function provisionInstalledWindowsSandbox(
   if (before.exitCode !== 1) return before;
   if (automatic && fs.existsSync(ownerMismatch)) return ownerMismatchSetup();
   if (automatic && fs.existsSync(consent)) return cancelledSetup();
+  if (automatic && fs.existsSync(setupFailure)) return deferredSetupFailure();
   const setup = await runElevatedSecuritySetup(runtimePath, stateDir, 'install', spawnProcess);
-  if (setup.code === 'uac_cancelled') saveConsentDeferral(consent, true);
-  if (setup.code === 'windows_setup_owner_mismatch') saveConsentDeferral(ownerMismatch, true);
+  if (setup.code === 'uac_cancelled') saveSetupDeferral(consent, true);
+  if (setup.code === 'windows_setup_owner_mismatch') saveSetupDeferral(ownerMismatch, true);
+  if (!setup.ok && !setup.code) saveSetupDeferral(setupFailure, true);
   if (!setup.ok) return setup;
   const after = await verify();
   if (after.ok) clearDeferrals();
+  else if (!after.code) saveSetupDeferral(setupFailure, true);
   return after;
 }
 

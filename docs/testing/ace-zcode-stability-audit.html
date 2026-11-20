@@ -455,6 +455,13 @@
 <p>桌面 145 项与完整 TypeScript、定向 ESLint 通过。后端 169 项通过、1 项跳过。另有 2 项要求预先就绪的原生沙箱，本机测试工作树缺少该环境，未计入通过数。Ruff 和差异检查通过。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts</code>、<code>security-setup.ts</code>、<code>crew/security/launch.py</code>。ZCode <code>packages/desktop/src/main/desktopRuntimeEnv.ts:359–367</code>。Codex <code>codex-rs/windows-sandbox-rs/src/helper_materialization.rs:29–52</code>。</p>
 </article>
+<article id="windows-sandbox-generic-failure-retry">
+<h3>D7n · Windows 防护自动准备失败后重复触发管理员确认</h3>
+<p>桌面之前只记住取消管理员确认和提权账号不匹配。原生安装或安装后的复查遇到其他失败时，下一次启动会再次尝试自动准备，可能重复触发相同的 UAC 流程。</p>
+<p><strong>修复</strong> 自动准备失败后记录当前 Windows 状态目录内的暂缓标记。后续启动仍先运行原生就绪检查；防护未就绪时返回可理解的暂缓状态并跳过再次提权。安全中心的显式重试不受标记限制。原生检查成功后清除标记；标记不改变原生运行时的命令准入。</p>
+<p><strong>验证</strong> Windows 定向桌面用例通过正式安装协调器和隔离状态目录模拟原生未就绪、通用安装退出码 5、应用重启和安全中心显式重试。重启后的自动路径仅再次运行只读就绪检查；显式安装重试成功，原生复查后移除标记；下一次启动只检查状态。设置与安全中心 50 项通过、2 项既有跳过；全量桌面套件 205 个测试文件、2,332 项通过、2 项跳过。完整桌面构建、类型检查、ESLint（无错误）、CSS lint 与两份 HTML 解析通过。完整 npm 检查链在前置 Playwright 依赖边界门禁处停止：未改动的 <code>scripts/smoke-packaged-desktop.mjs</code> 直接引用 <code>playwright-core</code>；独立设计系统审计另报告既有 <code>assets/styles/stream-chat.css:91</code> spacing token。测试替代了提权子进程，没有实际触发 UAC 或改动防火墙。</p>
+<p class="evidence">Ace <code>desktop/src/main/security-setup.ts</code>、<code>desktop/tests/unit/security-setup.test.ts</code>、<code>docs/backend/modules/security.html</code>。Codex 的免安装 Windows 受限令牌路径属于另一套执行后端，不由此重试策略替代。</p>
+</article>
 <article id="release">
 <h3>D8 · P2 · 安装包需要覆盖冷启动和故障恢复</h3>
 <p>Ace 有三平台 Python CI、桌面单测、Playwright 核心边界工作流和三平台 nightly 裸包。夜间产物上传能确认打包流程，无法确认全新用户目录中完整的首聊和故障恢复。现有 Windows 打包脚本可验证 Python 导入，macOS smoke 会在打开正常桌面窗口前退出。ZCode 有验证工作区和 composer 的 Desktop E2E，以及独立安装/更新 smoke 入口。建议用真实打包产物跑固定 provider 的主流程，沿用已有发布矩阵和 Windows/macOS/Linux 的运行时打包入口。</p>
