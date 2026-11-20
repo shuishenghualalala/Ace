@@ -796,6 +796,63 @@ async def test_mcp_remove_rejects_stale_approval_and_missing_management_context(
     assert servers["echo"] == {"command": "different-server"}
 
 
+async def test_mcp_reload_requires_management_context_and_reconnects_configured_server():
+    from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
+    from crew.tools.mcp_management import register_mcp_tools
+
+    registry = Registry()
+    server_cfg = {"url": "https://mcp.example.com/v1", "transport": "http"}
+    servers = {"echo": dict(server_cfg)}
+
+    class ManagerStub:
+        def __init__(self):
+            self.reloaded = []
+
+        async def reload_one(self, name):
+            self.reloaded.append(name)
+            return True
+
+        def status(self):
+            return [{
+                "name": "echo",
+                "transport": "http",
+                "connected": True,
+                "state": "connected",
+                "error": "",
+                "tools": ["echo"],
+                "config": dict(server_cfg),
+            }]
+
+    manager = ManagerStub()
+    app = SimpleNamespace(
+        config=SimpleNamespace(mcp_servers=servers),
+        mcp_manager=manager,
+        registry=registry,
+    )
+    register_mcp_tools(app)
+
+    denied = await registry.execute(ToolCall("reload-denied", "mcp_reload", {"name": "echo"}))
+    assert denied.is_error
+
+    authority = current_mcp_install_allowed.set(True)
+    call_id = current_tool_call_id.set("reload-call")
+    try:
+        result = await registry.execute(ToolCall("reload-1", "mcp_reload", {"name": "echo"}))
+        missing = await registry.execute(ToolCall("reload-2", "mcp_reload", {"name": "missing"}))
+    finally:
+        current_tool_call_id.reset(call_id)
+        current_mcp_install_allowed.reset(authority)
+
+    assert not result.is_error
+    payload = json.loads(result.content)
+    assert payload["reloaded"] is True
+    assert payload["server"]["state"] == "connected"
+    assert payload["server"]["tools"] == ["echo"]
+    assert manager.reloaded == ["echo"]
+    assert missing.is_error
+    assert "不存在" in missing.content
+
+
 def test_mcp_worker_state_distinguishes_starting_from_reconnecting():
     from crew.tools.mcp_client import _ServerWorker
 

@@ -30,6 +30,7 @@ log = get_logger("tools.mcp_management")
 MCP_INSTALL_TOOL = "mcp_install"
 MCP_STATUS_TOOL = "mcp_status"
 MCP_REMOVE_TOOL = "mcp_remove"
+MCP_RELOAD_TOOL = "mcp_reload"
 SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _VALID_TRANSPORTS = {"stdio", "http", "sse"}
 _STATUS_MAX_TOOLS = 50
@@ -153,13 +154,23 @@ def _approval_digest(config_path: str, name: str, config: dict[str, Any]) -> str
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _removal_name(args: dict[str, Any]) -> str:
+def _management_name(args: dict[str, Any], action: str) -> str:
     if not current_mcp_install_allowed.get() or not current_tool_call_id.get():
-        raise StructuredToolError("请在有管理权限的前台对话中移除 MCP。", code="permission_denied")
+        raise StructuredToolError(
+            f"请在有管理权限的前台对话中{action} MCP。", code="permission_denied",
+        )
     name = str(args.get("name") or "").strip()
     if not SERVER_NAME_RE.fullmatch(name):
         raise StructuredToolError("MCP 名称只能使用字母、数字、下划线或连字符。", code="invalid_arguments")
     return name
+
+
+def _removal_name(args: dict[str, Any]) -> str:
+    return _management_name(args, "移除")
+
+
+def _reload_name(args: dict[str, Any]) -> str:
+    return _management_name(args, "重连")
 
 
 def _removal_digest(config_path: str, name: str, config: dict[str, Any]) -> str:
@@ -478,4 +489,54 @@ def register_mcp_tools(app: Any) -> None:
         display_name="移除 MCP",
         permission_resolver=describe_remove_permission,
         permission_approver=confirm_remove_permission,
+    )
+
+    async def reload_server(args: dict[str, Any]) -> str:
+        name = _reload_name(args)
+        config = app.config.mcp_servers.get(name)
+        if config is None:
+            raise StructuredToolError(f"MCP 服务不存在: {name}", code="mcp_server_not_found")
+        manager = getattr(app, "mcp_manager", None)
+        if manager is None:
+            raise StructuredToolError("MCP 管理器未初始化。", code="mcp_unavailable")
+        reloaded = await manager.reload_one(name)
+        rows = manager.status()
+        row = next((item for item in rows if str(item.get("name") or "") == name), None)
+        if row is None:
+            row = {
+                "name": name,
+                "transport": str(config.get("transport") or ""),
+                "connected": False,
+                "state": "not_started",
+                "tools": [],
+                "config": dict(config),
+            }
+        return tool_result(
+            name=name,
+            reloaded=bool(reloaded),
+            server=_public_server_status(row),
+        )
+
+    app.registry.register(
+        name=MCP_RELOAD_TOOL,
+        toolset="mcp_management",
+        schema={
+            "name": MCP_RELOAD_TOOL,
+            "description": (
+                "Reconnect one configured MCP server after a failed or abandoned "
+                "connection. Uses the existing approved configuration and does not "
+                "install or modify it. Waits for the server startup attempt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Exact configured server name"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+        handler=reload_server,
+        is_async=True,
+        display_name="重连 MCP",
     )
