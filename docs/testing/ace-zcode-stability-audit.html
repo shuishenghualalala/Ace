@@ -312,6 +312,13 @@
 <p><strong>验收</strong> 通过真实 Gateway WebSocket、公开目标 API 与 SQLite，核对独立目标记录、版本冲突、已暂停目标重启后保持不注入、新会话实例拒绝旧版本、其他账号不能读写。仅替换模型。Goal、持久提交和 Plan 回归共 32 项通过；Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/state/session_goals.py</code>、<code>crew/gateway/routers/session_goals.py</code>、<code>crew/app.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts:241–425</code>、<code>packages/core/src/runtime/methods/target-continuation-loop.ts:45–85</code>。</p>
 </article>
+<article id="bounded-goal-step">
+<h3>会话 Goal 单轮推进的准入、停止和重启恢复</h3>
+<p>ZCode 在 Goal 自动续跑前重新核对目标，并让等待的用户命令先行；单独使用无工具模型请求验收目标。Ace 先提供一个需用户明确调用的前台推进：<code>POST /api/session/{id}/goal</code> 的 <code>advance</code> 携带当前版本，持久登记唯一请求并返回 202。仍使用原账号、工作空间、会话实例、Dispatcher 和 TaskRuntime；不抢占普通任务，不进入 Plan，不放行工具，不从一次正常回复推断目标完成。</p>
+<p><strong>验收</strong> 真实 Gateway 基线拒绝了未实现的推进。补上后定向复现并修复了进入 Plan、普通回执已经取得执行权但尚未入队时被 Goal 超车、目标请求 ID 被普通聊天复用，以及 TaskRuntime 登记中停止导致全局并发槽不释放。组合 181 项通过，Ruff 通过。使用受控模型覆盖独立的定向停止、无工具调用权限、已有独立任务拒绝准入、普通回复继续和停用普通时限后的 Goal 自身时限。</p>
+<p>Windows 两个真实本机 Gateway 进程使用同一隔离数据目录。强制终止前分别观察到一个已接收未取得执行权的步骤、一个模型确实已进入的步骤；重启后两者保留各自请求 ID、暂停目标并标记中断，未重放。显式恢复目标后，必须再次提交新版推进命令才有新模型调用。日志按同一请求 ID 记录接收、取得执行权、收尾或重启中断，并仅记录状态、原因与耗时。桌面和 Web 的推进控件、自动续跑和独立验收仍未接入。</p>
+<p class="evidence">Ace <code>crew/gateway/goal_steps.py</code>、<code>crew/gateway/dispatcher.py</code>、<code>crew/state/session_goals.py</code>、<code>tests/gateway/test_session_goals.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/target-continuation-loop.ts:45–85</code>、<code>target-completion-verification.ts:40–87,132–145</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts:371–425</code>。</p>
+</article>
 <article id="web-session-goal">
 <h3>Web 从 /goal 管理已保存的会话目标</h3>
 <p>ZCode 由输入层识别完整斜杠词及参数，目标通过专用命令进入会话。Ace Web 在已有内置主会话中用 <code>/goal</code> 打开编辑器，参数可预填；用户保存后从真实目标接口更新版本和状态。编辑、操作和冲突恢复都不生成聊天帧。</p>

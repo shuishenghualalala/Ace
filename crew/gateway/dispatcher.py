@@ -23,7 +23,7 @@ import enum
 import json
 import time
 from contextlib import aclosing
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -52,6 +52,16 @@ _REPLACED_OUTCOME = TurnOutcome(
     "stopped", reason="session_replaced", code="session_replaced", message="原会话已删除。",
 )
 _INCOMPLETE_OUTCOMES = frozenset({"partial", "failed", "stopped"})
+
+
+@dataclass(frozen=True, slots=True)
+class ForegroundAdmission:
+    """Server-created constraint; never sourced from a client envelope."""
+
+    incarnation: str
+    owner_epoch: int
+    claim: Callable[[], Awaitable[str | None]]
+    deadline_at: float
 
 
 def _history_fence(owner: str, session_id: str) -> dict[str, str]:
@@ -148,6 +158,8 @@ class SessionDispatcher:
         self._run_task_ids: dict[SessionKey, str] = {}
         self._active_exec_session_ids: dict[SessionKey, str] = {}
         self._tasks: dict[SessionKey, set[asyncio.Task]] = {}
+        self._guarded_foreground_tasks: set[asyncio.Task] = set()
+        self._ordinary_dispatches: dict[SessionKey, int] = {}
         self._request_for_task: dict[asyncio.Task, str] = {}
         self._exec_session_for_task: dict[asyncio.Task, str] = {}
         self._stop_reasons: dict[SessionKey, str] = {}
@@ -281,6 +293,24 @@ class SessionDispatcher:
     def owner_is_blocked(self, owner_account_id: str) -> bool:
         """Return whether owner-wide logout cleanup currently blocks admission."""
         return str(owner_account_id or "").strip() in self._blocked_owners
+
+    def owner_epoch(self, owner: str) -> int:
+        return self._owner_epochs.get(owner, 0)
+
+    def guarded_foreground(self, session_id: str, owner: str) -> bool:
+        return not self._guarded_foreground_tasks.isdisjoint(self._tasks.get((owner, session_id), ()))
+
+    def foreground_blocker(self, session_id: str, owner: str) -> str:
+        key = (owner, session_id)
+        lock = self._locks.get(key)
+        if self.closed or self.owner_is_blocked(owner):
+            return "goal_gateway_draining"
+        if (key in self._running or self._queued_depth(key) or (lock is not None and lock.locked())
+            or self._ordinary_dispatches.get(key) or self._tasks.get(key) or self._has_active_children(session_id, owner)):
+            return "goal_session_busy"
+        if self._global_semaphore is not None and self._global_semaphore.locked():
+            return "goal_gateway_busy"
+        return ""
 
     @property
     def closed(self) -> bool:
@@ -557,7 +587,7 @@ class SessionDispatcher:
         if not text.strip():
             return False
         key = self._resolve_key(session_id, owner_account_id)
-        if key not in self._running:
+        if key not in self._running or self.guarded_foreground(session_id, key[0]):
             return False
         steer_fn = getattr(self._controller, "steer", None)
         if steer_fn is not None and callable(steer_fn):
@@ -585,16 +615,19 @@ class SessionDispatcher:
         """把当前 Agent turn 标记为后台任务；执行协程继续运行。"""
         key = self._resolve_key(session_id, owner_account_id)
         task_id = self._run_task_ids.get(key)
-        if not task_id or self._task_runtime is None:
+        worker = self._running_task.get(key)
+        lock = self._locks.get(key)
+        if not task_id or self._task_runtime is None or worker in self._guarded_foreground_tasks:
             return None
         self._snapshot_requests.pop(key, None)
         try:
             await self._task_runtime.set_backgrounded_async(task_id)
+            if self._run_task_ids.get(key) != task_id or self._running_task.get(key) is not worker:
+                return task_id
             self._snapshot_requests.pop(key, None)
             # The current run keeps its old lock, while future foreground
             # messages use a fresh lock and a fresh sidechain Agent.
-            current_lock = self._locks.get(key)
-            if current_lock is not None and current_lock.locked():
+            if lock is not None and self._locks.get(key) is lock and lock.locked():
                 self._locks[key] = asyncio.Lock()
             return task_id
         except Exception:
@@ -609,21 +642,35 @@ class SessionDispatcher:
         return request_id if self._running_request_ids.get(key) == request_id else None
 
     # ------------------------------------------------------------------ #
-    async def run(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+    async def run(
+        self, envelope: Envelope, *, foreground: ForegroundAdmission | None = None,
+    ) -> AsyncIterator[ResponseChunk]:
         """Run one turn under the causally verified Owner logging context."""
         token = current_owner_account_id.set(normalize_owner_account_id(envelope.user_id))
         history_token = current_turn_session_incarnation.set(None)
         execution_token = current_turn_execution_incarnation.set(None)
+        ordinary = self._key(envelope.session_id, envelope.user_id) if foreground is None else None
+        if ordinary is not None:
+            # A receipted busy send can claim its inbox row before entering the waiters set.
+            self._ordinary_dispatches[ordinary] = self._ordinary_dispatches.get(ordinary, 0) + 1
         try:
-            async with aclosing(self._run_owned(envelope)) as stream:
+            async with aclosing(self._run_owned(envelope, foreground)) as stream:
                 async for chunk in stream:
                     yield chunk
         finally:
+            if ordinary is not None:
+                remaining = self._ordinary_dispatches[ordinary] - 1
+                if remaining:
+                    self._ordinary_dispatches[ordinary] = remaining
+                else:
+                    self._ordinary_dispatches.pop(ordinary, None)
             current_turn_execution_incarnation.reset(execution_token)
             current_turn_session_incarnation.reset(history_token)
             current_owner_account_id.reset(token)
 
-    async def _run_owned(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+    async def _run_owned(
+        self, envelope: Envelope, foreground: ForegroundAdmission | None,
+    ) -> AsyncIterator[ResponseChunk]:
         """串行执行一轮对话；忙时根据策略处理。透传内核产出的 ResponseChunk。"""
         if self._closed:
             yield self._shutdown_error(envelope.request_id)
@@ -640,10 +687,20 @@ class SessionDispatcher:
         owner_epoch = self._owner_epochs.get(owner, 0)
         key = self._key(sid, owner)
         read_incarnation = getattr(self._store, "get_history_incarnation", None)
+        incarnation = None
         if callable(read_incarnation):
             incarnation = await asyncio.to_thread(read_incarnation, sid, owner_account_id=owner)
             if incarnation is not None:
                 current_turn_session_incarnation.set((owner, sid, incarnation))
+        if foreground is not None:
+            blocker = self.foreground_blocker(sid, owner)
+            if self.owner_epoch(owner) != foreground.owner_epoch:
+                blocker = "goal_owner_changed"
+            elif incarnation != foreground.incarnation:
+                blocker = "session_replaced"
+            if blocker:
+                yield ResponseChunk.error(rid, "目标推进未获得执行资格", code=blocker)
+                return
         lock = self._lock_for(key)
         current_task = asyncio.current_task()
 
@@ -689,7 +746,7 @@ class SessionDispatcher:
 
         # ---- 忙时策略判定（在获取锁之前） ----
         busy = lock.locked()
-        effective_mode = self._busy_mode
+        effective_mode = BusyMode.QUEUE if self.guarded_foreground(sid, owner) else self._busy_mode
         demoted_for_children = False
         queued_status = ""
         if busy and effective_mode == BusyMode.STEER:
@@ -759,9 +816,12 @@ class SessionDispatcher:
         runtime_activity_interval = _TASK_ACTIVITY_PULSE_INTERVAL_SECONDS
         runtime_activity_touch: Callable[[dict[str, Any] | None], None] | None = None
 
+        admitted = foreground is None
         if current_task is not None:
             self._tasks.setdefault(key, set()).add(current_task)
             self._request_for_task[current_task] = rid
+            if foreground is not None:
+                self._guarded_foreground_tasks.add(current_task)
         try:
             try:
                 if queued_status:
@@ -782,7 +842,10 @@ class SessionDispatcher:
                             raise asyncio.CancelledError
                         if send is not None and current_task is not None:
                             self._settling_tasks.add(current_task)
-                        allowed = await _claim_send()
+                        refusal = await foreground.claim() if foreground is not None else None
+                        if foreground is not None and (self.closed or self.owner_epoch(owner) != owner_epoch):
+                            refusal = "goal_owner_changed"
+                        allowed = not refusal and await _claim_send()
                         ensure = getattr(self._store, "ensure_session_incarnation", None)
                         if allowed and callable(ensure) and current_turn_session_incarnation.get() is None:
                             incarnation = await asyncio.to_thread(
@@ -801,44 +864,63 @@ class SessionDispatcher:
                         self._running_counts.pop(key, None)
                         self._running.discard(key)
                         self._running_request_ids.pop(key, None)
+                        if refusal:
+                            yield ResponseChunk.error(rid, "目标推进已取消或暂不可用", code=refusal)
                         return
+                    admitted = True
                     if current_task is not None:
                         self._running_task[key] = current_task
                         # Finish preparing durable state before interrupting the turn.
                         self._settling_tasks.add(current_task)
                     runtime_task_id = ""
+                    task_registered = False
+                    registration_interrupted = False
                     if self._task_runtime is not None:
-                        try:
+                        async def register_task():
+                            nonlocal runtime_task_id
                             cfg = getattr(self._controller, "config", None)
-                            task = await self._task_runtime.create_runtime_async(
+                            execution_timeout = getattr(cfg, "tasks_agent_turn_execution_timeout_seconds", 3600.0)
+                            if foreground is not None:
+                                limit = max(0.001, foreground.deadline_at - asyncio.get_running_loop().time())
+                                execution_timeout = min(execution_timeout, limit) if execution_timeout > 0 else limit
+                            created = await self._task_runtime.create_runtime_async(
                                 kind="agent_turn",
                                 session_id=sid,
                                 request_id=rid,
                                 title=envelope.query[:120] or "Agent turn",
                                 detail=envelope.query,
-                                execution_timeout=getattr(
-                                    cfg, "tasks_agent_turn_execution_timeout_seconds", 3600.0
-                                ),
+                                execution_timeout=execution_timeout,
                                 inactivity_timeout=getattr(
                                     cfg, "tasks_agent_turn_inactivity_timeout_seconds", 600.0
                                 ),
-                                # 恢复回合异步执行、无人同步等待：沿用后台标记
-                                # （后台回合结束时不把 sidechain 收敛回主会话，
-                                # 避免覆盖主会话上可能已发生的新消息）。
+                                # 后台恢复不收敛到前台历史；cron 自己发完成通知。
                                 backgrounded=bool(envelope.params.get("internal_task_resume")),
-                                # cron 回合的完成已有定时任务自己的通知，不重复发任务通知。
                                 notify_completion=envelope.channel != "cron",
                                 owner_account_id=owner,
                             )
-                            runtime_task_id = task["task_id"]
+                            runtime_task_id = created["task_id"]
                             from crew.state.home import get_owner_runtime_home
 
-                            output_ref = str(
-                                get_owner_runtime_home(owner) / "tasks" / f"{runtime_task_id}.json"
-                            )
+                            output_ref = str(get_owner_runtime_home(owner) / "tasks" / f"{runtime_task_id}.json")
                             await self._task_runtime.update_async(runtime_task_id, owner_account_id=owner, output_ref=output_ref)
-                            self._run_task_ids[key] = runtime_task_id
                             await self._task_runtime.mark_running_async(runtime_task_id)
+                            return created
+
+                        try:
+                            # A cancelled thread await may still commit. Learn the actual task
+                            # identity, then settle it in the same release path as a running turn.
+                            registration = asyncio.create_task(register_task())
+                            while True:
+                                try:
+                                    task = await asyncio.shield(registration)
+                                    break
+                                except asyncio.CancelledError:
+                                    registration_interrupted = True
+                                    if registration.cancelled():
+                                        raise
+                            if registration_interrupted:
+                                raise asyncio.CancelledError
+                            self._run_task_ids[key] = runtime_task_id
                             # TaskRuntime 是 agent_turn 的根截止时间来源。将其快照
                             # 注入本次 envelope，避免 dispatcher monitor 与 executor
                             # 各自维护一套可能漂移的回合 deadline。
@@ -912,6 +994,9 @@ class SessionDispatcher:
                             rt_id_token = current_task_runtime_id.set(runtime_task_id)
                             rt_token = current_task_runtime.set(self._task_runtime)
                             rt_activity_token = current_task_activity_fn.set(runtime_activity_touch)
+                            task_registered = True
+                        except asyncio.CancelledError:
+                            registration_interrupted = True
                         except Exception:
                             log.exception("注册 agent_turn 任务失败 session=%s", sid)
 
@@ -943,6 +1028,11 @@ class SessionDispatcher:
                     exec_envelope = envelope
                     stream = None
                     try:
+                        if registration_interrupted:
+                            raise asyncio.CancelledError
+                        if foreground is not None and not task_registered:
+                            deferred_terminal = ResponseChunk.error(rid, "目标任务运行时未就绪", code="goal_runtime_unavailable")
+                            return
                         # 标记会话进入 running，同时刷新 updated_at 防止被后台过期清理误删
                         try:
                             await self._store_set_status(sid, "running", owner=owner, error="")
@@ -951,7 +1041,7 @@ class SessionDispatcher:
                         except Exception:
                             log.exception("写入 running 状态失败 session=%s", sid)
 
-                        steer_text = self._steer_texts.pop(key, "")
+                        steer_text = self._steer_texts.pop(key, "") if foreground is None else ""
                         if steer_text:
                             envelope.params["steer_text"] = steer_text
 
@@ -1078,6 +1168,9 @@ class SessionDispatcher:
                         log.info("会话已停止 session=%s", sid)
                         stopped = TurnOutcome("stopped", reason="gateway_shutdown" if self._closed else "user_stop", message=err)
                         if intent is not None and intent[0] == "timed_out":
+                            stopped = TurnOutcome("failed", reason="timed_out", code="timeout", message=err)
+                        elif not self._closed and foreground is not None and asyncio.get_running_loop().time() >= foreground.deadline_at:
+                            err = "目标推进已达到执行时限"
                             stopped = TurnOutcome("failed", reason="timed_out", code="timeout", message=err)
                         deferred_terminal = enrich_error_chunk(ResponseChunk.error(rid, err, outcome=stopped))
                     except GeneratorExit:
@@ -1412,6 +1505,8 @@ class SessionDispatcher:
                                     "running_depth": remaining,
                                 })
             except asyncio.CancelledError:
+                if not admitted:
+                    return
                 if self._closed:
                     deferred_terminal = self._shutdown_error(rid)
                 else:
@@ -1451,6 +1546,7 @@ class SessionDispatcher:
             _dequeue_once()
             if current_task is not None:
                 self._settling_tasks.discard(current_task)
+                self._guarded_foreground_tasks.discard(current_task)
                 self._request_for_task.pop(current_task, None)
                 self._exec_session_for_task.pop(current_task, None)
                 tasks = self._tasks.get(key)

@@ -63,6 +63,7 @@ from crew.gateway.routers.collaboration_planning import create_collaboration_pla
 from crew.gateway.routers.collaboration_execution import create_collaboration_execution_router
 from crew.gateway.routers.scenarios import create_scenarios_router
 from crew.gateway.routers.security import create_security_router
+from crew.gateway.goal_steps import GoalSteps
 from crew.gateway.routers.session_goals import create_session_goals_router
 from crew.gateway.routers.sessions import create_sessions_router, read_session_history_window
 from crew.gateway.routers.sites import create_sites_router
@@ -124,6 +125,8 @@ def create_app(crew: CrewApp | None = None, *, desktop_managed: bool = False) ->
     log.info("调度器忙时策略: %s", crew.config.gateway_busy_mode)
     # 连接管理器：session → 活跃 WS，供 cron/后台任务主动推送
     connections = ConnectionManager(min_interval=crew.config.gateway_push_min_interval)
+    session_goals = getattr(crew.session_store, "goals", None)
+    goal_steps = GoalSteps(crew, connections, session_goals) if session_goals is not None else None
 
     async def capture_turn_history(owner, sid, request_id, started_at, is_current):
         def read_history():
@@ -218,6 +221,8 @@ def create_app(crew: CrewApp | None = None, *, desktop_managed: bool = False) ->
         await _stop_all_channels(reason="login_required")
         await asyncio.to_thread(_prepare_owner_storage)
         await crew.startup_core()
+        if goal_steps is not None:
+            await goal_steps.recover()
 
     def _read_startup_status() -> str:
         return api.state.gateway_readiness["status"]
@@ -302,6 +307,8 @@ def create_app(crew: CrewApp | None = None, *, desktop_managed: bool = False) ->
             if pending:
                 log.warning("Gateway 启动任务关停超时 generation=%s count=%d", generation, len(pending))
             await logout_coordinator.shutdown()
+            if goal_steps is not None:
+                await goal_steps.close()
             await _stop_all_channels()
             await crew.shutdown()
             # 反注册本实例的渠道会话通知钩子：hook_registry 是全局单例，
@@ -393,9 +400,8 @@ def create_app(crew: CrewApp | None = None, *, desktop_managed: bool = False) ->
     api.include_router(create_auth_session_router(logout_coordinator))
     api.include_router(create_browser_router(crew))
     api.include_router(create_sessions_router(crew, dispatcher))
-    session_goals = getattr(crew.session_store, "goals", None)
-    if session_goals is not None:
-        api.include_router(create_session_goals_router(session_goals))
+    if session_goals is not None and goal_steps is not None:
+        api.include_router(create_session_goals_router(session_goals, goal_steps))
     api.include_router(create_cron_router(crew))
     api.include_router(create_runtimes_router(crew))
     api.include_router(create_collaboration_planning_router(crew))

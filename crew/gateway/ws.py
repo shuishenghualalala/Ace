@@ -44,6 +44,7 @@ from crew.gateway.helpers import (
 from crew.channels.broadcast import stream_and_broadcast
 from crew.features.session_context import session_context_from_envelope
 from crew.state.logging import get_logger
+from crew.state.session_goals import STEP_REQUEST_PREFIX
 from crew.core.followup import FollowupAnswerMessage, get_followup_waiter, normalize_followup_answers
 
 log = get_logger("gateway.ws")
@@ -565,12 +566,18 @@ def create_ws_router(
 
         def _request_id_kw(data: dict) -> dict[str, str]:
             request_id = str(data.get("request_id") or "").strip()
-            return {"request_id": request_id} if request_id else {}
+            return {"request_id": request_id} if request_id and not request_id.startswith(STEP_REQUEST_PREFIX) else {}
 
         async def _handle_chat(
             data: dict[str, Any], session_id: str, execution: SendExecution | None = None,
             *, approved_plan: dict[str, Any] | None = None, revision_plan: dict[str, Any] | None = None,
         ) -> None:
+            if str(data.get("request_id") or "").strip().startswith(STEP_REQUEST_PREFIX):
+                await connections.send_socket(socket, {
+                    "kind": "status", "sequence": 0, "is_final": False,
+                    "body": {"message": "此请求标识由目标推进保留", "code": "reserved_request_id"},
+                })
+                return
             attachments = data.get("attachments", [])
             if not isinstance(attachments, list):
                 attachments = []
@@ -651,6 +658,17 @@ def create_ws_router(
             # 新会话在首条消息发送前只存在于前端；Plan 选择随首条消息带入，
             # 必须等 ensure_session 后再进入 Plan，避免空会话点击 Plan 报“会话不存在”。
             if data.get("plan_active"):
+                if dispatcher.guarded_foreground(session_id, owner):
+                    message = "目标仍在推进，请先暂停或等待本轮结束，再进入计划模式"
+                    outcome = TurnOutcome("failed", reason="goal_step_active", message=message)
+                    if execution is not None:
+                        await execution.finish("failed", "goal_step_active", outcome=outcome)
+                    await connections.push_payload(session_id, {
+                        "kind": "error", "is_final": True, "sequence": 0,
+                        "session_id": session_id, "request_id": str(data.get("request_id") or ""),
+                        "body": {"message": message, "code": "goal_step_active", "outcome": outcome.to_body()},
+                    }, owner_account_id=owner)
+                    return
                 pm = getattr(crew, "plan_manager", None)
                 if pm is not None:
                     pm.enter(session_id, owner_account_id=owner)
@@ -1153,6 +1171,9 @@ def create_ws_router(
                             log.warning("plan 通知自动已读失败 session=%s: %s", session_id, exc)
 
                     if act == "plan_enter":
+                        if dispatcher.guarded_foreground(session_id, owner):
+                            await _send_status(session_id, "目标仍在推进，请先暂停或等待本轮结束，再进入计划模式")
+                            continue
                         pm.enter(session_id, owner_account_id=owner)
                         await _send_status(
                             session_id, "已进入 Plan 模式（只读探索→写计划→审批后执行）"

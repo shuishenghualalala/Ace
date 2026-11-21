@@ -73,7 +73,7 @@ from crew.features import (
     ServiceKey,
     run_async_compat,
 )
-from crew.gateway.dispatcher import BusyMode, SessionDispatcher
+from crew.gateway.dispatcher import BusyMode, ForegroundAdmission, SessionDispatcher
 from crew.gateway.helpers import session_external_agent_id
 from crew.features.session_context import build_session_context_contribution
 from crew.memory.simple import NullMemory, SQLiteMemory
@@ -2292,7 +2292,9 @@ class CrewApp:
             merged.setdefault(sid, []).extend(recs)
         return merged
 
-    async def dispatch(self, envelope: Envelope) -> AsyncIterator[ResponseChunk]:
+    async def dispatch(
+        self, envelope: Envelope, *, foreground: ForegroundAdmission | None = None,
+    ) -> AsyncIterator[ResponseChunk]:
         """共享调度入口：gateway/cron/平台入口都走同一 SessionDispatcher。"""
         from crew.core.runctx import current_push_fn
         from crew.channels.channel_sessions import prepare_inbound_channel_envelope
@@ -2314,7 +2316,8 @@ class CrewApp:
 
             token = current_push_fn.set(_push_for_owner)
         try:
-            async with aclosing(self.dispatcher.run(envelope)) as stream:
+            options = {"foreground": foreground} if foreground is not None else {}
+            async with aclosing(self.dispatcher.run(envelope, **options)) as stream:
                 async for chunk in stream:
                     yield chunk
         finally:
@@ -3827,8 +3830,16 @@ class CrewApp:
             owner_account_id=envelope.user_id,
         )
         executor = str(agent_config.get("executor") or self.config.agent_executor or "builtin").strip().lower()
+        goal_step = envelope.params.get("_goal_step") is True
+        if goal_step and (executor != "builtin" or agent_config.get("wiki_agent_session")
+                          or self.plan_manager.is_active(config_session_id, owner_account_id=envelope.user_id)):
+            yield ResponseChunk.error(envelope.request_id, "目标推进的执行条件已变化", code="goal_execution_changed")
+            return
         if executor == "builtin" and envelope.channel == "web" and not envelope.params.get("internal_task_resume"):
-            await self._add_session_goal_context(envelope, config_session_id)
+            has_goal = await self._add_session_goal_context(envelope, config_session_id)
+            if goal_step and not has_goal:
+                yield ResponseChunk.error(envelope.request_id, "目标已暂停或会话已变化", code="goal_step_superseded")
+                return
         async with self._preset_execution_lease(agent_config) as preset_binding:
             if preset_binding is not None:
                 agent_config = dict(agent_config or {})
@@ -3846,16 +3857,20 @@ class CrewApp:
                     async for chunk in stream:
                         yield chunk
 
-    async def _add_session_goal_context(self, envelope: Envelope, session_id: str) -> None:
+    async def _add_session_goal_context(self, envelope: Envelope, session_id: str) -> bool:
         from crew.core.runctx import current_turn_session_incarnation
 
         binding = current_turn_session_incarnation.get()
         goals = getattr(self.session_store, "goals", None)
         if binding is None or binding[:2] != (envelope.user_id, session_id) or goals is None:
-            return
+            return False
         snapshot = await asyncio.to_thread(goals.read, *binding)
         if snapshot is None or snapshot.goal is None or snapshot.goal.status != "active":
-            return
+            return False
+        if envelope.params.get("_goal_step") is True and (
+            snapshot.run is None or snapshot.run.request_id != envelope.request_id or snapshot.run.state != "running"
+        ):
+            return False
         parts = envelope.params.setdefault("_context_prompt_parts", [])
         parts.append(
             "## 用户保存的会话目标\n"
@@ -3863,6 +3878,7 @@ class CrewApp:
             "不要把普通回复结束视为目标已完成。\n"
             f"{json.dumps(snapshot.goal.objective, ensure_ascii=False)}"
         )
+        return True
 
     async def _structured_path_context(
         self,

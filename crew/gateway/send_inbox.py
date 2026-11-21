@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from crew.core.envelope import TurnOutcome
 from crew.state.logging import get_logger
+from crew.state.session_goals import STEP_REQUEST_PREFIX
 
 _MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
 _REQUEST_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
@@ -121,6 +122,8 @@ class DesktopSendInbox:
         return self._accept_encoded(conn, key, canonical, hashlib.sha256(wire).hexdigest())
 
     def _accept_encoded(self, conn, key: SendKey, canonical: str, digest: str) -> SendReceipt:
+        if key.request_id.startswith(STEP_REQUEST_PREFIX):
+            return SendReceipt(key, "rejected", "reserved_request_id")
         row = conn.execute(_SELECT, key.values).fetchone()
         if row is not None:
             if row[3] is not None and row[3] != digest:

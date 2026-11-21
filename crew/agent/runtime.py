@@ -1060,7 +1060,9 @@ class SingleAgent(Agent):
         history.extend(await self._contribute_prompt_context(envelope))
 
         tool_schemas, effective_tool_filter, plan_active = self._request_tool_schemas(
-            task_sid, owner, readonly=envelope.params.get("collaboration_readonly") is True,
+            task_sid, owner, readonly=(
+                envelope.params.get("collaboration_readonly") is True or envelope.params.get("_goal_step") is True
+            ),
         )
         t = time.perf_counter()
         system_static, user_reminder = await self._build_prompts(
