@@ -1158,6 +1158,8 @@
 <p>两轮预取在原构造处都已结束。首次 <code>build_app</code> 分别缩短 1.286 和 1.168 秒，同时 Gateway 模块导入拉长 0.756 和 0.900 秒。启动到首正文净缩短 0.533 和 0.306 秒，实际发送后的首正文两轮各多等待约 0.08 和 0.09 秒。试验中的模型类别由夹具提前确定，生产配置还涉及用户模板、凭据和环境变量时序。发行继续使用原装配。本节各组的新用户目录样本仍高于五秒验收目标。</p>
 <h3>无密钥回放与 MCP 审批验收</h3>
 <p><code>tests/e2e/replay_server.py</code> 以录制的模型响应替代真实模型 HTTP/SSE 边界，应用、Provider、工具、SQLite 和会话入口保持真实。现有六个组装态场景：并行读取部分失败、读取后写入、工具搜索后创建 Cron、HTTP MCP 的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上的 <code>mcp_update</code> 与 <code>mcp_remove</code> 各一次审批；审批场景分别核对 <code>X-Replay</code> 写入配置和配置中不再有 echo。回放与审批用例合计 9 项通过；CI 安装 <code>mcp</code> extra，避免 MCP 用例被静默跳过。</p>
+<h3>全量回归与状态表归属</h3>
+<p>本轮全量后端回归（不含 <code>tests/security</code>）为 <code>5036 passed, 3 failed, 30 skipped, 20 deselected</code>，用时 28 分 14 秒；3 项失败均位于当前工作树中尚未提交的 session goals 用例，已单独记录而不混入本分支提交。session goals 新建的 <code>session_goals</code>、<code>session_goal_steps</code>、<code>session_goal_verifications</code> 已加入主库 core 归属清单，先前拆库诊断的 3 项失败因此通过。</p>
 <h3>模型拾取器中的永久 Default</h3>
 <p>新安装模板自带 <code>default</code> profile，内容为 <code>your-model-name</code>/<code>api.example.com</code>。用户新增真实模型并设为默认后，该模板仍以 <code>name: Default</code> 留在模型选择器里，显示为缺少 Key 的模型，容易被误认为可用的默认模型。修复把占位 profile 与真实模型分开：设置页保留它供首次配置和 owner copy-on-write，但展示名归一为“默认模型（未配置）”；owner 已有可用真实模型时，对话模型选择器过滤该占位项，真实模型通过“设为默认”切换 <code>active/default</code>。直接编辑过的 default 卡片展示实际 <code>model</code>，不再保留 Default 名称。定向 20 项通过。</p>
 <h3>观测如何归因</h3>
