@@ -62,12 +62,20 @@ export interface BackendSession {
   agent_binding?: SessionAgentBinding;
 }
 
-export type SessionGoalAction = 'set' | 'pause' | 'resume' | 'complete';
+export type SessionGoalAction = 'set' | 'pause' | 'resume' | 'complete' | 'advance';
+export type SessionGoalRunState = 'accepted' | 'running' | 'stopping' | 'finished' | 'stopped' | 'interrupted' | 'failed';
 
 export interface SessionGoalSnapshot {
   version: string;
   goal: { objective: string; status: 'active' | 'paused' | 'completed' } | null;
+  supports_advance?: true;
+  run?: { request_id: string; state: SessionGoalRunState; code: string };
 }
+
+type SessionGoalChangeResult =
+  | { kind: 'applied'; snapshot: SessionGoalSnapshot }
+  | { kind: 'version-conflict' }
+  | { kind: 'rejected'; message: string };
 
 export interface BackendHistoryFileChange {
   path: string;
@@ -1353,15 +1361,23 @@ export const sessionApi = {
       `/api/session/${encodeURIComponent(parentId)}/side-chat`, { method: 'POST', signal, ...jsonBody({}) },
     ),
   sessionGoal: (id: string, signal: AbortSignal) =>
-    getJSON<SessionGoalSnapshot>(`/api/session/${encodeURIComponent(id)}/goal`, { signal }),
+    getJSON<SessionGoalSnapshot>(`/api/session/${encodeURIComponent(id)}/goal`, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    }),
   changeSessionGoal: async (
     id: string, change: { version: string; action: SessionGoalAction; objective?: string }, signal: AbortSignal,
-  ): Promise<SessionGoalSnapshot | null> => {
+  ): Promise<SessionGoalChangeResult> => {
     const path = `/api/session/${encodeURIComponent(id)}/goal`;
     const response = await gatewayFetch(path, { method: 'POST', signal, ...jsonBody(change) });
-    // A stale write never applies. The view must read the current version before prompting another action.
-    if (response.status === 409) return null;
-    return readJsonResponse<SessionGoalSnapshot>(response, path);
+    if (response.status === 409) {
+      const body: unknown = await response.json().catch(() => null);
+      if (body && typeof body === 'object') {
+        if ('code' in body && body.code === 'goal_version_conflict') return { kind: 'version-conflict' };
+        if ('error' in body && typeof body.error === 'string') return { kind: 'rejected', message: body.error };
+      }
+      return { kind: 'rejected', message: '当前条件不允许执行目标操作。' };
+    }
+    return { kind: 'applied', snapshot: await readJsonResponse<SessionGoalSnapshot>(response, path) };
   },
   channelSessions: () =>
     getJSON<{

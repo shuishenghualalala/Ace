@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import './helpers/mock-chat-controller-deps';
 import { backendApi } from '../../src/ui/backend-client';
 import {
-  _resetQueueEditDraftForTests, appendMessage, consumePending, dispatchWs,
+  _resetQueueEditDraftForTests, appendMessage, applyChunk, consumePending, dispatchWs,
   editQueueItem, finalizeStreamingTurn, sendMessage, sendNativeVisualMessage,
 } from '../../src/ui/features/chat-controller';
 import { createComposerView, type ComposerView } from '../../src/ui/features/composer-view';
@@ -125,6 +125,108 @@ beforeEach(() => {
       <textarea data-composer-input></textarea>
     </section>
   `;
+});
+
+const serverGoalId = `goal_${'a'.repeat(32)}`;
+function goalFrame(sid: string, kind: 'status' | 'delta' | 'final', sequence: number, text: string) {
+  return {
+    kind, session_id: sid, request_id: serverGoalId, sequence,
+    gateway_epoch: 'fixture-goal-epoch', gateway_sequence: sequence, is_final: kind === 'final',
+    body: kind === 'status' ? { message: text } : { text },
+  };
+}
+
+function sealedGoalSession(sid: string): void {
+  sessionStore.set({ activeSessionId: sid });
+  appendMessage(sid, 'user', 'Previous ordinary request', { requestId: 'previous-ordinary' });
+  appendMessage(sid, 'assistant', 'Previous ordinary answer', { requestId: 'previous-ordinary' });
+  patchBook(sid, { turnSealed: true, activeRequestId: 'previous-ordinary', acceptingNewRequest: false });
+}
+
+function stubGoalHistory(sid: string) {
+  const delayed = Promise.withResolvers<Response>();
+  const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
+  const fetch = vi.fn(async (url: string) => {
+    const path = new URL(url).pathname;
+    if (path === `/api/session/${sid}/history`) return delayed.promise;
+    if (path === `/api/session/${sid}/status`) return json({ session_id: sid, live: 'idle', last_status: 'completed', queue_depth: 0 });
+    if (path === `/api/session/${sid}/plan`) return json({ active: false, has_plan: false });
+    return json([]);
+  });
+  vi.stubGlobal('fetch', fetch);
+  return { fetch, resolve: () => delayed.resolve(json({
+    items: [
+      { role: 'user', content: 'Previous ordinary request', request_id: 'previous-ordinary', history_id: 'old-user' },
+      { role: 'assistant', content: 'Previous ordinary answer', request_id: 'previous-ordinary', history_id: 'old-assistant' },
+      { role: 'user', content: 'Durable prompt from the Goal step', request_id: serverGoalId, history_id: 'step-user' },
+      { role: 'assistant', content: 'Durable Goal reply', request_id: serverGoalId, history_id: 'step-assistant' },
+    ],
+    has_more: false, next_before: null,
+  })) };
+}
+
+describe('server-owned Goal steps', () => {
+  it('adopts a verified frame after sealed history, queues ordinary input, and hydrates the real Goal boundary before sending', async () => {
+    const sid = 'external-goal-queued-ordinary';
+    sealedGoalSession(sid);
+    const history = stubGoalHistory(sid);
+    applyChunk(goalFrame(sid, 'status', 1, 'Model starting'));
+    expect(applyChunk(goalFrame(sid, 'delta', 2, 'Streamed answer'))).toBe('repair');
+    expect((messageStore.get().messages[sid] ?? []).map((message) => message.content)).toEqual([
+      'Previous ordinary request', 'Previous ordinary answer',
+    ]);
+    expect(await sendMessage('After the Goal finishes')).toBe(true);
+    expect(getPendingQueue(sid).map((item) => item.query)).toEqual(['After the Goal finishes']);
+    expect(socketSend()).not.toHaveBeenCalled();
+    applyChunk(goalFrame(sid, 'final', 3, 'Durable Goal reply'));
+    await vi.waitFor(() => expect(history.fetch.mock.calls.some(([url]) => new URL(url).pathname.endsWith('/history'))).toBe(true));
+    expect(await sendMessage('Second draft during Goal history reconciliation')).toBe(true);
+    expect(getPendingQueue(sid).map((item) => item.query)).toEqual([
+      'After the Goal finishes', 'Second draft during Goal history reconciliation',
+    ]);
+    expect(socketSend()).not.toHaveBeenCalled();
+    history.resolve();
+    await vi.waitFor(() => expect(socketSend()).toHaveBeenCalledTimes(1));
+    expect(socketSend().mock.calls[0]?.[0]).toMatchObject({ query: 'After the Goal finishes' });
+    expect((messageStore.get().messages[sid] ?? []).filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
+      'Previous ordinary request', 'Durable prompt from the Goal step', 'After the Goal finishes',
+    ]);
+  });
+
+  it('does not reopen a sealed turn from a late Goal frame below the confirmed sequence', () => {
+    const sid = 'external-goal-delayed-before-boundary';
+    sealedGoalSession(sid);
+    applyChunk({ ...goalFrame(sid, 'status', 5, 'Previous turn settled'), request_id: 'previous-ordinary' });
+    expect(applyChunk(goalFrame(sid, 'delta', 4, 'Late Goal chunk'))).toBeUndefined();
+    expect(sessionStore.get().books[sid]).toMatchObject({ activeRequestId: 'previous-ordinary', turnSealed: true });
+  });
+
+  it('never adopts a Goal frame over a known active ordinary request', async () => {
+    const sid = 'external-goal-known-ordinary';
+    sealedGoalSession(sid);
+    expect(await sendMessage('Keep the active ordinary turn')).toBe(true);
+    const ordinary = sessionStore.get().books[sid]?.activeRequestId;
+    expect(ordinary).toBeTruthy();
+    expect(applyChunk(goalFrame(sid, 'delta', 1, 'Different Goal output'))).toBeUndefined();
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe(ordinary);
+    expect((messageStore.get().messages[sid] ?? []).some((message) => message.content === 'Different Goal output')).toBe(false);
+  });
+
+  it('does not let a delayed Goal history response overwrite a newer ordinary turn', async () => {
+    const sid = 'external-goal-newer-ordinary';
+    sealedGoalSession(sid);
+    const history = stubGoalHistory(sid);
+    applyChunk(goalFrame(sid, 'final', 1, 'Durable Goal reply'));
+    await vi.waitFor(() => expect(history.fetch.mock.calls.some(([url]) => new URL(url).pathname.endsWith('/history'))).toBe(true));
+    expect(await sendMessage('New ordinary turn')).toBe(true);
+    const ordinary = sessionStore.get().books[sid]?.activeRequestId;
+    expect(ordinary).toBeTruthy();
+    history.resolve();
+    await vi.waitFor(() => expect(messageStore.get().historyLoading.has(sid)).toBe(false));
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe(ordinary);
+    expect((messageStore.get().messages[sid] ?? []).some((message) => message.content === 'New ordinary turn')).toBe(true);
+    expect((messageStore.get().messages[sid] ?? []).some((message) => message.content === 'Durable prompt from the Goal step')).toBe(false);
+  });
 });
 
 describe('sendMessage', () => {

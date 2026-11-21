@@ -12,7 +12,7 @@
  * 本文件所有函数均为「原样搬迁」，行为与抽离前的 index.ts 完全一致。
  */
 
-import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, touchStreamActivity } from './gateway-sequence';
+import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, peekGatewaySequence, touchStreamActivity } from './gateway-sequence';
 import { noteDelta, noteDeltaBoundary, resetSession } from '../stream-reassembly';
 import {
   type ChatMessage,
@@ -841,7 +841,7 @@ export function applySessionTitle(sessionId: string, title: string): void {
   renderWorkspaceHistory(openSessionFn);
 }
 
-export function finalizeTurn(sessionId: string): void {
+export function finalizeTurn(sessionId: string, drainPending = true): void {
   const book = bookFor(sessionId);
   const finalizedAssistantId = book.assistantId;
   if (finalizedAssistantId) patchMessage(sessionId, finalizedAssistantId, { streaming: false });
@@ -866,7 +866,7 @@ export function finalizeTurn(sessionId: string): void {
     void refreshSessions();
   }, 2000);
   onAfterFinal();
-  consumePending(sessionId);
+  if (drainPending) consumePending(sessionId);
   syncTurnDurationTicker();
 }
 
@@ -1084,6 +1084,38 @@ export function applyChunk(incomingChunk: ChatChunk): 'repair' | void {
   }
 }
 
+const goalHistoryHandoffs = new Map<string, { requestId: string; ownsSession: () => boolean }>();
+
+function waitsForGoalHistory(sessionId: string): boolean {
+  const handoff = goalHistoryHandoffs.get(sessionId);
+  const book = sessionStore.get().books[sessionId];
+  return Boolean(handoff?.ownsSession() && book?.turnSealed && book.activeRequestId === handoff.requestId);
+}
+
+function finalizeServerGoalTurn(sessionId: string, requestId: string): void {
+  const owner = interactiveOwnerKey();
+  const generation = state.backendReadiness?.generation;
+  const socket = state.socket;
+  const ownsSession = () => isRendererLoggedIn() && interactiveOwnerKey() === owner
+    && state.backendReadiness?.generation === generation && state.socket === socket;
+  const handoff = { requestId, ownsSession };
+  goalHistoryHandoffs.set(sessionId, handoff);
+  const canApply = () => goalHistoryHandoffs.get(sessionId) === handoff && waitsForGoalHistory(sessionId)
+    && !state.suppressChunks.has(sessionId) && !getSessionStreamRecovery(sessionId);
+  finalizeTurn(sessionId, false);
+  void import('./session-controller').then(async ({ loadBackendHistory }) => {
+    if (!canApply()) return;
+    const applied = await loadBackendHistory(sessionId, { canApply });
+    if (applied && ownsSession() && state.activeSessionId === sessionId) renderChat();
+  }).catch(() => {
+    logStream('history', 'goal-reconcile-failed', { sessionId, requestId });
+  }).finally(() => {
+    if (goalHistoryHandoffs.get(sessionId) !== handoff) return;
+    goalHistoryHandoffs.delete(sessionId);
+    if (ownsSession() && !isBusy(sessionId) && !state.suppressChunks.has(sessionId)) consumePending(sessionId);
+  });
+}
+
 function reportObservationClientEvent(payload: Record<string, unknown>): void {
   // The renderer is a presentation observer only; the gateway verifies the
   // request/session owner before accepting this best-effort notification.
@@ -1237,6 +1269,9 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   if (isDuplicateGatewayChunk(sid, chunk)) {
     return;
   }
+  const goalRequestId = typeof chunk.request_id === 'string' && /^goal_[a-f0-9]{32}$/.test(chunk.request_id)
+    ? chunk.request_id : null;
+  const previousSequence = goalRequestId ? peekGatewaySequence(sid) : 0;
   if (chunk.kind !== 'delta' && chunk.kind !== 'tool') noteGatewaySequence(sid, chunk);
   touchStreamActivity(sid);
   if (applyFollowupResolution(sid, sourceSid, chunk)) return;
@@ -1255,8 +1290,27 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
     return;
   }
 
-  const book = bookFor(sid);
+  let book = bookFor(sid);
   const reqId = chunkRequestId(parsed, chunk.request_id);
+  // Goal IDs are reserved at server ingress. Never open a turn from a 202,
+  // client-supplied body metadata, or a frame without a verified stream position.
+  const goalFrame = chunk.session_id === sid && typeof chunk.gateway_epoch === 'string' && !!chunk.gateway_epoch
+    && hasGatewayDeltaSequence(chunk.gateway_sequence) && Boolean(goalRequestId) && isRendererLoggedIn()
+    && (parsed.kind === 'delta' || parsed.kind === 'thinking' || parsed.kind === 'final'
+      || (parsed.kind === 'status' && parsed.body.control !== true) || (parsed.kind === 'error' && chunk.is_final));
+  const hasGoalBoundary = goalFrame && (getMessages(sid).findLast((message) => message.role === 'user' && message.requestId === reqId) !== undefined);
+  if (goalFrame && reqId && (chunk.gateway_sequence ?? 0) > previousSequence
+    && book.turnSealed && book.activeRequestId !== reqId && !hasGoalBoundary) {
+    resetSession(sid);
+    patchBook(sid, {
+      activeRequestId: reqId, turnSealed: false, acceptingNewRequest: false,
+      assistantId: null, firstChunkAt: null, toolMap: new Map(), deltaSpans: [], legacyDeltaText: '',
+      hadTeamInternal: false, pendingStopOutcome: undefined,
+    });
+    setBusyWithUi(sid, true);
+    setStatusWithUi(sid, 'running');
+    book = bookFor(sid);
+  }
   const gate = resolveTurnGate(parsed, reqId, {
     turnSealed: book.turnSealed,
     activeRequestId: book.activeRequestId,
@@ -1274,6 +1328,16 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   });
   if (gate.action === 'drop') {
     if (parsed.kind === 'delta' || parsed.kind === 'tool') noteGatewaySequence(sid, chunk);
+    return;
+  }
+  if (goalFrame && reqId && !hasGoalBoundary) {
+    if (parsed.kind === 'final' || parsed.kind === 'error') {
+      finalizeServerGoalTurn(sid, reqId);
+      return;
+    }
+    // Project the real durable user row and already-received output together;
+    // placing an orphan assistant after the previous user would mix turns.
+    if (parsed.kind === 'delta' || parsed.kind === 'thinking') return 'repair';
     return;
   }
   const bindRequestId = 'bindRequestId' in gate ? gate.bindRequestId : null;
@@ -1515,7 +1579,8 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
         });
       }
     }
-    finalizeTurn(sid);
+    if (goalFrame && reqId) finalizeServerGoalTurn(sid, reqId);
+    else finalizeTurn(sid);
     if (result.statusHint === 'error') setStatusWithUi(sid, 'error');
     renderWorkspaceHistory(openSessionFn);
     renderChat();
@@ -1608,7 +1673,7 @@ const pendingDispatches = new Set<string>();
 function dispatchPendingItem(sessionId: string, head: PendingMessage): void {
   const book = bookFor(sessionId);
   if (head.requiresReview || pendingDispatches.has(sessionId) || getSessionStreamRecovery(sessionId)
-    || book.pendingFollowup || book.pendingPlan?.status === 'pending') return;
+    || waitsForGoalHistory(sessionId) || book.pendingFollowup || book.pendingPlan?.status === 'pending') return;
   pendingDispatches.add(sessionId);
   const dispatchOptions: DispatchOptions = {
     subScenario: head.subScenario ?? '',
@@ -2076,7 +2141,9 @@ export async function sendMessage(
     if (queueEditDraft?.sessionId === sessionId) queueEditDraft = null;
   };
 
-  if (isBusy(sessionId)) {
+  // A completed Goal can still be loading its durable boundary. Keep FIFO
+  // when an older draft is waiting, without holding a new standalone turn.
+  if (isBusy(sessionId) || (waitsForGoalHistory(sessionId) && getPendingQueue(sessionId).length > 0)) {
     const pendingItem = {
       id: newMessageId('q'),
       query: content || '(附件)',
