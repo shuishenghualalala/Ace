@@ -1028,6 +1028,8 @@
 </tbody>
 </table>
 <p>两轮预取在原构造处都已结束。首次 <code>build_app</code> 分别缩短 1.286 和 1.168 秒，同时 Gateway 模块导入拉长 0.756 和 0.900 秒。启动到首正文净缩短 0.533 和 0.306 秒，实际发送后的首正文两轮各多等待约 0.08 和 0.09 秒。试验中的模型类别由夹具提前确定，生产配置还涉及用户模板、凭据和环境变量时序。发行继续使用原装配。本节各组的新用户目录样本仍高于五秒验收目标。</p>
+<h3>模型拾取器中的永久 Default</h3>
+<p>新安装模板自带 <code>default</code> profile，内容为 <code>your-model-name</code>/<code>api.example.com</code>。用户新增真实模型并设为默认后，该模板仍以 <code>name: Default</code> 留在模型选择器里，显示为缺少 Key 的模型，容易被误认为可用的默认模型。修复把占位 profile 与真实模型分开：设置页保留它供首次配置和 owner copy-on-write，但展示名归一为“默认模型（未配置）”；owner 已有可用真实模型时，对话模型选择器过滤该占位项，真实模型通过“设为默认”切换 <code>active/default</code>。定向 19 项通过。</p>
 <h3>观测如何归因</h3>
 <p>沿用 <a href="../frontend/stream-performance-diagnostics.html">首 token 诊断</a> 和 <a href="observability-tracing.html">已有 tracing</a>。以 <code>request_id</code> 串起 Desktop 接收、网关受理、provider 首事件、首正文、持久化和首绘，以 <code>gateway_instance_id</code>、进程代次、退出原因串起启动与回收。恢复路径记录模式、游标距离、缺口、队列字节与同步耗时。按平台、通道、事件类别等有限维度报 P50/P95/P99，实例和请求 ID 留在结构化事件。采样只记行为类别、计时和大小。审计基线的 <code>first-visible-text</code> 出现在回合门控前，<code>first-dom-patch</code> 也可能早于正文挂载。<a href="#first-text-timing">F8</a> 已分别记录收到正文、接纳正文、确认挂载和下一绘制时机。用故障测试验证每个阶段都能找到，便于判断慢在模型、路由、重放、磁盘或绘制。</p>
 </section>

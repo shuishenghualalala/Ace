@@ -542,6 +542,7 @@ async def test_config_marks_default_profile_owner_editable(api, auth_headers):
 
     assert resp.status_code == 200
     item = next(profile for profile in resp.json()["model_profiles"] if profile["id"] == "default")
+    assert item["name"] == "默认模型（未配置）"
     assert item["builtin"] is True
     assert item["editable"] is True
 

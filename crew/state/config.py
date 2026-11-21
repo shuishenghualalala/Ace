@@ -638,8 +638,14 @@ class Config:
     def owner_public_model_options(self, owner_account_id: str | None = None) -> list[dict[str, Any]]:
         """返回 owner 对话可选模型列表。"""
         profiles = self.owner_model_profiles(owner_account_id)
-        options = [profile.public_dict() for profile in profiles.values() if profile.loaded and profile.has_key]
         active_id = self.owner_active_model_id(owner_account_id)
+        options = [
+            profile.public_dict()
+            for profile in profiles.values()
+            if profile.loaded
+            and profile.has_key
+            and not (is_placeholder_model_profile(profile) and profile.id != active_id)
+        ]
         if not options and active_id in profiles:
             options = [profiles[active_id].public_dict()]
         return options

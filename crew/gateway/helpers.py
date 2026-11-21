@@ -16,7 +16,11 @@ from crew.agent.capabilities import capability_profile_ids
 from crew.agent.external.runtime_registry import resolve_runtime_display_badge
 from crew.features.session_context import SessionSource, build_session_key
 from crew.security.models import default_conversation_permission_mode
-from crew.state.config import _lookup_api_key, is_owner_overridable_model_profile
+from crew.state.config import (
+    _lookup_api_key,
+    is_owner_overridable_model_profile,
+    is_placeholder_model_profile,
+)
 from crew.team.formation import (
     build_team_draft as build_team_draft,
     confirmed_formation_plan as confirmed_formation_plan,
@@ -198,6 +202,8 @@ def config_body(
 
     def _profile_dict(profile) -> dict[str, Any]:
         data = profile.public_dict()
+        if is_placeholder_model_profile(profile):
+            data["name"] = "默认模型（未配置）"
         data["editable"] = (
             not profile.builtin
             or is_gateway_admin

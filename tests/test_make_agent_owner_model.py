@@ -173,6 +173,7 @@ def test_existing_owner_profile_replaces_placeholder_default_at_runtime(
     monkeypatch.setenv("CREW_HOME", str(crew_home))
     cfg = load_config(config_path=str(_write_placeholder_config(tmp_path, crew_home)))
     owner = "dev:dev"
+    assert [profile.id for profile in cfg.owner_visible_model_profiles("fresh-owner")] == ["default"]
     owner_home = get_owner_runtime_home(owner)
     owner_home.mkdir(parents=True, exist_ok=True)
     (owner_home / "config.yaml").write_text(
@@ -200,6 +201,10 @@ def test_existing_owner_profile_replaces_placeholder_default_at_runtime(
 
     assert cfg.owner_default_model_id(owner) == "deepseek"
     assert cfg.owner_default_model_profile(owner).model == "deepseek-chat"
+    visible_ids = [profile.id for profile in cfg.owner_visible_model_profiles(owner)]
+    assert "default" in visible_ids
+    assert "deepseek" in visible_ids
+    assert all(option["id"] != "default" for option in cfg.owner_public_model_options(owner))
 
 
 def test_first_ready_owner_model_replaces_and_persists_placeholder_default(
