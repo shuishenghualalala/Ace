@@ -1,5 +1,5 @@
 import { backendApi } from '../backend-client';
-import type { SessionGoalAction, SessionGoalRunState, SessionGoalSnapshot } from '../api/feature-session';
+import type { SessionGoalAction, SessionGoalRunState, SessionGoalSnapshot, SessionGoalVerificationState } from '../api/feature-session';
 import { notify, state } from '../state';
 import { authStore, productModeStore, sessionStore, uiStore } from '../stores/stores';
 import { logStream } from '../stream-debug';
@@ -39,8 +39,25 @@ const RUN_REASONS: Record<string, string> = {
   goal_dispatch_failed: '无法调度目标任务。',
   goal_no_terminal: '网关未确认本轮执行结果。',
 };
-const isLive = (run: SessionGoalSnapshot['run']) =>
-  run?.state === 'accepted' || run?.state === 'running' || run?.state === 'stopping';
+const VERIFICATION_STATUS: Record<SessionGoalVerificationState, string> = {
+  running: '正在验收目标',
+  passed: '目标验收通过',
+  incomplete: '证据不足，目标未完成',
+  unconfirmed: '未能确认目标达成',
+  interrupted: '本次目标验收已中断',
+};
+
+function currentVerification(snapshot: SessionGoalSnapshot | null) {
+  const check = snapshot?.verification;
+  const run = snapshot?.run;
+  return check && run?.state === 'finished' && check.step_request_id === run.request_id ? check : undefined;
+}
+
+function hasLiveGoalOperation(snapshot: SessionGoalSnapshot | null): boolean {
+  const step = snapshot?.run?.state;
+  return step === 'accepted' || step === 'running' || step === 'stopping'
+    || currentVerification(snapshot)?.state === 'running';
+}
 const OBSERVATION_INTERVAL_MS = 2000;
 const MAX_OBSERVATION_READS = 75;
 const MAX_OBJECTIVE = 4000;
@@ -81,9 +98,10 @@ export function openDesktopSessionGoal(objective: string): boolean {
   panel.innerHTML = `
     <header class="desktop-goal__row"><strong data-title>会话目标</strong>
       <button class="btn btn-ghost" type="button" data-close>关闭目标面板</button></header>
-    <p class="desktop-goal__hint">活动目标会加入后续聊天的上下文。暂停不会停止普通聊天，保存或恢复不会自动发起回合。</p>
+    <p class="desktop-goal__hint">活动目标会加入后续聊天的上下文。暂停不会停止普通聊天，保存或恢复不会自动发起回合。<span data-verify-hint hidden>验收只核对已保存的会话证据，不检查外部实际状态。关闭面板只停止观察。</span></p>
     <p role="status" class="desktop-goal__feedback" data-feedback></p>
     <p role="status" class="desktop-goal__feedback" data-run hidden><span data-run-state></span> <span data-run-reason hidden></span></p>
+    <p role="status" aria-atomic="true" class="desktop-goal__feedback" data-verification hidden></p>
     <p class="desktop-goal__objective" data-objective hidden></p>
     <form data-editor hidden>
       <textarea aria-label="目标内容" aria-describedby="desktop-goal-validation" rows="2" placeholder="描述想达成的结果"></textarea>
@@ -95,6 +113,7 @@ export function openDesktopSessionGoal(objective: string): boolean {
     </form>
     <div class="desktop-goal__row" data-actions hidden>
       <button class="btn btn-ghost" type="button" data-advance title="推进已保存的目标，不保存当前草稿">推进一轮</button>
+      <button class="btn btn-ghost" type="button" data-verify title="用已保存的会话证据验收目标，不保存当前草稿">验收目标</button>
       <button class="btn btn-ghost" type="button" data-pause>暂停目标</button>
       <button class="btn btn-ghost" type="button" data-resume>恢复目标</button>
       <button class="btn btn-ghost" type="button" data-complete>标记目标完成</button>
@@ -107,6 +126,8 @@ export function openDesktopSessionGoal(objective: string): boolean {
   const runStatus = panel.querySelector<HTMLElement>('[data-run]')!;
   const runState = runStatus.querySelector<HTMLElement>('[data-run-state]')!;
   const runReason = runStatus.querySelector<HTMLElement>('[data-run-reason]')!;
+  const verificationStatus = panel.querySelector<HTMLElement>('[data-verification]')!;
+  const verificationHint = panel.querySelector<HTMLElement>('[data-verify-hint]')!;
   const displayed = panel.querySelector<HTMLElement>('[data-objective]')!;
   const form = panel.querySelector<HTMLFormElement>('[data-editor]')!;
   const input = form.querySelector('textarea')!;
@@ -115,6 +136,7 @@ export function openDesktopSessionGoal(objective: string): boolean {
   const cancelEdit = form.querySelector<HTMLButtonElement>('[data-cancel-edit]')!;
   const actions = panel.querySelector<HTMLElement>('[data-actions]')!;
   const advance = actions.querySelector<HTMLButtonElement>('[data-advance]')!;
+  const verify = actions.querySelector<HTMLButtonElement>('[data-verify]')!;
   const pause = actions.querySelector<HTMLButtonElement>('[data-pause]')!;
   const resume = actions.querySelector<HTMLButtonElement>('[data-resume]')!;
   const complete = actions.querySelector<HTMLButtonElement>('[data-complete]')!;
@@ -135,12 +157,13 @@ export function openDesktopSessionGoal(objective: string): boolean {
     const tooLong = length > MAX_OBJECTIVE;
     input.setAttribute('aria-invalid', String(tooLong));
     validation.textContent = tooLong ? `目标最多 ${MAX_OBJECTIVE} 个字符` : '';
-    save.disabled = busy || !snapshot || isLive(snapshot.run) || length < 1 || tooLong;
+    save.disabled = busy || !snapshot || hasLiveGoalOperation(snapshot) || length < 1 || tooLong;
   };
   const render = () => {
     const goal = snapshot?.goal;
     const run = snapshot?.run;
-    const live = isLive(run);
+    const check = currentVerification(snapshot);
+    const live = hasLiveGoalOperation(snapshot);
     title.textContent = goal ? `会话目标 · ${STATUS[goal.status]}` : '会话目标';
     const stepLabel = run ? RUN_STATUS[run.state] : '';
     if (runState.textContent !== stepLabel) runState.textContent = stepLabel;
@@ -149,20 +172,25 @@ export function openDesktopSessionGoal(objective: string): boolean {
       : run?.code && Object.hasOwn(RUN_REASONS, run.code) ? RUN_REASONS[run.code] : '';
     if (runReason.textContent !== reason) runReason.textContent = reason;
     runReason.hidden = !reason;
+    const verdict = check ? VERIFICATION_STATUS[check.state] : '';
+    if (verificationStatus.textContent !== verdict) verificationStatus.textContent = verdict;
+    verificationStatus.hidden = !verdict;
+    verificationHint.hidden = snapshot?.supports_verify !== true;
     displayed.hidden = !goal;
     displayed.textContent = goal?.objective ?? '';
     form.hidden = !editing && snapshot?.goal !== null;
     input.readOnly = busy;
     cancelEdit.hidden = !goal;
     advance.hidden = goal?.status !== 'active' || live || !(snapshot?.supports_advance === true || run);
+    verify.hidden = snapshot?.supports_verify !== true || goal?.status !== 'active' || run?.state !== 'finished' || live;
     pause.hidden = goal?.status !== 'active' || (!form.hidden && !live);
     resume.hidden = goal?.status !== 'paused' || !form.hidden;
     complete.hidden = !goal || goal.status === 'completed' || !form.hidden;
     edit.hidden = !goal || !form.hidden;
-    actions.hidden = [advance, pause, resume, complete, edit].every((button) => button.hidden);
-    for (const button of [cancelEdit, advance, pause, edit]) button.disabled = busy;
+    actions.hidden = [advance, verify, pause, resume, complete, edit].every((button) => button.hidden);
+    for (const button of [cancelEdit, advance, verify, pause, edit]) button.disabled = busy;
     resume.disabled = complete.disabled = busy || live;
-    reload.hidden = Boolean(snapshot && !observationHalted && snapshot.supports_advance !== true && !run);
+    reload.hidden = Boolean(snapshot && !observationHalted && snapshot.supports_advance !== true && snapshot.supports_verify !== true && !run);
     reload.disabled = busy || Boolean(pendingObservation);
     refreshSave();
   };
@@ -170,7 +198,7 @@ export function openDesktopSessionGoal(objective: string): boolean {
     const focused = document.activeElement;
     if (!previous || !panel.contains(previous) || (focused !== previous && focused !== document.body)) return;
     const candidates = !snapshot || observationHalted || previous === reload ? [reload]
-      : !form.hidden ? [input] : [pause, resume, advance, edit, reload];
+      : !form.hidden ? [input] : [pause, resume, verify, advance, edit, reload];
     const next = candidates.find((element) => !element.hidden && !element.disabled);
     next?.focus();
   };
@@ -205,13 +233,14 @@ export function openDesktopSessionGoal(objective: string): boolean {
     } catch (error) {
       if (!canUse()) return;
       observationHalted = true;
-      feedback.textContent = automatic ? `无法刷新本轮推进状态：${problem(error)}。请重新读取目标。`
+      const purpose = currentVerification(snapshot)?.state === 'running' ? '验收' : '推进';
+      feedback.textContent = automatic ? `无法刷新本轮${purpose}状态：${problem(error)}。请重新读取目标。`
         : `无法读取目标：${problem(error)}`;
       report('read', operationId, started, 'failed');
     }
   };
   const scheduleObservation = () => {
-    if (!isCurrent() || busy || observationHalted || !isLive(snapshot?.run)
+    if (!isCurrent() || busy || observationHalted || !hasLiveGoalOperation(snapshot)
       || observeTimer !== undefined || pendingObservation) return;
     if (observeRemaining <= 0) {
       observationHalted = true;
@@ -249,8 +278,9 @@ export function openDesktopSessionGoal(objective: string): boolean {
     else if (!form.hidden && document.activeElement === close) input.focus();
   };
   const apply = async (action: SessionGoalAction) => {
-    if (!isCurrent() || busy || !snapshot || (action !== 'pause' && isLive(snapshot.run))) return;
-    if ((action === 'set' && save.disabled) || (action === 'advance' && advance.hidden)) return;
+    if (!isCurrent() || busy || !snapshot || (action !== 'pause' && hasLiveGoalOperation(snapshot))) return;
+    if ((action === 'set' && save.disabled) || (action === 'advance' && advance.hidden)
+      || (action === 'verify' && verify.hidden)) return;
     const previous = document.activeElement;
     const operationId = crypto.randomUUID();
     const started = performance.now();
@@ -269,7 +299,7 @@ export function openDesktopSessionGoal(objective: string): boolean {
         snapshot = result.snapshot;
         resetObservation();
         if (action === 'set') editing = false;
-        feedback.textContent = action === 'advance' ? '' : '目标已更新';
+        feedback.textContent = action === 'advance' || action === 'verify' ? '' : '目标已更新';
         report(action, operationId, started, 'applied');
       } else if (result.kind === 'version-conflict') {
         snapshot = null;
@@ -306,6 +336,7 @@ export function openDesktopSessionGoal(objective: string): boolean {
   edit.onclick = () => { input.value = snapshot?.goal?.objective ?? ''; editing = true; render(); input.focus(); };
   cancelEdit.onclick = () => { editing = false; render(); edit.focus(); };
   advance.onclick = () => { void apply('advance'); };
+  verify.onclick = () => { void apply('verify'); };
   pause.onclick = () => { void apply('pause'); };
   resume.onclick = () => { void apply('resume'); };
   complete.onclick = () => { void apply('complete'); };

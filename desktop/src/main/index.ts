@@ -69,6 +69,7 @@ import type {
 } from './backend-health-monitor';
 import { GatewayRestartController } from './gateway-restart-controller';
 import { GatewayStartupLog } from './gateway-startup-log';
+import { dispatchRendererGatewayFetch } from './gateway-fetch-dispatch';
 import { GatewayProcessRetirement, GatewayStopTimeoutError } from './gateway-process-retirement';
 import { DesktopShutdown, waitForShutdownTask, type ShutdownReason } from './desktop-shutdown';
 import { DesktopChatOutbox, desktopChatOutboxScope } from './chat-outbox';
@@ -1154,6 +1155,7 @@ function rendererAuthState(): AuthStateSnapshot {
 }
 
 let publishedSessionOwner: string | null = null;
+let publishedSessionEpoch = 0;
 let authRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let authRetryDelay = 2_000;
 
@@ -1189,6 +1191,7 @@ function pushSessionState(resetReason?: string): Promise<void> {
   publishedSessionOwner = owner;
   let cleanup = Promise.resolve();
   if (reason) {
+    publishedSessionEpoch += 1;
     closeGatewaySockets(reason);
     cleanup = resetBrowserHost(reason).catch((error: unknown) => console.warn('[browser-host]', error));
   }
@@ -3353,6 +3356,10 @@ function registerIpc() {
   trustedHandle('gateway:fetch', async (event, raw: unknown) => {
     const documentIsCurrent = rendererDocumentLease(event);
     const owner = currentBrowserOwnerId();
+    const requestGeneration = gatewayGeneration;
+    const authEpoch = publishedSessionEpoch;
+    const scopeIsCurrent = () => documentIsCurrent() && currentBrowserOwnerId() === owner
+      && gatewayGeneration === requestGeneration && publishedSessionEpoch === authEpoch;
     const args = parseOrThrow(GatewayFetchArgs.parse(raw), 'gateway:fetch');
     const usesRemoteAuth = usesGatewayRemoteAuth();
     const jwt = usesRemoteAuth ? loginNewServiceInstance.getJWTToken() : null;
@@ -3437,7 +3444,7 @@ function registerIpc() {
         'X-Crew-Security-Proof': createActiveGatewaySecurityProof(proofMethod, proofPath, proofBody),
       };
     }
-    const res = await fetchGatewayWithStartupRetry(targetUrl.toString(), fetchInit);
+    const res = await dispatchRendererGatewayFetch(targetUrl, fetchInit, scopeIsCurrent, fetchGatewayWithStartupRetry);
     const body = await res.text();
     return {
       ok: res.ok,

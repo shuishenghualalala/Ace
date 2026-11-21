@@ -12,6 +12,12 @@ const step = (version: string, state: string, code = '', status = 'active') => (
   ...goal(version, 'Check the saved sample', status),
   run: { request_id: 'goal_sample', state, code },
 });
+const check = (version: string, state: string, {
+  code = '', status = 'active', stepRequestId = 'goal_sample', evidence = [] as number[],
+} = {}) => ({
+  ...step(version, 'finished', '', status), supports_verify: true,
+  verification: { request_id: 'verify_sample', step_request_id: stepRequestId, state, code, evidence_sequences: evidence },
+});
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { 'Content-Type': 'application/json' },
 });
@@ -60,6 +66,170 @@ it('advances the saved goal exactly once per click and shows the accepted step s
   expect(JSON.parse(String(writes[0]?.[1]?.body))).toEqual({ action: 'advance', version: 'current-version' });
   expect(document.body.textContent).toContain('会话目标 · 已启用');
   expect(() => button('推进一轮')).toThrow();
+});
+
+it('requests async verification through the Desktop bridge and waits for durable completion', async () => {
+  vi.useFakeTimers();
+  let verifying = false;
+  const gatewayFetch = vi.fn(async (url: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => {
+    expect(new URL(url).pathname).toBe(path);
+    let data: unknown = { ...step('ready', 'finished'), supports_verify: true };
+    let status = 200;
+    if (init?.method === 'POST') {
+      verifying = true;
+      data = check('reserved', 'running');
+      status = 202;
+    } else if (verifying) {
+      data = check('settled', 'passed', { status: 'completed', evidence: [7, 11] });
+    }
+    return { body: JSON.stringify(data), status, headers: { 'content-type': 'application/json' } };
+  });
+  vi.stubGlobal('Crew', { gatewayFetch });
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(button('验收目标').disabled).toBe(false);
+  expect(document.body.textContent).not.toContain('目标验收通过');
+  button('验收目标').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).toContain('正在验收目标');
+  expect(document.body.textContent).toContain('会话目标 · 已启用');
+  expect(document.body.textContent).not.toContain('会话目标 · 已完成');
+  expect(gatewayFetch.mock.calls).toHaveLength(2);
+  expect(gatewayFetch.mock.calls[1]?.[1]).toMatchObject({ method: 'POST', headers: { Prefer: 'respond-async' } });
+  expect(JSON.parse(String(gatewayFetch.mock.calls[1]?.[1]?.body))).toEqual({ action: 'verify', version: 'ready' });
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(document.body.textContent).toContain('目标验收通过');
+  expect(document.body.textContent).toContain('会话目标 · 已完成');
+  expect(() => button('验收目标')).toThrow();
+  expect(gatewayFetch.mock.calls).toHaveLength(3);
+  expect(gatewayFetch.mock.calls[2]?.[1]?.headers).not.toHaveProperty('Prefer');
+});
+
+it('keeps Pause available with a replacement draft and discards a stale verification read', async () => {
+  vi.useFakeTimers();
+  const delayed = Promise.withResolvers<Response>();
+  let reads = 0;
+  const fetch = vi.fn(async (_url: string, options?: RequestInit) => {
+    if (options?.method === 'POST') return json(check('paused', 'interrupted', { status: 'paused', code: 'goal_changed' }));
+    reads += 1;
+    return reads === 1 ? json(check('reserved', 'running')) : delayed.promise;
+  });
+  vi.stubGlobal('fetch', fetch);
+  openDesktopSessionGoal('Keep this replacement draft');
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(reads).toBe(2);
+  expect(document.body.textContent).toContain('正在验收目标');
+  expect(button('保存目标').disabled).toBe(true);
+  expect(button('暂停目标').disabled).toBe(false);
+  expect(() => button('推进一轮')).toThrow();
+  expect(() => button('验收目标')).toThrow();
+  button('暂停目标').click();
+  await vi.advanceTimersByTimeAsync(0);
+  const posted = fetch.mock.calls.find(([, init]) => init?.method === 'POST')?.[1];
+  expect(JSON.parse(String(posted?.body))).toEqual({ action: 'pause', version: 'reserved' });
+  expect(posted?.headers).not.toHaveProperty('Prefer');
+  expect(document.body.textContent).toContain('本次目标验收已中断');
+  expect(document.body.textContent).toContain('会话目标 · 已暂停');
+  delayed.resolve(json(check('wrong', 'passed', { status: 'completed', evidence: [7] })));
+  await vi.advanceTimersByTimeAsync(6500);
+  expect(fetch.mock.calls).toHaveLength(3);
+  expect(document.body.textContent).not.toContain('目标验收通过');
+  expect(document.body.textContent).not.toContain('会话目标 · 已完成');
+  expect(document.querySelector('textarea')?.value).toBe('Keep this replacement draft');
+  expect(button('保存目标').disabled).toBe(false);
+});
+
+it.each([
+  ['incomplete', '证据不足，目标未完成'],
+  ['unconfirmed', '未能确认目标达成'],
+  ['interrupted', '本次目标验收已中断'],
+])('shows an older synchronous Gateway verdict %s without completing or replaying', async (state, label) => {
+  vi.useFakeTimers();
+  const fetch = vi.fn(async (_url: string, options?: RequestInit) => options?.method === 'POST'
+    ? json(check('settled', state))
+    : json({ ...step('ready', 'finished'), supports_verify: true }));
+  vi.stubGlobal('fetch', fetch);
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  button('验收目标').click();
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(document.body.textContent).toContain(label);
+  expect(document.body.textContent).toContain('会话目标 · 已启用');
+  expect(document.body.textContent).not.toContain('会话目标 · 已完成');
+  expect(button('验收目标').disabled).toBe(false);
+  expect(fetch.mock.calls).toHaveLength(2);
+});
+
+it.each([
+  step('older', 'finished'),
+  { ...step('running', 'running'), supports_verify: true },
+  { ...step('paused', 'finished', '', 'paused'), supports_verify: true },
+])('does not offer verification without exact capability, active goal and finished evidence', async (snapshot) => {
+  vi.useFakeTimers();
+  const fetch = vi.fn(async () => json(snapshot));
+  vi.stubGlobal('fetch', fetch);
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(() => button('验收目标')).toThrow();
+  expect(fetch.mock.calls).toHaveLength(1);
+});
+
+it('does not trust a verdict for a different step even when the goal capability is present', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn(async () => json(check('current', 'passed', { stepRequestId: 'goal_previous', evidence: [7] })));
+  vi.stubGlobal('fetch', fetch);
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(document.body.textContent).not.toContain('目标验收通过');
+  expect(button('验收目标').disabled).toBe(false);
+  expect(fetch.mock.calls).toHaveLength(1);
+});
+
+it('requires an explicit refresh on ambiguous verification POST and never retries it', async () => {
+  vi.useFakeTimers();
+  let reads = 0;
+  const fetch = vi.fn(async (_url: string, options?: RequestInit) => {
+    if (options?.method === 'POST') throw new TypeError('Connection closed after request');
+    reads += 1;
+    return reads === 1 ? json({ ...step('ready', 'finished'), supports_verify: true })
+      : json(check('settled', 'passed', { status: 'completed', evidence: [7] }));
+  });
+  vi.stubGlobal('fetch', fetch);
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  button('验收目标').click();
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(document.body.textContent).toContain('未能确认目标更新');
+  expect(document.body.textContent).not.toContain('会话目标 · 已完成');
+  expect(fetch.mock.calls).toHaveLength(2);
+  button('重新读取目标').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).toContain('目标验收通过');
+  expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+});
+
+it('closes verification observation without mutating it and reopens from a GET only', async () => {
+  vi.useFakeTimers();
+  const delayed = Promise.withResolvers<Response>();
+  const fetch = vi.fn<(url: string, options?: RequestInit) => Promise<Response>>()
+    .mockResolvedValueOnce(json(check('running', 'running')))
+    .mockReturnValueOnce(delayed.promise)
+    .mockResolvedValueOnce(json(check('latest', 'incomplete')));
+  vi.stubGlobal('fetch', fetch);
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(fetch.mock.calls).toHaveLength(2);
+  const observationSignal = fetch.mock.calls[1]?.[1]?.signal;
+  button('关闭目标面板').click();
+  expect(observationSignal?.aborted).toBe(true);
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  delayed.resolve(json(check('old', 'passed', { status: 'completed', evidence: [11] })));
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(document.body.textContent).toContain('证据不足，目标未完成');
+  expect(document.body.textContent).not.toContain('目标验收通过');
+  expect(fetch.mock.calls).toHaveLength(3);
+  expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
 });
 
 it('refreshes serially during a live step without letting a delayed GET undo Pause', async () => {

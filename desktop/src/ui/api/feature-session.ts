@@ -62,14 +62,23 @@ export interface BackendSession {
   agent_binding?: SessionAgentBinding;
 }
 
-export type SessionGoalAction = 'set' | 'pause' | 'resume' | 'complete' | 'advance';
+export type SessionGoalAction = 'set' | 'pause' | 'resume' | 'complete' | 'advance' | 'verify';
 export type SessionGoalRunState = 'accepted' | 'running' | 'stopping' | 'finished' | 'stopped' | 'interrupted' | 'failed';
+export type SessionGoalVerificationState = 'running' | 'passed' | 'incomplete' | 'unconfirmed' | 'interrupted';
 
 export interface SessionGoalSnapshot {
   version: string;
   goal: { objective: string; status: 'active' | 'paused' | 'completed' } | null;
   supports_advance?: true;
+  supports_verify?: true;
   run?: { request_id: string; state: SessionGoalRunState; code: string };
+  verification?: {
+    request_id: string;
+    step_request_id: string;
+    state: SessionGoalVerificationState;
+    code: string;
+    evidence_sequences: number[];
+  };
 }
 
 type SessionGoalChangeResult =
@@ -1368,7 +1377,10 @@ export const sessionApi = {
     id: string, change: { version: string; action: SessionGoalAction; objective?: string }, signal: AbortSignal,
   ): Promise<SessionGoalChangeResult> => {
     const path = `/api/session/${encodeURIComponent(id)}/goal`;
-    const response = await gatewayFetch(path, { method: 'POST', signal, ...jsonBody(change) });
+    const init = jsonBody(change);
+    // Only verify needs the persisted live snapshot before its model call ends.
+    if (change.action === 'verify') init.headers = { 'Content-Type': 'application/json', Prefer: 'respond-async' };
+    const response = await gatewayFetch(path, { method: 'POST', signal, ...init });
     if (response.status === 409) {
       const body: unknown = await response.json().catch(() => null);
       if (body && typeof body === 'object') {
