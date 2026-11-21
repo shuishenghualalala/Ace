@@ -67,6 +67,7 @@
 | `desktop/scripts/smoke-packaged-desktop.mjs` | dev-only | 发布验收通过固定参数启动候选桌面程序，使用本次临时配置验证自管 Gateway 身份与退出。 |
 | `desktop/scripts/dev.mjs` | dev-only | 源码开发入口：仅以固定 argv 启动 esbuild 与依赖目录中的 Electron，不接收产品用户/模型命令，也不进入安装包。 |
 | `desktop/scripts/resolve-playwright-candidates.mjs` | dev-only | 定时/手动兼容性 CI 解析候选 npm 版本；不进入用户安装包，也不接收产品用户输入。 |
+| `desktop/scripts/benchmark-session-history-electron.mjs` | dev-only | 本地/CI 基准脚本：以固定 argv 启动 Electron 与 esbuild，只读取受控基准数据；不进入安装包，也不接收产品用户输入。 |
 | `desktop/src/main/security-setup.ts` | installer-only | 仅 Windows 安装包：固定 runtime 绝对路径经编码 PowerShell `RunAs` 请求一次 UAC，用户动作不能提供 executable/argv。 |
 
 ## 门禁边界
