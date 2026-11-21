@@ -461,6 +461,12 @@
 <p><strong>验收</strong> Markdown 回归在基线实际调用系统打开一次。候选从同一协作看板点击后，在真实文件预览容器显示正文且不调用系统打开。桌面五组组合回归 101 项通过，TypeScript 与隔离生产构建通过。Windows Chrome 在隔离夹具中运行实际桌面看板及文件面板代码，点击产物并核对独立临时文件的正文。夹具替换了桌面 IPC 传输，未调用真实系统应用。本项只覆盖 Desktop 协作看板，不宣称通用任务看板或浏览器远程预览已完成。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/team-collaboration-board.ts</code>、<code>conversation-renderer.ts:215–250</code>、<code>inspector.ts</code>。ZCode <code>packages/ui/src/app-shell/WorkflowRunSidePane.tsx:317–335</code>、<code>packages/ui/src/v4/ConversationWorkflowCompletion.tsx:74–91</code>。</p>
 </article>
+<article id="desktop-slash-commands">
+<h3>桌面输入框的斜杠命令与技能</h3>
+<p>ZCode 将当前应用可执行的动作与协议命令、技能分开呈现，应用动作选中时直接执行。Ace 桌面的原补全只等待并过滤技能目录。桌面主聊天现在用原补全面板分别显示命令与技能；<code>/plan</code>、<code>/craft</code> 和 <code>/new</code> 使用现有工具栏或新建动作。完整命令可直接提交，不生成模型回合；技能仍只补全文本。候选在技能目录返回前可用，迟到目录和切换会话不会重新打开已关闭的菜单。</p>
+<p><strong>验收</strong> 旧版在技能目录等待时没有 <code>/plan</code> 候选。候选通过桌面定向 123 项、TypeScript 和隔离生产构建。Windows Chrome 加载实际构建桌面渲染器及测试桥接，验证命令和技能分组、键盘进入 Plan、Escape 关闭后直接提交 <code>/craft</code>、点击 <code>/new</code> 创建不同草稿。桥接捕获对应会话的 Plan/Craft 控制帧，没有聊天请求；选中技能只补全文本。此组未使用真实 Gateway 或模型。</p>
+<p class="evidence">Ace <code>desktop/src/ui/app.ts</code>、<code>features/composer-mention.ts</code>、<code>conversation-panel.ts</code>。ZCode <code>packages/ui/src/v4/SessionPane.tsx:2856–2865</code>、<code>packages/ui/src/SlashCommandPlugin.tsx:283–305</code>。</p>
+</article>
 <article id="renderer-heartbeat-probe">
 <h3>D7h · 丢失定时心跳时确认当前渲染器仍能应答</h3>
 <p>ZCode 主要用 Chromium 的原生无响应和恢复事件记录冻结，并独立处理浏览网页的来宾进程。Ace 继续处理原生事件，并在补充的前台定时心跳路径上增加一次即时应答确认。超过 16 秒后向当前可信主文档发探测，最多等待一个检查周期（当前 4 秒）。原定时心跳或探测应答都会续上本代计时。</p>
