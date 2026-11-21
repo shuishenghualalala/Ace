@@ -512,6 +512,19 @@
 <p><strong>安全运行时预构建清单 · <code>651c6322</code></strong> 原工作流未把已检出的 Rust 源码根目录传给打包工具，生成的发布清单缺少源码摘要及文件数。修复后使用本地离线构建的 Windows Release helper，执行同一 staging、校验、归档和解包流程。前后归档内二进制逐字节一致，修复后清单记录 36 个输入及与 Git 对象相同的摘要，24 项定向回归通过。现有 Apple Silicon Mach-O 自身摘要匹配原清单，源码证明仍需原生重建。另在本轮 Debian 普通用户用原发行包的 <code>bwrap</code> 实际尝试创建用户命名空间，内核仍拒绝，未调整宿主安全参数。</p>
 <p class="evidence">Ace <code>.github/workflows/ci.yml:28</code>，<code>.github/workflows/nightly-desktop.yml:49</code>、<code>:78</code>、<code>:110</code>，<code>desktop/electron-builder.yml</code>。Ace 发布脚本 <code>deb-package/pack_exe.ps1:357</code>、<code>deb-package/pack_mac.sh:344</code>。ZCode <code>packages/desktop/test/e2e/smoke.test.ts:12</code>，<code>packages/desktop/package.json:28</code>，<code>apps/zcode-cli/packages/adapters/tests/migration-crash-recovery.test.ts:10</code>。</p>
 </article>
+<article id="platform-runtime-matrix">
+<h3>Windows、macOS 与 Linux 的终端、沙箱与发行</h3>
+<p>交互式终端、模型发起的命令和操作系统沙箱不是同一个入口。以下为 Ace、ZCode <code>3c5b2276</code> 与 Codex <code>014489466a</code> 的本地源码对照；发行配置不等于本轮安装实测。</p>
+<div class="table"><table>
+<thead><tr><th scope="col">平台</th><th scope="col">Ace</th><th scope="col">ZCode</th><th scope="col">Codex</th></tr></thead>
+<tbody>
+<tr><th scope="row">Windows</th><td>模型终端按绝对路径优先用 PowerShell 7，否则用系统 5.1，显式设置 UTF-8；走管道。受管命令由沙箱账号、受限令牌、ACL 和 Job Object 执行，离线及受管联网使用 WFP。x64 Inno 安装和首次可见打包窗口负责准备；失败后不重复自动提权。</td><td>手动终端使用 node-pty；随包 ConPTY DLL 加载失败时回退系统 ConPTY。模型 Bash 是独立的 Git Bash/可选 CMD 宿主进程路径，停止用 <code>taskkill</code>，不是前述原生文件/网络沙箱。桌面使用 NSIS。</td><td>原生 MSVC x64/arm64 CLI，支持 ConPTY；按配置选择受限令牌、提权准备或 MXC。Windows 发布包含 setup、service 和 command runner。</td></tr>
+<tr><th scope="row">macOS</th><td>受管命令用系统 Seatbelt 和进程组，无 Windows 账号准备；x64/arm64 DMG 内嵌 Python Gateway 和 Rust helper。当前脚本采用 ad hoc 签名，重算 helper 清单，非 Developer ID 公证分发。</td><td>手动终端检查并修复 node-pty <code>spawn-helper</code> 执行权限；模型 Bash 用 POSIX 宿主 shell。桌面构建配置含 DMG/zip。</td><td>Rust CLI 用 Seatbelt；原生 x64/arm64 发行另有签名与公证流程。</td></tr>
+<tr><th scope="row">Linux</th><td>受管命令要求 bwrap 及 seccomp 内层成功就绪，拒绝 WSL1。UOS/Kylin amd64 deb 内附 bwrap 和来源信息。</td><td>手动终端使用目标平台原生 node-pty；模型执行以 POSIX shell、进程组和后代进程收尾。桌面构建配置含 AppImage/deb/rpm/pacman。</td><td>原生 musl x64/arm64 发行构建并校验 bwrap；受管 Linux 进程走 bwrap + seccomp，只有显式选择时才走旧 Landlock 路径。</td></tr>
+</tbody></table></div>
+<p>优先补 Ace 的 Windows 标准账号隔离实测（首次准备、失效账号修复、多配置交替），再补 macOS 已签名包及 Linux 普通用户的隔离与重启验收。ZCode 的终端可用性适配是独立事项，不能用宿主命令执行代替 Ace 受管路径。</p>
+<p class="evidence">Ace <code>crew/security/launch.py:624–652</code>、<code>security-runtime/src/{windows,macos,linux}/mod.rs</code>、<code>.github/workflows/release-desktop.yml:75–235</code>、<code>deb-package/pack_mac.sh:328–349</code>。ZCode <code>packages/services/src/terminal/terminalService.ts:99–146、234–307</code>、<code>apps/zcode-cli/packages/adapters/src/exec/node-execution-adapter-process.ts:124–199</code>、<code>packages/desktop/electron-builder.config.js:817–904</code>。Codex <code>codex-rs/core/src/config/windows_sandbox_config.rs:85–119</code>、<code>codex-rs/sandboxing/src/manager.rs:437–539</code>、<code>codex-rs/linux-sandbox/src/linux_run_main.rs:263–328</code>、<code>codex-cli/bin/codex.js:16–73</code>。</p>
+</article>
 </section>
 
 <section id="performance">
