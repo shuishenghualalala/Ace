@@ -164,7 +164,7 @@ cd web &amp;&amp; npm run typecheck</code></pre>
   </ul>
 
   <h3>4.1 无密钥回放（组装态）</h3>
-  <p><code>tests/e2e/replay_server.py</code> 用录制的 JSONL 响应替代模型 HTTP 边界；应用仍走真实 <code>build_app</code>、Provider、工具、SQLite 和会话入口，不需要 API Key。当前样例覆盖并行 <code>file_read</code> 的部分失败、<code>file_read</code> → <code>file_write</code> 的写入流程、<code>tool_search</code> → <code>cron_create</code> 的持久化任务、HTTP MCP server 上的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上一次 <code>mcp_update</code> 审批与配置写入；响应耗尽时服务器返回失败，不会静默重复最后一条。fixture 从真实 trace 提取后必须人工审查是否含本地路径、用户数据或密钥。</p>
+  <p><code>tests/e2e/replay_server.py</code> 用录制的 JSONL 响应替代模型 HTTP 边界；应用仍走真实 <code>build_app</code>、Provider、工具、SQLite 和会话入口，不需要 API Key。当前样例覆盖并行 <code>file_read</code> 的部分失败、<code>file_read</code> → <code>file_write</code> 的写入流程、<code>tool_search</code> → <code>cron_create</code> 的持久化任务、HTTP MCP server 上的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上 <code>mcp_update</code> 与 <code>mcp_remove</code> 各一次审批；响应耗尽时服务器返回失败，不会静默重复最后一条。fixture 从真实 trace 提取后必须人工审查是否含本地路径、用户数据或密钥。</p>
   <pre><code># 从一次真实 E2E 的 llm.jsonl 提取回放响应
 python scripts/record_replay_fixture.py \
   --trace build/e2e/&lt;run&gt;/&lt;category&gt;/&lt;case&gt;/llm.jsonl \
@@ -217,7 +217,7 @@ python scripts/record_replay_fixture.py --trace ... --output ... --force</code><
   <h2>7. 当前缺口与后续方向</h2>
   <p>下面这些是尚未落地的能力，不应在 PR 中声称已有；需要时先单独设计，不要用临时脚本冒充：</p>
   <ul>
-    <li><strong>回放场景覆盖。</strong>已有五个无密钥组装态样例；更多模型可见流程、录制工具、fixture 审查流程和 CI 矩阵仍需补齐，不能因为样例增加就宣称所有模型行为都已覆盖。</li>
+    <li><strong>回放场景覆盖。</strong>已有六个无密钥组装态样例；更多模型可见流程、录制工具、fixture 审查流程和 CI 矩阵仍需补齐，不能因为样例增加就宣称所有模型行为都已覆盖。</li>
     <li><strong>覆盖率门禁。</strong>当前只有 <code>test:coverage</code> 命令，没有按文件强制阈值；覆盖率只应作为“死代码/漏测”的删除检测器，不能替代行为断言。</li>
     <li><strong>受影响测试选择。</strong>前端可用 Vitest 的 related/changed 机制；后端需要稳定的测试映射或依赖分析后再接入 pre-push，避免“猜一个子集”造成假绿。</li>
     <li><strong>桌面视觉与打包 E2E 的 CI 化。</strong>目前视觉测试和部分真实安装包场景仍以本地/专项为主，nightly 只构建产物。</li>
