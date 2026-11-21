@@ -129,7 +129,7 @@ async def finish_foreground(app, *, plan: bool = False):
 async def test_built_registry_offers_install_and_contextless_direct_call_does_not_write(gateway):
     original = gateway.config_file.read_bytes()
     assert {
-        TOOL, "mcp_status", "mcp_remove", "mcp_reload",
+        TOOL, "mcp_status", "mcp_remove", "mcp_reload", "mcp_update",
     } <= set(gateway.crew.registry.names()), "the built registry must expose MCP management"
     result = await gateway.crew.registry.execute(ToolCall("direct", TOOL, ARGS))
     assert result.is_error
@@ -299,7 +299,7 @@ async def test_gateway_plan_never_exposes_install_or_writes_on_guessed_call(gate
         assert not is_permission_card(final), frames
         assert final["kind"] == "final", frames
     assert gateway.provider.offered
-    management = {TOOL, "mcp_status", "mcp_remove", "mcp_reload"}
+    management = {TOOL, "mcp_status", "mcp_remove", "mcp_reload", "mcp_update"}
     assert all(not (management & names) for names in gateway.provider.offered)
     assert not config_servers(gateway)
     assert gateway.config_file.read_bytes() == original
