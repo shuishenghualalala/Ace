@@ -24,7 +24,7 @@ class GoalChange(BaseModel):
 def _response(snapshot: GoalSnapshot | None, *, status: int = 200) -> JSONResponse:
     if snapshot is None:
         return JSONResponse({"error": "当前账号下没有可设置目标的会话"}, status_code=404)
-    body = asdict(snapshot)
+    body = {**asdict(snapshot), "supports_advance": True}
     if snapshot.run is None:
         body.pop("run")
     return JSONResponse(body, status_code=status)

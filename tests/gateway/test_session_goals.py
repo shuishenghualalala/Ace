@@ -76,6 +76,7 @@ def test_goal_round_trip_controls_prompt_and_survives_restart(goal_gateway):
         initial = client.get(path)
         assert initial.status_code == 200
         assert initial.json()["goal"] is None
+        assert initial.json()["supports_advance"] is True
         applied = _set(client, path, initial.json()["version"], objective)
         assert applied.status_code == 200
         assert applied.json()["goal"] == {"objective": objective, "status": "active"}

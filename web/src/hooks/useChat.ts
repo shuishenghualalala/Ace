@@ -678,6 +678,7 @@ export function useChat(
   const gatewaySequences = useRef(new GatewaySequenceTracker());
   const recoveries = useRef(new Map<string, SessionRecovery>());
   const historyLoads = useRef(new Map<string, symbol>());
+  const goalHistoryHandoffs = useRef(new Map<string, symbol>());
   const snapshotBooks = useRef(new WeakSet<Bookkeeping>());
   const transportOpen = useRef(false);
   const activeRequests = useRef(new Map<string, string>());
@@ -1055,13 +1056,34 @@ export function useChat(
         }
       }
       const identity = activeRequests.current.get(sid);
-      if (chunkRequestId && (terminal || ["delta", "thinking", "tool"].includes(c.kind))) {
+      const goalStep = /^goal_[a-f0-9]{32}$/.test(chunkRequestId);
+      const goalOutput = goalStep && showsTurnOutput(c);
+      if (chunkRequestId && (terminal || goalOutput || ["delta", "thinking", "tool"].includes(c.kind))) {
         if (identity && identity !== chunkRequestId) return;
         if (!identity && notice) return;
         if (!identity && !terminal) activeRequests.current.set(sid, chunkRequestId);
       }
       if (!terminal && !unconfirmed && isSuppressedRequest(suppressedRequestKey(sid, chunkRequestId), suppressedRequestIdsRef.current)) return;
+      if (goalOutput && !terminal && !busyRef.current[sid]) {
+        setBusy(sid, true);
+      }
       const executingPlan = sockRef.current?.plans.observeExecution(sid, chunkRequestId, terminal);
+      const advanceQueueAfterTerminal = () => {
+        if (goalStep) {
+          // Only durable history supplies the server-owned user row. A late read
+          // must not overwrite a newer turn or drop the visible reply on failure.
+          const handoff = Symbol();
+          goalHistoryHandoffs.current.set(sid, handoff);
+          void loadHistory(sid, undefined, { keepVisibleOnFailure: true }).then(() => {
+            if (goalHistoryHandoffs.current.get(sid) !== handoff) return;
+            goalHistoryHandoffs.current.delete(sid);
+            if (!activeRequests.current.has(sid) && !busyRef.current[sid]) consumePendingRef.current(sid);
+          });
+        } else {
+          if (executingPlan) void loadHistory(sid);
+          consumePendingRef.current(sid);
+        }
+      };
       if (executingPlan && !terminal && !busyRef.current[sid]) {
         bookRef.current.delete(sid);
         setBusy(sid, true);
@@ -1135,7 +1157,7 @@ export function useChat(
       }
 
       if (applyTurnOutput(c, book, {
-        append: (role, text, extra) => append(sid, role, text, extra),
+        append: (role, text, extra) => append(sid, role, text, { requestId: chunkRequestId || undefined, ...extra }),
         patch: (id, update) => patch(sid, id, update),
         setTodos: (todos) => setTodos(sid, todos),
       }, Date.now())) {
@@ -1232,7 +1254,7 @@ export function useChat(
             ...timing,
           }));
         } else if (!book.hadTeamInternal) {
-          assistantId = append(sid, "assistant", text, timing);
+          assistantId = append(sid, "assistant", text, { ...timing, requestId: chunkRequestId || undefined });
         }
         if (assistantId && book.toolMap.size > 0) {
           patch(sid, assistantId, {
@@ -1248,18 +1270,15 @@ export function useChat(
         if (outcome) append(sid, outcome.role, outcome.text, outcome);
         // 轮次结束才重置聚合（忙时连发时第一轮的尾部 delta 不会误起新消息）
         finishLocalTurn(sid, outcome?.turnOutcome === "failed" ? "error" : "idle");
-        if (executingPlan) void loadHistory(sid);
         afterFinalRef.current();
-        // 自动消费前端本地队列
-        consumePendingRef.current(sid);
+        // Goal-owned responses reconcile server-persisted history before the next local send.
+        advanceQueueAfterTerminal();
       } else if (c.kind === "error") {
         const outcome = turnOutcomeNotice(c.body.outcome, chunkRequestId, c.body.message);
         if (outcome) append(sid, outcome.role, outcome.text, outcome);
         else append(sid, "error", c.body.message ?? "未知错误", localTurnTiming(sid));
         finishLocalTurn(sid, outcome?.turnOutcome === "partial" ? "idle" : "error");
-        if (executingPlan) void loadHistory(sid);
-        // 自动消费前端本地队列（stop 导致的 error 会在 stop 回调中清空队列）
-        consumePendingRef.current(sid);
+        advanceQueueAfterTerminal();
       } else if (c.kind === "plan_review") {
         applyPlanReview(c, sid);
       } else if (c.kind === "followup_question") {
@@ -1287,6 +1306,7 @@ export function useChat(
       for (const recovery of recoveries.current.values()) clearTimeout(recovery.timer);
       recoveries.current.clear();
       historyLoads.current.clear();
+      goalHistoryHandoffs.current.clear();
       sock.dispose();
     };
   }, []); // 空依赖，只在挂载时创建一次 WS
@@ -1300,7 +1320,7 @@ export function useChat(
       sendAttachments: Attachment[] = [],
       options: SendOptions = {},
     ) => {
-      const wasBusy = Boolean(busyRef.current[sessionId] || recoveries.current.has(sessionId));
+      const wasBusy = Boolean(busyRef.current[sessionId] || recoveries.current.has(sessionId) || goalHistoryHandoffs.current.has(sessionId));
       const planActive = Boolean(planMapRef.current[sessionId]?.active);
       if (wasBusy) {
         // 该会话已有一轮在跑 → 本条进入前端本地队列
@@ -1584,7 +1604,9 @@ export function useChat(
     });
   }, []);
 
-  const loadHistory = useCallback(async (sessionId: string, resume?: RecoveryHistoryLoad) => {
+  const loadHistory = useCallback(async (
+    sessionId: string, resume?: RecoveryHistoryLoad, options?: { keepVisibleOnFailure?: boolean },
+  ) => {
     const book = bookRef.current.get(sessionId);
     if (!resume && (recoveries.current.has(sessionId) || (book && snapshotBooks.current.has(book)))) return;
     const load = Symbol();
@@ -1607,7 +1629,7 @@ export function useChat(
 
     subscribedSessionsRef.current.add(sessionId);
     if (!resume) setQueue(sessionId, "");
-    if (!resume && !isLoaded && !wasRunning) {
+    if (!resume && !isLoaded && !wasRunning && !options?.keepVisibleOnFailure) {
       setMessagesMap((prev) => ({
         ...prev,
         [sessionId]: [{ id: newId(), role: "assistant" as MsgRole, text: HISTORY_LOADING_TEXT }],
@@ -1725,7 +1747,7 @@ export function useChat(
         syncSubscriptions(Array.from(subscribedSessionsRef.current));
       }
     } catch {
-      if (!isCurrent() || resume) return;
+      if (!isCurrent() || resume || options?.keepVisibleOnFailure) return;
       loadedSessionsRef.current.add(sessionId);
       if (!wasRunning) {
         setBusy(sessionId, false);
@@ -1803,6 +1825,7 @@ export function useChat(
     clearTimeout(recoveries.current.get(sessionId)?.timer);
     recoveries.current.delete(sessionId);
     historyLoads.current.delete(sessionId);
+    goalHistoryHandoffs.current.delete(sessionId);
   }, []);
 
   const plan = planMap[currentSessionId] ?? { active: false, review: null };

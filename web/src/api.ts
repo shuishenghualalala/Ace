@@ -39,7 +39,7 @@ export class ApiError extends Error {
     message: string,
     public status: number,
     public url: string,
-    public body?: { ok?: boolean; error?: string; error_code?: string; dependency?: string; install_command?: string; detail?: string },
+    public body?: { ok?: boolean; error?: string; error_code?: string; code?: string; dependency?: string; install_command?: string; detail?: string },
   ) {
     super(message);
     this.name = "ApiError";
@@ -227,10 +227,13 @@ const jsonBody = (body: object): RequestInit => ({
 const withKb = (url: string, kbId?: string) =>
   kbId ? `${url}${url.includes("?") ? "&" : "?"}kb_id=${encodeURIComponent(kbId)}` : url;
 
-export type SessionGoalAction = "set" | "pause" | "resume" | "complete";
+export type SessionGoalAction = "set" | "pause" | "resume" | "complete" | "advance";
+export interface SessionGoalRun { request_id: string; state: string; code: string }
 export interface SessionGoalSnapshot {
   version: string;
   goal: { objective: string; status: "active" | "paused" | "completed" } | null;
+  supports_advance?: boolean;
+  run?: SessionGoalRun;
 }
 
 const sessionGoalPath = (id: string) => `/api/session/${encodeURIComponent(id)}/goal`;

@@ -326,6 +326,13 @@
 <p><strong>验收</strong> Windows Chrome 使用生产 Web 与隔离 Gateway，实际输入并保存目标。独立请求改变版本后，旧按钮收到冲突并读回已暂停状态，没有自动重试；随后恢复、标记完成及重新打开均正确。合成模型只在活动状态的普通请求收到目标，持久聊天历史没有命令或目标正文。Web 308 项、TypeScript 和生产构建通过。此阶段不包含桌面入口或目标自动推进。</p>
 <p class="evidence">Ace <code>web/src/features/SessionGoal.tsx</code>、<code>web/src/components/ComposerSlashMenu.tsx</code>。ZCode <code>packages/ui/src/v4/slashCommands.ts:43–74</code>、<code>packages/ui/src/v4/SessionPane.tsx:3325–3388</code>。</p>
 </article>
+<article id="web-goal-step-controls">
+<h3>Web Goal 单轮推进、定向暂停和独立聊天回合</h3>
+<p>ZCode 的 Goal 状态区独立呈现目标和执行/验收记录，暂停与恢复各有明确操作。Ace Web 只在网关声明可推进或返回过实际运行记录时开放「推进一轮」。单轮状态由有上限的只读查询更新；关闭面板不改变运行，重新打开按原请求恢复观察。提交不明时先读取，不重发。旧网关保留手动目标，暂停不取消普通回复。</p>
+<p>基线从 HTTP 启动的 Goal 没有让聊天区切换当前请求，可能把输出接到上一个助手回合，并让新的普通发送替换正在执行的 Goal。候选按实际流中的服务端请求 ID 绑定本轮。不同已知请求分别渲染，终态读取历史补齐服务器保存的用户行，再继续本地队列，读取失败也不擦掉已显示回复。</p>
+<p><strong>验收</strong> Web 全量 318 项、Goal Gateway 12 项通过，TypeScript 和生产构建通过。Windows Chrome 通过生产 Web 操作真实 Gateway：先启动一轮，在同一会话提交普通输入只进入本地队列，Goal 结束后按顺序补齐历史并发送一次；第二轮关闭再打开仍是同一个 ID，暂停后网关确认该轮停止。恢复目标没有第三次推进。模拟断线与旧会话迟到读取不重发、也不覆盖新状态。尚无自动续跑或独立验收。</p>
+<p class="evidence">Ace <code>web/src/features/SessionGoal.tsx</code>、<code>web/src/hooks/useChat.ts</code>、<code>web/src/lib/chatTurns.ts</code>、<code>crew/gateway/routers/session_goals.py</code>。ZCode <code>packages/ui/src/v4/ConversationStatusPanel.tsx:463–557</code>。</p>
+</article>
 <article id="desktop-session-goal">
 <h3>桌面 /goal 管理持久目标</h3>
 <p>ZCode 先解析完整命令和上下文，再把不带附件的目标交给专用命令；状态区通过明确的暂停和恢复操作通报结果。Ace 桌面复用现有目标 API。主聊天的 <code>/goal</code> 打开面板，参数保留内部空格、换行，保存后仍不是聊天消息。未接收或遇到版本冲突时保留原草稿；收到不确定的写入结果后先读取，不自动重发。面板按主会话、账号和网关代际隔离旧响应。</p>

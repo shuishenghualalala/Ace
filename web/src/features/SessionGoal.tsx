@@ -1,46 +1,134 @@
-import { useEffect, useRef, useState } from "react";
-import { api, ApiError, type SessionGoalAction, type SessionGoalSnapshot } from "../api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, ApiError, type SessionGoalAction, type SessionGoalRun, type SessionGoalSnapshot } from "../api";
 
-const goalStatus = { active: "进行中", paused: "已暂停", completed: "已完成" };
+const goalStatus = { active: "已启用", paused: "已暂停", completed: "已完成" };
+const runLabels: Readonly<Record<string, string>> = {
+  accepted: "本轮已接收",
+  running: "正在推进本轮",
+  stopping: "正在停止本轮",
+  finished: "本轮已结束",
+  stopped: "本轮已停止",
+  interrupted: "本轮已中断",
+  failed: "本轮推进失败",
+};
+const runDetails: Readonly<Record<string, string>> = {
+  gateway_restarted: "网关重启后未重放本轮。",
+  goal_deadline: "本轮达到运行时限。",
+  goal_session_busy: "已有普通对话或后台任务。",
+  goal_plan_active: "会话正在使用计划模式。",
+  paused_before_dispatch: "目标在执行前已暂停。",
+  goal_identity_lost: "原会话或网关已变化。",
+};
+const POLL_MS = 2_000;
+const POLL_LIMIT = 90;
+
+const isLive = (run?: SessionGoalRun) => run?.state === "accepted" || run?.state === "running" || run?.state === "stopping";
+const isUnsettled = (run?: SessionGoalRun) => run != null && !["finished", "stopped", "interrupted", "failed"].includes(run.state);
+const knownText = (values: Readonly<Record<string, string>>, key: string) => Object.prototype.hasOwnProperty.call(values, key) ? values[key] : "";
 
 function goalError(error: unknown): string {
   if (error instanceof ApiError) return error.body?.error || `网关返回 ${error.status}`;
   return "请检查网关连接与版本";
 }
 
-export function SessionGoalPanel({ sessionId, initialObjective, onClose }: {
-  sessionId: string;
-  initialObjective: string;
-  onClose: () => void;
-}) {
+type Props = { sessionId: string; initialObjective: string; onClose: () => void };
+
+export function SessionGoalPanel(props: Props) {
+  return <ScopedGoalPanel key={props.sessionId} {...props} />;
+}
+
+function ScopedGoalPanel({ sessionId, initialObjective, onClose }: Props) {
   const [snapshot, setSnapshot] = useState<SessionGoalSnapshot | null>(null);
   const [draft, setDraft] = useState(initialObjective);
   const [editing, setEditing] = useState(Boolean(initialObjective));
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
-  const request = useRef<AbortController | null>(null);
-  const updating = useRef(false);
+  const [needsRefresh, setNeedsRefresh] = useState(false);
+  const scope = useRef<AbortController | null>(null);
+  const observer = useRef<AbortController | null>(null);
+  const locked = useRef(true);
+  const run = snapshot?.run;
+  const observedId = isLive(run) ? run?.request_id : undefined;
+
+  const read = useCallback(async (signal: AbortSignal, notice = "") => {
+    try {
+      const latest = await api.sessionGoal(sessionId, signal);
+      if (!signal.aborted) {
+        setSnapshot(latest);
+        setNeedsRefresh(false);
+        setError(notice);
+      }
+    } catch (err) {
+      if (!signal.aborted) {
+        setNeedsRefresh(true);
+        setError(`${notice ? `${notice} ` : ""}无法读取目标：${goalError(err)}`);
+      }
+    }
+  }, [sessionId]);
+
+  const unlock = (signal: AbortSignal) => {
+    if (signal.aborted) return;
+    locked.current = false;
+    setBusy(false);
+  };
 
   useEffect(() => {
     const controller = new AbortController();
-    request.current = controller;
-    const { signal } = controller;
-    void api.sessionGoal(sessionId, signal).then((state) => {
-      if (!signal.aborted) setSnapshot(state);
-    }).catch((err: unknown) => {
-      if (!signal.aborted) setError(`无法读取目标：${goalError(err)}`);
-    }).finally(() => {
-      if (!signal.aborted) setBusy(false);
-    });
+    scope.current = controller;
+    locked.current = true;
+    setBusy(true);
+    void read(controller.signal).finally(() => unlock(controller.signal));
     return () => controller.abort();
-  }, [sessionId]);
+  }, [read]);
 
-  const apply = async (action: SessionGoalAction) => {
-    const signal = request.current?.signal;
-    if (!snapshot || !signal || signal.aborted || updating.current) return;
-    updating.current = true;
+  useEffect(() => {
+    if (!observedId || busy || needsRefresh) return;
+    const controller = new AbortController();
+    observer.current = controller;
+    const { signal } = controller;
+    let attempts = 0;
+    let timer: number;
+    const tick = async () => {
+      if (signal.aborted) return;
+      try {
+        const latest = await api.sessionGoal(sessionId, signal);
+        if (signal.aborted) return;
+        setSnapshot(latest);
+        if (!isLive(latest.run)) return;
+        if (++attempts < POLL_LIMIT) timer = window.setTimeout(() => void tick(), POLL_MS);
+        else {
+          setNeedsRefresh(true);
+          setError("尚未确认本轮结束，请重新读取目标。");
+        }
+      } catch (err) {
+        if (!signal.aborted) {
+          setNeedsRefresh(true);
+          setError(`无法确认本轮状态：${goalError(err)}。请重新读取目标。`);
+        }
+      }
+    };
+    timer = window.setTimeout(() => void tick(), POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [observedId, busy, needsRefresh, sessionId]);
+
+  const startRequest = () => {
+    const signal = scope.current?.signal;
+    if (!signal || signal.aborted || locked.current) return;
+    // Fence a read already in flight before a versioned write can resolve.
+    observer.current?.abort();
+    locked.current = true;
     setBusy(true);
     setError("");
+    return signal;
+  };
+
+  const apply = async (action: SessionGoalAction) => {
+    if (!snapshot || needsRefresh || (isUnsettled(run) && action !== "pause")) return;
+    const signal = startRequest();
+    if (!signal) return;
     try {
       const latest = await api.changeSessionGoal(sessionId, {
         action, version: snapshot.version, ...(action === "set" ? { objective: draft.trim() } : {}),
@@ -52,50 +140,72 @@ export function SessionGoalPanel({ sessionId, initialObjective, onClose }: {
     } catch (err) {
       if (signal.aborted) return;
       if (err instanceof ApiError && err.status === 409) {
-        setError("目标已在其他窗口更新。请核对当前状态后再提交。");
-        setSnapshot(null);
-        const latest = await api.sessionGoal(sessionId, signal).catch(() => null);
-        if (!signal.aborted) setSnapshot(latest);
+        const reason = err.body?.code;
+        const notice = !reason || reason === "goal_version_conflict"
+          ? "目标或会话已更新，请核对当前状态后再提交。"
+          : `未能更新目标：${goalError(err)}`;
+        await read(signal, notice);
       } else {
-        setError(`未能更新目标：${goalError(err)}`);
+        setNeedsRefresh(true);
+        setError(`无法确认目标更新：${goalError(err)}。请重新读取目标，不会自动重试。`);
       }
     } finally {
-      updating.current = false;
-      if (!signal.aborted) setBusy(false);
+      unlock(signal);
     }
   };
 
   const goal = snapshot?.goal;
   const showEditor = editing || snapshot?.goal === null;
+  const disabled = busy || needsRefresh;
+  const stepBusy = isUnsettled(run);
+  const canAdvance = snapshot?.supports_advance ?? Boolean(run);
+  const tooLong = Array.from(draft.trim()).length > 4000;
   return (
     <section className="session-goal" aria-label="会话目标" aria-busy={busy}>
       <div className="session-goal__header">
         <strong>会话目标{goal ? ` · ${goalStatus[goal.status]}` : ""}</strong>
-        <button type="button" className="toolbar-btn" onClick={onClose}>关闭目标面板</button>
+        <div className="session-goal__actions">
+          <button type="button" className="toolbar-btn" disabled={busy} onClick={() => {
+            const signal = startRequest();
+            if (signal) void read(signal).finally(() => unlock(signal));
+          }}>重新读取目标</button>
+          <button type="button" className="toolbar-btn" onClick={onClose}>关闭目标面板</button>
+        </div>
       </div>
-      <small>目标随相关消息提供给模型，不自动提交或继续运行。</small>
+      <small>{canAdvance ? "每次只推进一轮，不调用工具。本轮结束不代表目标达成，关闭面板不会停止推进。"
+        : "目标随相关消息提供给模型，保存和恢复不自动提交回合。"}</small>
       {busy && !snapshot && <p role="status">正在读取目标…</p>}
       {error && <p role="alert">{error}</p>}
-      {goal && !showEditor && <p className="session-goal__objective">{goal.objective}</p>}
+      {run && <p role="status" data-goal-run={run.request_id}>
+        {needsRefresh && "上次确认："}{knownText(runLabels, run.state) || "本轮状态待确认"}
+        {knownText(runDetails, run.code) && ` · ${knownText(runDetails, run.code)}`}
+      </p>}
+      {goal && <p className="session-goal__objective">{goal.objective}</p>}
       {showEditor && (
-        <form onSubmit={(event) => { event.preventDefault(); if (draft.trim()) void apply("set"); }}>
-          <textarea aria-label="目标内容" value={draft} onChange={(event) => setDraft(event.target.value)}
-            maxLength={4000} rows={2} placeholder="描述想达成的结果" />
-          <button type="submit" className="toolbar-btn" disabled={busy || !snapshot || !draft.trim()}>保存目标</button>
+        <form onSubmit={(event) => { event.preventDefault(); if (draft.trim() && !tooLong) void apply("set"); }}>
+          <textarea aria-label="目标内容" aria-invalid={tooLong} value={draft} readOnly={busy}
+            onChange={(event) => setDraft(event.target.value)} maxLength={8000} rows={2} placeholder="描述想达成的结果" />
+          {tooLong && <small role="alert">目标最多 4000 个字符。</small>}
+          <div className="session-goal__actions">
+            <button type="submit" className="toolbar-btn" disabled={disabled || stepBusy || !snapshot || !draft.trim() || tooLong}>保存目标</button>
+            {goal && <button type="button" className="toolbar-btn" disabled={busy} onClick={() => setEditing(false)}>取消编辑</button>}
+          </div>
         </form>
       )}
-      {goal && !showEditor && (
+      {goal && (
         <div className="session-goal__actions">
-          {goal.status === "active" && <button type="button" className="toolbar-btn" disabled={busy}
+          {goal.status === "active" && canAdvance && <button type="button" className="toolbar-btn" disabled={disabled || stepBusy || showEditor}
+            onClick={() => void apply("advance")}>推进一轮</button>}
+          {goal.status === "active" && (!showEditor || stepBusy) && <button type="button" className="toolbar-btn" disabled={disabled}
             onClick={() => void apply("pause")}>暂停目标</button>}
-          {goal.status === "paused" && <button type="button" className="toolbar-btn" disabled={busy}
+          {goal.status === "paused" && !showEditor && <button type="button" className="toolbar-btn" disabled={disabled || stepBusy}
             onClick={() => void apply("resume")}>恢复目标</button>}
-          {goal.status !== "completed" && <button type="button" className="toolbar-btn" disabled={busy}
+          {goal.status !== "completed" && !showEditor && <button type="button" className="toolbar-btn" disabled={disabled || stepBusy}
             onClick={() => void apply("complete")}>标记目标完成</button>}
-          <button type="button" className="toolbar-btn" disabled={busy} onClick={() => {
+          {!showEditor && <button type="button" className="toolbar-btn" disabled={disabled || stepBusy} onClick={() => {
             setDraft(goal.objective);
             setEditing(true);
-          }}>设置新目标</button>
+          }}>设置新目标</button>}
         </div>
       )}
     </section>

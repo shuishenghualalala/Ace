@@ -90,6 +90,49 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
+describe("Web Goal turn ownership", () => {
+  it("queues ordinary text behind a streamed Goal and reconciles both turns before sending it", async () => {
+    const goalId = "goal_0123456789abcdef0123456789abcdef";
+    vi.mocked(api.sessionStatus).mockResolvedValueOnce(status("idle"));
+    vi.mocked(api.history).mockResolvedValueOnce([
+      { role: "user", content: "Earlier ordinary request", request_id: "normal" },
+      { role: "assistant", content: "Earlier result", request_id: "normal" },
+      { role: "user", content: "推进已保存的会话目标。", request_id: goalId },
+      { role: "assistant", content: "Goal result", request_id: goalId },
+    ]);
+    const socket = TestWebSocket.instances[0];
+    const goalFrame = (kind: Chunk["kind"], seq: number, body: Chunk["body"]) =>
+      socket.receive({ ...frame(kind, seq, body), request_id: goalId });
+    await act(async () => goalFrame("status", 1, { message: "Goal runtime admitted" }));
+    expect(chat.busy).toBe(true);
+    await act(async () => chat.send("Leave this ordinary message queued", sid, "agent", workspace));
+    expect(chat.pendingQueue.map((item) => item.query)).toEqual(["Leave this ordinary message queued"]);
+    expect(socket.sent.some((payload) => payload.query === "Leave this ordinary message queued")).toBe(false);
+    await act(async () => goalFrame("delta", 2, { text: "Goal result" }));
+    expect(chat.messages.at(-1)).toMatchObject({ text: "Goal result", requestId: goalId });
+    await act(async () => goalFrame("final", 3, { text: "Goal result" }));
+    expect(api.history).toHaveBeenCalledWith(sid);
+    expect(chat.messages.map((message) => message.text)).toEqual([
+      "Earlier ordinary request", "Earlier result", "推进已保存的会话目标。", "Goal result", "Leave this ordinary message queued",
+    ]);
+    expect(socket.sent.filter((payload) => payload.query === "Leave this ordinary message queued")).toHaveLength(1);
+  });
+
+  it("leaves the already visible Goal reply intact if the canonical read fails", async () => {
+    const goalId = "goal_0123456789abcdef0123456789abcdef";
+    vi.mocked(api.sessionStatus).mockResolvedValueOnce(status("idle"));
+    vi.mocked(api.history).mockRejectedValueOnce(new Error("fixture temporarily unavailable"));
+    const socket = TestWebSocket.instances[0];
+    await act(async () => {
+      socket.receive({ ...frame("delta", 1, { text: "Visible goal result" }), request_id: goalId });
+      socket.receive({ ...frame("final", 2, { text: "Visible goal result" }), request_id: goalId });
+    });
+    expect(chat.busy).toBe(false);
+    expect(api.history).toHaveBeenCalledWith(sid);
+    expect(chat.messages).toMatchObject([{ text: "Visible goal result", requestId: goalId }]);
+  });
+});
+
 describe("Web Gateway recovery", () => {
   it("splits both tabs at the accepted question exactly once, even without a tool result", async () => {
     let peer!: ReturnType<typeof useChat>;
