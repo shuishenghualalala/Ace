@@ -35,6 +35,7 @@ interface Props {
   onEnterPlan?: () => void;
   onExitPlan?: () => void;
   onNewSession?: () => void;
+  onOpenSideChat?: () => void;
   /** 场景化推荐：预填文本（nonce 变化即注入）+ 场景 chip + 携带的细分玩法 id */
   prefillText?: string;
   prefillNonce?: number;
@@ -85,6 +86,7 @@ export default function Composer({
   onEnterPlan,
   onExitPlan,
   onNewSession,
+  onOpenSideChat,
   prefillText,
   prefillNonce,
   scenarioChip,
@@ -245,6 +247,8 @@ export default function Composer({
     "/plan": onEnterPlan && (() => { if (!planActive) onEnterPlan(); }),
     "/craft": onExitPlan && (() => { if (planActive) onExitPlan(); }),
     "/new": onNewSession,
+    "/side": onOpenSideChat,
+    "/btw": onOpenSideChat,
   } : {};
   const slashQuery = slashOpen && slashEligible ? composerSlashQuery(text) : null;
   const slashItems = slashQuery === null ? [] : composerSlashItems(slashQuery, slashActions, skills);

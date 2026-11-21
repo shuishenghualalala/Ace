@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from crew.agent.capabilities import canonicalize_capability_config, capability_profile_ids
 from crew.agent.external.runtime_profile import canonical_runtime_model_id, normalize_runtime_models
 from crew.agent.external.feature import EXTERNAL_AGENT_CATALOG_SERVICE_KEY
+from crew.channels.channel_sessions import is_channel_session_id
 from crew.core.errors import ToolError
 from crew.agent.loop.tool_result_display import (
     SUBAGENT_FULL_RESULT_TOOLS,
@@ -938,6 +939,33 @@ def create_sessions_router(crew, dispatcher) -> APIRouter:
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True, "session_id": new_id, "source_session_id": session_id})
+
+    @router.post("/api/session/{session_id}/side-chat")
+    def create_side_chat(request: Request, session_id: str, _payload: dict) -> JSONResponse:
+        """Create a separate built-in conversation from committed parent history."""
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            return JSONResponse({"ok": False, "error": "侧边聊天只接受 JSON 请求"}, status_code=415)
+        owner = _owner(request)
+        create = getattr(crew.session_store, "create_side_chat", None)
+        if not callable(create):
+            return JSONResponse({"ok": False, "error": "会话存储不支持侧边聊天"}, status_code=503)
+        if "::" in session_id or is_channel_session_id(session_id) or not _session_owned(session_id, owner):
+            return _not_found(session_id)
+        plan_manager = getattr(crew, "plan_manager", None)
+        if plan_manager is not None and plan_manager.is_active(session_id, owner_account_id=owner):
+            return JSONResponse({"ok": False, "error": "请先退出主会话的计划模式"}, status_code=409)
+        try:
+            child, workspace = create(
+                session_id, owner_account_id=owner,
+                default_executor=crew.config.agent_executor,
+            )
+        except SessionOwnershipError:
+            return _not_found(session_id)
+        except (SessionWriteConflict, ValueError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+        return JSONResponse({
+            "ok": True, "session_id": child, "source_session_id": session_id, "workspace_id": workspace,
+        })
 
     @router.get("/api/session/{session_id}/branches")
     def session_branches(request: Request, session_id: str) -> JSONResponse:

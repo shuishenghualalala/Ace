@@ -5,6 +5,8 @@ const COMMANDS = [
   { name: "/plan", detail: "进入计划模式" },
   { name: "/craft", detail: "回到普通对话" },
   { name: "/new", detail: "在当前工作空间新建对话" },
+  { name: "/side", detail: "打开侧边聊天" },
+  { name: "/btw", detail: "打开侧边聊天" },
 ] as const;
 
 type CommandName = (typeof COMMANDS)[number]["name"];

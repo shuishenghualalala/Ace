@@ -11,6 +11,7 @@ import {
 } from "./features/WikiFeature";
 import type { WikiPageContext } from "./features/WikiFeature";
 import { installAgentsPageContribution } from "./features/AgentsFeature";
+import { SideChatPane, useSideChat } from "./features/SideChat";
 import type { AgentsPageContext } from "./features/AgentsFeature";
 import {
   installKanbanFeatureHandlers,
@@ -240,6 +241,9 @@ export default function App() {
   }, [appFeatureEventRegistry]);
 
   const chat = useChat(currentSessionId, onAfterFinal, appFeatureEventRegistry);
+  const sideChat = useSideChat(view === "chat" ? currentSessionId : null, chat.loadHistory);
+  const canOpenSideChat = sessions.some(({ session_id }) => session_id === currentSessionId)
+    || chat.messages.some(({ role }) => role === "user");
   const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
   const currentTeamMembers = useMemo(() => teamMembersForBoard(currentExternalTeam), [currentExternalTeam]);
 
@@ -659,8 +663,8 @@ export default function App() {
 
   return (
     <div
-      className={"app" + (boardOpen ? " with-board" : "")}
-      style={boardOpen ? ({ "--board-width": `${boardWidth}px` } as CSSProperties) : undefined}
+      className={"app" + (sideChat.pane ? " with-side-chat" : boardOpen ? " with-board" : "")}
+      style={boardOpen && !sideChat.pane ? ({ "--board-width": `${boardWidth}px` } as CSSProperties) : undefined}
     >
       <Sidebar
         workspaces={workspaces}
@@ -714,7 +718,10 @@ export default function App() {
                 onToggleBoard={() => {
                   const next = !boardOpen;
                   setBoardOpen(next);
-                  if (next) refreshTasks();
+                  if (next) {
+                    sideChat.close();
+                    refreshTasks();
+                  }
                 }}
               />
             )}
@@ -737,6 +744,10 @@ export default function App() {
               onEnterPlan={() => chat.enterPlan(currentSessionId)}
               onExitPlan={() => chat.exitPlan(currentSessionId)}
               onNewSession={() => newSession(currentWorkspaceId)}
+              onOpenSideChat={canOpenSideChat ? () => {
+                setBoardOpen(false);
+                sideChat.open();
+              } : undefined}
               onPlanDecision={(action, review) => chat.decidePlan(action, review, currentSessionId, mode, currentWorkspaceId)}
               followupQuestion={chat.followupQuestion}
               onAnswerFollowup={(questionId, answers) => chat.answerFollowup(currentSessionId, questionId, answers)}
@@ -782,7 +793,10 @@ export default function App() {
           </>
         )}
       </main>
-      {boardOpen && teamAvailable && (
+      {sideChat.pane && (
+        <SideChatPane pane={sideChat.pane} chat={chat} config={config} onClose={sideChat.close} onRetry={sideChat.open} />
+      )}
+      {boardOpen && teamAvailable && !sideChat.pane && (
         <TaskBoard
           sessionId={currentSessionId}
           tasks={tasks}

@@ -2176,24 +2176,34 @@ class SQLiteSessionStore(SessionStore):
                     outcome = message.turn_outcome
         return messages, outcome
 
+    @staticmethod
+    def _settled_cut(chain: list[tuple[int, str, str]]) -> tuple[int, bool, int]:
+        """Find the last stable event and report any unsettled state at the tip."""
+        tip = 0
+        in_turn = False
+        balance = 0
+        for seq, kind, payload in chain:
+            if kind == SessionEventType.TURN_START.value:
+                in_turn = True
+            elif kind == SessionEventType.TURN_END.value:
+                in_turn = False
+            elif kind == SessionEventType.ASSISTANT_MESSAGE.value:
+                balance += len(json.loads(payload).get("tool_calls") or [])
+            elif kind == SessionEventType.TOOL_RESULT.value:
+                balance -= 1
+            if not in_turn and balance == 0:
+                tip = seq
+        return tip, in_turn, balance
+
     def _validate_cut(self, owner: str, session_id: str, target_seq: int) -> None:
-        """校验 rewind/fork 切口合法：行存在、不在开放回合中、工具配对平衡。"""
+        """Validate that a fork or rewind cut is present and fully settled."""
         if target_seq < 1:
             raise ValueError(f"切口 seq 必须 >= 1: {target_seq}")
         rows = self._fetch_chain_rows(owner, session_id, target_seq)
         if target_seq not in rows:
             raise ValueError(f"切口 seq={target_seq} 不存在于会话链上")
-        chain = self._ordered_chain(rows, target_seq)
-        last_turn: str | None = None
-        balance = 0
-        for _seq, etype, payload in chain:
-            if etype in (SessionEventType.TURN_START.value, SessionEventType.TURN_END.value):
-                last_turn = etype
-            elif etype == SessionEventType.ASSISTANT_MESSAGE.value:
-                balance += len(json.loads(payload).get("tool_calls") or [])
-            elif etype == SessionEventType.TOOL_RESULT.value:
-                balance -= 1
-        if last_turn == SessionEventType.TURN_START.value:
+        _, in_turn, balance = self._settled_cut(self._ordered_chain(rows, target_seq))
+        if in_turn:
             raise ValueError(f"切口 seq={target_seq} 落在开放回合中（turn_start 未闭合）")
         if balance != 0:
             raise ValueError(f"切口 seq={target_seq} 落在未闭合的工具调用回合中")
@@ -2308,8 +2318,34 @@ class SQLiteSessionStore(SessionStore):
         new_session_id: str | None = None,
         title: str | None = None,
     ) -> str:
-        """分叉：新会话行 + end_seed 切口事件，前缀经 (source_session_id, parent_seq)
-        二元组共享——不复制源会话任何事件行（O(1)）。"""
+        """Create a fork from an explicit committed event without copying prefix rows."""
+        new_id, _ = self._fork_from_cut(
+            session_id, boundary_seq, owner_account_id=owner_account_id,
+            new_session_id=new_session_id, title=title,
+        )
+        return new_id
+
+    def create_side_chat(
+        self, session_id: str, *, owner_account_id: str, default_executor: str,
+    ) -> tuple[str, str]:
+        """Create an independent conversation at the last settled cut of its parent."""
+        return self._fork_from_cut(
+            session_id, None, owner_account_id=owner_account_id,
+            default_executor=default_executor,
+        )
+
+    def _side_chat_cut(self, owner: str, session_id: str, leaf: int) -> int:
+        chain = self._ordered_chain(self._fetch_chain_rows(owner, session_id, leaf), leaf)
+        tip, _, _ = self._settled_cut(chain)
+        if tip == 0:
+            raise ValueError("主会话暂无可用的已保存历史")
+        return tip
+
+    def _fork_from_cut(
+        self, session_id: str, boundary_seq: int | None, *, owner_account_id: str,
+        new_session_id: str | None = None, title: str | None = None, default_executor: str = "builtin",
+    ) -> tuple[str, str]:
+        side_chat = boundary_seq is None
         new_id = new_session_id or uuid.uuid4().hex
         key = (owner_account_id, new_id)
         now = time.time()
@@ -2319,19 +2355,45 @@ class SQLiteSessionStore(SessionStore):
                 raise ValueError(f"会话不存在: {session_id}")
             if new_session_id is not None and any(sid == new_id for sid, _, _ in self._fork_chain(owner_account_id, session_id)):
                 raise ValueError(f"分叉会话标识与其前缀来源重复：{new_id}")
-            self._validate_cut(owner_account_id, session_id, boundary_seq)
+            if boundary_seq is None:
+                boundary_seq = self._side_chat_cut(owner_account_id, session_id, prepared[0])
+            else:
+                self._validate_cut(owner_account_id, session_id, boundary_seq)
             prefix, _ = self._chain_at_cut(owner_account_id, session_id, boundary_seq)
 
-        def _write(conn) -> str:
+        def _write(conn) -> tuple[str, str]:
             self._ensure_writer_lease(conn, owner_account_id, new_id, now)
             src = conn.execute(
-                "SELECT workspace_id, title, events_generation, history_incarnation FROM sessions "
+                "SELECT workspace_id, title, events_generation, history_incarnation, archived FROM sessions "
                 "WHERE owner_account_id = ? AND session_id = ?",
                 (owner_account_id, session_id),
             ).fetchone()
-            if src is None or src[2:] != prepared[1:]:
+            if src is None or src[2:4] != prepared[1:]:
                 raise SessionWriteConflict(f"分叉来源在准备期间已变化：{session_id}")
-            fork_title = title if title is not None else (str(src[1] or "") + " · 分支")
+            config_json = None
+            if side_chat:
+                if src[4]:
+                    raise SessionOwnershipError("主会话不存在或已归档")
+                config_row = conn.execute(
+                    "SELECT config_json FROM session_agent_config WHERE owner_account_id=? AND session_id=?",
+                    (owner_account_id, session_id),
+                ).fetchone()
+                config = json.loads(config_row[0]) if config_row else {}
+                if not isinstance(config, dict) or str(config.get("executor") or default_executor).strip().lower() != "builtin":
+                    raise ValueError("只有内置智能体会话可以打开侧边聊天")
+                if config.keys() - {"executor", "model_profile_id", "user_type"}:
+                    raise ValueError("此会话的自定义权限或执行配置不支持侧边聊天")
+                # Preserve an explicit ceiling but never copy authority or opaque settings.
+                child_config = {"executor": "builtin"}
+                if isinstance(config.get("model_profile_id"), str):
+                    child_config["model_profile_id"] = config["model_profile_id"]
+                if config.get("user_type") == "external":
+                    child_config["user_type"] = "external"
+                config_json = json.dumps(child_config, ensure_ascii=False)
+            workspace_id = str(src[0] or "default")
+            fork_title = title if title is not None else (
+                f"{src[1] or '新对话'} · 侧边聊天" if side_chat else f"{src[1] or ''} · 分支"
+            )
             seed_payload = json.dumps(
                 {
                     "source_session_id": session_id,
@@ -2353,7 +2415,7 @@ class SQLiteSessionStore(SessionStore):
                     "[]",  # P1-3：前缀不落 blob，经 end_seed 共享源会话事件链
                     now,
                     now,
-                    str(src[0] or "default"),
+                    workspace_id,
                     fork_title,
                     len(prefix),
                     self._estimate_tokens(prefix),
@@ -2368,11 +2430,18 @@ class SQLiteSessionStore(SessionStore):
                 "VALUES (?, ?, 1, NULL, ?, ?, ?)",
                 (owner_account_id, new_id, SessionEventType.END_SEED.value, seed_payload, now),
             )
-            return new_id
+            if config_json is not None:
+                stamp = self._now_iso()
+                conn.execute(
+                    "INSERT INTO session_agent_config "
+                    "(owner_account_id, session_id, config_json, created_at, updated_at) VALUES (?,?,?,?,?)",
+                    (owner_account_id, new_id, config_json, stamp, stamp),
+                )
+            return new_id, workspace_id
 
-        self._writer.execute(_write)
+        created = self._writer.execute(_write)
         self._evict_projection(key)
-        return new_id
+        return created
 
     def list_branches(self, session_id: str, *, owner_account_id: str) -> list[dict[str, Any]]:
         """枚举会话的分支：fork 子会话 + rewind 后留在 leaf 之外的旧分支尾巴。"""

@@ -473,6 +473,12 @@
 <p><strong>验收</strong> Markdown 回归在基线实际调用系统打开一次。候选从同一协作看板点击后，在真实文件预览容器显示正文且不调用系统打开。桌面五组组合回归 101 项通过，TypeScript 与隔离生产构建通过。Windows Chrome 在隔离夹具中运行实际桌面看板及文件面板代码，点击产物并核对独立临时文件的正文。夹具替换了桌面 IPC 传输，未调用真实系统应用。本项只覆盖 Desktop 协作看板，不宣称通用任务看板或浏览器远程预览已完成。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/team-collaboration-board.ts</code>、<code>conversation-renderer.ts:215–250</code>、<code>inspector.ts</code>。ZCode <code>packages/ui/src/app-shell/WorkflowRunSidePane.tsx:317–335</code>、<code>packages/ui/src/v4/ConversationWorkflowCompletion.tsx:74–91</code>。</p>
 </article>
+<article id="web-side-chat">
+<h3>Web 侧边聊天共享已保存前缀，独立执行</h3>
+<p>ZCode 的 <code>createSelectionSideSession</code> 先提交独立子会话，再把首条输入交给子会话的准入路径。创建时过滤运行中助手和工具增量，不复制父 Goal 或队列。Ace 首版重用 SQLite 分叉和现有对话面板；从同账号的内置主会话取固定已保存切口，先显示独立侧边面板，后续由用户向该会话发送。使用原工作空间，不复制审批、队列、Goal 或浏览器状态。切换来源时旧创建响应不能改变当前侧栏。</p>
+<p><strong>验收</strong> 基线没有 <code>/side</code> 候选，Gateway 未实现相应 POST。候选 Web 307 项通过，TypeScript 和生产构建通过；Gateway 与会话事件回归 53 项通过。Windows Chrome 加载生产 Web 与隔离 Gateway：父回合保持流式时，侧聊从实际已保存历史完成独立问答；只停止侧聊的第二个请求，父会话仍继续并最终完成。公开历史分别包含各自输出，侧聊内容不进入父历史。Gateway 退出释放双端口。使用受控模型，未接触真实会话。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/sessions.py</code>、<code>crew/state/session_store.py</code>、<code>web/src/features/SideChat.tsx</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/selection-side-session.ts:12–78</code>、<code>packages/core/src/runtime/methods/session-fork.ts:811–859</code>、<code>packages/ui/src/app-shell/SelectionSideChatPane.tsx:24–54</code>。</p>
+</article>
 <article id="desktop-slash-commands">
 <h3>桌面输入框的斜杠命令与技能</h3>
 <p>ZCode 将当前应用可执行的动作与协议命令、技能分开呈现，应用动作选中时直接执行。Ace 桌面的原补全只等待并过滤技能目录。桌面主聊天现在用原补全面板分别显示命令与技能；<code>/plan</code>、<code>/craft</code> 和 <code>/new</code> 使用现有工具栏或新建动作。完整命令可直接提交，不生成模型回合；技能仍只补全文本。候选在技能目录返回前可用，迟到目录和切换会话不会重新打开已关闭的菜单。</p>

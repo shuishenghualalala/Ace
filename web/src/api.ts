@@ -241,6 +241,10 @@ export const api = {
   runtimeConcurrency: () => getJSON<RuntimeConcurrency>("/api/runtime/concurrency"),
   history: (id: string) =>
     getJSON<BackendHistoryItem[]>(`/api/session/${id}`),
+  createSideChat: (id: string, signal: AbortSignal) =>
+    getJSON<{ ok: true; session_id: string; source_session_id: string; workspace_id: string }>(
+      `/api/session/${encodeURIComponent(id)}/side-chat`, { method: "POST", signal, ...jsonBody({}) },
+    ),
   historyTail: (id: string, signal?: AbortSignal) =>
     getJSON<{ items: { role: string; request_id?: string }[] }>(
       `/api/session/${encodeURIComponent(id)}/history?limit=40`, { signal },

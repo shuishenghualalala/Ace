@@ -43,6 +43,8 @@ export interface Props {
   onEnterPlan?: () => void;
   onExitPlan?: () => void;
   onNewSession?: () => void;
+  onOpenSideChat?: () => void;
+  embedded?: boolean;
   onPlanDecision?: PlanDecisionHandler;
   onAsk?: (text: string) => void;
   followupQuestion?: FollowupQuestion | null;
@@ -101,6 +103,8 @@ export default function ChatPanel({
   onEnterPlan,
   onExitPlan,
   onNewSession,
+  onOpenSideChat,
+  embedded = false,
   onPlanDecision,
   onAsk,
   followupQuestion,
@@ -127,17 +131,20 @@ export default function ChatPanel({
     }
     return () => { active = false; };
   }, [isTeamSession, sessionId]);
-  const isEmpty = messages.length === 0 && !busy && !followupQuestion && !isTeamSession;
+  const isEmpty = !embedded && messages.length === 0 && !busy && !followupQuestion && !isTeamSession;
   // 场景化推荐：预填文本 + nonce（触发注入）+ 当前激活的场景 chip
   const [prefillText, setPrefillText] = useState("");
   const [prefillNonce, setPrefillNonce] = useState(0);
   const [scenarioChip, setScenarioChip] = useState<{ label: string; subId: string } | null>(null);
 
   useEffect(() => {
+    if (embedded) return;
+    let active = true;
     api.skills()
-      .then((items) => setSkills(items.filter((skill) => skill.featured)))
-      .catch(() => setSkills([]));
-  }, []);
+      .then((items) => { if (active) setSkills(items.filter((skill) => skill.featured)); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [embedded]);
 
   return (
     <div className="chat-panel">
@@ -292,6 +299,7 @@ export default function ChatPanel({
               onEnterPlan={onEnterPlan}
               onExitPlan={onExitPlan}
               onNewSession={onNewSession}
+              onOpenSideChat={onOpenSideChat}
               prefillText={prefillText}
               prefillNonce={prefillNonce}
               scenarioChip={scenarioChip ? { label: scenarioChip.label, onClear: () => setScenarioChip(null) } : null}
@@ -318,7 +326,7 @@ export default function ChatPanel({
             onRetryMention={onRetryMention}
             onCancelMention={onCancelMention}
             teamMembers={teamMembers}
-            showEmptyState={!isTeamSession}
+            showEmptyState={!embedded && !isTeamSession}
             currentAgentLabel={currentAgentLabel}
             onWikiLink={onWikiLink}
           />
@@ -374,6 +382,7 @@ export default function ChatPanel({
             onEnterPlan={onEnterPlan}
             onExitPlan={onExitPlan}
             onNewSession={onNewSession}
+            onOpenSideChat={onOpenSideChat}
             editDraft={editDraft}
             onCancelEdit={onCancelEdit}
             uploadContext={uploadContext}

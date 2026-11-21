@@ -206,6 +206,23 @@ describe("Composer slash input", () => {
     expect(document.activeElement).toBe(input);
   });
 
+  it("opens a side chat for either alias without submitting to the main conversation", async () => {
+    vi.spyOn(api, "skills").mockResolvedValue([]);
+    const onOpenSideChat = vi.fn();
+    const onSend = vi.fn();
+    const input = await mount({ onOpenSideChat, onSend });
+    await type(input, "/si");
+    expect(container.querySelector('[role="option"]')?.textContent).toContain("/side");
+    press(input, "Enter");
+    expect(onOpenSideChat).toHaveBeenCalledTimes(1);
+    expect(input.value).toBe("");
+    await type(input, "/btw");
+    press(input, "Escape");
+    press(input, "Enter");
+    expect(onOpenSideChat).toHaveBeenCalledTimes(2);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("does not interpret a slash token as a command when it has attachments", async () => {
     const attachments = [{ id: "f", name: "fixture.txt", path: "fixture.txt", type: "file" as const }];
     const onSend = vi.fn();
