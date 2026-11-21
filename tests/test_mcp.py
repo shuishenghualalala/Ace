@@ -853,6 +853,27 @@ async def test_mcp_reload_requires_management_context_and_reconnects_configured_
     assert "不存在" in missing.content
 
 
+async def test_manager_cleans_up_a_worker_adopted_during_shutdown():
+    from crew.tools.mcp_client import MCPClientManager
+
+    class FakeWorker:
+        name = "echo"
+
+        def __init__(self):
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    manager = MCPClientManager({})
+    manager._closing = True
+    worker = FakeWorker()
+
+    assert await manager._adopt_worker(worker) is False
+    assert worker.stopped is True
+    assert manager._workers == []
+
+
 async def test_manager_serializes_concurrent_server_reloads(monkeypatch):
     from crew.tools import mcp_client
 

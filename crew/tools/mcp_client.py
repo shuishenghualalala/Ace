@@ -1273,6 +1273,18 @@ class MCPClientManager:
             self._server_locks[name] = lock
         return lock
 
+    async def _adopt_worker(self, worker: _ServerWorker) -> bool:
+        """Register a worker unless shutdown won the race; clean it up if so."""
+        self._workers.append(worker)
+        if not self._closing:
+            return True
+        self._workers = [item for item in self._workers if item is not worker]
+        try:
+            await worker.stop()
+        except Exception:  # noqa: BLE001 - shutdown must not surface cleanup noise
+            log.exception("关闭晚到 MCP worker 失败 name=%s", worker.name)
+        return False
+
     @staticmethod
     def _transport_of(cfg: dict[str, Any]) -> str:
         """探测配置的传输类型：stdio / sse / http。"""
@@ -1348,7 +1360,8 @@ class MCPClientManager:
             startup_timeout=self._startup_timeout,
         )
         # 启动前登记，确保并发 aclose() 能发现并关闭尚在握手的 worker。
-        self._workers.append(worker)
+        if not await self._adopt_worker(worker):
+            return False
         try:
             return bool(await worker.start())
         except Exception:
@@ -1417,7 +1430,8 @@ class MCPClientManager:
             startup_timeout=self._startup_timeout,
         )
         # 与 add_server 一致，避免后台重连与 manager 关闭竞态泄漏 MCP 协程。
-        self._workers.append(worker)
+        if not await self._adopt_worker(worker):
+            return False
         try:
             return bool(await worker.start())
         except Exception:
