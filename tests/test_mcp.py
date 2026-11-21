@@ -853,6 +853,40 @@ async def test_mcp_reload_requires_management_context_and_reconnects_configured_
     assert "不存在" in missing.content
 
 
+async def test_manager_serializes_concurrent_adds(monkeypatch):
+    from crew.tools import mcp_client
+
+    class FakeWorker:
+        name = "echo"
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _unregister_tools(self):
+            pass
+
+        async def start(self):
+            await asyncio.sleep(0.02)
+            return True
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(mcp_client, "_ServerWorker", FakeWorker)
+    manager = mcp_client.MCPClientManager({})
+    manager._registry = Registry()
+    manager._start_task = asyncio.create_task(asyncio.sleep(0))
+    await manager._start_task
+
+    results = await asyncio.gather(
+        manager.add_server("echo", {"url": "https://example.invalid/mcp"}),
+        manager.add_server("echo", {"url": "https://example.invalid/mcp"}),
+    )
+
+    assert sorted(results) == [False, True]
+    assert len([worker for worker in manager._workers if worker.name == "echo"]) == 1
+
+
 async def test_manager_cleans_up_a_worker_adopted_during_shutdown():
     from crew.tools.mcp_client import MCPClientManager
 
