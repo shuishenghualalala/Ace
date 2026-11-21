@@ -304,6 +304,12 @@
 <p>Windows 官方 Gateway 副本的旧版在正常删除源后，仍共享前缀的子孙历史各返回 HTTP 400。加载最终候选后，同一类子孙均能读取原四行，逐行来源和消息 ID 不变。两个分叉各含一对子孙，四个会话均继续聊天并完成，共七次回环模型请求。新连接查得四个完成回执。重启不重跑模型，四个会话的原始历史和回执响应逐字节相同。两次进程正常退出并释放双端口。</p>
 <p class="evidence">Ace <code>crew/state/session_store.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/session-fork.ts:585</code>、<code>:660</code>，<code>apps/zcode-cli/packages/adapters/src/storage/session-store/sqlite-session-store.ts:374</code>。</p>
 </article>
+<article id="cli-session-resume">
+<h3>CLI 交互续接已保存的会话</h3>
+<p>Kimi 的 CLI 提供显式会话 ID 和按当前目录续接最近会话两种入口。显式 ID 路径查询会话索引，不存在或目录不符时报错。Ace 的非交互 <code>run</code> 已能指定会话；交互 <code>chat</code> 现在也可以用 <code>--session-id</code>，在打开输入前核对账号的公开会话目录和所选工作空间，保持原审批流程。启动和 <code>/new</code> 显示当前 ID；未指定时维持新建。自动续接最近会话不在本次变更中。</p>
+<p><strong>验收</strong> 交互输入通过正式 CLI 分发、模型回合及 SQLite，复验原历史进入模型上下文、答复仍落入原会话；未知、跨账号、工作空间不符及内部会话 ID 均不触发模型或创建会话。Windows 独立 CLI 进程先用 <code>run</code> 写入历史，再用交互管道续接；另外以错误工作空间复验退出码 1。独立重读 SQLite 仍为一个会话、四条消息。续接定向 5 项通过，CLI 主测试文件 34 项通过、1 项跳过，帮助列出新参数。</p>
+<p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:38–49</code>、<code>apps/kimi-code/src/cli/v2/run-v2-print.ts:347–394</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
