@@ -245,6 +245,28 @@
   background: var(--mw-bg-surface);
 }
 
+.mw-inspector__body.desktop-side-chat-host {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.desktop-side-chat__title, .desktop-side-chat__status { padding: var(--mw-space-3); }
+.desktop-side-chat__status { color: var(--mw-text-secondary); }
+.desktop-side-chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.desktop-side-chat > .chat-messages { flex: 1; min-height: 0; overflow-y: auto; }
+.desktop-side-chat > .conversation-panel__composer-host { flex: 0 0 auto; padding: var(--mw-space-3); }
+.desktop-side-chat :is(.chat-edit-btn, button[data-file-reveal], button[data-file-changes-open], button[data-browser-artifact], button[data-inspiration-surface]) {
+  display: none;
+}
+
 /* Keep the legacy Kanban composition; only its values come from the MW tokens. */
 .mw-inspector .inspector-kanban {
   display: flex;

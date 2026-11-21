@@ -139,12 +139,20 @@ function ensureHistoryRetryDelegation(
     void import('./session-controller').then(({ loadBackendHistory }) => loadBackendHistory(sid));
   });
 }
-export function ensureFileChangesDelegation(container: HTMLElement): void {
+export function ensureFileChangesDelegation(container: HTMLElement, workspaceActions = true): void {
   if (fileChangesBoundContainers.has(container)) return;
   fileChangesBoundContainers.add(container);
   container.addEventListener('click', (event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
+    if (!workspaceActions) {
+      const link = target.closest('a[href], [data-file-reveal], [data-file-changes-open], [data-browser-artifact], [data-inspiration-surface], [data-rel-title]');
+      if (link && container.contains(link)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
     const revealBtn = target.closest<HTMLElement>('[data-file-reveal]');
     if (revealBtn && container.contains(revealBtn)) {
       event.preventDefault();
@@ -999,6 +1007,8 @@ export interface ConversationRenderHooks {
     onCancel: (questionId: string) => void;
   };
   teamCommunicationHandlers?: TeamCommunicationActionHandlers;
+  /** Disable actions that open global file, browser or Wiki panels from an embedded conversation. */
+  workspaceActions?: boolean;
   /** DOM apply 之后、软钉底之前的渲染后钩子（todo 槽位 / running intro / composer 刷新等）。 */
   afterRender?: (sessionId: string | null) => void;
 }
@@ -1331,7 +1341,7 @@ export function renderConversation(
   container.classList.toggle('conversation-viewport--active', target.viewport.enabled);
   target.wrapper.classList.toggle('messages__inner--long', !target.viewport.enabled && visibleLength >= 200);
   ensureFoldDelegation(container, getSessionId);
-  ensureFileChangesDelegation(container);
+  ensureFileChangesDelegation(container, hooks.workspaceActions);
   ensureHistoryRetryDelegation(container, getSessionId);
   ensureTeamCommunicationDelegation(container, hooks.teamCommunicationHandlers, () => allMessages);
   if (replacedFollowup) disposePermissionCardPosition(replacedFollowup);

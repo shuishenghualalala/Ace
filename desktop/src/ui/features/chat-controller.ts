@@ -186,6 +186,7 @@ let teamIdentityRefreshBound = false;
 interface DispatchOptions {
   requestId?: string;
   canStart?: () => boolean;
+  preparedSession?: { workspaceId: string };
   subScenario?: string;
   planActive?: boolean;
   clientIntent?: 'revision';
@@ -1810,7 +1811,7 @@ export async function dispatchWs(
   if (!requireRendererLogin() || !canSubmitDesktopChat() || getSessionStreamRecovery(sessionId)) return false;
   if (pendingFirstDispatches.has(sessionId)) return false;
 
-  const workspaceId = workspaceForSessionDispatch(sessionId);
+  const workspaceId = dispatchOptions.preparedSession?.workspaceId ?? workspaceForSessionDispatch(sessionId);
   if (!needsFirstTurnSecurityMode(sessionId, workspaceId)) {
     return dispatchQuery(sessionId, query, attachments, dispatchOptions);
   }
@@ -1860,7 +1861,7 @@ async function dispatchQuery(
   dispatchOptions: DispatchOptions,
   draft?: DraftDispatch,
 ): Promise<boolean> {
-  const workspaceId = draft?.workspaceId ?? workspaceForSessionDispatch(sessionId);
+  const workspaceId = draft?.workspaceId ?? dispatchOptions.preparedSession?.workspaceId ?? workspaceForSessionDispatch(sessionId);
   const subScenario = dispatchOptions.subScenario ?? '';
   const durable = Boolean(desktopOutboxBridge());
   const socket = state.socket;
@@ -1868,7 +1869,7 @@ async function dispatchQuery(
   const canDispatch = () => canSubmitDesktopChat() && state.socket === socket
     && state.backendReadiness?.generation === generation && (!draft || draft.isCurrent());
   const capabilityKey = JSON.stringify([state.userInfo, sessionId]);
-  if (!nativeVisualCapabilitySessions.has(capabilityKey) && state.backendConnected) {
+  if (!dispatchOptions.preparedSession && !nativeVisualCapabilitySessions.has(capabilityKey) && state.backendConnected) {
     try {
       await ensureNativeVisualCapability(sessionId, workspaceId,
         state.sessions.find((item) => item.id === sessionId)?.title || '新会话');
@@ -1898,7 +1899,7 @@ async function dispatchQuery(
   // 外源 Team 路由已写入 session_agent_config；WS payload 再带上 id，便于网关直连场景。
   const externalTeamId = state.activeExternalTeamIdBySession[sessionId] || '';
   const mode = externalTeamId || isExternalTeamSession(sessionId) ? 'team' : 'agent';
-  state.mode = mode;
+  if (state.activeSessionId === sessionId) state.mode = mode;
   if (externalTeamId) {
     await primeTeamCollaborationIdentity(sessionId);
     renderChat();
@@ -1952,7 +1953,7 @@ async function dispatchQuery(
   setStatusWithUi(sessionId, 'running');
   renderChat();
   syncTurnDurationTicker();
-  jumpChatToBottom();
+  if (state.activeSessionId === sessionId) jumpChatToBottom();
   const clientTs = Date.now();
   beginFirstText(sessionId, requestId);
   logStream('dispatch', 'send-ws', {

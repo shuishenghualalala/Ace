@@ -69,6 +69,7 @@ export interface ConversationPanelOptions {
   primary?: boolean;
   emptyState?: ConversationRenderHooks['emptyState'];
   followupHandlers?: ConversationRenderHooks['followupHandlers'];
+  workspaceActions?: boolean;
   /** 渲染后钩子（主对话：inspector 角标 / messages:changed 等 main-only 副作用）。 */
   afterRender?: (sessionId: string | null) => void;
   /** todo 槽位 fold key（提供则面板在每次渲染后刷新自己 Composer 的 todo 槽位）。 */
@@ -236,6 +237,7 @@ export function mountConversationPanel(
       getSessionId: opts.getSessionId,
       ...(opts.emptyState ? { emptyState: opts.emptyState } : {}),
       ...(opts.followupHandlers ? { followupHandlers: opts.followupHandlers } : {}),
+      ...(opts.workspaceActions === false ? { workspaceActions: false } : {}),
       afterRender: (sessionId) => {
         renderPanelTodo(sessionId);
         opts.afterRender?.(sessionId);

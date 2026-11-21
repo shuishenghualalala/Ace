@@ -803,6 +803,14 @@ function ensureFileExpanded(path: string): void {
 }
 
 let customViewOpen = false;
+let disposeCustomView: (() => void) | undefined;
+
+function retireCustomView(): void {
+  const dispose = disposeCustomView;
+  customViewOpen = false;
+  disposeCustomView = undefined;
+  dispose?.();
+}
 
 function getDiffExpands(path: string): DiffRegionExpandMap {
   return diffExpandsByPath.get(path) ?? {};
@@ -1576,6 +1584,7 @@ function restoreInspectorScroll(
 }
 
 function renderBody(): void {
+  if (customViewOpen) return;
   const body = $('#chat-inspector-body');
   if (!body) return;
   capturePlanDraftFromDom();
@@ -1752,6 +1761,7 @@ function openWorkspaceEntry(id: string): void {
 }
 
 function renderTabs(): void {
+  if (customViewOpen) return;
   syncInspectorSessionUi();
   const teamSession = isExternalTeamSession();
   if (activeTab === 'collaboration' && !teamSession) {
@@ -2099,6 +2109,7 @@ async function handlePlanBoardAction(action: string): Promise<void> {
 function setTab(tab: TabKey): void {
   syncInspectorSessionUi();
   if (tab === 'collaboration' && !isExternalTeamSession()) return;
+  retireCustomView();
   if (tab !== 'browser') openCoreTabs.add(tab);
   if (activeTab === 'browser' && tab !== 'browser') releaseUserBrowserControl();
   if (activeTab === 'kanban' && tab !== 'kanban') {
@@ -2207,8 +2218,8 @@ export function openInspectorToTab(
     return;
   }
   if (activeTab === 'browser' && tab !== 'browser') releaseUserBrowserControl();
+  retireCustomView();
   inspectorOpen = true;
-  customViewOpen = false;
   activeTab = tab;
   disableInspectorSurfaceAutoWidth();
   document.body.classList.remove('site-annotation-workbench-open');
@@ -2261,16 +2272,19 @@ export function openInspectorToTab(
   syncInspectorToggleState();
 }
 
-/** 打开由功能模块提供内容的自定义看板，并保持看板自身的开关状态一致。 */
-export function openInspectorCustomView(): boolean {
+/** Mount a custom inspector surface; a registered disposer runs once when it is replaced or closed. */
+export function openInspectorCustomView(dispose?: () => void): boolean {
   if (!canShowInspectorUi() || !state.activeSessionId) return false;
+  retireCustomView();
   if (activeTab === 'browser') {
     releaseUserBrowserControl();
     hideBrowserPanelView();
   }
   if (activeTab === 'collaboration') stopTeamCollaborationPolling();
+  if (activeTab === 'kanban') disconnectKanbanObserver();
   inspectorOpen = true;
   customViewOpen = true;
+  disposeCustomView = dispose;
   activeTab = 'context';
   document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized');
   document.body.classList.add('inspector-open');
@@ -2365,7 +2379,7 @@ export function closeInspector(): void {
   if (activeTab === 'browser') releaseUserBrowserControl();
   if (activeTab === 'collaboration') stopTeamCollaborationPolling();
   inspectorOpen = false;
-  customViewOpen = false;
+  retireCustomView();
   hideBrowserPanelView();
   document.body.classList.remove('inspector-open');
   document.body.classList.remove('browser-workbench-open', 'browser-workbench-maximized', 'inspector-workspace-maximized', 'inspector-surface-auto-width', 'site-annotation-workbench-open', 'blueprint-surface-open');
@@ -2374,12 +2388,11 @@ export function closeInspector(): void {
 }
 
 /**
- * Detach the session-scoped Browser surface before activeSessionId changes.
- * This closes only the workbench UI; the old Crew session keeps its tabs and
- * can resume them when the user returns.
+ * Close session-scoped workbench views before the active session changes.
+ * The browser and custom conversation keep their persisted state.
  */
 export function prepareInspectorForSessionChange(): void {
-  if (inspectorOpen && activeTab === 'browser') closeInspector();
+  if (inspectorOpen && (activeTab === 'browser' || disposeCustomView)) closeInspector();
   else hideBrowserPanelView();
   syncBrowserPanelSession(null);
 }

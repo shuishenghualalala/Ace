@@ -79,6 +79,7 @@ import { mountSessionHistoryView } from './features/session-history-view';
 import { bindSettingsUi, disposeSettingsSecurityPane, openSettingsPane, registerConfigPaneRenderers } from './features/settings';
 import { mountSettingsDataPanes } from './features/settings-data';
 import { isRendererLoggedIn, requireRendererLogin } from './features/auth-gate';
+import { canOpenDesktopSideChat, disposeDesktopSideChat, openDesktopSideChat } from './features/side-chat';
 import { initAuthFlow } from './features/login';
 import { disposeBackendStatusGuard, initBackendStatusGuard, isBackendConnected } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
@@ -245,10 +246,15 @@ const MAIN_CHAT_COMMANDS: readonly ComposerSlashCommand[] = [
   { token: '/new', detail: '在当前工作空间新建对话', run: () => startWorkspaceChat(composerWorkspaceId()) },
 ];
 
+const SIDE_CHAT_COMMANDS: readonly ComposerSlashCommand[] = [
+  { token: '/side', detail: '打开侧边聊天', run: () => { void openDesktopSideChat(); } },
+  { token: '/btw', detail: '打开侧边聊天', run: () => { void openDesktopSideChat(); } },
+];
+
 function availableMainChatCommands(): readonly ComposerSlashCommand[] {
-  return isRendererLoggedIn() && state.activeTab === 'chat' && !isStudioView()
-    && productModeStore.get().productMode === 'assistant' && !hasContextualChatDraft()
-    ? MAIN_CHAT_COMMANDS : [];
+  if (!isRendererLoggedIn() || state.activeTab !== 'chat' || isStudioView()
+    || productModeStore.get().productMode !== 'assistant' || hasContextualChatDraft()) return [];
+  return canOpenDesktopSideChat() ? [...MAIN_CHAT_COMMANDS, ...SIDE_CHAT_COMMANDS] : MAIN_CHAT_COMMANDS;
 }
 
 function bindGlobalEvents(): () => void {
@@ -538,6 +544,7 @@ function bindGlobalEvents(): () => void {
     disposeNotificationCenter();
     disposeAttachments();
     disposeComposerMention();
+    disposeDesktopSideChat();
     disposeComposerToolbar();
     disposeAgentsPage();
     composerContextView?.dispose();

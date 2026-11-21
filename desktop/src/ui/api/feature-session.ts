@@ -1341,6 +1341,10 @@ export const sessionApi = {
       method: 'POST',
       ...jsonBody(payload),
     }),
+  createSideChat: (parentId: string, signal: AbortSignal) =>
+    getJSON<{ ok: true; session_id: string; source_session_id: string; workspace_id: string }>(
+      `/api/session/${encodeURIComponent(parentId)}/side-chat`, { method: 'POST', signal, ...jsonBody({}) },
+    ),
   channelSessions: () =>
     getJSON<{
       platforms: Array<{

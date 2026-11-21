@@ -493,6 +493,12 @@
 <p><strong>验收</strong> 真实 Gateway 的桌面 <code>ensure</code> 写入后，基线两场景均在创建侧聊时返回 409。候选返回同一工作空间的独立会话，SQLite 未复制创作能力；显式模型与外部角色上限仍在。相关侧聊、原首发和会话事件回归共 61 项通过，Ruff 及差异检查通过。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/native-visual-capability.ts:4–8</code>、<code>crew/gateway/routers/sessions.py:503–535</code>、<code>crew/state/session_store.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/session-fork.ts:811–859</code>。</p>
 </article>
+<article id="desktop-side-chat">
+<h3>桌面侧聊在独立右栏执行与停止</h3>
+<p>ZCode 的侧聊以子会话 ID 挂载同一类会话面板。Ace 桌面复用右栏和通用对话面板；<code>/side</code>、<code>/btw</code> 走真实分叉入口。独立请求使用新会话和服务端工作空间，不切换、滚动或改写主会话，也不重新赋予创作能力。右栏关闭或切换时释放订阅，旧响应不再生效；停用会借主会话打开的预览动作。</p>
+<p><strong>验收</strong> 侧栏原先没有释放回调，基线无法在替换时释放；候选桌面 7 组 118 项通过，TypeScript、定向 ESLint 与隔离生产构建通过。Windows Chrome 加载构建后的真实桌面渲染器，以隔离 IPC 和 outbox 适配器连接真实 Gateway。标准桌面首发后打开侧聊，父会话流式期间侧聊完成问答；第二次侧聊的停止帧及终态均匹配发起时的子请求 ID，父回合仍完成。公开历史分离，子会话未重新准备创作能力，退出释放双端口。未运行正式 Electron 安装包，也未使用真实模型。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/side-chat.ts</code>、<code>conversation-panel.ts</code>、<code>inspector.ts</code>。ZCode <code>packages/ui/src/app-shell/SelectionSideChatPane.tsx:24–54</code>、<code>packages/ui/src/hooks/useAppPanels.ts:990–1017</code>。</p>
+</article>
 <article id="desktop-slash-commands">
 <h3>桌面输入框的斜杠命令与技能</h3>
 <p>ZCode 将当前应用可执行的动作与协议命令、技能分开呈现，应用动作选中时直接执行。Ace 桌面的原补全只等待并过滤技能目录。桌面主聊天现在用原补全面板分别显示命令与技能；<code>/plan</code>、<code>/craft</code> 和 <code>/new</code> 使用现有工具栏或新建动作。完整命令可直接提交，不生成模型回合；技能仍只补全文本。候选在技能目录返回前可用，迟到目录和切换会话不会重新打开已关闭的菜单。</p>

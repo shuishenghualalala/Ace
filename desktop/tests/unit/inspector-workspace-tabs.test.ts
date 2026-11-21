@@ -5,9 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { backendApi, type BrowserPageState } from '../../src/ui/backend-client';
 import {
   bindInspectorUi,
+  closeInspector,
   enableInspectorSurfaceAutoWidth,
   openBrowserWorkbench,
+  openInspectorCustomView,
   openInspectorToTab,
+  prepareInspectorForSessionChange,
   refreshInspector,
 } from '../../src/ui/features/inspector';
 import { needsFirstTurnSecurityMode } from '../../src/ui/features/security-approval';
@@ -109,6 +112,30 @@ describe('Inspector browser-style workspace tabs', () => {
     });
     vi.mocked(backendApi.browserState).mockResolvedValue({ ok: true, state: blankBrowserState() });
     vi.mocked(backendApi.browserControl).mockResolvedValue({ ok: true, state: blankBrowserState() });
+  });
+
+  it('disposes an attached custom conversation only when the inspector is replaced or closed', () => {
+    const sid = 'custom-conversation-lifecycle';
+    setActiveSessionId(sid);
+    messageStore.set({ messages: { [sid]: [{ id: 'origin', role: 'user', content: 'Open side chat', timestamp: 1 }] } });
+    const replaced = vi.fn();
+    expect(openInspectorCustomView(replaced)).toBe(true);
+    const host = document.getElementById('chat-inspector-body')!;
+    const content = host.appendChild(document.createElement('aside'));
+    refreshInspector();
+    expect(host.contains(content)).toBe(true);
+    expect(replaced).not.toHaveBeenCalled();
+    openInspectorToTab('browser');
+    expect(host.contains(content)).toBe(false);
+    expect(replaced).toHaveBeenCalledTimes(1);
+    closeInspector();
+    expect(replaced).toHaveBeenCalledTimes(1);
+
+    const switched = vi.fn();
+    expect(openInspectorCustomView(switched)).toBe(true);
+    prepareInspectorForSessionChange();
+    expect(switched).toHaveBeenCalledTimes(1);
+    expect(document.body.classList.contains('inspector-open')).toBe(false);
   });
 
   it('keeps global controls available and opens files/browser as top-level tabs', async () => {
