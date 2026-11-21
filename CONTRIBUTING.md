@@ -29,6 +29,8 @@ cd ../web && npm install
 
 ## 提交前检查
 
+按改动面选择最小测试并报告实际结果；分层、真实入口和 E2E 场景写法见 [自动化测试指南](docs/testing/developer-testing-guide.html)。
+
 从仓库根目录运行 Python 检查：
 
 ```bash

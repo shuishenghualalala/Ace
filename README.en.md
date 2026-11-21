@@ -318,7 +318,7 @@ Key directories:
 
 ## 🤝 Contributing
 
-Bug reports, feature ideas, and pull requests are welcome. Please read the [contributing guide](CONTRIBUTING.md) before you begin. Report vulnerabilities privately according to the [security policy](SECURITY.md) so the maintainers have time to investigate and fix them.
+Bug reports, feature ideas, and pull requests are welcome. Please read the [contributing guide](CONTRIBUTING.md) before you begin. Report vulnerabilities privately according to the [security policy](SECURITY.md) so the maintainers have time to investigate and fix them. Before submitting, read the [automated testing guide](docs/testing/developer-testing-guide.html), choose the narrowest test tier for your change, and report the exact commands and results in the PR.
 
 ## 🔒 Security notes
 

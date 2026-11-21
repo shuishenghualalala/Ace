@@ -357,7 +357,7 @@ Skill 就是船员的职业技能包，装上就会，卸了就忘。仓库随�
 
 ## 🤝 参与贡献
 
-欢迎提交 Issue 和 Pull Request——Bug 也好，想法也好，甚至只是来围观都行。开始前请阅读 [贡献指南](CONTRIBUTING.md)；安全漏洞请按照 [安全政策](SECURITY.md) 私下报告，给修复留点时间。
+欢迎提交 Issue 和 Pull Request——Bug 也好，想法也好，甚至只是来围观都行。开始前请阅读 [贡献指南](CONTRIBUTING.md)；安全漏洞请按照 [安全政策](SECURITY.md) 私下报告，给修复留点时间。提交前请阅读 [自动化测试指南](docs/testing/developer-testing-guide.html)，按改动面选择最小测试，并在 PR 中报告实际执行的命令与结果。
 
 ## 🔒 安全提示
 

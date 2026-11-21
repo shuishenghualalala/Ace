@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ace 自动化测试指南</title>
+<style>
+  :root{
+    --text:#111;--t2:#555;--t3:#999;--border:#e8e8e8;--bg:#fff;--soft:#fafafa;--black:#111;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"PingFang SC",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:1040px;margin:0 auto;padding:56px 24px 100px}
+  h1{font-size:34px;font-weight:800;margin:0 0 8px;letter-spacing:-0.02em}
+  h2{font-size:22px;font-weight:700;margin:44px 0 14px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+  h3{font-size:16px;font-weight:700;margin:24px 0 8px}
+  p,li{color:var(--t2)}
+  code{font-family:var(--mono);font-size:13px;background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--text)}
+  pre{background:var(--soft);border:1px solid var(--border);border-radius:10px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.55}
+  pre code{background:none;border:0;padding:0}
+  a{color:var(--text);text-decoration:none;border-bottom:1px solid var(--border)}a:hover{border-bottom-color:var(--text)}
+  .crumb{color:var(--t3);font-size:13px;margin-bottom:6px}
+  .sub{color:var(--t2);font-size:16px;max-width:760px}
+  .note{color:var(--t3);font-size:13px;margin-top:8px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0}
+  th,td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  ul,ol{padding-left:22px}
+  li{padding:3px 0}
+  .tag{display:inline-block;font-size:12px;color:var(--t2);border:1px solid var(--border);border-radius:999px;padding:2px 10px;margin:0 6px 6px 0}
+  .ok{color:#0a7b34}
+  .warn{color:#9a5b00}
+  .box{border:1px solid var(--border);border-radius:10px;padding:14px 16px;background:var(--soft);margin:12px 0}
+  .nav{margin-top:44px;color:var(--t3);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">Ace / 测试 / 自动化测试指南</div>
+  <h1>Ace 自动化测试指南</h1>
+  <p class="sub">这篇文档面向提交 Ace 代码的开发者与 Agent。目标不是“把测试跑绿”，而是让测试能够在功能真正交付的路径上失败。命令以仓库当前脚本和 CI 为准；新增测试前先选层级，再决定改哪里。</p>
+  <div style="margin-top:14px">
+    <span class="tag">Python / pytest</span>
+    <span class="tag">Gateway</span>
+    <span class="tag">Electron / Vitest</span>
+    <span class="tag">React / Vitest</span>
+    <span class="tag">真实模型 E2E</span>
+    <span class="tag">三平台 CI</span>
+  </div>
+
+  <h2>1. 四条核心原则</h2>
+  <ol>
+    <li><strong>测真实入口路径。</strong>后端至少从 <code>CrewApp.handle(Envelope)</code>、<code>build_app</code> 或真实 Gateway/WebSocket 进入；桌面从 Electron main/preload/renderer 的真实边界进入；Web 从真实组件树进入。不要用手工拼出的对象替代装配根，否则测试看不到 Loader、路由、权限或生命周期差异。</li>
+    <li><strong>只 mock 昂贵或不确定的边界。</strong>模型、时钟、外部网络可以替换；SQLite、工具注册表、执行器、提示词拼装、会话持久化和安全判定保持真实。只证明桥接层搬了字节的测试，不足以证明产品可用。</li>
+    <li><strong>断言外部世界，不断言自我报告。</strong>重新读取文件、查询 SQLite、检查 HTTP/WS 响应或桌面 DOM；不要只搜 Agent 自己回复里的关键词。未修改的文件应逐字节一致。</li>
+    <li><strong>每个 bug fix 固定一条回归。</strong>在能复现它的最快层级加断言；只做一次临时验证、不留下测试，不算完成。</li>
+    <li><strong>不要锁源码文本。</strong>只检查类名、属性顺序、JSX 字符串或“函数被调用过”的测试，不能证明渲染、布局或交互；这类断言会阻碍重构。触发真实行为，断言外部可观察结果。</li>
+  </ol>
+
+  <h2>2. 层级与命令</h2>
+  <p>先选能捕获该回归的最窄层级；上层测试不重复下层已经证明的协议细节。完整后端 E2E 的字段与报告结构见 <a href="e2e-testing.md">后端 E2E 批量测试指南</a>。</p>
+  <table>
+    <thead><tr><th>层级</th><th>测什么</th><th>命令</th><th>当前 CI</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>后端单元 / 集成</td>
+        <td>模块边界、状态机、错误路径、并发/取消、Store 事务、Gateway 路由</td>
+        <td><code>.venv\Scripts\python.exe -m pytest tests/test_mcp.py -q</code><br />Linux/macOS: <code>.venv/bin/python -m pytest ...</code></td>
+        <td>Linux/Windows/macOS 三平台；<code>uv run pytest -q --ignore=tests/security</code></td>
+      </tr>
+      <tr>
+        <td>安全运行时</td>
+        <td>原生沙箱、命令准入、三平台隔离、安装/修复矩阵</td>
+        <td><code>uv run pytest tests/security -q</code>（需先构建对应平台 Rust runtime）</td>
+        <td>独立 <code>security-*.yml</code>，不在主 <code>ci.yml</code> 中跑</td>
+      </tr>
+      <tr>
+        <td>后端真实模型 E2E</td>
+        <td>从产品入口走完整对话、工具、文件、Wiki、外援运行时</td>
+        <td><code>.venv\Scripts\python.exe scripts/run_e2e_batch.py --case write_file</code><br /><code>--category wiki</code>、<code>--fail-on-skip</code></td>
+        <td>默认不在 CI；消耗真实模型额度</td>
+      </tr>
+      <tr>
+        <td>桌面单元 / 主进程</td>
+        <td>main、preload、renderer 控制器、IPC、Gateway 生命周期、状态机</td>
+        <td><code>cd desktop</code><br /><code>npm test</code><br /><code>npx vitest run tests/unit/foo.test.ts</code></td>
+        <td><code>npm run check</code>（含 vitest、typecheck、eslint、CSS、静态门禁）</td>
+      </tr>
+      <tr>
+        <td>桌面视觉 / Playwright</td>
+        <td>真实 Electron/Chromium 下的布局、交互、截图回归</td>
+        <td><code>cd desktop</code><br /><code>npm run test:visual</code><br /><code>npm run test:visual:update</code>（仅在确认变更时）</td>
+        <td>不在 <code>ci.yml</code>；本地按 <code>test:visual</code> 执行，Playwright 协议边界由 <code>playwright-core-contract.yml</code> 覆盖</td>
+      </tr>
+      <tr>
+        <td>Web 单元 / 构建</td>
+        <td>React 组件、Composer、状态投影、类型与打包</td>
+        <td><code>cd web</code><br /><code>npm test</code><br /><code>npx vitest run src/components/Composer.test.tsx</code><br /><code>npm run build</code></td>
+        <td><code>npm run build</code> + <code>npm test</code></td>
+      </tr>
+      <tr>
+        <td>打包 / 安装包</td>
+        <td>Electron 打包、原生 runtime 准备、启动/退出/端口释放</td>
+        <td>按 <a href="../deploy/release-packaging.html">发布打包流程</a>；开发期可用 <code>desktop/scripts/verify-security-runtime.mjs</code> 做运行时校验</td>
+        <td><code>nightly-desktop.yml</code> 三平台构建与产物上传</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2.1 静态检查</h3>
+  <pre><code>uv run ruff check .
+uv run lint-imports
+cd desktop &amp;&amp; npm run typecheck &amp;&amp; npm run lint
+cd web &amp;&amp; npm run typecheck</code></pre>
+  <p>静态检查通过不等于行为正确；它只负责挡住类型、导入方向和风格回归。行为改动仍要落到对应层级。</p>
+
+  <h2>3. 测试放在哪里</h2>
+  <table>
+    <thead><tr><th>目录</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>tests/test_*.py</code></td><td>后端模块、状态机、工具、模型配置、Cron、MCP 等单元/集成测试</td></tr>
+      <tr><td><code>tests/gateway/</code></td><td>Gateway 路由、认证、WebSocket、Owner 隔离、健康检查</td></tr>
+      <tr><td><code>tests/security/</code></td><td>原生安全运行时与命令准入；按平台构建后执行</td></tr>
+      <tr><td><code>tests/e2e/</code></td><td>真实产品入口的批量场景：<code>scenarios.yaml</code>、<code>_run_case.py</code></td></tr>
+      <tr><td><code>tests/fixtures/</code></td><td>可复用的 MCP、工作区、HTTP/SSE 等夹具</td></tr>
+      <tr><td><code>desktop/tests/unit/</code></td><td>Electron main/preload/renderer 单元与集成测试</td></tr>
+      <tr><td><code>desktop/tests/visual/</code></td><td>Playwright 视觉/交互回归</td></tr>
+      <tr><td><code>web/src/**/*.test.tsx</code></td><td>React 组件与前端控制器测试，与被测代码就近放置</td></tr>
+    </tbody>
+  </table>
+  <p>新增文件时优先沿用既有文件名与夹具；不要把共享 harness 放进另一个 <code>*.test.ts</code>/<code>test_*.py</code>，导入测试文件会重复注册用例或产生额外副作用。</p>
+
+  <h2>4. 真实模型 E2E 的写法</h2>
+  <p>后端 E2E 场景写在 <code>tests/e2e/scenarios.yaml</code>，每个 case 在独立临时目录和子进程中运行，报告包含 <code>result.json</code>、<code>transcript.jsonl</code>、<code>llm.jsonl</code>、<code>crew.log</code> 和工作区前后快照。新增 case 的最小结构：</p>
+  <pre><code>complex_tasks:
+  my_feature:
+    title: 新功能的用户可见行为
+    mode: agent
+    workspace:
+      files:
+        "toy/input.txt": "hello\n"
+    prompt: |
+      读取 toy/input.txt，写入 toy/output.txt。
+    expected_tools: [file_read, file_write]
+    expected_files:
+      - path: "toy/output.txt"
+        contains: ["hello"]
+    expected_final_keywords: ["output.txt"]
+    timeout_seconds: 240</code></pre>
+  <ul>
+    <li>先只跑新 case：<code>python scripts/run_e2e_batch.py --case my_feature</code>；通过后再跑同类别。</li>
+    <li>断言工具名、文件产物和有限关键词；不要写死模型全文。模型行为波动时先看 <code>llm.jsonl</code>，判断是提示词、产品还是断言问题，不要直接放宽断言。</li>
+    <li>凭据只从隔离环境的 <code>config/.env</code>/<code>CREW_MODEL_API_KEY</code> 解析；不要把 key 写进日志、报告或测试文件，也不要混用不同仓库的 <code>CREW_*</code> 环境变量。</li>
+    <li>缺少外部 CLI（Codex/Claude/Kimi 等）时用例应标记 <code>skipped</code>；<code>--fail-on-skip</code> 只用于明确要求“跳过也算失败”的验收。</li>
+  </ul>
+
+  <h2>5. 稳定性与防 flake</h2>
+  <ul>
+    <li><strong>不要用固定 sleep 等待。</strong>用 <code>asyncio.Event</code>、<code>wait_for</code>、持久化完成信号、DOM/WS 事件或真实进程退出信号；只有时间本身是被测对象时才用假时钟。</li>
+    <li><strong>把 flake 当 bug。</strong>失败若与调度有关，先定位竞态或资源泄漏；不要用重试把它变成通过。需要时对最可疑套件做重复/打乱顺序运行。</li>
+    <li><strong>自己创建的资源自己释放。</strong>端口、临时目录、子进程、MCP 连接、Electron 窗口和 Gateway 都要在 teardown 中关闭，即使断言失败或超时。</li>
+    <li><strong>跨平台语义不要按本机字面量写。</strong>路径用 <code>Path</code>/<code>pathlib</code>，URL 用解析 API，换行/编码显式指定；平台差异用相邻断言覆盖，而不是静默跳过整个文件。</li>
+    <li><strong>并发/取消测试要断言副作用边界。</strong>取消后是否还有写入、是否重复执行、是否留下运行中状态，都要从外部状态验证。</li>
+    <li><strong>覆盖率只是删除检测器。</strong>未覆盖的行往往说明死代码或漏测；不要为了凑数字补空洞用例。</li>
+  </ul>
+
+  <h2>6. 提交前检查</h2>
+  <p>按改动面选择命令，不要默认跑全量；在 PR 描述中写清实际运行的命令和结果。</p>
+  <table>
+    <thead><tr><th>改动</th><th>至少运行</th></tr></thead>
+    <tbody>
+      <tr><td>单个后端模块</td><td>对应 <code>pytest tests/test_&lt;module&gt;.py -q</code> + <code>uv run ruff check .</code></td></tr>
+      <tr><td>Gateway 路由 / 认证 / WS</td><td>对应 <code>tests/gateway/</code> 用例 + 相关后端模块测试</td></tr>
+      <tr><td>工具编排 / MCP / Cron</td><td>工具或模块测试 + Gateway 相关用例 + 失败场景回归</td></tr>
+      <tr><td>安全 / 沙箱</td><td><code>tests/security</code> 对应平台 + 原生 runtime 构建 + 命令准入回归</td></tr>
+      <tr><td>Desktop main/preload/renderer</td><td><code>cd desktop &amp;&amp; npx vitest run tests/unit/&lt;file&gt;.test.ts</code>；跨进程/生命周期改动跑 <code>npm run check</code></td></tr>
+      <tr><td>Desktop 视觉/交互</td><td><code>npm run test:visual</code>（只在确认的视觉变更时更新快照并审查 diff）</td></tr>
+      <tr><td>Web 组件/状态</td><td><code>cd web &amp;&amp; npx vitest run src/...test.tsx</code>；提交前 <code>npm run build</code></td></tr>
+      <tr><td>模型可见 / 用户可见的完整流程</td><td>新增或更新一个后端 E2E 场景，跑单 case + 同类别</td></tr>
+      <tr><td>发布/打包</td><td>对应平台构建 + 启动/退出/端口释放 smoke；必要时跑 nightly 等价命令</td></tr>
+    </tbody>
+  </table>
+
+  <h3>6.1 PR 检查清单</h3>
+  <ul>
+    <li>[ ] 我选了能捕获这次回归的最窄层级，并在改动前确认它失败、改动后确认它通过。</li>
+    <li>[ ] 用户可见或模型可见的改动，有从真实入口执行的测试；不是只测了手工拼装的对象。</li>
+    <li>[ ] bug fix 在 owning suite 中留下了回归断言。</li>
+    <li>[ ] 断言检查了文件、SQLite、HTTP/WS 或 DOM 的真实状态，而不是只搜 Agent 回复。</li>
+    <li>[ ] 没有用固定 sleep、单次 DOM 采样或重试来掩盖竞态。</li>
+    <li>[ ] 临时资源在成功、失败和超时路径都释放。</li>
+    <li>[ ] 受影响模块的 HTML 文档已更新；行为变化写清边界与已知缺口。</li>
+    <li>[ ] PR 中报告了实际执行的命令与结果；未执行或环境受限的地方如实说明。</li>
+  </ul>
+
+  <h2>7. 当前缺口与后续方向</h2>
+  <p>下面这些是尚未落地的能力，不应在 PR 中声称已有；需要时先单独设计，不要用临时脚本冒充：</p>
+  <ul>
+    <li><strong>无密钥录制/回放层。</strong>用真实模型录制一次会话，随后在 CI 中回放模型边界，仍然走完整产品入口。这样可以把模型可见行为纳入无密钥门禁。</li>
+    <li><strong>覆盖率门禁。</strong>当前只有 <code>test:coverage</code> 命令，没有按文件强制阈值；覆盖率只应作为“死代码/漏测”的删除检测器，不能替代行为断言。</li>
+    <li><strong>受影响测试选择。</strong>前端可用 Vitest 的 related/changed 机制；后端需要稳定的测试映射或依赖分析后再接入 pre-push，避免“猜一个子集”造成假绿。</li>
+    <li><strong>桌面视觉与打包 E2E 的 CI 化。</strong>目前视觉测试和部分真实安装包场景仍以本地/专项为主，nightly 只构建产物。</li>
+  </ul>
+
+  <div class="box">
+    <strong>快速判断：</strong>这次改动如果坏了，哪一个现有测试会变红？如果答不上来，先补测试，不要先改实现。若只能靠人工点一遍才能发现，考虑把它变成真实入口的 E2E 或视觉用例。
+  </div>
+
+  <h2>8. 相关入口</h2>
+  <ul>
+    <li><a href="e2e-testing.md">后端 E2E 批量测试指南</a>：场景字段、报告目录、日志排查。</li>
+    <li><a href="ace-zcode-stability-audit.html">Ace 稳定性审计记录</a>：已修复问题和真实模型/桌面验收证据。</li>
+    <li><a href="../security/security-test-matrix.md">安全测试矩阵</a>：三平台原生运行时覆盖。</li>
+    <li><a href="../deploy/release-packaging.html">发布打包流程</a>：安装包构建与验证。</li>
+    <li><a href="../index.html">文档总览</a></li>
+  </ul>
+
+  <div class="nav">最后更新：2026-11-22 · 命令与 CI 以仓库当前配置为准</div>
+</div>
+</body>
+</html>
