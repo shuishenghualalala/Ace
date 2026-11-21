@@ -1,0 +1,3 @@
+{"text": "", "tool_calls": [{"id": "call_00_Pf4qu4Hp5eqdA5ybn5sY7270", "name": "file_read", "arguments": {"path": "input.txt"}}], "finish_reason": "tool_calls", "reasoning": "Simple task. Let me check input.txt first.\n\nLet me read input.txt."}
+{"text": "", "tool_calls": [{"id": "call_00_ET_CgZiZM6inUzkaHr6c6JQ8885", "name": "file_write", "arguments": {"path": "output.txt", "content": "hello-replay-done"}}], "finish_reason": "tool_calls", "reasoning": ""}
+{"text": "done", "tool_calls": [], "finish_reason": "stop", "reasoning": ""}
