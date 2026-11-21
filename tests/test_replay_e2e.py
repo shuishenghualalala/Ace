@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -148,6 +150,43 @@ def test_recorded_responses_extracts_replayable_events(tmp_path):
     assert recorded_responses(trace) == responses[:1] + [
         {"text": "other", "tool_calls": [], "finish_reason": "stop", "reasoning": ""},
     ] + responses[1:]
+
+
+def test_record_replay_fixture_cli_writes_a_fixture(tmp_path):
+    trace = tmp_path / "llm.jsonl"
+    trace.write_text(
+        '{"dir": "response", "session_id": "s1", "text": "done", "tool_calls": [], "finish_reason": "stop"}\n',
+        encoding="utf-8",
+    )
+    output = tmp_path / "fixture.jsonl"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "scripts" / "record_replay_fixture.py"),
+            "--trace", str(trace),
+            "--output", str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").strip() == (
+        '{"text": "done", "tool_calls": [], "finish_reason": "stop", "reasoning": ""}'
+    )
+    repeated = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "scripts" / "record_replay_fixture.py"),
+            "--trace", str(trace),
+            "--output", str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert repeated.returncode != 0
+    assert "output exists" in repeated.stderr
 
 
 def test_replay_server_fails_loud_when_no_response_remains():
