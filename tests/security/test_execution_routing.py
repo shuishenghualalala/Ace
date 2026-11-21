@@ -55,7 +55,14 @@ def _managed(tmp_path: Path) -> ProcessLaunch:
     )
 
 
+WINDOWS_NATIVE_READY = os.name != "nt" or bool(os.environ.get("ACE_SECURITY_STATE_DIR"))
+
+
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not WINDOWS_NATIVE_READY,
+    reason="Windows native security state is not configured",
+)
 async def test_approved_outside_write_reaches_native_runtime(
     tmp_path: Path,
     external_write_dir: Path,
@@ -111,6 +118,10 @@ async def test_approved_outside_write_reaches_native_runtime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not WINDOWS_NATIVE_READY,
+    reason="Windows native security state is not configured",
+)
 async def test_default_workspace_inside_runtime_home_remains_writable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
