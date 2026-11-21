@@ -266,6 +266,11 @@
   pointer-events: none;
 }
 
+.mw-session-history__group--workspace .mw-session-history__virtual-rows,
+.mw-session-history__group--channel .mw-session-history__virtual-rows {
+  left: var(--mw-space-3);
+}
+
 .mw-session-history__virtual-row {
   position: absolute;
   inset-inline: 0;

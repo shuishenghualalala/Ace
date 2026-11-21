@@ -323,7 +323,10 @@ export function createSessionHistoryView(
 
   const clearVirtualRows = (): void => {
     for (const group of virtualGroups) {
-      for (const session of group.sessions) rows.delete(session.id);
+      for (const index of group.mountedRows.keys()) {
+        const session = group.sessions[index];
+        if (session) rows.delete(session.id);
+      }
     }
     virtualGroups = [];
   };
