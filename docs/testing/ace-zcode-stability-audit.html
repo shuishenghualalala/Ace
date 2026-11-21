@@ -723,7 +723,17 @@
 <p><strong>本次修复与测量</strong> 会话历史侧栏原先为每个可见工作区分别过滤整份普通会话数组，再次扫描归档数组。现在在 <code>session-history-view.ts</code> 中单次遍历并按工作区分桶，随后保持原有排序、搜索、隐藏项目、默认对话和归档规则。隔离 Node 投影基准使用 20,000 条会话、100 个工作区、3 轮预热及 15 次计时，中位数由 29.212 ms 降至 1.098 ms；两版都生成 20,000 个对应条目。该基准不包含 DOM、网络、Gateway 或 Electron 冷启动。</p>
 <p><strong>ZCode 路径差异</strong> ZCode 的 <code>useWorkspaceSessionsIndexItems</code> 从各 workspace 的 V4 sessions-index 聚合实时摘要，持久任务行由 tasks-index 提供；<code>VirtualizedGroupedTaskList</code> 在组内任务超过 80 条时只渲染视口窗口，并保留 12 行 overscan。它优化的是任务侧栏投影，不等同于完整归档历史管理。Ace 历史仍由分页会话目录构建，每组初显 10 条；超过 80 条的搜索或「显示全部」组现在使用 30px 行高与 4px 间隔计算完整滚动高度，只挂载可视窗口和前后 12 行，并在滚动时更新行节点。</p>
 <p><strong>本次验收</strong> 200 条会话的 workspace 组在组件测试中展开及滚动：两处视口窗口均少于 40 个挂载行，远端行在滚动前不在 DOM，滚动后目标行出现且可正常打开。新增 Electron 43.1 基准脚本 <code>desktop/scripts/benchmark-session-history-electron.mjs</code>，把当前视图 TypeScript 与当前 CSS 源码打入临时目录，并在隔离隐藏窗口中使用合成会话。100、1,000、10,000、20,000 条时同步创建视图的三次中位数分别为 5.3、4.3、15.5、23.1 ms；各档初始挂载 32 行，列表布局高度随条目增长。两组各 10,000 条时滚到第二组及尾部仍各挂载 32 行，尾部会话可打开；Electron Chromium 无障碍树包含「最近会话」导航和「打开会话：Session 19999」按钮。该基准证明实际 DOM、布局、窗口滚动和无障碍节点行为，不测前台绘制帧时间。定向侧栏 8 项、状态隔离 15 项、TypeScript、脚本 ESLint 与差异检查通过。</p>
-<p><strong>剩余缺口</strong> 尚无同一发行包、相同数据下的冷启动、首会话可发送和首轮首字配对测量，不能据此宣称 F4 完成。新 Electron 基准仍是合成组件夹具，不包含 Gateway、首个活动会话预览数据、前台可见绘制、接口往返或模型请求；需在同一 Windows/macOS/Linux 发行基底上分别记录冷/热启动、会话可发送和首轮首字，并补充可见窗口的滚动帧时间。</p>
+<p><strong>Windows staging 包态首聊和重开配对 · <code>27fbd5c3</code></strong> 从该提交的干净源码归档运行 <code>deb-package/pack_exe.ps1</code>，构建 Electron 43.1.0、Python 3.11.9、Node 20.18.3 staging；17,400 个文件，<code>crew-desktop.exe</code> 为 225,475,072 字节（SHA-256 <code>19383484c4bbb9aaad20038c055f46310ea6f17a85dc2aeff0f24f34f5d6cd4c</code>），<code>app.asar</code> SHA-256 <code>95e9e3472b26ac8894844e0a9de564325e17570912b8d9fae3bba8fd5d473c08</code>。Gateway 使用随包解释器与 Node，随包入口导入冒烟通过。机器未安装 Inno Setup，未生成安装器；构建期间 Electron Builder 对临时依赖链接打印路径解析警告，因此这些结果只代表通过真实包内可执行文件运行的 staging 验收。</p>
+<div class="table"><table>
+<thead><tr><th>阶段（秒）</th><th>五轮配对样本</th><th>P50</th></tr></thead>
+<tbody>
+<tr><td>新用户目录启动至 Renderer、Gateway、WebSocket 和 Composer 可用</td><td>10.080，10.316，10.416，10.330，10.429</td><td>10.330</td></tr>
+<tr><td>保留首聊历史，正常退出后重开至可读历史</td><td>9.077，9.199，9.344，9.436，9.406</td><td>9.344</td></tr>
+<tr><td>首次本地 SSE 答复可见</td><td>0.931，0.965，0.948，0.942，0.954</td><td>0.948</td></tr>
+<tr><td>Gateway 退出后重建并恢复页面及历史</td><td>9.400，9.249，9.442，9.229，9.923</td><td>9.400</td></tr>
+</tbody></table></div>
+<p>五轮均在同一 staging 包中完成首次会话、停止后接续、Renderer 崩溃恢复、Gateway 故障恢复、退出重开及历史校验，全部进程退出并释放端口。最初一轮的冷启动阶段完成于 28.271 秒，但该轮稍后在 Gateway 重启阶段失败：新 Gateway 已报告 core ready，之后页面恢复检查遇到 Desktop shutdown；根因尚未确定。随后五轮完整通过，不能据此隐藏该次失败或宣称已排除间歇问题。首聊使用本机合成 SSE 提供方，不含远端模型首 token 时延。当前 P50 是新用户目录首次启动与同目录热重开对照，不是操作系统重启后的磁盘冷缓存数据。</p>
+<p><strong>剩余缺口</strong> F4 仍不能宣称完成：目前只有 Windows staging 五轮，没有 Inno 安装态、macOS/Linux 发行态的同基底配对，也没有前台可见滚动帧时间。下一轮需要先消除 staging 构建的依赖路径警告，再用正式安装产物复测并解释 28.271 秒首次样本及一次 Gateway 重启失败；另外需要覆盖未登录或技能预取未完成的首发路径。</p>
 <p class="evidence">Ace <code>desktop/src/ui/api/feature-session.ts:1306</code>、<code>desktop/src/ui/features/workspaces.ts:1138</code>、<code>desktop/src/ui/features/session-controller.ts:1184</code>、<code>desktop/src/ui/features/backend-status-guard.ts:224</code>、<code>desktop/src/ui/features/session-history-view.ts:186</code>、<code>crew/gateway/routers/sessions.py</code>、<code>crew/state/session_store.py</code>。ZCode <code>packages/ui/src/v4/useWorkspaceSessionsIndexItems.ts:94</code>、<code>packages/ui/src/project-sidebar/grouped/virtualized-group-task-list.tsx:17</code>、<code>:137</code>.</p>
 </article>
 <article id="backpressure">
@@ -1170,12 +1180,6 @@
 <p>两轮预取在原构造处都已结束。首次 <code>build_app</code> 分别缩短 1.286 和 1.168 秒，同时 Gateway 模块导入拉长 0.756 和 0.900 秒。启动到首正文净缩短 0.533 和 0.306 秒，实际发送后的首正文两轮各多等待约 0.08 和 0.09 秒。试验中的模型类别由夹具提前确定，生产配置还涉及用户模板、凭据和环境变量时序。发行继续使用原装配。本节各组的新用户目录样本仍高于五秒验收目标。</p>
 <h3>无密钥回放与 MCP 审批验收</h3>
 <p><code>tests/e2e/replay_server.py</code> 以录制的模型响应替代真实模型 HTTP/SSE 边界，应用、Provider、工具、SQLite 和会话入口保持真实。现有六个组装态场景：并行读取部分失败、读取后写入、工具搜索后创建 Cron、HTTP MCP 的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上的 <code>mcp_update</code> 与 <code>mcp_remove</code> 各一次审批；审批场景分别核对 <code>X-Replay</code> 写入配置和配置中不再有 echo。回放与审批用例合计 9 项通过；CI 安装 <code>mcp</code> extra，避免 MCP 用例被静默跳过。</p>
-<h3>全量回归与状态表归属</h3>
-<p>本轮全量后端回归（不含 <code>tests/security</code>）为 <code>5044 passed, 30 skipped, 20 deselected</code>，0 failed，用时 29 分 28 秒。session goals 新建的 <code>session_goals</code>、<code>session_goal_steps</code>、<code>session_goal_verifications</code> 已加入主库 core 归属清单；此前失败的 session goals 验证与登出栅栏用例现已通过。</p>
-<h3>后端全量与安全基线</h3>
-<p>后端全量（不含 <code>tests/security</code>）为 <code>5044 passed, 30 skipped, 20 deselected</code>，0 failed，用时 29 分 28 秒。安全套件为 <code>478 passed, 2 failed, 10 skipped</code>；剩余两项均为预编译运行时清单与当前 WFP 源码摘要不一致，需跨平台重建后复验。Windows 原生执行路由在未配置安全身份时跳过，避免把环境缺失误报为产品失败。</p>
-<h3>桌面与后端联合基线</h3>
-<p>桌面 Vitest 全量为 <code>2401 passed, 2 skipped</code>（208 个测试文件），TypeScript 类型检查与 esbuild 构建均通过。结合后端 <code>5044 passed, 0 failed</code> 和安全套件 <code>478 passed, 2 failed</code>，当前跨层功能路径已有可重复的绿色基线；安全剩余两项仍是预编译运行时清单。</p>
 <h3>模型拾取器中的永久 Default</h3>
 <p>新安装模板自带 <code>default</code> profile，内容为 <code>your-model-name</code>/<code>api.example.com</code>。用户新增真实模型并设为默认后，该模板仍以 <code>name: Default</code> 留在模型选择器里，显示为缺少 Key 的模型，容易被误认为可用的默认模型。修复把占位 profile 与真实模型分开：设置页保留它供首次配置和 owner copy-on-write，但展示名归一为“默认模型（未配置）”；owner 已有可用真实模型时，对话模型选择器过滤该占位项，真实模型通过“设为默认”切换 <code>active/default</code>。直接编辑过的 default 卡片展示实际 <code>model</code>，不再保留 Default 名称。定向 20 项通过。</p>
 <h3>观测如何归因</h3>
