@@ -296,6 +296,44 @@ class HeldVerificationModel(VerificationModel):
         return await super().chat(messages, tools, **kwargs)
 
 
+def test_goal_verification_preference_acknowledges_while_the_same_check_can_still_be_paused(goal_gateway):
+    provider = HeldVerificationModel()
+    sid = "goal-interactive-verification"
+    with goal_gateway(provider) as (client, _crew):
+        path, step = _finished_fixture_goal(client, sid)
+        transcript_path = f"/api/session/{sid}/history"
+        transcript = client.get(transcript_path).content
+        with ThreadPoolExecutor(max_workers=1) as thread:
+            pending = thread.submit(client.post, path, headers={"Prefer": "respond-async"},
+                                    json={"action": "verify", "version": step["version"]})
+            try:
+                assert provider.entered.wait(5)
+                accepted = pending.result(timeout=2)
+                assert accepted.status_code == 202, accepted.text
+                assert accepted.headers["Preference-Applied"] == "respond-async"
+                snapshot = accepted.json()
+                assert snapshot["verification"]["state"] == "running"
+                assert snapshot["goal"]["status"] == "active"
+                assert snapshot["version"] != step["version"]
+                assert client.get(path).json() == snapshot
+                duplicate = client.post(path, headers={"Prefer": "respond-async"},
+                                        json={"action": "verify", "version": step["version"]})
+                assert duplicate.status_code == 409
+                for action in ("complete", "set", "resume"):
+                    denied = client.post(path, json={"action": action, "version": snapshot["version"],
+                                                     "objective": "Do not change a live check"})
+                    assert denied.status_code == 409 and denied.json()["code"] == "goal_verification_active"
+                assert client.get(path).json() == snapshot
+                paused = client.post(path, json={"action": "pause", "version": snapshot["version"]}).json()
+                assert paused["goal"]["status"] == "paused"
+                assert paused["verification"]["request_id"] == snapshot["verification"]["request_id"]
+                assert paused["verification"]["state"] == "interrupted"
+                assert provider.exited.wait(5)
+                assert client.get(transcript_path).content == transcript
+            finally:
+                client.portal.call(provider.release.set)
+
+
 def test_goal_verification_deadline_cancels_without_changing_the_target(goal_gateway, monkeypatch):
     monkeypatch.setattr("crew.gateway.goal_verification.VERIFICATION_TIMEOUT_SECONDS", 0.3)
     provider = HeldVerificationModel()
@@ -356,6 +394,40 @@ def test_goal_verification_cannot_publish_success_after_history_or_target_change
         assert snapshot["verification"]["state"] == "interrupted"
         assert (snapshot["goal"]["status"], snapshot["verification"]["code"]) == expected
         assert client.get(path).json() == snapshot
+
+
+def test_logout_ignores_a_verify_rejected_before_reservation(goal_gateway, monkeypatch):
+    provider = VerificationModel()
+    with goal_gateway(provider) as (client, crew):
+        path, step = _finished_fixture_goal(client, "rejected-verification-logout")
+        reserve_entered, release = Event(), Event()
+        reserve = crew.session_store.goals.reserve_verification
+
+        def held_reserve(*args, **kwargs):
+            reserve_entered.set()
+            assert release.wait(8)
+            return reserve(*args, **kwargs)
+
+        monkeypatch.setattr(crew.session_store.goals, "reserve_verification", held_reserve)
+        with ThreadPoolExecutor(max_workers=2) as threads:
+            pending = threads.submit(client.post, path, headers={"Prefer": "respond-async"},
+                                     json={"action": "verify", "version": "stale"})
+            try:
+                assert reserve_entered.wait(5)
+                logout = threads.submit(client.post, "/api/auth/logout")
+                deadline = monotonic() + 4
+                while not logout.done() and client.get(path).status_code != 423:
+                    assert monotonic() < deadline
+                    sleep(0.01)
+                assert not logout.done(), "logout must drain the ongoing admission"
+            finally:
+                release.set()
+            rejected = pending.result(timeout=5)
+            assert rejected.status_code == 409 and rejected.json()["code"] == "goal_version_conflict"
+            result = logout.result(timeout=5)
+        assert result.status_code == 200 and result.json()["released"] is True, result.text
+        assert provider.checks == []
+        assert client.get(path).json() == step
 
 
 def test_logout_fences_a_verdict_waiting_for_the_sqlite_commit(goal_gateway, monkeypatch):

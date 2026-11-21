@@ -326,6 +326,12 @@
 <p><strong>验收</strong> 真实生产入口先复现未实现验收以及归档、退出账号、SQLite 提交前退出三处竞态。候选组合 203 项后端回归及 1 项主库归属检查通过，Ruff 通过。用受控模型验证一次正向验收、证据不足、伪造或过滤后的引文、意外工具请求、超时、计划文件改动后重新进入 Plan、普通历史在验收期间变更、暂停、归档与退出。Windows 隔离 Gateway 在模型已开始验收后强制终止；新进程保留原验收 ID、标记中断且不重放。重新显式恢复并验收通过后，公开历史响应仍逐字节相同。</p>
 <p class="evidence">Ace <code>crew/gateway/goal_verification.py</code>、<code>crew/gateway/goal_steps.py</code>、<code>crew/state/session_goals.py</code>、<code>tests/gateway/test_session_goals.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/target-completion-verification.ts:40–87,132–145,197–218</code>。本次验收入口为 Gateway API；界面和自动续跑不在该切片。</p>
 </article>
+<article id="interactive-goal-verification-web">
+<h3>Web 可在本轮结束后验收并定向暂停</h3>
+<p>ZCode 的目标状态区与轮次摘要分别投影执行和验收。Ace Web 只在网关明确支持、目标启用且该轮已结束时显示「验收目标」。<code>Prefer: respond-async</code> 返回已写入 SQLite 的 202 和新版本；不用等待模型结束就可以定向暂停。无该偏好时仍返回同步终态。进行中的验收不允许覆盖目标或手动完成。退出时，正常拒绝的旧验收请求不会留下账号租约。</p>
+<p><strong>验收</strong> 基线复现同步调用阻塞、验收运行时可绕过界面手动完成、以及退出被正常版本冲突卡住。候选后端 36 项、Web 全量 321 项、TypeScript、生产构建及 Ruff 通过。实际 Web 与隔离 Gateway 逐次显示证据不足、关闭重开恢复原验收、暂停和最后通过。受控模型调用与持久 ID 一一对应，公开聊天记录在整个验收过程中不变。模拟丢回执后通过 GET 找回，没有自动重发。尚无自动续跑。</p>
+<p class="evidence">Ace <code>crew/gateway/goal_steps.py</code>、<code>crew/state/session_goals.py</code>、<code>web/src/features/SessionGoal.tsx</code>。ZCode <code>packages/ui/src/v4/ConversationStatusPanel.tsx:463–557</code>、<code>packages/ui/src/v4/conversationGoalSummaryModel.ts:46–69</code>。</p>
+</article>
 <article id="web-session-goal">
 <h3>Web 从 /goal 管理已保存的会话目标</h3>
 <p>ZCode 由输入层识别完整斜杠词及参数，目标通过专用命令进入会话。Ace Web 在已有内置主会话中用 <code>/goal</code> 打开编辑器，参数可预填；用户保存后从真实目标接口更新版本和状态。编辑、操作和冲突恢复都不生成聊天帧。</p>

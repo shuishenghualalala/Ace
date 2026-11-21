@@ -6,7 +6,7 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 GoalAction = Literal["set", "pause", "resume", "complete"]
@@ -195,8 +195,12 @@ class SessionGoalStore:
                 return None
             self._require_version(current, version)
             run = current.run
-            if action != "pause" and run is not None and run.state in _LIVE_STEPS:
-                raise GoalStepConflict("goal_step_active", "请先暂停正在推进的目标并等待这轮收尾")
+            verification = current.verification
+            if action != "pause":
+                if run is not None and run.state in _LIVE_STEPS:
+                    raise GoalStepConflict("goal_step_active", "请先暂停正在推进的目标并等待这轮收尾")
+                if verification is not None and verification.state == "running":
+                    raise GoalStepConflict("goal_verification_active", "请等待验收完成或先暂停目标")
             if action == "set":
                 goal = SessionGoal(text, "active")
             else:
@@ -218,11 +222,11 @@ class SessionGoalStore:
             """, (owner, session_id, new_version, goal.objective, goal.status))
             if action == "set":
                 conn.execute("DELETE FROM session_goal_steps WHERE owner_account_id=? AND session_id=?", (owner, session_id))
-            elif current.verification is not None and current.verification.state == "running":
+            elif verification is not None and verification.state == "running":
                 conn.execute("""
                     UPDATE session_goal_verifications SET state='interrupted', code='goal_changed'
                     WHERE owner_account_id=? AND session_id=? AND request_id=?
-                """, (owner, session_id, current.verification.request_id))
+                """, (owner, session_id, verification.request_id))
             if action == "pause" and run is not None and run.state in {"accepted", "running"}:
                 state = "stopped" if run.state == "accepted" else "stopping"
                 code = "paused_before_dispatch" if state == "stopped" else "pause_requested"
@@ -337,7 +341,7 @@ class SessionGoalStore:
 
     def reserve_verification(
         self, owner: str, session_id: str, version: str, default_executor: str,
-    ) -> ReservedGoalVerification | None:
+    ) -> tuple[ReservedGoalVerification, GoalSnapshot] | None:
         def reserve(conn):
             current = self._read(conn, owner, session_id)
             if current is None:
@@ -374,9 +378,10 @@ class SessionGoalStore:
             """, (owner, session_id, check.request_id, step_id))
             conn.execute("UPDATE session_goals SET version=? WHERE owner_account_id=? AND session_id=?",
                          (new_version, owner, session_id))
-            return ReservedGoalVerification(owner, session_id, incarnation, workspace,
-                                            str(config.get("model_profile_id") or "inherit"), owner_lease, stamp,
-                                            new_version, current.goal.objective, check, evidence)
+            reservation = ReservedGoalVerification(owner, session_id, incarnation, workspace,
+                                                   str(config.get("model_profile_id") or "inherit"), owner_lease, stamp,
+                                                   new_version, current.goal.objective, check, evidence)
+            return reservation, replace(current, version=new_version, verification=check)
 
         return self._store.transaction(reserve)
 

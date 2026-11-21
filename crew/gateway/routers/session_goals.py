@@ -47,7 +47,13 @@ def create_session_goals_router(goals: SessionGoalStore, steps: GoalSteps) -> AP
             if change.action == "advance":
                 return _response(await steps.advance(owner, session_id, change.version), status=202)
             if change.action == "verify":
-                return _response(await steps.verify(owner, session_id, change.version))
+                prefer = request.headers.get("prefer", "")
+                respond_async = any(part.split(";", 1)[0].strip().lower() == "respond-async" for part in prefer.split(","))
+                snapshot = await steps.verify(owner, session_id, change.version, respond_async=respond_async)
+                response = _response(snapshot, status=202 if respond_async else 200)
+                if response.status_code == 202:
+                    response.headers["Preference-Applied"] = "respond-async"
+                return response
             if change.action == "pause":
                 return _response(await steps.pause(owner, session_id, change.version))
             snapshot = await asyncio.to_thread(

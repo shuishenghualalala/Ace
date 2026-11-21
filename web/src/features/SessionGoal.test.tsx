@@ -66,6 +66,85 @@ it("sends one versioned advance and shows the server's separate step and objecti
   expect(fetch).toHaveBeenCalledTimes(3);
 });
 
+it("starts one explicit verification and separates its running and passed receipts from the step", async () => {
+  const verificationId = "verify_fixture";
+  const base = { supports_advance: true, supports_verify: true, run: step("finished") };
+  const writes: unknown[] = [];
+  const fetch = vi.fn(async (url, options?: RequestInit) => {
+    expect(url).toBe(path);
+    if (options?.method === "POST") {
+      expect(new Headers(options.headers).get("Prefer")).toBe("respond-async");
+      writes.push(JSON.parse(String(options.body)));
+      return json({ ...base, version: "checking", goal: active, verification: {
+        request_id: verificationId, step_request_id: "goal_fixture", state: "running", code: "", evidence_sequences: [],
+      } }, 202);
+    }
+    return writes.length ? json({ ...base, version: "verified", goal: { ...active, status: "completed" }, verification: {
+      request_id: verificationId, step_request_id: "goal_fixture", state: "passed", code: "", evidence_sequences: [25],
+    } }) : json({ ...base, version: "step-finished", goal: active });
+  });
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  expect(host.textContent).toContain("本轮已结束");
+  expect(host.textContent).not.toContain("目标验收通过");
+  await act(async () => { const verify = button("验收目标"); verify.click(); verify.click(); });
+  expect(writes).toEqual([{ action: "verify", version: "step-finished" }]);
+  expect(host.textContent).toContain("正在验收目标");
+  expect(host.textContent).toContain("会话目标 · 已启用");
+  expect(button("暂停目标").disabled).toBe(false);
+  expect(button("标记目标完成").disabled).toBe(true);
+  expect(button("推进一轮").disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(2_000));
+  expect(host.textContent).toContain("会话目标 · 已完成");
+  expect(host.textContent).toContain("目标验收通过");
+  expect(host.textContent).toContain("本轮已结束");
+  await act(async () => vi.advanceTimersByTimeAsync(10_000));
+  expect(fetch).toHaveBeenCalledTimes(3);
+});
+
+it("reconciles an unconfirmed verify submission without replaying it", async () => {
+  const run = step("finished");
+  const verifying = { request_id: "verify_lost_ack", step_request_id: run.request_id,
+    state: "running", code: "", evidence_sequences: [] };
+  const base = { supports_verify: true, supports_advance: true, goal: active, run };
+  let reads = 0;
+  const fetch = vi.fn(async (_url, options?: RequestInit) => {
+    if (options?.method === "POST") throw new TypeError("connection lost after acceptance");
+    reads += 1;
+    if (reads === 1) return json({ ...base, version: "step-version" });
+    if (reads === 2) return json({ ...base, version: "reserved", verification: verifying });
+    return json({ ...base, version: "settled", verification: {
+      ...verifying, state: "unconfirmed", code: "goal_verification_timeout",
+    } });
+  });
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  await act(async () => button("验收目标").click());
+  expect(button("验收目标").disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(20_000));
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await act(async () => button("重新读取目标").click());
+  expect(host.textContent).toContain("正在验收目标");
+  await act(async () => vi.advanceTimersByTimeAsync(2_000));
+  expect(host.textContent).toContain("未能确认目标达成 · 验收模型未在时限内返回。");
+  expect(host.textContent).toContain("会话目标 · 已启用");
+  expect(host.textContent).not.toContain("目标验收通过");
+  expect(fetch.mock.calls.filter(([, opt]) => opt?.method === "POST")).toHaveLength(1);
+});
+
+it("does not display a verifier from a replaced step or advertise unnegotiated verification", async () => {
+  const fetch = vi.fn(async () => json({ version: "current", goal: active, run: step("finished"), verification: {
+    request_id: "verify_stale", step_request_id: "previous-step", state: "running", code: "", evidence_sequences: [],
+  } }));
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  expect(host.querySelector("[data-goal-verification]")).toBeNull();
+  expect(host.textContent).not.toContain("验收目标");
+  expect(button("推进一轮").disabled).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(10_000));
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
 it("does not let a stale observation undo an exact pause, even with a replacement draft", async () => {
   let deliver!: (result: Response) => void;
   const older = new Promise<Response>((resolve) => { deliver = resolve; });

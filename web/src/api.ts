@@ -227,13 +227,22 @@ const jsonBody = (body: object): RequestInit => ({
 const withKb = (url: string, kbId?: string) =>
   kbId ? `${url}${url.includes("?") ? "&" : "?"}kb_id=${encodeURIComponent(kbId)}` : url;
 
-export type SessionGoalAction = "set" | "pause" | "resume" | "complete" | "advance";
+export type SessionGoalAction = "set" | "pause" | "resume" | "complete" | "advance" | "verify";
 export interface SessionGoalRun { request_id: string; state: string; code: string }
+export interface SessionGoalVerification {
+  request_id: string;
+  step_request_id: string;
+  state: "running" | "passed" | "incomplete" | "unconfirmed" | "interrupted";
+  code: string;
+  evidence_sequences: number[];
+}
 export interface SessionGoalSnapshot {
   version: string;
   goal: { objective: string; status: "active" | "paused" | "completed" } | null;
   supports_advance?: boolean;
+  supports_verify?: boolean;
   run?: SessionGoalRun;
+  verification?: SessionGoalVerification;
 }
 
 const sessionGoalPath = (id: string) => `/api/session/${encodeURIComponent(id)}/goal`;
@@ -256,10 +265,19 @@ export const api = {
     getJSON<{ ok: true; session_id: string; source_session_id: string; workspace_id: string }>(
       `/api/session/${encodeURIComponent(id)}/side-chat`, { method: "POST", signal, ...jsonBody({}) },
     ),
-  sessionGoal: (id: string, signal: AbortSignal) => getJSON<SessionGoalSnapshot>(sessionGoalPath(id), { signal }),
+  sessionGoal: (id: string, signal: AbortSignal) => getJSON<SessionGoalSnapshot>(sessionGoalPath(id), {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+  }),
   changeSessionGoal: (
     id: string, payload: { version: string; action: SessionGoalAction; objective?: string }, signal: AbortSignal,
-  ) => getJSON<SessionGoalSnapshot>(sessionGoalPath(id), { method: "POST", signal, ...jsonBody(payload) }),
+  ) => getJSON<SessionGoalSnapshot>(sessionGoalPath(id), {
+    method: "POST", signal, ...jsonBody(payload),
+    ...(payload.action === "verify" ? {
+      headers: { "Content-Type": "application/json", Prefer: "respond-async" },
+      // A compatible Gateway may ignore Prefer and wait for its bounded model result.
+      signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]),
+    } : {}),
+  }),
   historyTail: (id: string, signal?: AbortSignal) =>
     getJSON<{ items: { role: string; request_id?: string }[] }>(
       `/api/session/${encodeURIComponent(id)}/history?limit=40`, { signal },
