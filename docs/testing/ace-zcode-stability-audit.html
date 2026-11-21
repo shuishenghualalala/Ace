@@ -617,10 +617,11 @@
 <p class="evidence">Ace <code>desktop/src/ui/features/session-controller.ts:543</code>，<code>desktop/src/ui/features/workspaces.ts:1144</code>、<code>:1201</code>，<code>crew/state/session_store.py:2267</code>、<code>:2462</code>，<code>crew/app.py:2422</code>、<code>:2480</code>。ZCode <code>packages/ui/src/v4/agentSessionsIndexTransport.ts:80</code>，<code>packages/ui/src/project-sidebar/grouped/virtualized-top-level-list.tsx:132</code>。</p>
 </article>
 <article id="backpressure">
-<h3>F5 · 慢订阅与回放占用实时推送路径</h3>
-<p>Ace 实时侧已约 50 ms 合包，回放缓存仍以 raw 帧计数，回放逐条等待发送并持有会话级共享锁。发送给多个订阅连接时顺序等待，慢客户端可能延迟其他客户端。队列只有每会话条数上限，实际内存还与帧字节数和缓存会话数相关。ZCode 先归并订阅操作并按操作数和 UTF-8 字节设限，resume 接入同一增量管线。</p>
-<p><strong>修复</strong> 在 D3 的恢复契约明确后，为每个订阅独立排队，按帧、字节、活跃会话和队列年龄设限。小文本可合并，关键状态保留序列语义。超过水位切换到重新同步。验证同时连接两个页面、慢连接不阻塞正常连接、断连后内存回落、终态可靠且未重复。</p>
-<p class="evidence">Ace <code>crew/gateway/connections.py:249</code>、<code>:438</code>、<code>:538</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:224</code>、<code>:908</code>。</p>
+<h3>F5 · 慢订阅与回放占用实时推送路径（已修复）</h3>
+<p><strong>基线差异</strong> Ace 旧路径在会话锁内逐个等待 socket 写入，慢连接会延迟同一会话的其他订阅者；回放队列以帧数为主，缺少单连接字节和等待时限。ZCode 的 <code>ConversationTopicPublisher</code> 按订阅归并增量，并以操作数和编码字节数限制积压；超过预算后要求订阅者重同步。</p>
+<p><strong>修复 · <code>1317ca95</code></strong> Ace 为每个 WebSocket 建立先进先出的发送队列，会话锁只负责分配序号和预订回放位置，入队后即释放。队列最多 4 MiB、4,096 帧，每批最长等待 15 秒；会话侧合包另受 256 KiB 和 256 帧限制，回放日志受每会话 2 MiB、全局 16 MiB 和 128 个窗口限制。连接超过队列界限时以 1013 关闭，重连用已确认游标续传；超大实时帧走权威恢复水位。Ace 通过断开慢连接恢复，ZCode 在订阅内标记重同步，两者都保留有界状态和序列恢复。</p>
+<p><strong>验证</strong> Gateway 连接管理器回归 55 项通过。阻塞慢 socket、正常 socket 和游标续传的定向用例确认：慢连接只关闭自身，快连接仍收到连续序号 1–6，从序号 3 重连只补 4–6；长限流间隔用例也确认待发送队列受字节上限约束。该组使用受控 WebSocket 传输夹具，未在正式桌面包中压满操作系统 TCP 发送缓冲区。</p>
+<p class="evidence">Ace <code>crew/gateway/connections.py:520</code>、<code>:577</code>、<code>:785</code>、<code>crew/gateway/socket_delivery.py</code>、<code>tests/gateway/test_connections.py:961</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:224–247</code>、<code>:908–931</code>。</p>
 </article>
 <article id="first-text-timing">
 <h3>F8 · 桌面首字诊断区分接收、接纳和呈现</h3>
