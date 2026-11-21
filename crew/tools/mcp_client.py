@@ -1196,6 +1196,8 @@ class MCPClientManager:
             return
         pending: list[tuple[_ServerWorker, asyncio.Task[bool]]] = []
         for name, cfg in self._config.items():
+            if self._closing:
+                return
             if not isinstance(cfg, dict):
                 log.warning("MCP server %s 配置非法，跳过", name)
                 continue
@@ -1210,7 +1212,8 @@ class MCPClientManager:
                 call_timeout=self._call_timeout,
                 startup_timeout=self._startup_timeout,
             )
-            self._workers.append(worker)
+            if not await self._adopt_worker(worker):
+                return
             pending.append((worker, asyncio.create_task(worker.start())))
 
         # 各 server 并行启动并独立失败，避免一个慢 server 阻塞其他 server 注册。
