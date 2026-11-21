@@ -163,6 +163,8 @@
     <li>Shift+Enter 始终用于换行，不影响发送判定。</li>
   </ul>
 
+  <p>从对话点击本地 HTML 产物或网址时，浏览器打开请求绑定当前账号、会话和工作台绑定代次。状态读取与连接完成后仍匹配原绑定才会显示看板；切走或切回同一会话之后，旧回包不会激活面板或显示错误提示。这不撤回已经在原会话创建的标签页，也不改变接管确认或访问策略。</p>
+
   <h3>3.8 工具生成中状态</h3>
   <ul>
     <li>Desktop 独立适配后端 <code>tool/generating</code>，不复用 Web 渲染实现。<code>chat-reducer.ts</code> 将 <code>generating/start</code> 按同一 <code>tool_call_id</code> 聚合，避免生成中和执行中出现两张工具卡。</li>

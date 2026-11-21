@@ -37,6 +37,7 @@ let socketOpen = false;
 let browserListenerBound = false;
 const browserListenerDisposers: Array<() => void> = [];
 let streamStateRevision = 0;
+let panelBindingRevision = 0;
 let resizeObserver: ResizeObserver | null = null;
 let layoutMutationObserver: MutationObserver | null = null;
 let layoutListenersBound = false;
@@ -164,6 +165,7 @@ function switchBrowserPanelSession(
   releaseHumanControl: boolean,
 ): void {
   if (next && socketSession === next) return;
+  panelBindingRevision += 1;
   if (releaseHumanControl && previous && pageState?.mode === 'human') {
     void releaseHumanBrowserControl(previous);
   }
@@ -194,11 +196,12 @@ function switchBrowserPanelSession(
 async function ensureConnection(sessionId: string): Promise<void> {
   bindGlobalListener();
   if (socketSession === sessionId && (socketOpen || socketConnectingSession === sessionId)) return;
+  const revision = panelBindingRevision;
   socketSession = sessionId;
   socketConnectingSession = sessionId;
   socketOpen = false;
   const result = await window.Crew?.browserWsConnect?.(sessionId);
-  if (socketSession !== sessionId) return;
+  if (socketSession !== sessionId || revision !== panelBindingRevision) return;
   socketConnectingSession = '';
   if (!result?.ok) updateStatus(result?.error || '浏览器状态连接失败');
 }
@@ -558,12 +561,35 @@ type OpenUserBrowserOptions = {
   createIfEmpty?: boolean;
 };
 
-async function approveHumanControl(sessionId: string): Promise<boolean> {
-  const known = socketSession === sessionId ? pageState : null;
-  const current = known || (await backendApi.browserState(sessionId)).state;
-  if (currentSession() !== sessionId) return false;
-  if (!isBrowserPageState(current)) throw new Error('浏览器状态响应格式无效');
-  if (!known) applyPageState(current);
+type BrowserOpenScope = { sessionId: string; isCurrent: () => boolean };
+
+function captureBrowserOpenScope(): BrowserOpenScope | null {
+  const sessionId = currentSession();
+  if (!sessionId) return null;
+  const revision = panelBindingRevision;
+  const owner = state.userInfo;
+  return {
+    sessionId,
+    isCurrent: () => panelBindingRevision === revision && currentSession() === sessionId && state.userInfo === owner,
+  };
+}
+
+function acceptOpenState(scope: BrowserOpenScope, value: unknown): BrowserPageState | null {
+  if (!scope.isCurrent()) return null;
+  if (!isBrowserPageState(value)) throw new Error('浏览器状态响应格式无效');
+  applyPageState(value);
+  return value;
+}
+
+async function connectOpenScope(scope: BrowserOpenScope): Promise<BrowserOpenDestination> {
+  await ensureConnection(scope.sessionId);
+  return scope.isCurrent() ? 'in_app' : 'failed';
+}
+
+async function approveHumanControl(scope: BrowserOpenScope): Promise<boolean> {
+  const known = socketSession === scope.sessionId ? pageState : null;
+  const current = known || acceptOpenState(scope, (await backendApi.browserState(scope.sessionId)).state);
+  if (!current || !scope.isCurrent()) return false;
   if (!current.tab_id || current.mode !== 'ai') return true;
   return window.confirm('打开此内容会暂停 AI 浏览操作并进入人工控制。是否继续？');
 }
@@ -573,40 +599,25 @@ export async function openUserBrowser(
   newTab = false,
   options: OpenUserBrowserOptions = {},
 ): Promise<BrowserOpenDestination> {
-  const sessionId = currentSession();
-  if (!sessionId) return 'failed';
+  const scope = captureBrowserOpenScope();
+  if (!scope) return 'failed';
   const normalizedUrl = normalizeUserUrl(value);
   try {
-    if (options.confirmTakeover && !(await approveHumanControl(sessionId))) return 'cancelled';
-    // Clicking the global Browser entry is also how users watch an AI-owned
-    // tab.  Merely revealing that tab must not silently switch the whole
-    // session into human mode.  Only create a blank human tab when the
-    // session truly has no browser page yet — and never on passive opens,
-    // which race ahead of the AI's first tab and would lock the AI out.
+    if (options.confirmTakeover && !(await approveHumanControl(scope))) return 'cancelled';
+    if (!scope.isCurrent()) return 'failed';
+    // Revealing an AI page must not change its control mode or create a human tab.
     if (!value.trim() && !newTab) {
-      const existing = pageState?.tab_id
+      const existing = acceptOpenState(scope, pageState?.tab_id
         ? pageState
-        : (await backendApi.browserState(sessionId)).state;
-      if (currentSession() !== sessionId) return 'failed';
-      if (!isBrowserPageState(existing)) throw new Error('浏览器状态响应格式无效');
-      applyPageState(existing);
-      if (existing.tab_id || options.createIfEmpty === false) {
-        await ensureConnection(sessionId);
-        return 'in_app';
-      }
+        : (await backendApi.browserState(scope.sessionId)).state);
+      if (!existing) return 'failed';
+      if (existing.tab_id || options.createIfEmpty === false) return await connectOpenScope(scope);
     }
-    const result = await backendApi.browserControl(
-      sessionId,
-      newTab ? 'new_tab' : 'open',
-      normalizedUrl,
-    );
-    if (currentSession() !== sessionId) return 'failed';
-    if (!isBrowserPageState(result.state)) throw new Error('浏览器状态响应格式无效');
-    applyPageState(result.state);
-    await ensureConnection(sessionId);
-    return 'in_app';
+    const result = await backendApi.browserControl(scope.sessionId, newTab ? 'new_tab' : 'open', normalizedUrl);
+    if (!acceptOpenState(scope, result.state)) return 'failed';
+    return await connectOpenScope(scope);
   } catch (error) {
-    notify(`无法在 Crew 浏览器中打开：${(error as Error).message}`);
+    if (scope.isCurrent()) notify(`无法在 Crew 浏览器中打开：${(error as Error).message}`);
     return 'failed';
   }
 }
@@ -687,20 +698,16 @@ export async function openBrowserArtifact(
   newTab = false,
   options: Pick<OpenUserBrowserOptions, 'confirmTakeover'> = {},
 ): Promise<BrowserOpenDestination> {
-  const sessionId = currentSession();
-  if (!sessionId || !path.trim()) return 'failed';
+  const scope = captureBrowserOpenScope();
+  if (!scope || !path.trim()) return 'failed';
   try {
-    if (options.confirmTakeover && !(await approveHumanControl(sessionId))) return 'cancelled';
-    // The gateway forwards new_tab into the same manager call, keeping artifact
-    // creation atomic and avoiding a failed preview leaving a blank tab behind.
-    const result = await backendApi.browserOpenArtifact(sessionId, path.trim(), newTab);
-    if (currentSession() !== sessionId) return 'failed';
-    if (!isBrowserPageState(result.state)) throw new Error('浏览器状态响应格式无效');
-    applyPageState(result.state);
-    await ensureConnection(sessionId);
-    return 'in_app';
+    if (options.confirmTakeover && !(await approveHumanControl(scope))) return 'cancelled';
+    if (!scope.isCurrent()) return 'failed';
+    const result = await backendApi.browserOpenArtifact(scope.sessionId, path.trim(), newTab);
+    if (!acceptOpenState(scope, result.state)) return 'failed';
+    return await connectOpenScope(scope);
   } catch (error) {
-    notify(`HTML 预览失败：${(error as Error).message}`);
+    if (scope.isCurrent()) notify(`HTML 预览失败：${(error as Error).message}`);
     return 'failed';
   }
 }

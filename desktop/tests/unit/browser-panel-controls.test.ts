@@ -257,6 +257,43 @@ describe('browser panel control recovery', () => {
     expect(artifact).toHaveBeenCalledWith('session-artifact', 'site/index.html', true);
   });
 
+  it.each([
+    { kind: 'HTML 产物', returnToOrigin: false },
+    { kind: '网址', returnToOrigin: false },
+    { kind: 'HTML 产物', returnToOrigin: true },
+  ] as const)('丢弃会话切换后迟到的 $kind 打开结果（切回原会话：$returnToOrigin）', async ({ kind, returnToOrigin }) => {
+    const origin = 'session-open-origin';
+    const next = 'session-open-next';
+    const opened = pageState({ tab_id: 'preview-tab', tab_label: 'preview-label', mode: 'human' });
+    let releaseConnect!: (result: { ok: boolean }) => void;
+    let connectStarted!: () => void;
+    const started = new Promise<void>((resolve) => { connectStarted = resolve; });
+    const pending = new Promise<{ ok: boolean }>((resolve) => { releaseConnect = resolve; });
+    const connect = vi.fn(async (_sid: string) => ({ ok: true })).mockImplementationOnce(() => {
+      connectStarted();
+      return pending;
+    });
+    Object.defineProperty(window, 'Crew', { configurable: true, value: { browserWsConnect: connect } });
+    vi.spyOn(backendApi, 'browserOpenArtifact').mockResolvedValue({ ok: true, state: opened });
+    vi.spyOn(backendApi, 'browserControl').mockResolvedValue({ ok: true, state: opened });
+    setActiveSessionId(origin);
+
+    const result = kind === 'HTML 产物'
+      ? openBrowserArtifact('site/index.html', true)
+      : openUserBrowser('https://example.test/', true);
+    await started;
+    setActiveSessionId(next);
+    syncBrowserPanelSession(next);
+    if (returnToOrigin) {
+      setActiveSessionId(origin);
+      syncBrowserPanelSession(origin);
+    }
+    releaseConnect({ ok: true });
+
+    await expect(result).resolves.toBe('failed');
+    expect(connect.mock.calls).toEqual(returnToOrigin ? [[origin], [next], [origin]] : [[origin], [next]]);
+  });
+
   it('renders a Codex-style blank tab without exposing internal control or debug UI', () => {
     document.body.innerHTML = renderBrowserPanel();
 

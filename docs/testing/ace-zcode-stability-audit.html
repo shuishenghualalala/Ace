@@ -435,6 +435,13 @@
 <p><strong>验收</strong> 定向回归在基线无法找到 <code>/plan</code> 候选。候选 Web 40 个文件、304 项通过；TypeScript 与生产构建通过。Windows Chrome 加载实际生产页面并连接隔离 Gateway。键盘进入 Plan 后，下一条正常请求在同一会话携带 <code>plan_active=true</code>；点击 <code>/craft</code> 发出该会话的 <code>plan_exit</code>。<code>/new</code> 保留工作空间但切到新的会话，技能选择只补全文本，明确提交后模型收到真实激活正文。全程只发两条聊天请求，两段公开历史分别落在对应会话。检查了实际菜单画面；Gateway 正常退出并回收两个端口。模型使用可控提供方。</p>
 <p class="evidence">Ace <code>web/src/components/Composer.tsx</code>、<code>ComposerSlashMenu.tsx</code>、<code>web/src/App.tsx</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/slash-commands.ts:21–51</code>、<code>packages/ui/src/v4/SessionPane.tsx:2856–2865</code>、<code>packages/ui/src/SlashCommandPlugin.tsx:283–305</code>。</p>
 </article>
+<article id="browser-preview-session-binding">
+<h3>对话预览只打开原会话的浏览器看板</h3>
+<p>对话中点击 HTML 产物和网址会先请求浏览器操作，再等待状态通道连接，最终展开浏览器看板。旧版只在操作响应时核对会话；随后切换会话，旧连接仍可能回报打开成功，展开新会话的面板。ZCode 将浏览器截图视图的 prepare/release 分别与工作区、会话、标签及原请求匹配，并由宿主检查代次。</p>
+<p>Ace 的显式预览和网址打开绑定账号、会话与面板绑定代次，在确认后、接收内容状态时及连接返回后核对。旧操作的成功或失败不会驱动当前看板；已为原会话创建的标签不回滚。Gateway 与宿主的接管确认、文件和网络边界不变。</p>
+<p><strong>验收</strong> 阻塞状态连接时，基线的 HTML 和网址两例在切换会话后均返回打开成功。候选拒绝两例及切走再切回原会话的迟到结果。组装测试实际点击对话产物按钮、切换会话，确认只请求原会话，新的看板不会显示。桌面定向回归 170 项通过，TypeScript 和隔离生产构建通过。连接边界使用受控夹具，未启动安装态 Electron。任务看板的产物按钮仍使用系统打开路径，文件预览缓存与任务看板内嵌入口单独核对。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/browser-panel.ts</code>、<code>conversation-renderer.ts:176–205</code>、<code>kanban-board.ts:390–413</code>。ZCode <code>packages/ui/src/browser-use/useBrowserScreenshotSurfaceRequest.ts:10–54、106–141</code>。</p>
+</article>
 <article id="renderer-heartbeat-probe">
 <h3>D7h · 丢失定时心跳时确认当前渲染器仍能应答</h3>
 <p>ZCode 主要用 Chromium 的原生无响应和恢复事件记录冻结，并独立处理浏览网页的来宾进程。Ace 继续处理原生事件，并在补充的前台定时心跳路径上增加一次即时应答确认。超过 16 秒后向当前可信主文档发探测，最多等待一个检查周期（当前 4 秒）。原定时心跳或探测应答都会续上本代计时。</p>
