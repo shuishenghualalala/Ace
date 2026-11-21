@@ -2381,7 +2381,14 @@ class SQLiteSessionStore(SessionStore):
                 config = json.loads(config_row[0]) if config_row else {}
                 if not isinstance(config, dict) or str(config.get("executor") or default_executor).strip().lower() != "builtin":
                     raise ValueError("只有内置智能体会话可以打开侧边聊天")
-                if config.keys() - {"executor", "model_profile_id", "user_type"}:
+                unsupported = config.keys() - {"executor", "model_profile_id", "user_type"}
+                # Desktop prepares this exact profile for the parent only.
+                if (
+                    config.get("executor") == "builtin"
+                    and config.get("capability_profiles") == ["blueprint.authoring"]
+                ):
+                    unsupported.discard("capability_profiles")
+                if unsupported:
                     raise ValueError("此会话的自定义权限或执行配置不支持侧边聊天")
                 # Preserve an explicit ceiling but never copy authority or opaque settings.
                 child_config = {"executor": "builtin"}

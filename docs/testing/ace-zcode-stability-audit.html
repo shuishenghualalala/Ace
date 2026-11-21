@@ -485,6 +485,12 @@
 <p><strong>验收</strong> 基线没有 <code>/side</code> 候选，Gateway 未实现相应 POST。候选 Web 307 项通过，TypeScript 和生产构建通过；Gateway 与会话事件回归 53 项通过。Windows Chrome 加载生产 Web 与隔离 Gateway：父回合保持流式时，侧聊从实际已保存历史完成独立问答；只停止侧聊的第二个请求，父会话仍继续并最终完成。公开历史分别包含各自输出，侧聊内容不进入父历史。Gateway 退出释放双端口。使用受控模型，未接触真实会话。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/sessions.py</code>、<code>crew/state/session_store.py</code>、<code>web/src/features/SideChat.tsx</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/selection-side-session.ts:12–78</code>、<code>packages/core/src/runtime/methods/session-fork.ts:811–859</code>、<code>packages/ui/src/app-shell/SelectionSideChatPane.tsx:24–54</code>。</p>
 </article>
+<article id="desktop-side-chat-admission">
+<h3>标准桌面首发配置可创建独立侧聊</h3>
+<p>ZCode 建立侧聊时单独组织子会话运行状态，不继承父会话正在推进的目标、队列或阻塞交互。Ace 的 Web 侧聊首版拒绝带自定义能力的父会话，但桌面标准首发也会持久化唯一 <code>blueprint.authoring</code>。侧聊现允许此标准父配置，不把创作能力复制给子会话；仍保留显式模型和外部角色限制，其他能力组合、预设和权限配置继续拒绝。</p>
+<p><strong>验收</strong> 真实 Gateway 的桌面 <code>ensure</code> 写入后，基线两场景均在创建侧聊时返回 409。候选返回同一工作空间的独立会话，SQLite 未复制创作能力；显式模型与外部角色上限仍在。相关侧聊、原首发和会话事件回归共 61 项通过，Ruff 及差异检查通过。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/native-visual-capability.ts:4–8</code>、<code>crew/gateway/routers/sessions.py:503–535</code>、<code>crew/state/session_store.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/session-fork.ts:811–859</code>。</p>
+</article>
 <article id="desktop-slash-commands">
 <h3>桌面输入框的斜杠命令与技能</h3>
 <p>ZCode 将当前应用可执行的动作与协议命令、技能分开呈现，应用动作选中时直接执行。Ace 桌面的原补全只等待并过滤技能目录。桌面主聊天现在用原补全面板分别显示命令与技能；<code>/plan</code>、<code>/craft</code> 和 <code>/new</code> 使用现有工具栏或新建动作。完整命令可直接提交，不生成模型回合；技能仍只补全文本。候选在技能目录返回前可用，迟到目录和切换会话不会重新打开已关闭的菜单。</p>
