@@ -853,6 +853,20 @@ async def test_mcp_reload_requires_management_context_and_reconnects_configured_
     assert "不存在" in missing.content
 
 
+def test_mcp_status_invalid_port_does_not_break_projection():
+    from crew.tools.mcp_management import _public_server_status
+
+    public = _public_server_status({
+        "name": "bad-port",
+        "transport": "http",
+        "connected": False,
+        "tools": [],
+        "config": {"url": "https://mcp.example.com:notaport/v1"},
+    })
+    assert public["target"] == ""
+    assert public["name"] == "bad-port"
+
+
 def test_mcp_worker_state_distinguishes_starting_from_reconnecting():
     from crew.tools.mcp_client import _ServerWorker
 

@@ -246,14 +246,15 @@ def _public_url_origin(url: str) -> str:
     try:
         parsed = urlsplit(url)
         host = parsed.hostname or ""
+        port = parsed.port
     except ValueError:
         return ""
     if not host or not parsed.scheme:
         return ""
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    port = f":{parsed.port}" if parsed.port is not None else ""
-    return f"{parsed.scheme}://{host}{port}"
+    suffix = f":{port}" if port is not None else ""
+    return f"{parsed.scheme}://{host}{suffix}"
 
 
 def _require_management_context() -> None:
