@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { clearTimeout, setTimeout } from 'node:timers';
 import process from 'node:process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -184,10 +184,22 @@ await build({
   write: true,
   logLevel: 'silent',
 });
-const stylesheet = pathToFileURL(path.join(desktopRoot, 'dist', 'styles.bundle.css')).href;
+await build({
+  entryPoints: [path.join(desktopRoot, 'assets', 'styles', 'index.css')],
+  outfile: path.join(appRoot, 'styles.bundle.css'),
+  bundle: true,
+  loader: {
+    '.css': 'css',
+    '.woff2': 'dataurl',
+    '.woff': 'dataurl',
+    '.ttf': 'dataurl',
+  },
+  minify: true,
+  logLevel: 'silent',
+});
 fs.writeFileSync(path.join(appRoot, 'index.html'), `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="stylesheet" href="${stylesheet}">
+<link rel="stylesheet" href="./styles.bundle.css">
 <style>html,body,#mount{width:100%;height:100%;margin:0;overflow:hidden}.mw-assistant-context{width:380px;height:820px;overflow:hidden}</style>
 </head><body><main id="mount"></main><script src="./renderer.js"></script></body></html>`);
 
