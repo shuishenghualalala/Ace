@@ -32,6 +32,7 @@ import {
   steerQueuedItem,
   stopGeneration,
 } from './chat-controller';
+import { runComposerSlashCommand } from './composer-mention';
 import { createComposerView, type ComposerView, type ComposerViewOptions } from './composer-view';
 import {
   disposeConversationRenderer,
@@ -99,6 +100,7 @@ export function createMainComposerActions(
   return {
     submit: async (text, userMentions, composerCheckpoint) => {
       if (!requireRendererLogin()) return false;
+      if (runComposerSlashCommand(text)) return true;
       const sessionId = state.activeSessionId;
       const editFrom = sessionId ? state.editFromIdx[sessionId] : null;
       const editedMessageId = sessionId && editFrom != null

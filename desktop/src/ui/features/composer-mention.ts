@@ -1,5 +1,5 @@
 /**
- * Composer 触发式补全：输入 `@` 补全项目文件，输入 `/` 补全技能。
+ * Composer 触发式补全：`@` 查找引用，`/` 查找命令和技能。
  *
  * 取代旧的 complete-popup（只支持 @、贴输入框角、无防抖、邮箱 foo@bar 误触发）。
  *
@@ -60,9 +60,16 @@ interface MentionItem {
   sig: 'slash' | 'folder' | 'image' | 'file' | 'agent' | 'tab';
   /** 弹窗候选左侧图标；未指定时由 sig 推导。 */
   icon?: IconId;
-  section?: '团队成员' | '文件';
+  section?: '团队成员' | '文件' | '命令' | '技能';
+  command?: { token: ComposerSlashCommand['token']; draft: string };
   userMention?: UserAgentMention;
   workResult?: MentionResult;
+}
+
+export interface ComposerSlashCommand {
+  token: `/${string}`;
+  detail: string;
+  run: () => void;
 }
 
 interface CompactMention {
@@ -104,6 +111,7 @@ let input: HTMLTextAreaElement | null = null;
 let overlay: HTMLElement | null = null;
 let popup: HTMLElement | null = null;
 let items: MentionItem[] = [];
+let getSlashCommands: (() => readonly ComposerSlashCommand[]) | undefined;
 let active: ActiveTrigger | null = null;
 let selectedIndex = 0;
 let workTags: MentionTag[] = [];
@@ -321,6 +329,32 @@ function filterSkills(query: string): MentionItem[] {
       meta: x.s.description_zh || x.s.description || '',
       sig: 'slash' as const,
       icon: 'skill-badge' as const,
+      section: '技能' as const,
+    }));
+}
+
+function lookupSlashCommand(token: string): ComposerSlashCommand | undefined {
+  return getSlashCommands?.().find((command) => command.token === token.trim().toLowerCase());
+}
+
+/** Consume a directly submitted command only when it is available in the current context. */
+export function runComposerSlashCommand(text: string): boolean {
+  const command = lookupSlashCommand(text);
+  if (!command) return false;
+  closePopup();
+  command.run();
+  return true;
+}
+
+function localCommandItems(token: string): MentionItem[] {
+  const draft = input?.value;
+  if (draft == null || active?.trigger !== '/' || input?.selectionStart !== draft.length
+      || draft.slice(0, active.start).trim()) return [];
+  const needle = token.slice(1).toLowerCase();
+  return (getSlashCommands?.() ?? [])
+    .filter(({ token: name, detail }) => name.slice(1).startsWith(needle) || detail.includes(needle))
+    .map(({ token: name, detail }) => ({
+      text: name, display: name, meta: detail, sig: 'slash', section: '命令', command: { token: name, draft },
     }));
 }
 
@@ -826,6 +860,7 @@ function renderPopup(): void {
     }
     button.append(createSig(item), body);
     button.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
       event.preventDefault();
       selectedIndex = index;
       pickSelected();
@@ -881,35 +916,43 @@ function schedule(trigger: Trigger, token: string): void {
   }, delay);
 }
 
-async function run(trigger: Trigger, token: string, mySeq: number): Promise<void> {
-  let result: MentionItem[];
+function applyCompletion(trigger: Trigger, token: string, sequence: number, result: MentionItem[], waiting = false): void {
+  if (sequence !== fetchSeq || !input || !active) return;
+  const caret = input.selectionStart ?? 0;
+  const target = detectTrigger(input.value, caret);
+  if (target?.trigger !== trigger || target.start !== active.start || input.value.slice(target.start, caret) !== token) {
+    closePopup();
+    return;
+  }
+  const selected = items[selectedIndex];
+  items = result;
+  selectedIndex = trigger === '/' && selected?.command
+    ? Math.max(0, items.findIndex((item) => item.command?.token === selected.command?.token)) : 0;
+  if (items.length > 0) renderPopup();
+  else if (waiting) {
+    popup?.remove();
+    popup = null;
+  } else closePopup();
+}
+
+async function run(trigger: Trigger, token: string, sequence: number): Promise<void> {
   if (trigger === '@') {
     const [agentItems, fileItems] = await Promise.all([
       fetchAgentItems(token.slice(1)).catch(() => []),
       fetchFileItems(token).catch(() => []),
     ]);
-    result = [...agentItems, ...fileItems];
-  } else {
+    applyCompletion(trigger, token, sequence, [...agentItems, ...fileItems]);
+    return;
+  }
+  if (!skillsCache) {
+    applyCompletion(trigger, token, sequence, localCommandItems(token), true);
     await ensureSkills();
-    result = filterSkills(token.slice(1));
   }
-  // 过期：用户继续输入发起了更新的查询
-  if (mySeq !== fetchSeq) return;
-  if (!input) return;
-  // 二次确认光标仍在同一触发符上（fetch 期间用户可能已删/移走）
-  const recheck = detectTrigger(input.value, input.selectionStart ?? 0);
-  const caret = input.selectionStart ?? 0;
-  if (!recheck || recheck.trigger !== trigger || recheck.start !== active?.start || input.value.slice(recheck.start, caret) !== token) {
-    closePopup();
-    return;
-  }
-  items = result;
-  selectedIndex = 0;
-  if (items.length === 0) {
-    closePopup();
-    return;
-  }
-  renderPopup();
+  const commands = localCommandItems(token);
+  const names = new Set(commands.map((item) => item.text));
+  applyCompletion(trigger, token, sequence, [
+    ...commands, ...filterSkills(token.slice(1)).filter((item) => !names.has(item.text.toLowerCase())),
+  ]);
 }
 
 // ---------------- 选中回填 ----------------
@@ -921,6 +964,17 @@ function pickSelected(): void {
   const start = active.start;
   const value = input.value;
   const caret = input.selectionStart ?? value.length;
+  if (item.command) {
+    const command = item.command.draft === value && caret === value.length
+      ? lookupSlashCommand(item.command.token) : undefined;
+    closePopup();
+    if (!command) return;
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+    command.run();
+    return;
+  }
   const visibleText = compactMentionText(item);
   const next = value.slice(0, start) + visibleText + ' ' + value.slice(caret);
   input.value = next;
@@ -1114,6 +1168,12 @@ function onInput(): void {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && active) {
+    e.preventDefault();
+    e.stopPropagation();
+    closePopup();
+    return;
+  }
   if (popup && items.length > 0) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -1133,11 +1193,6 @@ function onKeydown(e: KeyboardEvent): void {
       pickSelected();
       return;
     }
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closePopup();
-      return;
-    }
   }
   if (e.key === 'Backspace') {
     maybeBackspaceChip(e);
@@ -1148,11 +1203,12 @@ function onKeydown(e: KeyboardEvent): void {
  * 绑定主对话 Composer 输入框的触发式补全。幂等。替代旧 bindCompletePopup。
  * 由 ui/index.ts 在 init 时调用一次。
  */
-export function bindComposerMention(): () => void {
+export function bindComposerMention(commandSource?: () => readonly ComposerSlashCommand[]): () => void {
   if (bound) return () => {};
   input = queryPrimaryComposer<HTMLTextAreaElement>('[data-composer-input]') ?? null;
   if (!input) return () => {};
   bound = true;
+  getSlashCommands = commandSource;
   bindingController = new AbortController();
   const signal = bindingController.signal;
 
@@ -1173,6 +1229,7 @@ export function bindComposerMention(): () => void {
   });
   const unsubscribeSession = sessionStore.subscribe((next, previous) => {
     if (next.activeSessionId === previous.activeSessionId) return;
+    closePopup();
     disabledWorkPreferenceIds.clear();
     renderWorkTags();
   });
@@ -1254,6 +1311,7 @@ export function bindComposerMention(): () => void {
       input.parentElement?.classList.remove('chat-input-overlay-host');
     }
     input = null;
+    getSlashCommands = undefined;
     composing = false;
     bound = false;
   };

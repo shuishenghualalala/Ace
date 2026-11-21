@@ -6,8 +6,43 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it, vi } from 'vitest';
-import type { BrowserPageState } from '../../src/ui/backend-client';
-import { buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, teamMemberMentionId, workMentionText } from '../../src/ui/features/composer-mention';
+import { backendApi, type BrowserPageState } from '../../src/ui/backend-client';
+import { bindComposerMention, buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, teamMemberMentionId, workMentionText } from '../../src/ui/features/composer-mention';
+
+describe('桌面斜杠命令', () => {
+  it('技能目录仍在等待时，输入 /pl 已可选中并执行 Plan', async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<div><textarea data-composer-input></textarea></div>';
+    const input = document.querySelector('textarea')!;
+    let deliver!: () => void;
+    const pendingSkills = new Promise<[]>((resolve) => { deliver = () => resolve([]); });
+    const skills = vi.spyOn(backendApi, 'skills').mockReturnValue(pendingSkills);
+    const enterPlan = vi.fn();
+    const dispose = bindComposerMention(() => [{ token: '/plan', detail: '进入计划模式', run: enterPlan }]);
+    try {
+      input.focus();
+      input.value = '/pl';
+      input.setSelectionRange(3, 3);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(40);
+      const option = document.querySelector('[role="option"]');
+      expect(option, 'Plan 应在技能未返回时出现在真实补全列表中').not.toBeNull();
+      expect(option?.textContent).toContain('/plan');
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      expect(enterPlan).toHaveBeenCalledTimes(1);
+      expect(input.value).toBe('');
+      deliver();
+      await pendingSkills;
+      expect(document.querySelector('[role="listbox"]')).toBeNull();
+    } finally {
+      dispose();
+      deliver();
+      skills.mockRestore();
+      vi.useRealTimers();
+      document.body.replaceChildren();
+    }
+  });
+});
 
 describe('detectTrigger', () => {
   it('行首 @ 触发', () => {

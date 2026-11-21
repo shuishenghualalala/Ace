@@ -17,7 +17,7 @@ import { bindSitesTab, createSitesPageContribution, syncSiteComposerMarker } fro
 import { bindBlueprintSurface } from './features/blueprint-surface';
 import { bindNativeVisuals } from './features/native-visual';
 import { bindModelPicker } from './features/model-picker';
-import { bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
+import { applyComposerMode, bindComposerToolbar, syncCraftLabel } from './features/composer-toolbar';
 import { bindComposerContextRing } from './features/composer-context-ring';
 import { createComposerContextView } from './features/composer-context-view';
 import { createAgentsPageContribution, disposeAgentsPage, initAgentsPage } from './features/agents-page';
@@ -59,6 +59,7 @@ import { disposeWikiAgentFeature, enterWikiAgentMode, forgetWikiAgentKb, initWik
 import {
   assignSessionAgentDisplay,
   bindWorkspaceUi,
+  composerWorkspaceId,
   createSessionInWorkspace,
   createWorkspaceFromFolderPicker,
   getHistoryLoadError,
@@ -90,7 +91,7 @@ import {
   openImageViewer,
   revealImageInFolder,
 } from './features/image-viewer';
-import { bindComposerMention, isMentionOpen } from './features/composer-mention';
+import { bindComposerMention, isMentionOpen, type ComposerSlashCommand } from './features/composer-mention';
 import { createMainPanelAttachments } from './features/attachments';
 import {
   createMainComposerActions,
@@ -117,6 +118,7 @@ import {
 import {
   bookFor,
   getMessages,
+  hasContextualChatDraft,
   dispatchWs,
   patchPlanReviewMessages,
   refreshSessions,
@@ -222,11 +224,31 @@ function resetExpertForNewSession(): void {
   syncCraftLabel();
 }
 
-function startNewChat(): void {
+function startWorkspaceChat(workspaceId: string): void {
   if (!requireRendererLogin()) return;
   resetExpertForNewSession();
-  createSessionInWorkspace('default', openSession);
+  createSessionInWorkspace(workspaceId, openSession);
   setTab('chat');
+}
+
+function startNewChat(): void {
+  startWorkspaceChat('default');
+}
+
+const MAIN_CHAT_COMMANDS: readonly ComposerSlashCommand[] = [
+  { token: '/plan', detail: '进入计划模式', run: () => {
+    if (state.composerMode !== 'plan') applyComposerMode('plan');
+  } },
+  { token: '/craft', detail: '回到普通对话', run: () => {
+    if (state.composerMode !== 'craft') applyComposerMode('craft');
+  } },
+  { token: '/new', detail: '在当前工作空间新建对话', run: () => startWorkspaceChat(composerWorkspaceId()) },
+];
+
+function availableMainChatCommands(): readonly ComposerSlashCommand[] {
+  return isRendererLoggedIn() && state.activeTab === 'chat' && !isStudioView()
+    && productModeStore.get().productMode === 'assistant' && !hasContextualChatDraft()
+    ? MAIN_CHAT_COMMANDS : [];
 }
 
 function bindGlobalEvents(): () => void {
@@ -434,7 +456,7 @@ function bindGlobalEvents(): () => void {
   });
 
   const disposeAttachments = bindAttachments();
-  const disposeComposerMention = bindComposerMention();
+  const disposeComposerMention = bindComposerMention(availableMainChatCommands);
   bindTooltips();
   bindModelPicker();
   const disposeComposerToolbar = bindComposerToolbar();

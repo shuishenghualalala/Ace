@@ -2025,6 +2025,14 @@ export async function sendNativeVisualMessage(sessionId: string, text: string): 
   return dispatchWs(sessionId, text, [], { subScenario: '', workDisabledPreferenceIds: [] });
 }
 
+export function hasContextualChatDraft(): boolean {
+  const sessionId = state.activeSessionId;
+  return Boolean(state.attachments.length || getArmedSubScenario() || (sessionId && (
+    state.editFromIdx[sessionId] != null || queueEditDraft?.sessionId === sessionId
+    || hasSiteAnnotationDraft(sessionId) || hasBlueprintAnnotationDraft(sessionId)
+  )));
+}
+
 export async function sendMessage(
   text: string,
   userMentions: UserAgentMention[] = [],
