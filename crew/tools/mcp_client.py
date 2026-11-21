@@ -1135,6 +1135,9 @@ class MCPClientManager:
     ) -> None:
         self._config = servers_config or {}
         self._workers: list[_ServerWorker] = []
+        # Serialize lifecycle changes per server: two concurrent reload/add calls
+        # must not both stop the old worker and append a replacement.
+        self._server_locks: dict[str, asyncio.Lock] = {}
         self._queue_capacity = queue_capacity
         self._call_timeout = call_timeout
         self._startup_timeout = startup_timeout
@@ -1263,6 +1266,13 @@ class MCPClientManager:
                 return w
         return None
 
+    def _server_lock(self, name: str) -> asyncio.Lock:
+        lock = self._server_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._server_locks[name] = lock
+        return lock
+
     @staticmethod
     def _transport_of(cfg: dict[str, Any]) -> str:
         """探测配置的传输类型：stdio / sse / http。"""
@@ -1320,6 +1330,10 @@ class MCPClientManager:
             return False
         # 等后台初始 start 跑完，避免与 _start_blocking 同时写 _workers / _config。
         await self.await_started()
+        async with self._server_lock(name):
+            return await self._add_server_locked(name, cfg)
+
+    async def _add_server_locked(self, name: str, cfg: dict[str, Any]) -> bool:
         if self._closing:
             return False
         if self._worker_for(name) is not None:
@@ -1354,6 +1368,10 @@ class MCPClientManager:
     async def remove_server(self, name: str) -> bool:
         """删除一个 server：停止 worker + 注销工具 + 从配置移除。"""
         await self.await_started()
+        async with self._server_lock(name):
+            return await self._remove_server_locked(name)
+
+    async def _remove_server_locked(self, name: str) -> bool:
         worker = self._worker_for(name)
         self._config.pop(name, None)
         if worker is None:
@@ -1372,6 +1390,10 @@ class MCPClientManager:
         if self._registry is None or self._closing:
             return False
         await self.await_started()
+        async with self._server_lock(name):
+            return await self._reload_one_locked(name, cfg)
+
+    async def _reload_one_locked(self, name: str, cfg: dict[str, Any] | None) -> bool:
         if self._closing:
             return False
         if cfg is not None:

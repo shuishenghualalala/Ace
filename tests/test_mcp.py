@@ -853,6 +853,44 @@ async def test_mcp_reload_requires_management_context_and_reconnects_configured_
     assert "不存在" in missing.content
 
 
+async def test_manager_serializes_concurrent_server_reloads(monkeypatch):
+    from crew.tools import mcp_client
+
+    events: list[tuple[str, str]] = []
+
+    class FakeWorker:
+        def __init__(self, name, _cfg, _registry, **_kwargs):
+            self.name = name
+
+        def _unregister_tools(self):
+            events.append(("unregister", self.name))
+
+        async def stop(self):
+            events.append(("stop", self.name))
+            await asyncio.sleep(0)
+
+        async def start(self):
+            events.append(("start", self.name))
+            await asyncio.sleep(0.02)
+            return True
+
+    monkeypatch.setattr(mcp_client, "_ServerWorker", FakeWorker)
+    manager = mcp_client.MCPClientManager({"echo": {"url": "https://example.invalid/mcp"}})
+    manager._registry = Registry()
+    manager._start_task = asyncio.create_task(asyncio.sleep(0))
+    await manager._start_task
+
+    results = await asyncio.gather(
+        manager.reload_one("echo"),
+        manager.reload_one("echo"),
+    )
+
+    assert results == [True, True]
+    assert len([worker for worker in manager._workers if worker.name == "echo"]) == 1
+    assert events.count(("start", "echo")) == 2
+    assert events.count(("stop", "echo")) == 1
+
+
 def test_mcp_status_invalid_port_does_not_break_projection():
     from crew.tools.mcp_management import _public_server_status
 
