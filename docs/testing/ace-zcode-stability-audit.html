@@ -310,6 +310,12 @@
 <p><strong>验收</strong> 通过真实 Gateway WebSocket、公开目标 API 与 SQLite，核对独立目标记录、版本冲突、已暂停目标重启后保持不注入、新会话实例拒绝旧版本、其他账号不能读写。仅替换模型。Goal、持久提交和 Plan 回归共 32 项通过；Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/state/session_goals.py</code>、<code>crew/gateway/routers/session_goals.py</code>、<code>crew/app.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts:241–425</code>、<code>packages/core/src/runtime/methods/target-continuation-loop.ts:45–85</code>。</p>
 </article>
+<article id="web-session-goal">
+<h3>Web 从 /goal 管理已保存的会话目标</h3>
+<p>ZCode 由输入层识别完整斜杠词及参数，目标通过专用命令进入会话。Ace Web 在已有内置主会话中用 <code>/goal</code> 打开编辑器，参数可预填；用户保存后从真实目标接口更新版本和状态。编辑、操作和冲突恢复都不生成聊天帧。</p>
+<p><strong>验收</strong> Windows Chrome 使用生产 Web 与隔离 Gateway，实际输入并保存目标。独立请求改变版本后，旧按钮收到冲突并读回已暂停状态，没有自动重试；随后恢复、标记完成及重新打开均正确。合成模型只在活动状态的普通请求收到目标，持久聊天历史没有命令或目标正文。Web 308 项、TypeScript 和生产构建通过。此阶段不包含桌面入口或目标自动推进。</p>
+<p class="evidence">Ace <code>web/src/features/SessionGoal.tsx</code>、<code>web/src/components/ComposerSlashMenu.tsx</code>。ZCode <code>packages/ui/src/v4/slashCommands.ts:43–74</code>、<code>packages/ui/src/v4/SessionPane.tsx:3325–3388</code>。</p>
+</article>
 <article id="cli-session-resume">
 <h3>CLI 交互续接已保存的会话</h3>
 <p>Kimi 的 CLI 提供显式会话 ID 和按当前目录续接最近会话两种入口。显式 ID 路径查询会话索引，不存在或目录不符时报错。Ace 的非交互 <code>run</code> 已能指定会话；交互 <code>chat</code> 现在也可以用 <code>--session-id</code>，在打开输入前核对账号的公开会话目录和所选工作空间，保持原审批流程。启动和 <code>/new</code> 显示当前 ID；未指定时维持新建。自动续接最近会话不在本次变更中。</p>

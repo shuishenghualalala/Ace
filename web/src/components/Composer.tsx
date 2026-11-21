@@ -36,6 +36,7 @@ interface Props {
   onExitPlan?: () => void;
   onNewSession?: () => void;
   onOpenSideChat?: () => void;
+  onOpenGoal?: (objective: string) => void;
   /** 场景化推荐：预填文本（nonce 变化即注入）+ 场景 chip + 携带的细分玩法 id */
   prefillText?: string;
   prefillNonce?: number;
@@ -87,6 +88,7 @@ export default function Composer({
   onExitPlan,
   onNewSession,
   onOpenSideChat,
+  onOpenGoal,
   prefillText,
   prefillNonce,
   scenarioChip,
@@ -249,6 +251,7 @@ export default function Composer({
     "/new": onNewSession,
     "/side": onOpenSideChat,
     "/btw": onOpenSideChat,
+    "/goal": onOpenGoal,
   } : {};
   const slashQuery = slashOpen && slashEligible ? composerSlashQuery(text) : null;
   const slashItems = slashQuery === null ? [] : composerSlashItems(slashQuery, slashActions, skills);

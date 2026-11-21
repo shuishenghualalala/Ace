@@ -12,6 +12,7 @@ import {
 import type { WikiPageContext } from "./features/WikiFeature";
 import { installAgentsPageContribution } from "./features/AgentsFeature";
 import { SideChatPane, useSideChat } from "./features/SideChat";
+import { SessionGoalPanel } from "./features/SessionGoal";
 import type { AgentsPageContext } from "./features/AgentsFeature";
 import {
   installKanbanFeatureHandlers,
@@ -195,6 +196,7 @@ export default function App() {
   const [modal, setModal] = useState<{ open: boolean; ws: Workspace | null }>({ open: false, ws: null });
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [editDraft, setEditDraft] = useState<{ messageId: string; text: string } | null>(null);
+  const [goalEditor, setGoalEditor] = useState<{ sessionId: string; objective: string; revision: number } | null>(null);
   const [sessionExternalTeams, setSessionExternalTeams] = useState<Record<string, string>>({});
   const [sessionTeamTiers, setSessionTeamTiers] = useState<Record<string, TeamExecutionTier | undefined>>({});
   const [sessionTeamWikiReadGrants, setSessionTeamWikiReadGrants] = useState<Record<string, { teamId: string; kbId: string }>>({});
@@ -242,6 +244,7 @@ export default function App() {
 
   const chat = useChat(currentSessionId, onAfterFinal, appFeatureEventRegistry);
   const sideChat = useSideChat(view === "chat" ? currentSessionId : null, chat.loadHistory);
+  useLayoutEffect(() => { setGoalEditor(null); }, [currentSessionId, view]);
   const canOpenSideChat = sessions.some(({ session_id }) => session_id === currentSessionId)
     || chat.messages.some(({ role }) => role === "user");
   const currentExternalTeam = externalTeams.find((team) => team.id === sessionExternalTeams[currentSessionId]);
@@ -725,6 +728,10 @@ export default function App() {
                 }}
               />
             )}
+            {goalEditor?.sessionId === currentSessionId && (
+              <SessionGoalPanel key={`${goalEditor.sessionId}:${goalEditor.revision}`}
+                sessionId={goalEditor.sessionId} initialObjective={goalEditor.objective} onClose={() => setGoalEditor(null)} />
+            )}
             <ChatPanel
               sessionId={currentSessionId}
               messages={chat.messages}
@@ -747,6 +754,9 @@ export default function App() {
               onOpenSideChat={canOpenSideChat ? () => {
                 setBoardOpen(false);
                 sideChat.open();
+              } : undefined}
+              onOpenGoal={canOpenSideChat && mode === "agent" && !isExternalAgentSession(currentSession) ? (objective) => {
+                setGoalEditor((previous) => ({ sessionId: currentSessionId, objective, revision: (previous?.revision ?? 0) + 1 }));
               } : undefined}
               onPlanDecision={(action, review) => chat.decidePlan(action, review, currentSessionId, mode, currentWorkspaceId)}
               followupQuestion={chat.followupQuestion}

@@ -227,6 +227,14 @@ const jsonBody = (body: object): RequestInit => ({
 const withKb = (url: string, kbId?: string) =>
   kbId ? `${url}${url.includes("?") ? "&" : "?"}kb_id=${encodeURIComponent(kbId)}` : url;
 
+export type SessionGoalAction = "set" | "pause" | "resume" | "complete";
+export interface SessionGoalSnapshot {
+  version: string;
+  goal: { objective: string; status: "active" | "paused" | "completed" } | null;
+}
+
+const sessionGoalPath = (id: string) => `/api/session/${encodeURIComponent(id)}/goal`;
+
 export const api = {
   config: () => getJSON<AppConfig>("/api/config"),
   switchModel: (modelId: string) =>
@@ -245,6 +253,10 @@ export const api = {
     getJSON<{ ok: true; session_id: string; source_session_id: string; workspace_id: string }>(
       `/api/session/${encodeURIComponent(id)}/side-chat`, { method: "POST", signal, ...jsonBody({}) },
     ),
+  sessionGoal: (id: string, signal: AbortSignal) => getJSON<SessionGoalSnapshot>(sessionGoalPath(id), { signal }),
+  changeSessionGoal: (
+    id: string, payload: { version: string; action: SessionGoalAction; objective?: string }, signal: AbortSignal,
+  ) => getJSON<SessionGoalSnapshot>(sessionGoalPath(id), { method: "POST", signal, ...jsonBody(payload) }),
   historyTail: (id: string, signal?: AbortSignal) =>
     getJSON<{ items: { role: string; request_id?: string }[] }>(
       `/api/session/${encodeURIComponent(id)}/history?limit=40`, { signal },

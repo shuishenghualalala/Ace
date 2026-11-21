@@ -44,6 +44,7 @@ export interface Props {
   onExitPlan?: () => void;
   onNewSession?: () => void;
   onOpenSideChat?: () => void;
+  onOpenGoal?: (objective: string) => void;
   embedded?: boolean;
   onPlanDecision?: PlanDecisionHandler;
   onAsk?: (text: string) => void;
@@ -104,6 +105,7 @@ export default function ChatPanel({
   onExitPlan,
   onNewSession,
   onOpenSideChat,
+  onOpenGoal,
   embedded = false,
   onPlanDecision,
   onAsk,
@@ -300,6 +302,7 @@ export default function ChatPanel({
               onExitPlan={onExitPlan}
               onNewSession={onNewSession}
               onOpenSideChat={onOpenSideChat}
+              onOpenGoal={onOpenGoal}
               prefillText={prefillText}
               prefillNonce={prefillNonce}
               scenarioChip={scenarioChip ? { label: scenarioChip.label, onClear: () => setScenarioChip(null) } : null}
@@ -383,6 +386,7 @@ export default function ChatPanel({
             onExitPlan={onExitPlan}
             onNewSession={onNewSession}
             onOpenSideChat={onOpenSideChat}
+            onOpenGoal={onOpenGoal}
             editDraft={editDraft}
             onCancelEdit={onCancelEdit}
             uploadContext={uploadContext}

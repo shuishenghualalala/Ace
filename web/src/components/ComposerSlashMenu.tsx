@@ -7,10 +7,11 @@ const COMMANDS = [
   { name: "/new", detail: "在当前工作空间新建对话" },
   { name: "/side", detail: "打开侧边聊天" },
   { name: "/btw", detail: "打开侧边聊天" },
+  { name: "/goal", detail: "设置或管理会话目标" },
 ] as const;
 
 type CommandName = (typeof COMMANDS)[number]["name"];
-export type ComposerCommandActions = Partial<Record<CommandName, () => void>>;
+export type ComposerCommandActions = Partial<Record<CommandName, (argument: string) => void>>;
 
 type CommandItem = { kind: "command"; token: CommandName; detail: string };
 type SkillItem = { kind: "skill"; token: string; detail: string };
@@ -24,9 +25,14 @@ export function composerSlashQuery(text: string): string | null {
 }
 
 export function composerSlashAction(text: string, actions: ComposerCommandActions): (() => void) | undefined {
-  const token = text.trim().toLowerCase();
+  const parsed = /^(\S+)(?:\s+([\s\S]+))?$/.exec(text.trim());
+  if (!parsed) return undefined;
+  const token = parsed[1].toLowerCase();
+  const argument = parsed[2] ?? "";
   const command = COMMANDS.find(({ name }) => name === token);
-  return command && actions[command.name];
+  if (!command || (argument && command.name !== "/goal")) return undefined;
+  const action = actions[command.name];
+  return action ? () => action(argument) : undefined;
 }
 
 export function composerSlashItems(

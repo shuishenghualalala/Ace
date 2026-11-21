@@ -223,6 +223,18 @@ describe("Composer slash input", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("keeps the objective text of a /goal command out of the chat submit path", async () => {
+    vi.spyOn(api, "skills").mockResolvedValue([]);
+    const onOpenGoal = vi.fn();
+    const onSend = vi.fn();
+    const input = await mount({ onOpenGoal, onSend });
+    await type(input, "/goal Reconcile A  and B\nThen verify the totals");
+    press(input, "Enter");
+    expect(onOpenGoal).toHaveBeenCalledWith("Reconcile A  and B\nThen verify the totals");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe("");
+  });
+
   it("does not interpret a slash token as a command when it has attachments", async () => {
     const attachments = [{ id: "f", name: "fixture.txt", path: "fixture.txt", type: "file" as const }];
     const onSend = vi.fn();

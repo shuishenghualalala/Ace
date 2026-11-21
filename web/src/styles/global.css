@@ -1842,6 +1842,35 @@ button { font-family: inherit; cursor: pointer; }
   }
 }
 /* ---------------- 聊天面板 ---------------- */
+.session-goal {
+  display: grid;
+  gap: 6px;
+  align-self: center;
+  width: min(720px, calc(100% - 32px));
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.session-goal__header, .session-goal__actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.session-goal__header { justify-content: space-between; }
+.session-goal p { margin: 0; }
+.session-goal small { color: var(--text-3); }
+.session-goal__objective { max-height: 8rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.session-goal form { display: grid; gap: 6px; justify-items: start; }
+.session-goal textarea {
+  width: 100%;
+  resize: vertical;
+  max-height: 8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--bg);
+  font: inherit;
+}
+
 .chat-panel {
   flex: 1;
   display: flex;
