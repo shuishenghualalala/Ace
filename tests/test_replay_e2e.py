@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from crew.app import build_app
@@ -12,6 +13,20 @@ from crew.state.config import Config, ModelProfile
 from tests.e2e.replay_server import ReplayServer
 
 FIXTURE = Path(__file__).parent / "e2e" / "fixtures" / "replay" / "partial_failure.jsonl"
+
+
+def test_replay_server_fails_loud_when_no_response_remains():
+    server = ReplayServer([]).start()
+    try:
+        with httpx.Client(trust_env=False, timeout=5) as client:
+            response = client.post(
+                f"{server.base_url}/chat/completions",
+                json={"stream": False},
+            )
+    finally:
+        server.stop()
+    assert response.status_code == 500
+    assert "no recorded model response" in response.text
 
 
 @pytest.mark.asyncio
