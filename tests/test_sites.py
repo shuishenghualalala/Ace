@@ -1153,7 +1153,7 @@ async def test_widget_show_is_panel_only_without_inline_html(site_manager, tmp_p
 @pytest.mark.asyncio
 async def test_native_visual_registry_live_history_without_widget_files(site_manager, tmp_path):
     from crew.gateway.routers.sessions import _tool_result_for_history
-    spec = json.loads((Path(__file__).parent / 'fixtures/native-visual.json').read_text())
+    spec = json.loads((Path(__file__).parent / 'fixtures/native-visual.json').read_text(encoding="utf-8"))
     registry = Registry()
     register_blueprint_tools(registry, site_manager)
     contexts = [(current_owner_account_id, current_owner_account_id.set('owner-1')),

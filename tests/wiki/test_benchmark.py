@@ -142,7 +142,7 @@ def test_benchmark_runs_production_search_in_isolation(tmp_path, monkeypatch):
     write_report(output, report, rows)
     assert json.loads((output / "report.json").read_text())["queries"] == 1
     assert len((output / "queries.jsonl").read_text().splitlines()) == 4
-    assert "未评测答案质量" in (output / "report.md").read_text()
+    assert "未评测答案质量" in (output / "report.md").read_text(encoding="utf-8")
 
 
 def test_custom_compiled_snapshot_exercises_real_neighbor_expansion():
