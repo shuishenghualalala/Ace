@@ -635,6 +635,48 @@ async def test_mount_retry_recovers_from_a_transient_prepare_failure(tmp_path, m
         await service.stop()
 
 
+async def test_mount_retry_stops_after_the_delay_budget(tmp_path, monkeypatch):
+    store = CronJobStore(str(tmp_path / "retry-budget.db"))
+    store.create(
+        name="retry-budget",
+        schedule="every 1h",
+        query="run",
+        session_id="retry-budget-session",
+        owner_account_id=OWNER,
+    )
+
+    async def runner(_envelope):
+        return None
+
+    attempts = 0
+
+    async def always_locked(_owner, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("still locked")
+
+    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount_async", always_locked)
+    service = CronService(
+        store,
+        runner,
+        owner_active=lambda owner: owner == OWNER,
+        mount_retry_delays=(0.01,),
+    )
+    await service.start()
+    try:
+        task = service.request_owner_mount(OWNER)
+        await asyncio.gather(task, return_exceptions=True)
+        for _ in range(100):
+            if attempts >= 2 and not service._mount_retry_tasks:
+                break
+            await asyncio.sleep(0.01)
+        assert attempts == 2
+        assert OWNER in service.mount_failures
+        assert service._mount_retry_tasks == {}
+    finally:
+        await service.stop()
+
+
 def test_recover_running_fire_marks_abandoned_without_replay(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
     job = store.create(
