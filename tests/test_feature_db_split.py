@@ -2523,6 +2523,9 @@ _CORE_MAIN_DB_TABLES = frozenset(
         "followup_receipts",
         "plan_gateway_state",
         "plan_receipts",
+        "session_goals",
+        "session_goal_steps",
+        "session_goal_verifications",
     }
 )
 

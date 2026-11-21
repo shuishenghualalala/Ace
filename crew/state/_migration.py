@@ -507,6 +507,10 @@ CORE_MAIN_DB_TABLES: frozenset[str] = frozenset({
     "session_fork_prefix_events",
     "plan_gateway_state",
     "plan_receipts",
+    # SessionGoals owns the durable goal, steps and verification ledger.
+    "session_goals",
+    "session_goal_steps",
+    "session_goal_verifications",
     "store_meta",
 })
 
