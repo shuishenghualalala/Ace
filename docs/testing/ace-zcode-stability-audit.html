@@ -345,6 +345,12 @@
 <p><strong>验收</strong> Web 全量 318 项、Goal Gateway 12 项通过，TypeScript 和生产构建通过。Windows Chrome 通过生产 Web 操作真实 Gateway：先启动一轮，在同一会话提交普通输入只进入本地队列，Goal 结束后按顺序补齐历史并发送一次；第二轮关闭再打开仍是同一个 ID，暂停后网关确认该轮停止。恢复目标没有第三次推进。模拟断线与旧会话迟到读取不重发、也不覆盖新状态。尚无自动续跑或独立验收。</p>
 <p class="evidence">Ace <code>web/src/features/SessionGoal.tsx</code>、<code>web/src/hooks/useChat.ts</code>、<code>web/src/lib/chatTurns.ts</code>、<code>crew/gateway/routers/session_goals.py</code>。ZCode <code>packages/ui/src/v4/ConversationStatusPanel.tsx:463–557</code>。</p>
 </article>
+<article id="web-goal-continuation">
+<h3>Web 显式启动并停止有界自动推进</h3>
+<p>ZCode 在目标状态区呈现自动续跑及每次继续前的验收结果。Ace Web 在网关声明支持时提供 1–12 的轮次选择和「自动推进」，只在用户点击后提交带预算的 <code>continue</code>。面板显示已运行轮次、上限和停止原因；运行中只开放「停止自动推进」与「暂停目标」，「停止自动推进」保留启用中的目标，「暂停目标」同时暂停目标。启动或停止的回执丢失时只按持久标识重新读取，不自动重发。</p>
+<p><strong>验收</strong> Web 全量 324 项、TypeScript 和生产构建通过。Windows Chrome 使用生产 Web 与隔离真实 Gateway：目标启用后选择 3 轮并启动，第一次验收证据不足、第二次通过，面板显示「自动推进已通过验收 · 2/3 轮」，目标完成，聊天只新增两轮固定推进说明和回复。随后设置第二个目标并按 2 轮启动，在验收模型确实运行时点击「停止自动推进」，面板显示「自动推进已停止 · 1/2 轮」且目标仍启用，在途验收标为中断；同一会话的普通消息随后正常完成。整个流程只提交 5 次目标写入（设置、启动、设置、启动、停止），未自动重试。</p>
+<p class="evidence">Ace <code>web/src/features/SessionGoal.tsx</code>、<code>web/src/api.ts</code>、<code>web/src/features/SessionGoal.test.tsx</code>。截图 <code>goal-continuation-ui-54a0e9780d/web-goal-continued.png</code>、<code>web-goal-continuation-stopped.png</code>。ZCode <code>packages/ui/src/v4/ConversationStatusPanel.tsx:463–557</code>、<code>conversationGoalSummaryModel.ts:46–69</code>。</p>
+</article>
 <article id="desktop-session-goal">
 <h3>桌面 /goal 管理持久目标</h3>
 <p>ZCode 先解析完整命令和上下文，再把不带附件的目标交给专用命令；状态区通过明确的暂停和恢复操作通报结果。Ace 桌面复用现有目标 API。主聊天的 <code>/goal</code> 打开面板，参数保留内部空格、换行，保存后仍不是聊天消息。未接收或遇到版本冲突时保留原草稿；收到不确定的写入结果后先读取，不自动重发。面板按主会话、账号和网关代际隔离旧响应。</p>
@@ -368,7 +374,7 @@
 <h3>由用户启动的有界 Goal 自动推进</h3>
 <p>ZCode 的续跑由用户提交触发，在每次继续前重新验收目标；验收通过、目标变化、等待用户命令或后台任务时停止。Ace 新增 <code>continue</code> 与 <code>stop_continue</code>，只有显式提交才启动。每次运行保存独立 <code>continue_</code> 标识、当前目标版本、轮次上限和已完成次数，默认 4 轮、上限 12 轮；设置目标本身仍不会启动任何模型调用。循环串行复用已交付的单轮推进与独立验收：每轮先推进一个无工具前台回合，再以已保存证据验收；验收通过即完成目标，明确证据不足才消耗下一轮预算，判定不确定、证据变化或无法确认时停止而不是继续猜测。</p>
 <p>暂停在保存目标状态时同事务停止自动运行，并定向停止当前步骤或验收；<code>stop_continue</code> 只停止自动运行，保留启用中的目标。普通用户回合、已接收的持久消息、Plan、独立后台任务和登出都会让循环先行让出或收尾，不绕过既有准入。网关重启把运行中的自动推进保存为中断且不重放，只保留原目标、步骤和验收记录。每次接收、让出、停止和收尾只记录标识、状态、原因、轮次与耗时，不记录目标正文。</p>
-<p><strong>验收</strong> 真实 Gateway 定向复现未实现入口、自动运行期间非暂停写入、停止时的在途验收、用户回合与验收竞态。候选 Goal 组合 40 项通过，网关退出协调 8 项、主库归属 7 项通过，Ruff 通过。受控模型覆盖两轮后通过、预算耗尽、不确定判定立即停止、精确暂停、保留目标的停止、用户回合先行、活动 Plan 拒绝、预算校验和重启不重放；每轮工具清单为空，公开聊天历史只新增两轮固定推进说明和助手回复。Web 与桌面入口在下一节。</p>
+<p><strong>验收</strong> 真实 Gateway 定向复现未实现入口、自动运行期间非暂停写入、停止时的在途验收、用户回合与验收竞态。候选 Goal 组合 40 项通过，网关退出协调 8 项、主库归属 7 项通过，Ruff 通过。受控模型覆盖两轮后通过、预算耗尽、不确定判定立即停止、精确暂停、保留目标的停止、用户回合先行、活动 Plan 拒绝、预算校验和重启不重放；每轮工具清单为空，公开聊天历史只新增两轮固定推进说明和助手回复。Web 入口在下一节；桌面入口另交付。</p>
 <p class="evidence">Ace <code>crew/gateway/goal_steps.py</code>、<code>crew/state/session_goals.py</code>、<code>crew/gateway/routers/session_goals.py</code>、<code>tests/gateway/test_session_goals.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/target-continuation-loop.ts:45–85</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/target.ts:77–180</code>。</p>
 </article>
 <article id="desktop-stop-then-goal">

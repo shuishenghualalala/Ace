@@ -34,8 +34,34 @@ const verificationDetails: Readonly<Record<string, string>> = {
   goal_verification_bad_citations: "无法核实验收模型给出的引文。",
   goal_plan_active: "会话正在使用计划模式。",
 };
+const continuationLabels: Readonly<Record<string, string>> = {
+  running: "正在自动推进",
+  passed: "自动推进已通过验收",
+  exhausted: "自动推进已用完轮次",
+  stopped: "自动推进已停止",
+  yielded: "自动推进已让出",
+  failed: "自动推进失败",
+  interrupted: "自动推进已中断",
+};
+const continuationDetails: Readonly<Record<string, string>> = {
+  gateway_restarted: "网关重启后未重放本次自动推进。",
+  goal_continue_passed: "验收通过，目标已完成。",
+  goal_continue_budget: "已达到本次轮次上限，目标仍启用。",
+  goal_continue_yielded: "普通对话或后台任务优先，目标仍启用。",
+  goal_continue_cancelled: "已停止自动推进，目标仍启用。",
+  goal_continue_paused: "目标已暂停，自动推进已停止。",
+  goal_continue_uncertain: "验收无法确认，未继续消耗轮次。",
+  goal_continue_changed: "目标或会话已变化。",
+  goal_continue_scope_lost: "账号或网关已变化。",
+  goal_continue_session_lost: "原会话已不可用。",
+  goal_continue_verification_missing: "没有找到本轮验收记录。",
+  goal_plan_active: "会话正在使用计划模式。",
+  goal_deadline: "本轮达到运行时限。",
+  goal_identity_lost: "原会话或网关已变化。",
+  goal_session_busy: "普通对话或后台任务优先，目标仍启用。",
+};
 const POLL_MS = 2_000;
-const POLL_LIMIT = 90;
+const POLL_LIMIT = 300;
 
 const isLive = (run?: SessionGoalRun) => run?.state === "accepted" || run?.state === "running" || run?.state === "stopping";
 const isUnsettled = (run?: SessionGoalRun) => run != null && !["finished", "stopped", "interrupted", "failed"].includes(run.state);
@@ -48,6 +74,7 @@ function currentVerification(snapshot: SessionGoalSnapshot | null) {
 }
 
 function observedRequest(snapshot: SessionGoalSnapshot | null) {
+  if (snapshot?.continuation?.state === "running") return `continue:${snapshot.continuation.request_id}`;
   const verification = currentVerification(snapshot);
   if (verification?.state === "running") return `verify:${verification.request_id}`;
   const run = snapshot?.run;
@@ -72,15 +99,22 @@ function ScopedGoalPanel({ sessionId, initialObjective, onClose }: Props) {
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [needsRefresh, setNeedsRefresh] = useState(false);
+  const [budget, setBudget] = useState(4);
   const scope = useRef<AbortController | null>(null);
   const observer = useRef<AbortController | null>(null);
   const locked = useRef(true);
   const run = snapshot?.run;
   const goal = snapshot?.goal;
   const verification = currentVerification(snapshot);
+  const continuation = snapshot?.continuation;
   const observedId = observedRequest(snapshot);
-  const operationBusy = isUnsettled(run) || verification?.state === "running";
-  const canVerify = snapshot?.supports_verify === true && goal?.status === "active" && run?.state === "finished";
+  const continuationRunning = continuation?.state === "running";
+  const operationBusy = isUnsettled(run) || verification?.state === "running" || continuationRunning;
+  const canVerify = snapshot?.supports_verify === true && goal?.status === "active" && run?.state === "finished"
+    && !continuationRunning;
+  const maxBudget = Math.max(1, Math.min(12, snapshot?.max_continue_budget ?? 4));
+  const selectedBudget = Math.min(budget, maxBudget);
+  const canContinue = snapshot?.supports_continue === true && goal?.status === "active";
 
   const read = useCallback(async (signal: AbortSignal, notice = "") => {
     try {
@@ -158,12 +192,15 @@ function ScopedGoalPanel({ sessionId, initialObjective, onClose }: Props) {
   };
 
   const apply = async (action: SessionGoalAction) => {
-    if (!snapshot || needsRefresh || (operationBusy && action !== "pause") || (action === "verify" && !canVerify)) return;
+    if (!snapshot || needsRefresh || (operationBusy && action !== "pause" && action !== "stop_continue")
+      || (action === "verify" && !canVerify)) return;
     const signal = startRequest();
     if (!signal) return;
     try {
       const latest = await api.changeSessionGoal(sessionId, {
-        action, version: snapshot.version, ...(action === "set" ? { objective: draft.trim() } : {}),
+        action, version: snapshot.version,
+        ...(action === "set" ? { objective: draft.trim() } : {}),
+        ...(action === "continue" ? { budget: selectedBudget } : {}),
       }, signal);
       if (!signal.aborted) {
         setSnapshot(latest);
@@ -190,6 +227,7 @@ function ScopedGoalPanel({ sessionId, initialObjective, onClose }: Props) {
   const disabled = busy || needsRefresh;
   const canAdvance = snapshot?.supports_advance ?? Boolean(run);
   const reason = verification ? knownText(verificationDetails, verification.code) : "";
+  const continuationReason = continuation ? knownText(continuationDetails, continuation.code) : "";
   const tooLong = Array.from(draft.trim()).length > 4000;
   return (
     <section className="session-goal" aria-label="会话目标" aria-busy={busy}>
@@ -206,6 +244,7 @@ function ScopedGoalPanel({ sessionId, initialObjective, onClose }: Props) {
       <small>{canAdvance ? "每次只推进一轮，不调用工具。本轮结束不代表目标达成。"
         : "目标随相关消息提供给模型，保存和恢复不自动提交回合。"}
         {snapshot?.supports_verify === true && "验收只核对已保存的会话证据，不检查外部实际状态。"}
+        {canContinue && "自动推进只在你启动后运行，每轮先推进再验收；达到轮次上限、验收无法确认或普通对话优先时停止。"}
         {canAdvance && "关闭面板只停止观察。"}</small>
       {busy && !snapshot && <p role="status">正在读取目标…</p>}
       {error && <p role="alert">{error}</p>}
@@ -216,6 +255,11 @@ function ScopedGoalPanel({ sessionId, initialObjective, onClose }: Props) {
       {verification && <p role="status" data-goal-verification={verification.request_id}>
         {needsRefresh && "上次确认："}{knownText(verificationLabels, verification.state) || "验收状态待确认"}
         {reason && ` · ${reason}`}
+      </p>}
+      {continuation && <p role="status" data-goal-continuation={continuation.request_id}>
+        {needsRefresh && "上次确认："}{knownText(continuationLabels, continuation.state) || "自动推进状态待确认"}
+        {` · ${continuation.iterations}/${continuation.budget} 轮`}
+        {continuationReason && ` · ${continuationReason}`}
       </p>}
       {goal && <p className="session-goal__objective">{goal.objective}</p>}
       {showEditor && (
@@ -235,6 +279,20 @@ function ScopedGoalPanel({ sessionId, initialObjective, onClose }: Props) {
             onClick={() => void apply("advance")}>推进一轮</button>}
           {canVerify && <button type="button" className="toolbar-btn" disabled={disabled || operationBusy || showEditor}
             onClick={() => void apply("verify")}>验收目标</button>}
+          {canContinue && !showEditor && !continuationRunning && (
+            <label className="session-goal__budget">自动轮次
+              <select aria-label="自动推进轮次" value={selectedBudget} disabled={disabled || operationBusy}
+                onChange={(event) => setBudget(Number(event.target.value))}>
+                {Array.from({ length: maxBudget }, (_, index) => index + 1).map((count) => (
+                  <option key={count} value={count}>{count}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {canContinue && !showEditor && !continuationRunning && <button type="button" className="toolbar-btn"
+            disabled={disabled || operationBusy} onClick={() => void apply("continue")}>自动推进</button>}
+          {continuationRunning && <button type="button" className="toolbar-btn" disabled={disabled}
+            onClick={() => void apply("stop_continue")}>停止自动推进</button>}
           {goal.status === "active" && (!showEditor || operationBusy) && <button type="button" className="toolbar-btn" disabled={disabled}
             onClick={() => void apply("pause")}>暂停目标</button>}
           {goal.status === "paused" && !showEditor && <button type="button" className="toolbar-btn" disabled={disabled || operationBusy}

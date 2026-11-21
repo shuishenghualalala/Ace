@@ -264,8 +264,109 @@ it("leaves older gateways manual and ignores observations from the previous sess
   await act(async () => deliver(json({ version: "new", goal: active, run: step("interrupted", "gateway_restarted") })));
   expect(host.textContent).toContain("Different goal");
   expect(host.textContent).not.toContain("推进一轮");
+  expect(host.textContent).not.toContain("自动推进");
   expect(host.textContent).not.toContain("本轮已中断");
   expect(button("暂停目标").disabled).toBe(false);
   await act(async () => vi.advanceTimersByTimeAsync(10_000));
   expect(fetch).toHaveBeenCalledTimes(3);
+});
+
+const continuation = (state: string, iterations: number, code = "") => ({
+  request_id: "continue_fixture", state, code, iterations, budget: 3,
+  step_request_id: "goal_fixture", verification_request_id: iterations ? "verify_fixture" : "",
+});
+
+it("starts one explicitly budgeted automatic run and follows its rounds until verification passes", async () => {
+  const writes: unknown[] = [];
+  const base = {
+    supports_advance: true, supports_verify: true, supports_continue: true, max_continue_budget: 12,
+    goal: active, run: step("finished"),
+  };
+  let reads = 0;
+  const fetch = vi.fn(async (_url, options?: RequestInit) => {
+    if (options?.method === "POST") {
+      writes.push(JSON.parse(String(options.body)));
+      return json({ ...base, version: "running", continuation: continuation("running", 0) }, 202);
+    }
+    return ++reads === 1
+      ? json({ ...base, version: "initial" })
+      : json({ ...base, version: "passed", goal: { ...active, status: "completed" },
+        continuation: continuation("passed", 2, "goal_continue_passed") });
+  });
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  const select = host.querySelector('select[aria-label="自动推进轮次"]') as HTMLSelectElement;
+  expect(select).not.toBeNull();
+  await act(async () => {
+    select.value = "3";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => { button("自动推进").click(); button("自动推进").click(); });
+  expect(writes).toEqual([{ action: "continue", version: "initial", budget: 3 }]);
+  expect(host.textContent).toContain("正在自动推进 · 0/3 轮");
+  expect(button("停止自动推进").disabled).toBe(false);
+  expect(button("暂停目标").disabled).toBe(false);
+  expect(button("标记目标完成").disabled).toBe(true);
+  expect(button("推进一轮").disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(2_000));
+  expect(host.textContent).toContain("自动推进已通过验收 · 2/3 轮");
+  expect(host.textContent).toContain("验收通过，目标已完成。");
+  expect(host.textContent).toContain("会话目标 · 已完成");
+  expect(host.textContent).not.toContain("停止自动推进");
+});
+
+it("stops an automatic run without pausing the goal and sends the stop only once", async () => {
+  const writes: unknown[] = [];
+  const base = {
+    supports_advance: true, supports_verify: true, supports_continue: true, max_continue_budget: 6,
+    goal: active, run: step("finished"),
+  };
+  const fetch = vi.fn(async (_url, options?: RequestInit) => {
+    if (options?.method === "POST") {
+      writes.push(JSON.parse(String(options.body)));
+      return json({ ...base, version: "stopped", continuation: continuation("stopped", 0, "goal_continue_cancelled") });
+    }
+    return json({ ...base, version: "running", continuation: continuation("running", 0) });
+  });
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  expect(host.textContent).toContain("正在自动推进 · 0/3 轮");
+  await act(async () => { button("停止自动推进").click(); button("停止自动推进").click(); });
+  expect(writes).toEqual([{ action: "stop_continue", version: "running" }]);
+  expect(host.textContent).toContain("自动推进已停止 · 0/3 轮");
+  expect(host.textContent).toContain("已停止自动推进，目标仍启用。");
+  expect(host.textContent).toContain("会话目标 · 已启用");
+  expect(button("自动推进").disabled).toBe(false);
+  expect(button("推进一轮").disabled).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(10_000));
+  expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+});
+
+it("recovers a lost automatic-run receipt by reading the durable continuation", async () => {
+  let reads = 0;
+  let writes = 0;
+  const base = {
+    supports_advance: true, supports_verify: true, supports_continue: true,
+    goal: active, run: step("finished"),
+  };
+  const fetch = vi.fn(async (_url, options?: RequestInit) => {
+    if (options?.method === "POST") {
+      writes += 1;
+      throw new TypeError("connection lost after acceptance");
+    }
+    return ++reads === 1
+      ? json({ ...base, version: "initial" })
+      : json({ ...base, version: "running", continuation: continuation("running", 1) });
+  });
+  vi.stubGlobal("fetch", fetch);
+  await render();
+  await act(async () => button("自动推进").click());
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("无法确认目标更新");
+  expect(button("自动推进").disabled).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(20_000));
+  expect(reads).toBe(1);
+  expect(writes).toBe(1);
+  await act(async () => button("重新读取目标").click());
+  expect(host.textContent).toContain("正在自动推进 · 1/3 轮");
+  expect(button("停止自动推进").disabled).toBe(false);
 });

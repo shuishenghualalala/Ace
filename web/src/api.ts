@@ -227,7 +227,7 @@ const jsonBody = (body: object): RequestInit => ({
 const withKb = (url: string, kbId?: string) =>
   kbId ? `${url}${url.includes("?") ? "&" : "?"}kb_id=${encodeURIComponent(kbId)}` : url;
 
-export type SessionGoalAction = "set" | "pause" | "resume" | "complete" | "advance" | "verify";
+export type SessionGoalAction = "set" | "pause" | "resume" | "complete" | "advance" | "verify" | "continue" | "stop_continue";
 export interface SessionGoalRun { request_id: string; state: string; code: string }
 export interface SessionGoalVerification {
   request_id: string;
@@ -236,13 +236,25 @@ export interface SessionGoalVerification {
   code: string;
   evidence_sequences: number[];
 }
+export interface SessionGoalContinuation {
+  request_id: string;
+  state: "running" | "passed" | "exhausted" | "stopped" | "yielded" | "failed" | "interrupted";
+  code: string;
+  iterations: number;
+  budget: number;
+  step_request_id: string;
+  verification_request_id: string;
+}
 export interface SessionGoalSnapshot {
   version: string;
   goal: { objective: string; status: "active" | "paused" | "completed" } | null;
   supports_advance?: boolean;
   supports_verify?: boolean;
+  supports_continue?: boolean;
+  max_continue_budget?: number;
   run?: SessionGoalRun;
   verification?: SessionGoalVerification;
+  continuation?: SessionGoalContinuation;
 }
 
 const sessionGoalPath = (id: string) => `/api/session/${encodeURIComponent(id)}/goal`;
@@ -269,7 +281,9 @@ export const api = {
     signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
   }),
   changeSessionGoal: (
-    id: string, payload: { version: string; action: SessionGoalAction; objective?: string }, signal: AbortSignal,
+    id: string,
+    payload: { version: string; action: SessionGoalAction; objective?: string; budget?: number },
+    signal: AbortSignal,
   ) => getJSON<SessionGoalSnapshot>(sessionGoalPath(id), {
     method: "POST", signal, ...jsonBody(payload),
     ...(payload.action === "verify" ? {
