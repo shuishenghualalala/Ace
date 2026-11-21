@@ -24,6 +24,8 @@ async def _run_assembled(
     prompt: str,
     tmp_path: Path,
     monkeypatch,
+    *,
+    cron: bool = False,
 ):
     monkeypatch.setenv("CREW_HOME", str(tmp_path / "crew-home"))
     monkeypatch.setenv("ACE_REPLAY_API_KEY", "replay-key")
@@ -49,17 +51,18 @@ async def _run_assembled(
     config = Config(
         db_path=str(tmp_path / "crew.db"),
         memory_db_path=str(tmp_path / "memory.db"),
+        cron_db_path=str(tmp_path / "cron.db"),
         model_profiles={"replay": profile},
         active_model_id="replay",
         title_auto=False,
-        cron_enabled=False,
+        cron_enabled=cron,
         plugins_enabled=[],
     )
     config.activate_model("replay")
     app = build_app(config=config, enable_team=False)
     app.active_owner.claim("local")
     try:
-        await app.startup(start_cron=False)
+        await app.startup(start_cron=cron)
         try:
             workspace_id = app.workspace_store.create(
                 "Replay", root_path=str(workspace), owner_account_id="local",
@@ -76,11 +79,12 @@ async def _run_assembled(
                 workspace_id=workspace_id,
             )
             chunks = [chunk async for chunk in app.handle(envelope)]
+            jobs = app.cron_store.list(owner_account_id="local") if cron else []
         finally:
             await app.shutdown()
     finally:
         server.stop()
-    return chunks, workspace, server
+    return chunks, workspace, server, jobs
 
 
 def _tools(chunks) -> set[str]:
@@ -99,7 +103,7 @@ def _final(chunks) -> str:
 
 @pytest.mark.asyncio
 async def test_assembled_app_replays_recorded_partial_failure(tmp_path, monkeypatch):
-    chunks, _, server = await _run_assembled(
+    chunks, _, server, _ = await _run_assembled(
         FIXTURES / "partial_failure.jsonl",
         {"marker.txt": "PRESENT-REPLAY"},
         "Read missing.txt and marker.txt, then report both outcomes.",
@@ -116,7 +120,7 @@ async def test_assembled_app_replays_recorded_partial_failure(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_assembled_app_replays_a_recorded_write(tmp_path, monkeypatch):
-    chunks, workspace, server = await _run_assembled(
+    chunks, workspace, server, _ = await _run_assembled(
         FIXTURES / "write_file.jsonl",
         {"input.txt": "hello-replay"},
         "Read input.txt, write output.txt, and reply done.",
@@ -127,6 +131,25 @@ async def test_assembled_app_replays_a_recorded_write(tmp_path, monkeypatch):
     assert {"file_read", "file_write"} <= _tools(chunks)
     assert (workspace / "output.txt").read_text(encoding="utf-8") == "hello-replay-done"
     assert "done" in _final(chunks)
+    assert server.remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_assembled_app_replays_a_recorded_cron_create(tmp_path, monkeypatch):
+    chunks, _, server, jobs = await _run_assembled(
+        FIXTURES / "cron_create.jsonl",
+        {},
+        "Create the cron job now.",
+        tmp_path,
+        monkeypatch,
+        cron=True,
+    )
+    assert [chunk for chunk in chunks if chunk.kind == "error"] == []
+    assert {"tool_search", "cron_create"} <= _tools(chunks)
+    assert _final(chunks).strip() == "created"
+    assert len(jobs) == 1
+    assert jobs[0]["name"] == "replay-cron"
+    assert jobs[0]["query"] == "reply with cron-ok"
     assert server.remaining == 0
 
 

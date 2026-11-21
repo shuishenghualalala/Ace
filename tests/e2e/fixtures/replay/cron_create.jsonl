@@ -1,0 +1,3 @@
+{"text": "", "tool_calls": [{"id": "call_replay_search", "name": "tool_search", "arguments": {"query": "cron_create"}}], "finish_reason": "tool_calls", "reasoning": ""}
+{"text": "", "tool_calls": [{"id": "call_replay_create", "name": "cron_create", "arguments": {"name": "replay-cron", "schedule": "every 1h", "query": "reply with cron-ok", "session_id": "replay-cron"}}], "finish_reason": "tool_calls", "reasoning": ""}
+{"text": "created", "tool_calls": [], "finish_reason": "stop", "reasoning": ""}
