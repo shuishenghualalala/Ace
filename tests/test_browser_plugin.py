@@ -240,6 +240,67 @@ async def test_app_shutdown_disposes_browser_through_feature_scope(tmp_path, mon
     assert "browser_use" not in crew.registry.names()
 
 
+def test_gateway_activates_bundled_web_gui_testing_skill(tmp_path, monkeypatch, unused_tcp_port):
+    from threading import Event
+
+    from starlette.testclient import TestClient
+
+    from crew.core.mocks import FakeProvider
+    from crew.core.types import ChatResponse
+    from crew.features.hooks import hook_registry
+    from crew.gateway.server import create_app
+    from crew.tools.tool_search import function_name
+
+    provider = FakeProvider([ChatResponse(text="fixture reply", finish_reason="stop")] * 2)
+    chat = provider.chat
+    offered: list[set[str]] = []
+
+    async def capture(messages, tools=None, **kwargs):
+        offered.append({function_name(schema) for schema in tools or ()})
+        return await chat(messages, tools, **kwargs)
+
+    monkeypatch.setattr(provider, "chat", capture)
+    monkeypatch.setattr("crew.app.build_provider", lambda _config: provider)
+    crew = build_app(config=Config(
+        db_path=str(tmp_path / "crew.db"), cron_enabled=False, auth_mode="local",
+        health_port=unused_tcp_port, title_auto=False,
+    ), enable_team=False)
+    ready = Event()
+
+    def on_ready(_event, _context):
+        ready.set()
+
+    def send_turn(client, sid, query):
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"request_id": sid, "session_id": sid, "query": query})
+            for _ in range(16):
+                frame = socket.receive_json()
+                if frame.get("is_final"):
+                    assert frame["body"]["outcome"]["status"] == "completed"
+                    return
+        pytest.fail("Gateway did not settle the test turn")
+
+    hook_registry.register("gateway:startup", on_ready)
+    try:
+        with TestClient(create_app(crew), client=("127.0.0.1", 16000)) as client:
+            assert ready.wait(10), "Gateway did not become ready"
+            catalog = client.get("/api/skills")
+            assert catalog.status_code == 200
+            assert any(row["slug"] == "web-gui-tester" and row["source"] == "builtin" for row in catalog.json())
+            send_turn(client, "gui-review", "/web-gui-tester 验证测试页面")
+            assert any("用户激活了 \"web-gui-tester\"" in message.content for message in provider.calls[0])
+            assert any("网页界面黑盒测试" in message.content for message in provider.calls[0])
+            assert "browser_use" in offered[0]
+
+            toggle = client.put("/api/plugins/browser/enabled", json={"enabled": False})
+            assert toggle.status_code == 200
+            send_turn(client, "browser-disabled", "检查当前可用的网页工具")
+            assert all("/web-gui-tester" not in message.content for message in provider.calls[1])
+            assert "browser_use" not in offered[1]
+    finally:
+        hook_registry.unregister("gateway:startup", on_ready)
+
+
 # ---- 四态一致：system && role && user ----
 
 

@@ -93,30 +93,16 @@
     </tbody>
   </table>
 
-  <h3>2.4 浏览器自动化</h3>
-  <p>详见 <a href="../../browser/playwright-engine-design.md">browser/playwright-engine-design.md</a>。</p>
+  <h3 id="browser-use">2.4 浏览器自动化</h3>
+  <p>浏览器插件注册两个按 <code>action</code> 分发的模型工具，执行仍由 BrowserManager 核对账号、会话、页面代次和审批，并经签名连接交给桌面宿主。独立 Gateway 或 CLI 未连接桌面宿主时不能执行浏览器动作。引擎见 <a href="../../browser/playwright-engine-design.md">浏览器自动化设计</a>。</p>
   <table>
     <thead><tr><th>工具</th><th>说明</th></tr></thead>
     <tbody>
-      <tr><td><code>browser_navigate</code></td><td>在 Crew 内置浏览器中导航，返回带 ref 的 accessibility snapshot。</td></tr>
-      <tr><td><code>browser_snapshot</code></td><td>重新观察当前页面，旧 ref 立即失效。</td></tr>
-      <tr><td><code>browser_find</code></td><td>按文本或正则查找 snapshot 中的元素，返回新代次 ref。</td></tr>
-      <tr><td><code>browser_click</code></td><td>点击 snapshot 中的页面 ref， accessibility 无节点时可用坐标兜底。</td></tr>
-      <tr><td><code>browser_locate</code></td><td>把技能里存盘的稳定选择器解析成当前页面的 ref。</td></tr>
-      <tr><td><code>browser_type</code></td><td>清空并填写 snapshot 中的输入元素。</td></tr>
-      <tr><td><code>browser_scroll</code></td><td>滚动页面并返回新 snapshot。</td></tr>
-      <tr><td><code>browser_back</code></td><td>后退并返回新 snapshot。</td></tr>
-      <tr><td><code>browser_press</code></td><td>按 Playwright 键名、字符或组合快捷键。</td></tr>
-      <tr><td><code>browser_get_images</code></td><td>列出当前页面全部图片的 URL、alt 与尺寸。</td></tr>
-      <tr><td><code>browser_vision</code></td><td>生成当前页面截图并作为多模态视觉输入附加给模型。</td></tr>
-      <tr><td><code>browser_console</code></td><td>读取 Playwright Console / PageError 缓冲。</td></tr>
-      <tr><td><code>browser_tabs</code></td><td>管理当前 Crew 会话自己的标签页：list / new / select / close。</td></tr>
-      <tr><td><code>browser_upload</code></td><td>上传本地文件到 file input 或完成最近一次触发的文件选择器。</td></tr>
-      <tr><td><code>browser_download</code></td><td>把链接下载到当前任务 downloads/browser/，需用户确认。</td></tr>
-      <tr><td><code>browser_dialog</code></td><td>查看、关闭或接受当前浏览器对话框；accept 需用户确认。</td></tr>
-      <tr><td><code>browser_takeover</code></td><td>请求用户接管、暂停或停止浏览器。</td></tr>
+      <tr><td><code>browser_use</code></td><td>导航、结构快照、定位、点击、填表、可取消等待、当前会话的标签管理及请求人工接管。下载、上传及敏感动作沿用浏览器治理策略。</td></tr>
+      <tr><td><code>browser_use_advanced</code></td><td>经 <code>tool_search</code> 按需披露。从当前页保存截图、将图像提供给视觉模型或读取控制台与网络记录；高级操作仍受执行策略约束。</td></tr>
     </tbody>
   </table>
+  <p>浏览器插件同时挂载 <code>/browser-use</code> 和 <code>/web-gui-tester</code>。后者指导模型用实际界面交互做黑盒测试，区分结构观察、已查看的截图与不能验证的环节。它不注册额外工具，不改变审批或网络规则；浏览器插件关闭时，两项从后续回合的模型技能索引隐藏。</p>
 
   <p>浏览器等待文本时，<code>text</code> 在任一同文元素可见时满足，<code>text_gone</code> 在可见匹配为空时满足。两个条件沿用命令的剩余截止时间。停止回合时，Gateway 通过原浏览器宿主连接取消该标签页的等待。宿主按账号、连接和原请求 ID 核对，已经执行的等待收尾后释放账号队列。</p>
 
@@ -359,6 +345,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
       <tr><td>2026-11-20</td><td>新增 <code>mcp_remove</code>：对话内一次批准后删除指定 MCP 配置并断开运行实例；批准绑定当前配置摘要，已不存在的服务幂等返回。</td><td><code>crew/tools/mcp_management.py</code>、MCP 配置事务与运行实例移除。</td></tr>
       <tr><td>2026-11-20</td><td><code>mcp_status</code> 增加 <code>state</code>：区分已连接、重连中、预算耗尽失败、启动中和未启动，避免仅凭 <code>connected=false</code> 猜测。</td><td><code>crew/tools/mcp_client.py</code>、<code>crew/tools/mcp_management.py</code>。</td></tr>
       <tr><td>2026-11-20</td><td>新增 <code>mcp_reload</code>：管理员前台用现有配置重连单个服务并重置重连预算，不修改配置。</td><td><code>crew/tools/mcp_management.py</code>、MCP 连接恢复。</td></tr>
+      <tr><td>2026-11-22</td><td>内置浏览器提供 <code>/web-gui-tester</code>，沿用原会话与权限规则。</td><td>浏览器技能目录和模型技能索引。</td></tr>
       <tr><td>2026-09-01</td><td>文档初始建立</td><td>—</td></tr>
       <tr><td>2026-09-01</td><td>统一整读上限 <code>MAX_READ_FILE_BYTES=512 MiB</code>；<code>file_read</code> / <code>patch</code> / <code>file_write</code> / <code>grep</code> 读前拒绝超大文件；<code>patch</code> 的读 / 写改 <code>asyncio.to_thread</code></td><td><code>crew/tools/file_utils.py</code>、<code>builtin.py</code>、<code>file_tools.py</code></td></tr>
       <tr><td>2026-09-01</td><td>附件读取 <code>_read_attachment</code> / <code>_read_image_as_data_url</code> 异步化 + 读前上限，路径 resolve 后读取</td><td><code>crew/agent/runtime.py</code></td></tr>

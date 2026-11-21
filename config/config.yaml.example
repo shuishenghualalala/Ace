@@ -182,7 +182,7 @@ access_control:
     disabled_plugins: []
     enabled_skills:
     - '*'
-    disabled_skills: ["browser-use"]   # browser-use skill 依赖内置浏览器；external 的 browser toolset 已在 disabled_toolsets 里禁用，避免展示无法使用的“死 skill”
+    disabled_skills: ["browser-use", "web-gui-tester"]  # 外部账号默认不提示依赖内置浏览器的技能
 
 # 进程内 HTTP 边界（web_search/web_extract/Wiki 抓取）的上游代理。
 # 安全意味着“经过策略判断”，判断通过后把流量级联到用户已有的上游代理，

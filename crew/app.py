@@ -1544,8 +1544,7 @@ class CrewApp:
         )
         browser_effective = self._browser_plugin_effective(owner, user_type)
         if not browser_effective:
-            # 插件有效状态折算进 per-session skill 范围：关闭后下一轮不再出现
-            disabled_skills = merge_disabled_skills(disabled_skills, ["browser-use"])
+            disabled_skills = merge_disabled_skills(disabled_skills, ("browser-use", "web-gui-tester"))
 
         if executor_kind in {"external", "acp"} and isinstance(executor_config, dict):
             executor_config = {
