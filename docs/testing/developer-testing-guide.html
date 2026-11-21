@@ -165,6 +165,15 @@ cd web &amp;&amp; npm run typecheck</code></pre>
 
   <h3>4.1 无密钥回放（组装态）</h3>
   <p><code>tests/e2e/replay_server.py</code> 用录制的 JSONL 响应替代模型 HTTP 边界；应用仍走真实 <code>build_app</code>、Provider、工具、SQLite 和会话入口，不需要 API Key。当前最小样例是 <code>tests/test_replay_e2e.py</code> + <code>tests/e2e/fixtures/replay/partial_failure.jsonl</code>：一次响应产生两个并行 <code>file_read</code>，第二次响应返回一个成功、一个失败的部分结果。响应耗尽时服务器返回失败，不会静默重复最后一条。新增场景时先录制真实响应的 <code>text</code>/<code>tool_calls</code>，再按稳定顺序写入 fixture；提交前审查是否含本地路径、用户数据或密钥。</p>
+  <pre><code># 从一次真实 E2E 的 llm.jsonl 提取回放响应
+python scripts/record_replay_fixture.py \
+  --trace build/e2e/&lt;run&gt;/&lt;category&gt;/&lt;case&gt;/llm.jsonl \
+  --output tests/e2e/fixtures/replay/my_case.jsonl
+
+# 只提取一个会话，或明确覆盖旧 fixture
+python scripts/record_replay_fixture.py --trace ... --output ... --session-id e2e_my_case
+python scripts/record_replay_fixture.py --trace ... --output ... --force</code></pre>
+  <p>脚本不会自动清洗业务路径或密钥，输出需要人工审查后再提交；响应序列必须覆盖该 case 的所有模型请求，不足时回放会以 500 失败。</p>
 
   <h2>5. 稳定性与防 flake</h2>
   <ul>

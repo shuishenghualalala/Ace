@@ -10,9 +10,31 @@ import pytest
 from crew.app import build_app
 from crew.core.envelope import Envelope
 from crew.state.config import Config, ModelProfile
-from tests.e2e.replay_server import ReplayServer
+from tests.e2e.replay_server import ReplayServer, recorded_responses
 
 FIXTURE = Path(__file__).parent / "e2e" / "fixtures" / "replay" / "partial_failure.jsonl"
+
+
+def test_recorded_responses_extracts_replayable_events(tmp_path):
+    trace = tmp_path / "llm.jsonl"
+    trace.write_text(
+        "\n".join([
+            '{"dir": "request", "session_id": "s1", "messages": []}',
+            '{"dir": "response", "session_id": "s1", "text": "done", "tool_calls": [], "finish_reason": "stop"}',
+            '{"dir": "response", "session_id": "s2", "text": "other", "tool_calls": [], "finish_reason": "stop"}',
+            '{"dir": "response", "session_id": "s1", "text": "", "tool_calls": [{"id": "c", "name": "file_read", "arguments": {"path": "a"}}], "finish_reason": "tool_calls"}',
+            '{"dir": "aux_response", "session_id": "s1", "text": "title"}',
+            '{"dir": "response", "session_id": "s1", "text": "", "tool_calls": []}',
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    responses = recorded_responses(trace, session_id="s1")
+    assert [item["text"] for item in responses] == ["done", ""]
+    assert responses[1]["tool_calls"][0]["name"] == "file_read"
+    assert recorded_responses(trace) == responses[:1] + [
+        {"text": "other", "tool_calls": [], "finish_reason": "stop", "reasoning": ""},
+    ] + responses[1:]
 
 
 def test_replay_server_fails_loud_when_no_response_remains():

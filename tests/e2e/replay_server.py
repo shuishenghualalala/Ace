@@ -15,6 +15,38 @@ from pathlib import Path
 from typing import Any
 
 
+def recorded_responses(
+    trace_path: Path,
+    *,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Extract replayable assistant responses from an llm.jsonl trace."""
+    responses: list[dict[str, Any]] = []
+    wanted_session = str(session_id or "").strip()
+    for line in trace_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get("dir") != "response":
+            continue
+        if wanted_session and str(record.get("session_id") or "") != wanted_session:
+            continue
+        text = str(record.get("text") or "")
+        tool_calls = record.get("tool_calls") or []
+        if not text and not tool_calls:
+            continue
+        responses.append({
+            "text": text,
+            "tool_calls": tool_calls,
+            "finish_reason": str(record.get("finish_reason") or ""),
+            "reasoning": str(record.get("reasoning") or ""),
+        })
+    return responses
+
+
 class ReplayServer:
     """Serve one recorded response per chat completion request."""
 
