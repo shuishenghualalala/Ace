@@ -486,6 +486,14 @@
 <p><strong>验收</strong> Windows 原生 Electron、实际 Python BrowserManager 和独立 WebSocket 双标签。A 等约 1.2 秒时，B 的快照从 1,281.2 降到 75.4 毫秒；A 同时等计时和文本时从 1,258.9 降到 46.0 毫秒。A 纯等其专属延迟文本时，B 在 246.9 毫秒取得自己的页面。两个标签和同目标观察均返回各自应有的正文。接管、切页后切回、在途取消与错标签均验证；一例 Gateway 未收到原生关闭事件时约 2.03 秒发现目标消失。兼容旧行的定向正负例均通过，Electron 正常退出。六组回归 424 项通过、2 项跳过，Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/browser/manager.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts:240</code>、<code>page-command.ts:286</code>。</p>
 </article>
+<article id="browser-session-storage-scope">
+<h3>浏览器会话隔离与站点存储范围</h3>
+<p>Ace 的 Gateway <code>BrowserManager</code> 按 Crew 会话维护标签和页面引用，<code>_sync_topology</code> 只接纳目标身份与预期 <code>sessionHash</code> 匹配的标签；同账号操作由 owner 队列串行化。Desktop <code>BrowserHost.ensureOwner</code> 则以账号 Profile 调用 <code>electronSession.fromPath(profile)</code>，其 owner 下的各个 <code>WebContentsView</code> 都使用同一个 Electron <code>Session</code>。这保证不同会话不能互用标签、目标或引用，但它们位于同一站点存储分区；由共享 Session 可推知，同源 Cookie、localStorage 与 IndexedDB 可以跨该账号的 Crew 会话复用。</p>
+<p>ZCode 的 <code>ManagedCdpBrowserControlPort.ensureSession(sessionId)</code> 按会话缓存独立 <code>ManagedCdpSession</code>，每个实例以 <code>browser.newContext()</code> 创建自己的 <code>BrowserContext</code>；<code>closeSession</code> 只取消该会话请求并关闭其 Context。因此两者的数据持久性范围不同：Ace 保存账号级浏览器登录态，ZCode 托管路径使用会话级存储 Context。</p>
+<p><strong>现有验证</strong> Python 的 <code>test_account_session_tabs_and_profiles_are_isolated</code>、<code>test_cross_session_switch_rejects_old_native_ref_until_snapshot</code> 和 <code>test_uncertain_mutation_scopes_failure_to_its_own_session</code> 均通过；Electron 的 <code>browser-host.test.ts</code>、<code>browser-session-switch.test.ts</code> 共 88 项通过。D7f、D7g 另有真实 Windows Electron 的双标签等待、取消与页面归属验收。上述回归覆盖会话标签、引用、控制和错误范围，未验证站点存储的跨会话可见性。</p>
+<p><strong>未决影响</strong> 同账号会话之间的站点存储共享是源码确认的行为差异，可能复用登录，也意味着同源会话数据不具备聊天级隔离。是否需要聊天级浏览器存储边界仍未由产品契约确定；本次保留现有账号级 Profile，不更改登录持久性。</p>
+<p class="evidence">Ace <code>crew/browser/manager.py:938</code>、<code>:1522</code>、<code>desktop/src/main/browser-host.ts:1729</code>、<code>:1754</code>、<code>:2789</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts:127</code>、<code>:240–275</code>、<code>session.ts:17</code>.</p>
+</article>
 <article id="browser-gui-testing">
 <h3>内置浏览器的网页黑盒测试</h3>
 <p>ZCode 的官方 Browser Use 0.5.1 清单只注册技能。ZCode 宿主另行注入 <code>node_repl</code>，由带会话身份的控制端口访问桌面内置浏览器或显式启用的 CLI headless CDP。只安装技能或 MCP 子进程不能取得该控制端口。Ace 已提供 Electron 内置浏览器和结构化工具，复用该插件发布 <code>/web-gui-tester</code>。该技能只用真实界面操作与观察，不增加权限或独立执行入口。</p>
