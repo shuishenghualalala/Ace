@@ -159,6 +159,15 @@ def is_placeholder_model_profile(profile: ModelProfile | None) -> bool:
     }
 
 
+def model_profile_display_name(profile: ModelProfile) -> str:
+    """Return a public label that never presents the legacy template as a model."""
+    if is_placeholder_model_profile(profile):
+        return "默认模型（未配置）"
+    if profile.id == "default" and str(profile.name or "").strip().lower() == "default":
+        return str(profile.model or "").strip() or "默认模型"
+    return profile.name
+
+
 def is_owner_overridable_model_profile(profile: ModelProfile | None) -> bool:
     """判断 owner 是否可以在自己的 overlay 中覆盖默认 profile。
 
@@ -639,15 +648,19 @@ class Config:
         """返回 owner 对话可选模型列表。"""
         profiles = self.owner_model_profiles(owner_account_id)
         active_id = self.owner_active_model_id(owner_account_id)
-        options = [
-            profile.public_dict()
-            for profile in profiles.values()
-            if profile.loaded
-            and profile.has_key
-            and not (is_placeholder_model_profile(profile) and profile.id != active_id)
-        ]
+        options = []
+        for profile in profiles.values():
+            if not profile.loaded or not profile.has_key:
+                continue
+            if is_placeholder_model_profile(profile) and profile.id != active_id:
+                continue
+            data = profile.public_dict()
+            data["name"] = model_profile_display_name(profile)
+            options.append(data)
         if not options and active_id in profiles:
-            options = [profiles[active_id].public_dict()]
+            fallback = profiles[active_id].public_dict()
+            fallback["name"] = model_profile_display_name(profiles[active_id])
+            options = [fallback]
         return options
 
     def owner_visible_model_profiles(

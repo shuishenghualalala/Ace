@@ -19,7 +19,7 @@ from crew.security.models import default_conversation_permission_mode
 from crew.state.config import (
     _lookup_api_key,
     is_owner_overridable_model_profile,
-    is_placeholder_model_profile,
+    model_profile_display_name,
 )
 from crew.team.formation import (
     build_team_draft as build_team_draft,
@@ -202,8 +202,7 @@ def config_body(
 
     def _profile_dict(profile) -> dict[str, Any]:
         data = profile.public_dict()
-        if is_placeholder_model_profile(profile):
-            data["name"] = "默认模型（未配置）"
+        data["name"] = model_profile_display_name(profile)
         data["editable"] = (
             not profile.builtin
             or is_gateway_admin

@@ -96,7 +96,7 @@
   显式传 <code>api_key_env</code> 才写 <code>.env</code>——当目标变量名被其它 profile 引用且已有不同旧值时，
   必须 payload 带 <code>overwrite_shared_key: true</code> 才放行（防"所有 apikey 变成最新的 apikey"）；
   <code>remove_model</code> 同步清理凭证库条目。</p>
-  <p><strong>模型占位项与默认选择</strong> 开源模板的 <code>default</code> profile 仍是 <code>your-model-name</code>/<code>api.example.com</code> 时视为占位项：设置页保留它供首次配置或 owner copy-on-write，但展示名归一为“默认模型（未配置）”；一旦 owner 已有可用真实模型，<code>owner_public_model_options</code> 不再把占位项放进对话模型选择器。真实模型卡片的“设为默认”继续通过 <code>/api/config/model</code> 切换 <code>active/default</code>，<code>owner_active_model_id</code> 仍会把旧 overlay 的 placeholder 解析到首个可用真实模型。</p>
+  <p><strong>模型占位项与默认选择</strong> 开源模板的 <code>default</code> profile 仍是 <code>your-model-name</code>/<code>api.example.com</code> 时视为占位项：设置页保留它供首次配置或 owner copy-on-write，但展示名归一为“默认模型（未配置）”；一旦 owner 已有可用真实模型，<code>owner_public_model_options</code> 不再把占位项放进对话模型选择器。真实模型卡片的“设为默认”继续通过 <code>/api/config/model</code> 切换 <code>active/default</code>，<code>owner_active_model_id</code> 仍会把旧 overlay 的 placeholder 解析到首个可用真实模型。若用户直接编辑了 <code>default</code> 卡片，展示名取实际 <code>model</code>（如 <code>deepseek-v4-flash</code>），不再显示 Default。</p>
   <p>owner 归一化规则（owner 统一化改造）：空 owner 不再是一种"模式"，而是归一为本机 owner <code>local</code> 的特例。
   归一化原语 <code>normalize_owner_account_id()</code> / 常量 <code>LOCAL_OWNER_ACCOUNT_ID</code> 定义在
   <code>crew/core/runctx.py</code>，只允许出现在系统边界——gateway 认证、CLI 入口、ContextVar set 点、
@@ -147,7 +147,7 @@ runtime.health_port                     # 独立线程 health 服务端口，默
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
-      <tr><td>2026-11-20</td><td>模型占位项在设置页显示为“默认模型（未配置）”；owner 已有真实模型时从对话模型选择器过滤，不再出现永久的 Default 模型。</td><td><code>crew/state/config.py</code>、<code>crew/gateway/helpers.py</code>、模型选择器。</td></tr>
+      <tr><td>2026-11-20</td><td>模型占位项在设置页显示为“默认模型（未配置）”；owner 已有真实模型时从对话模型选择器过滤；直接编辑过的 default 卡片展示实际 model，不再出现永久的 Default 名称。</td><td><code>crew/state/config.py</code>、<code>crew/gateway/helpers.py</code>、模型选择器。</td></tr>
       <tr><td>2026-11-20</td><td>SQLite 异步写重试支持 <code>cancelled</code> 回调；Cron 注销/关闭在每次重试前中止排队写入，关闭收尾最多等待当前一次 busy 超时。</td><td><code>crew/state/sqlite.py</code>、<code>crew/cron/jobs.py</code> 与关闭路径。</td></tr>
       <tr><td>2026-11-18</td><td>10,000 个正常结束的工具会话中，5,000 个仅有引擎终态，其余 5,000 个另有 Gateway 终态。冷恢复扫描五次中位数从 1.160 秒降至 0.046 秒，已结束会话的正文读取数降至零。另加一个开放分叉启动 Gateway，仅解码并恢复该分叉，HTTP 历史保留其未确认状态与账号隔离。</td><td>工具检查点冷恢复、分叉和侧栏首屏等待。</td></tr>
       <tr><td>2026-11-18</td><td><code>tests/test_state_memory.py</code> 覆盖结构升级与正文回填各自在提交前、提交后进程退出，以及 <code>PRAGMA max_page_count</code> 触发 <code>SQLITE_FULL</code>。Windows 发布暂存目录的内嵌 Python 在带中文和重音字符的临时用户目录执行这五例。随后六次启动正式 Gateway，<code>GET /api/session/old/history</code> 均返回一条旧正文。重开后结构为 v3，账号为 <code>local</code>，事件仅一条。</td><td>三列旧会话库升级、重试与重启。</td></tr>

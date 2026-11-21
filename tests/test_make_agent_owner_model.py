@@ -164,6 +164,21 @@ def test_unbound_session_inherits_owner_default_model(owner_app):
     assert binding["model_profile_id"] == "MiniMax-M3"
 
 
+def test_default_profile_display_name_uses_model_when_customized():
+    from crew.state.config import ModelProfile, model_profile_display_name
+
+    placeholder = ModelProfile(
+        id="default", name="Default", base_url="https://api.example.com/v1", model="your-model-name",
+    )
+    assert model_profile_display_name(placeholder) == "默认模型（未配置）"
+
+    configured = ModelProfile(
+        id="default", name="Default",
+        base_url="https://ark.cn-beijing.volces.com/api/plan/v3", model="deepseek-v4-flash",
+    )
+    assert model_profile_display_name(configured) == "deepseek-v4-flash"
+
+
 def test_existing_owner_profile_replaces_placeholder_default_at_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
