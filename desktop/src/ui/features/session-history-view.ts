@@ -22,6 +22,12 @@ import { openSessionActionsMenu, togglePin } from './session-actions';
 
 const SEARCH_DEBOUNCE_MS = 150;
 export const SESSION_HISTORY_GROUP_LIMIT = 10;
+const SESSION_HISTORY_VIRTUALIZATION_THRESHOLD = 80;
+const SESSION_HISTORY_VIRTUAL_OVERSCAN = 12;
+const SESSION_HISTORY_VIRTUAL_ROW_HEIGHT = 30;
+const SESSION_HISTORY_VIRTUAL_ROW_GAP = 4;
+const SESSION_HISTORY_VIRTUAL_ROW_STRIDE =
+  SESSION_HISTORY_VIRTUAL_ROW_HEIGHT + SESSION_HISTORY_VIRTUAL_ROW_GAP;
 const SECTION_KEYS = {
   projects: 'Crew.historyProjectsCollapsed',
   channels: 'Crew.historyChannelsCollapsed',
@@ -55,6 +61,13 @@ interface SessionGroup {
   sessions: SessionRow[];
   workspace?: Workspace;
   platform?: string;
+}
+
+interface VirtualSessionGroup {
+  items: HTMLElement;
+  rowsLayer: HTMLElement;
+  sessions: SessionRow[];
+  mountedRows: Map<number, HTMLElement>;
 }
 
 function formatTime(updatedAt: number): string {
@@ -250,8 +263,11 @@ export function createSessionHistoryView(
 ): SessionHistoryView {
   const controller = new AbortController();
   const rows = new Map<string, HTMLElement>();
+  let virtualGroups: VirtualSessionGroup[] = [];
+  let nextVirtualGroups: VirtualSessionGroup[] = [];
   let searchTimer: number | null = null;
   let renderFrame: number | null = null;
+  let virtualFrame: number | null = null;
   let disposed = false;
 
   const root = document.createElement('section');
@@ -304,6 +320,92 @@ export function createSessionHistoryView(
   list.setAttribute('aria-label', '最近会话');
   root.append(searchBox, actions, list);
   host.replaceChildren(root);
+
+  const clearVirtualRows = (): void => {
+    for (const group of virtualGroups) {
+      for (const session of group.sessions) rows.delete(session.id);
+    }
+    virtualGroups = [];
+  };
+
+  const updateVirtualRows = (): void => {
+    if (disposed || virtualGroups.length === 0) return;
+    const viewport = list.getBoundingClientRect();
+    const viewportHeight = list.clientHeight;
+    const focusedRow = (document.activeElement as HTMLElement | null)
+      ?.closest<HTMLElement>('[data-session-id]');
+
+    for (const group of virtualGroups) {
+      const groupRect = group.items.getBoundingClientRect();
+      const groupTop = groupRect.top - viewport.top;
+      const firstVisible = Math.floor(-groupTop / SESSION_HISTORY_VIRTUAL_ROW_STRIDE);
+      const lastVisible = Math.ceil(
+        (viewportHeight - groupTop) / SESSION_HISTORY_VIRTUAL_ROW_STRIDE,
+      );
+      const start = Math.min(group.sessions.length, Math.max(
+        0,
+        firstVisible - SESSION_HISTORY_VIRTUAL_OVERSCAN,
+      ));
+      const end = Math.min(group.sessions.length, Math.max(
+        start,
+        lastVisible + SESSION_HISTORY_VIRTUAL_OVERSCAN,
+      ));
+      const indexes = new Set<number>();
+      for (let index = start; index < end; index++) indexes.add(index);
+
+      const focusedIndex = focusedRow
+        ? group.sessions.findIndex((session) => session.id === focusedRow.dataset.sessionId)
+        : -1;
+      if (focusedIndex >= 0) indexes.add(focusedIndex);
+
+      for (const [index, rowContainer] of group.mountedRows) {
+        if (indexes.has(index)) continue;
+        const session = group.sessions[index];
+        if (session) rows.delete(session.id);
+        rowContainer.remove();
+        group.mountedRows.delete(index);
+      }
+
+      for (const index of indexes) {
+        if (group.mountedRows.has(index)) continue;
+        const session = group.sessions[index];
+        if (!session) continue;
+        const container = document.createElement('div');
+        container.className = 'mw-session-history__virtual-row';
+        container.dataset.virtualIndex = String(index);
+        container.style.top = `${index * SESSION_HISTORY_VIRTUAL_ROW_STRIDE}px`;
+        const row = getRow(session);
+        container.append(row);
+        group.mountedRows.set(index, container);
+      }
+
+      const orderedRows = [...indexes]
+        .sort((left, right) => left - right)
+        .map((index) => group.mountedRows.get(index))
+        .filter((element): element is HTMLElement => element !== undefined);
+      let cursor: ChildNode | null = group.rowsLayer.firstChild;
+      for (const row of orderedRows) {
+        if (row === cursor) {
+          cursor = cursor.nextSibling;
+        } else {
+          group.rowsLayer.insertBefore(row, cursor);
+        }
+      }
+    }
+  };
+
+  const scheduleVirtualRows = (): void => {
+    if (disposed || virtualFrame !== null) return;
+    virtualFrame = window.requestAnimationFrame(() => {
+      virtualFrame = null;
+      updateVirtualRows();
+    });
+  };
+
+  const virtualResizeObserver = typeof ResizeObserver === 'undefined'
+    ? null
+    : new ResizeObserver(scheduleVirtualRows);
+  virtualResizeObserver?.observe(list);
 
   const on = (
     target: EventTarget,
@@ -535,7 +637,22 @@ export function createSessionHistoryView(
       const visible = showAll
         ? group.sessions
         : group.sessions.slice(0, SESSION_HISTORY_GROUP_LIMIT);
-      for (const session of visible) items.append(getRow(session));
+      if (showAll && visible.length > SESSION_HISTORY_VIRTUALIZATION_THRESHOLD) {
+        items.classList.add('mw-session-history__items--virtualized');
+        const spacer = document.createElement('div');
+        spacer.className = 'mw-session-history__virtual-spacer';
+        spacer.setAttribute('aria-hidden', 'true');
+        spacer.style.height = `${Math.max(
+          0,
+          visible.length * SESSION_HISTORY_VIRTUAL_ROW_STRIDE - SESSION_HISTORY_VIRTUAL_ROW_GAP,
+        )}px`;
+        const rowsLayer = document.createElement('div');
+        rowsLayer.className = 'mw-session-history__virtual-rows';
+        items.append(spacer, rowsLayer);
+        nextVirtualGroups.push({ items, rowsLayer, sessions: visible, mountedRows: new Map() });
+      } else {
+        for (const session of visible) items.append(getRow(session));
+      }
       if (!query && group.sessions.length > SESSION_HISTORY_GROUP_LIMIT) {
         const expand = document.createElement('button');
         expand.type = 'button';
@@ -603,6 +720,8 @@ export function createSessionHistoryView(
 
   const render = (): void => {
     if (disposed) return;
+    clearVirtualRows();
+    nextVirtualGroups = [];
     const activeElement = document.activeElement as HTMLElement | null;
     const focusKey = activeElement && list.contains(activeElement)
       ? activeElement.dataset.sessionHistoryFocusKey
@@ -642,6 +761,8 @@ export function createSessionHistoryView(
     }
     root.dataset.updating = 'true';
     list.replaceChildren(fragment);
+    virtualGroups = nextVirtualGroups;
+    updateVirtualRows();
     if (renderFrame !== null) window.cancelAnimationFrame(renderFrame);
     renderFrame = window.requestAnimationFrame(() => {
       renderFrame = null;
@@ -681,6 +802,8 @@ export function createSessionHistoryView(
     if (!search.value.trim()) commit();
     else searchTimer = window.setTimeout(commit, SEARCH_DEBOUNCE_MS);
   });
+  on(list, 'scroll', scheduleVirtualRows);
+  on(window, 'resize', scheduleVirtualRows);
   on(clear, 'click', () => {
     if (searchTimer !== null) window.clearTimeout(searchTimer);
     searchTimer = null;
@@ -815,6 +938,9 @@ export function createSessionHistoryView(
       unsubscribeWorkspace();
       if (searchTimer !== null) window.clearTimeout(searchTimer);
       if (renderFrame !== null) window.cancelAnimationFrame(renderFrame);
+      if (virtualFrame !== null) window.cancelAnimationFrame(virtualFrame);
+      virtualResizeObserver?.disconnect();
+      clearVirtualRows();
       rows.clear();
       host.replaceChildren();
     },

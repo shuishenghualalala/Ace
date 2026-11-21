@@ -250,6 +250,37 @@
   gap: var(--mw-space-1);
 }
 
+.mw-session-history__items--virtualized {
+  position: relative;
+  display: block;
+}
+
+.mw-session-history__virtual-spacer {
+  width: 1px;
+  pointer-events: none;
+}
+
+.mw-session-history__virtual-rows {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.mw-session-history__virtual-row {
+  position: absolute;
+  inset-inline: 0;
+  height: 30px;
+  pointer-events: auto;
+}
+
+.mw-session-history__virtual-row > .mw-session-history__row {
+  height: 100%;
+}
+
+.mw-session-history__items--virtualized > .mw-session-history__more {
+  margin-top: var(--mw-space-1);
+}
+
 .mw-session-history__group--workspace .mw-session-history__items,
 .mw-session-history__group--channel .mw-session-history__items {
   padding-left: var(--mw-space-3);
@@ -258,6 +289,7 @@
 .mw-session-history__row {
   position: relative;
   display: grid;
+  height: 30px;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr);
   align-items: center;

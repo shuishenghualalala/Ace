@@ -42,7 +42,10 @@ function workspace(id: string, name: string, hidden = false): Workspace {
 
 let view: SessionHistoryView | null = null;
 
-function mountView(openSession: (sessionId: string) => void = () => {}): HTMLElement {
+function mountView(
+  openSession: (sessionId: string) => void = () => {},
+  renderStudioHistory: () => void = () => view?.render(),
+): HTMLElement {
   const host = document.createElement('div');
   document.body.innerHTML = '';
   document.body.append(host);
@@ -56,6 +59,7 @@ function mountView(openSession: (sessionId: string) => void = () => {}): HTMLEle
     retrySessions: async () => undefined,
     retryWorkspaces: async () => undefined,
     getLoadErrors: () => ({ sessions: null, workspaces: null }),
+    renderStudioHistory,
   });
   return host;
 }
@@ -133,6 +137,55 @@ describe('渠道侧栏分区', () => {
     expect(ids('[data-session-group="conversation:default"] [data-session-id]')).toEqual(['default-only']);
     expect(ids('[data-session-group="archived"] [data-session-id]')).toEqual(['a-archived']);
     expect(document.querySelector('[data-session-id="hidden-only"]')).toBeNull();
+  });
+
+  it('展开大型会话组时只挂载视口窗口并随滚动切换会话行', async () => {
+    workspaceStore.set({ workspaces: [workspace('ws-a', '项目 A')] });
+    sessionStore.set({
+      sessions: Array.from({ length: 200 }, (_, index) =>
+        historySession(`session-${index}`, 'ws-a', { updatedAt: 10_000 - index })),
+    });
+    const open = vi.fn();
+    const host = mountView(open);
+    const list = host.querySelector<HTMLElement>('[data-session-history-list]')!;
+    Object.defineProperty(list, 'clientHeight', { configurable: true, value: 150 });
+    vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, width: 260, height: 150, top: 0, right: 260, bottom: 150, left: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    host.querySelector<HTMLButtonElement>('[data-show-all="ws-a"]')!.click();
+    const virtualGroup = host.querySelector<HTMLElement>(
+      '[data-session-group="workspace:ws-a"] .mw-session-history__items--virtualized',
+    )!;
+    const setItemsRect = (): void => {
+      vi.spyOn(virtualGroup, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 40 - list.scrollTop, width: 248, height: 200 * 34 - 4,
+        top: 40 - list.scrollTop, right: 248, bottom: 40 - list.scrollTop + 200 * 34 - 4, left: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+    };
+    setItemsRect();
+
+    const mountedRows = (): string[] => Array.from(
+      virtualGroup.querySelectorAll<HTMLElement>('[data-session-id]'),
+    ).map((row) => row.dataset.sessionId!);
+    expect(mountedRows().length).toBeLessThan(40);
+    expect(mountedRows()).toContain('session-0');
+    expect(mountedRows()).not.toContain('session-100');
+    expect(virtualGroup.querySelector('.mw-session-history__virtual-spacer')?.getAttribute('style'))
+      .toContain('height: 6796px');
+
+    list.scrollTop = 1_700;
+    setItemsRect();
+    list.dispatchEvent(new Event('scroll'));
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+
+    expect(mountedRows().length).toBeLessThan(40);
+    expect(mountedRows()).not.toContain('session-0');
+    expect(mountedRows()).toContain('session-49');
+    host.querySelector<HTMLButtonElement>('[data-session-open="session-49"]')!.click();
+    expect(open).toHaveBeenCalledExactlyOnceWith('session-49');
   });
 
   it('有渠道分组时渲染平台文件夹与会话行', () => {
