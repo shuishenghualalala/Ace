@@ -328,12 +328,18 @@ pub fn uninstall(state_dir: &Path) -> Result<(), String> {
     }
     recover_identity_backup(state_dir)?;
     let path = identity_path(state_dir);
-    let usernames: Vec<String> = if super::state::read_optional_file(&path)?.is_some() {
-        stored_usernames(state_dir)?
+    let identity_bytes = super::state::read_optional_file(&path)?;
+    let (usernames, (offline_account, online_account)) = if let Some(bytes) = identity_bytes {
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Windows sandbox identity is invalid: {error}"))?;
+        (
+            stored_usernames_from_value(&value)?,
+            stored_wfp_accounts_from_value(&value),
+        )
     } else {
-        Vec::new()
+        (Vec::new(), (None, None))
     };
-    super::wfp::uninstall()?;
+    super::wfp::uninstall(offline_account.as_deref(), online_account.as_deref())?;
     for username in &usernames {
         if is_sandbox_account_name(username) && username.len() <= 64 {
             delete_local_user(username);
@@ -425,12 +431,18 @@ fn stored_usernames_from_value(value: &serde_json::Value) -> Result<Vec<String>,
     Ok(names)
 }
 
-fn stored_usernames(state_dir: &Path) -> Result<Vec<String>, String> {
-    let bytes = super::state::read_file(&identity_path(state_dir))
-        .map_err(|error| format!("Windows sandbox identity is not installed: {error}"))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Windows sandbox identity is invalid: {error}"))?;
-    stored_usernames_from_value(&value)
+fn stored_wfp_accounts_from_value(value: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let offline = value
+        .get("username")
+        .and_then(|value| value.as_str())
+        .filter(|name| valid_offline_account(name))
+        .map(str::to_string);
+    let online = value
+        .get("online_username")
+        .and_then(|value| value.as_str())
+        .filter(|name| valid_online_account(name))
+        .map(str::to_string);
+    (offline, online)
 }
 
 fn delete_local_user(username: &str) {
@@ -693,5 +705,28 @@ mod tests {
         assert!(stored_usernames_from_value(&value("Administrator"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn uninstall_scopes_wfp_cleanup_to_valid_offline_and_online_accounts() {
+        let identity = serde_json::json!({
+            "username": "AceSbOff_0123456789",
+            "online_username": "AceSbNet_0123456789",
+            "direct": { "username": "AceSbDir_0123456789" },
+        });
+        assert_eq!(
+            stored_wfp_accounts_from_value(&identity),
+            (
+                Some("AceSbOff_0123456789".to_string()),
+                Some("AceSbNet_0123456789".to_string()),
+            ),
+        );
+
+        let invalid = serde_json::json!({
+            "username": "Administrator",
+            "online_username": "AceSbOff_0123456789",
+            "direct": { "username": "AceSbDir_0123456789" },
+        });
+        assert_eq!(stored_wfp_accounts_from_value(&invalid), (None, None));
     }
 }

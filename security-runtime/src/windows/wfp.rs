@@ -1,26 +1,26 @@
 //! Installer-only persistent WFP policy for the two Ace sandbox accounts.
 //!
-//! Stable GUIDs make setup/repair/uninstall idempotent. Filters are scoped by
-//! ALE_USER_ID: the offline account is blocked, while the online account may
-//! reach only the fixed loopback proxy port and is otherwise blocked.
+//! SID-derived GUIDs make setup/repair/uninstall idempotent per account. Filters
+//! are scoped by ALE_USER_ID: the offline account is blocked, while the online
+//! account may reach only the fixed loopback proxy port and is otherwise blocked.
 
 use std::ffi::OsStr;
-use std::mem::zeroed;
+use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 
+use sha2::{Digest, Sha256};
 use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::{
     LocalFree, FWP_E_ALREADY_EXISTS, FWP_E_FILTER_NOT_FOUND, FWP_E_NOT_FOUND, HANDLE, HLOCAL,
 };
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 use windows_sys::Win32::Security::Authorization::{
-    BuildExplicitAccessWithNameW, BuildSecurityDescriptorW, BuildTrusteeWithSidW,
-    EXPLICIT_ACCESS_W, GRANT_ACCESS,
+    BuildSecurityDescriptorW, BuildTrusteeWithSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS,
 };
 use windows_sys::Win32::Security::{
-    EqualSid, GetAce, GetSecurityDescriptorDacl, IsValidSecurityDescriptor, ACCESS_ALLOWED_ACE,
-    ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    EqualSid, GetAce, GetSecurityDescriptorDacl, IsValidSecurityDescriptor, IsValidSid,
+    ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
 };
 
 use super::token::{sid_string_for_account, LocalSid};
@@ -28,88 +28,198 @@ use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
 use windows_sys::Win32::System::Threading::INFINITE;
 
 const PROXY_PORT: u16 = 43119;
-const PROVIDER_KEY: GUID = GUID::from_u128(0x4f4f9ca9_7741_4c6a_a230_6d0f24479c20);
-const SUBLAYER_KEY: GUID = GUID::from_u128(0x7d54fa23_8d4c_4632_ae37_47d56f1bc75d);
-const OFFLINE_V4: GUID = GUID::from_u128(0x60232765_66dd_4813_a070_810a6f51d4e1);
-const OFFLINE_V6: GUID = GUID::from_u128(0xe8fd818f_9c95_46cb_8103_f193c8c7d86f);
-const ONLINE_PERMIT_V4: GUID = GUID::from_u128(0x7ac9494d_fdef_4eea_9252_b62f9c040944);
-const ONLINE_PERMIT_V6: GUID = GUID::from_u128(0x847f5760_3cec_45f7_aac2_7272fa311e87);
-const ONLINE_BLOCK_V4: GUID = GUID::from_u128(0xdf12efcc_d5c8_4113_bb2a_d0781ce56599);
-const ONLINE_BLOCK_V6: GUID = GUID::from_u128(0xd07399a9_a34e_4858_84ed_dd9f323f6fd1);
+const LEGACY_PROVIDER_KEY: GUID = GUID::from_u128(0x4f4f9ca9_7741_4c6a_a230_6d0f24479c20);
+const LEGACY_SUBLAYER_KEY: GUID = GUID::from_u128(0x7d54fa23_8d4c_4632_ae37_47d56f1bc75d);
+const LEGACY_OFFLINE_V4: GUID = GUID::from_u128(0x60232765_66dd_4813_a070_810a6f51d4e1);
+const LEGACY_OFFLINE_V6: GUID = GUID::from_u128(0xe8fd818f_9c95_46cb_8103_f193c8c7d86f);
+const LEGACY_ONLINE_PERMIT_V4: GUID = GUID::from_u128(0x7ac9494d_fdef_4eea_9252_b62f9c040944);
+const LEGACY_ONLINE_PERMIT_V6: GUID = GUID::from_u128(0x847f5760_3cec_45f7_aac2_7272fa311e87);
+const LEGACY_ONLINE_BLOCK_V4: GUID = GUID::from_u128(0xdf12efcc_d5c8_4113_bb2a_d0781ce56599);
+const LEGACY_ONLINE_BLOCK_V6: GUID = GUID::from_u128(0xd07399a9_a34e_4858_84ed_dd9f323f6fd1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccountRole {
+    Offline,
+    Online,
+}
+
+impl AccountRole {
+    fn key(self, sid: &str, object: &str) -> GUID {
+        let mut hash = Sha256::new();
+        hash.update(b"ace-security-runtime/windows-wfp/v2\0");
+        hash.update(match self {
+            Self::Offline => &b"offline\0"[..],
+            Self::Online => &b"online\0"[..],
+        });
+        hash.update(object.as_bytes());
+        hash.update([0]);
+        hash.update(sid.as_bytes());
+        let digest = hash.finalize();
+        let mut bytes: [u8; 16] = digest[..16]
+            .try_into()
+            .expect("SHA-256 has a 16-byte prefix");
+        // Mark these deterministic identifiers as RFC 9562 custom UUIDs.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        GUID {
+            data1: u32::from_be_bytes(bytes[0..4].try_into().expect("four bytes")),
+            data2: u16::from_be_bytes(bytes[4..6].try_into().expect("two bytes")),
+            data3: u16::from_be_bytes(bytes[6..8].try_into().expect("two bytes")),
+            data4: bytes[8..16].try_into().expect("eight bytes"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AccountWfpKeys {
+    provider: GUID,
+    sublayer: GUID,
+    block_v4: GUID,
+    block_v6: GUID,
+    permit_v4: GUID,
+    permit_v6: GUID,
+}
+
+impl AccountWfpKeys {
+    fn new(sid: &str, role: AccountRole) -> Self {
+        Self {
+            provider: role.key(sid, "provider"),
+            sublayer: role.key(sid, "sublayer"),
+            block_v4: role.key(sid, "block-v4"),
+            block_v6: role.key(sid, "block-v6"),
+            permit_v4: role.key(sid, "permit-v4"),
+            permit_v6: role.key(sid, "permit-v6"),
+        }
+    }
+}
 
 pub fn install(offline_account: &str, online_account: &str) -> Result<(), String> {
+    let offline_sid = sid_string_for_account(offline_account)?;
+    let online_sid = sid_string_for_account(online_account)?;
+    let offline_keys = AccountWfpKeys::new(&offline_sid, AccountRole::Offline);
+    let online_keys = AccountWfpKeys::new(&online_sid, AccountRole::Online);
+    let offline_sid_value = LocalSid::from_string(&offline_sid)?;
+    let online_sid_value = LocalSid::from_string(&online_sid)?;
     let engine = Engine::open()?;
     let filter_security = FilterSecurity::for_installing_user(&engine)?;
     let mut transaction = engine.transaction()?;
-    ensure_provider(engine.handle)?;
-    ensure_sublayer(engine.handle)?;
-    let offline = UserCondition::new(offline_account)?;
-    let online = UserCondition::new(online_account)?;
+    ensure_provider(engine.handle, &offline_keys)?;
+    ensure_sublayer(engine.handle, &offline_keys)?;
+    ensure_provider(engine.handle, &online_keys)?;
+    ensure_sublayer(engine.handle, &online_keys)?;
+    let offline = UserCondition::for_sid(&offline_sid_value)?;
+    let online = UserCondition::for_sid(&online_sid_value)?;
     for (key, layer) in [
-        (OFFLINE_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
-        (OFFLINE_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
+        (offline_keys.block_v4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
+        (offline_keys.block_v6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &offline, false, &filter_security)?;
+        replace_filter(
+            engine.handle,
+            key,
+            layer,
+            &offline,
+            false,
+            &filter_security,
+            &offline_keys,
+        )?;
     }
     for (key, layer) in [
-        (ONLINE_PERMIT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
-        (ONLINE_PERMIT_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
+        (online_keys.permit_v4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
+        (online_keys.permit_v6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &online, true, &filter_security)?;
+        replace_filter(
+            engine.handle,
+            key,
+            layer,
+            &online,
+            true,
+            &filter_security,
+            &online_keys,
+        )?;
     }
     for (key, layer) in [
-        (ONLINE_BLOCK_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
-        (ONLINE_BLOCK_V6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
+        (online_keys.block_v4, FWPM_LAYER_ALE_AUTH_CONNECT_V4),
+        (online_keys.block_v6, FWPM_LAYER_ALE_AUTH_CONNECT_V6),
     ] {
-        replace_filter(engine.handle, key, layer, &online, false, &filter_security)?;
+        replace_filter(
+            engine.handle,
+            key,
+            layer,
+            &online,
+            false,
+            &filter_security,
+            &online_keys,
+        )?;
     }
-    transaction.commit()
+    transaction.commit()?;
+    verify_policy(offline_account, false)?;
+    verify_policy(online_account, true)?;
+    remove_legacy_filters(&offline_sid, &online_sid)?;
+    verify_installed(offline_account, false)?;
+    verify_installed(online_account, true)
 }
 
-pub fn uninstall() -> Result<(), String> {
+pub fn uninstall(
+    offline_account: Option<&str>,
+    online_account: Option<&str>,
+) -> Result<(), String> {
+    if offline_account.is_none() && online_account.is_none() {
+        return Ok(());
+    }
     let engine = Engine::open()?;
     let mut transaction = engine.transaction()?;
-    for key in [
-        OFFLINE_V4,
-        OFFLINE_V6,
-        ONLINE_PERMIT_V4,
-        ONLINE_PERMIT_V6,
-        ONLINE_BLOCK_V4,
-        ONLINE_BLOCK_V6,
-    ] {
-        delete_filter(engine.handle, &key)?;
+    if let Some(account) = offline_account {
+        let sid = sid_string_for_account(account)?;
+        delete_account_policy(
+            engine.handle,
+            &AccountWfpKeys::new(&sid, AccountRole::Offline),
+        )?;
+        remove_legacy_account_filters(engine.handle, &sid, AccountRole::Offline)?;
     }
-    let sublayer = unsafe { FwpmSubLayerDeleteByKey0(engine.handle, &SUBLAYER_KEY) };
-    allow_missing(sublayer, "FwpmSubLayerDeleteByKey0")?;
-    let provider = unsafe { FwpmProviderDeleteByKey0(engine.handle, &PROVIDER_KEY) };
-    allow_missing(provider, "FwpmProviderDeleteByKey0")?;
+    if let Some(account) = online_account {
+        let sid = sid_string_for_account(account)?;
+        delete_account_policy(
+            engine.handle,
+            &AccountWfpKeys::new(&sid, AccountRole::Online),
+        )?;
+        remove_legacy_account_filters(engine.handle, &sid, AccountRole::Online)?;
+    }
     transaction.commit()
 }
 
 /// Verify the filters for the account about to execute a restricted command.
 pub fn verify_installed(account: &str, proxy: bool) -> Result<(), String> {
+    verify_policy(account, proxy)?;
+    verify_no_legacy_filters_for_account(account, proxy)
+}
+
+fn verify_policy(account: &str, proxy: bool) -> Result<(), String> {
     let engine = Engine::open()?;
-    let account_sid = LocalSid::from_string(&sid_string_for_account(account)?)?;
-    let layers = [
+    let sid = sid_string_for_account(account)?;
+    let account_sid = LocalSid::from_string(&sid)?;
+    let role = if proxy {
+        AccountRole::Online
+    } else {
+        AccountRole::Offline
+    };
+    let keys = AccountWfpKeys::new(&sid, role);
+    for (layer, block, permit) in [
         (
             FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-            OFFLINE_V4,
-            ONLINE_BLOCK_V4,
-            ONLINE_PERMIT_V4,
+            keys.block_v4,
+            keys.permit_v4,
         ),
         (
             FWPM_LAYER_ALE_AUTH_CONNECT_V6,
-            OFFLINE_V6,
-            ONLINE_BLOCK_V6,
-            ONLINE_PERMIT_V6,
+            keys.block_v6,
+            keys.permit_v6,
         ),
-    ];
-    for (layer, offline, online_block, online_permit) in layers {
+    ] {
         if proxy {
-            verify_filter(&engine, layer, online_block, &account_sid, false)?;
-            verify_filter(&engine, layer, online_permit, &account_sid, true)?;
+            verify_filter(&engine, layer, block, &account_sid, false, &keys)?;
+            verify_filter(&engine, layer, permit, &account_sid, true, &keys)?;
         } else {
-            verify_filter(&engine, layer, offline, &account_sid, false)?;
+            verify_filter(&engine, layer, block, &account_sid, false, &keys)?;
         }
     }
     Ok(())
@@ -121,6 +231,7 @@ fn verify_filter(
     key: GUID,
     account_sid: &LocalSid,
     permit_proxy: bool,
+    keys: &AccountWfpKeys,
 ) -> Result<(), String> {
     let mut filter: *mut FWPM_FILTER0 = null_mut();
     check(
@@ -128,7 +239,7 @@ fn verify_filter(
         "FwpmFilterGetByKey0; run Windows sandbox setup or repair",
     )?;
     let matches = unsafe { filter.as_ref() }
-        .is_some_and(|filter| filter_matches(filter, &layer, account_sid, permit_proxy));
+        .is_some_and(|filter| filter_matches(filter, &layer, account_sid, permit_proxy, keys));
     unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
     if matches {
         Ok(())
@@ -143,6 +254,29 @@ fn filter_matches(
     layer: &GUID,
     account_sid: &LocalSid,
     permit_proxy: bool,
+    keys: &AccountWfpKeys,
+) -> bool {
+    if !filter_shape_matches(filter, layer, permit_proxy, keys) {
+        return false;
+    }
+    let conditions = unsafe {
+        std::slice::from_raw_parts(filter.filterCondition, filter.numFilterConditions as usize)
+    };
+    conditions.iter().any(|condition| {
+        same_key(&condition.fieldKey, &FWPM_CONDITION_ALE_USER_ID)
+            && user_condition_matches(
+                unsafe { condition.conditionValue.Anonymous.sd.as_ref() }
+                    .expect("validated user condition"),
+                account_sid,
+            )
+    })
+}
+
+fn filter_shape_matches(
+    filter: &FWPM_FILTER0,
+    layer: &GUID,
+    permit_proxy: bool,
+    keys: &AccountWfpKeys,
 ) -> bool {
     let (action, count, weight) = if permit_proxy {
         (FWP_ACTION_PERMIT, 3, 15)
@@ -150,7 +284,8 @@ fn filter_matches(
         (FWP_ACTION_BLOCK, 1, 0)
     };
     if !same_key(&filter.layerKey, layer)
-        || !same_key(&filter.subLayerKey, &SUBLAYER_KEY)
+        || !same_key(&filter.subLayerKey, &keys.sublayer)
+        || !unsafe { filter.providerKey.as_ref() }.is_some_and(|key| same_key(key, &keys.provider))
         || filter.flags & FWPM_FILTER_FLAG_DISABLED != 0
         || filter.action.r#type != action
         || filter.weight.r#type != FWP_UINT8
@@ -161,15 +296,21 @@ fn filter_matches(
         return false;
     }
     let conditions = unsafe { std::slice::from_raw_parts(filter.filterCondition, count as usize) };
-    let user_matches = conditions.iter().any(|condition| {
-        same_key(&condition.fieldKey, &FWPM_CONDITION_ALE_USER_ID)
-            && condition.matchType == FWP_MATCH_EQUAL
-            && condition.conditionValue.r#type == FWP_SECURITY_DESCRIPTOR_TYPE
-            && unsafe { condition.conditionValue.Anonymous.sd.as_ref() }
-                .is_some_and(|blob| user_condition_matches(blob, account_sid))
-    });
-    if !permit_proxy || !user_matches {
-        return user_matches;
+    let user_conditions: Vec<_> = conditions
+        .iter()
+        .filter(|condition| {
+            same_key(&condition.fieldKey, &FWPM_CONDITION_ALE_USER_ID)
+                && condition.matchType == FWP_MATCH_EQUAL
+                && condition.conditionValue.r#type == FWP_SECURITY_DESCRIPTOR_TYPE
+                && unsafe { condition.conditionValue.Anonymous.sd.as_ref() }
+                    .is_some_and(user_condition_is_valid)
+        })
+        .collect();
+    if user_conditions.len() != 1 {
+        return false;
+    }
+    if !permit_proxy {
+        return true;
     }
     let port_matches = conditions.iter().any(|condition| {
         same_key(&condition.fieldKey, &FWPM_CONDITION_IP_REMOTE_PORT)
@@ -187,7 +328,7 @@ fn filter_matches(
     port_matches && loopback_matches
 }
 
-fn user_condition_matches(blob: &FWP_BYTE_BLOB, account_sid: &LocalSid) -> bool {
+fn user_condition_is_valid(blob: &FWP_BYTE_BLOB) -> bool {
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
     let descriptor = blob.data.cast();
     let mut present = 0;
@@ -208,14 +349,193 @@ fn user_condition_matches(blob: &FWP_BYTE_BLOB, account_sid: &LocalSid) -> bool 
     }
     unsafe { ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() }.is_some_and(|ace| {
         ace.Header.AceType == ACCESS_ALLOWED_ACE_TYPE
+            && (ace.Header.AceSize as usize) >= size_of::<ACCESS_ALLOWED_ACE>()
             && ace.Mask == FWP_ACTRL_MATCH_FILTER
-            && unsafe {
-                EqualSid(
-                    (&raw const ace.SidStart).cast_mut().cast(),
-                    account_sid.as_ptr(),
-                ) != 0
-            }
+            && unsafe { IsValidSid((&raw const ace.SidStart).cast_mut().cast()) } != 0
     })
+}
+
+fn user_condition_matches(blob: &FWP_BYTE_BLOB, account_sid: &LocalSid) -> bool {
+    if !user_condition_is_valid(blob) {
+        return false;
+    }
+    let descriptor = blob.data.cast();
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl: *mut ACL = null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }
+        == 0
+    {
+        return false;
+    }
+    let mut ace = null_mut();
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 {
+        return false;
+    }
+    unsafe { ace.cast::<ACCESS_ALLOWED_ACE>().as_ref() }.is_some_and(|ace| unsafe {
+        EqualSid(
+            (&raw const ace.SidStart).cast_mut().cast(),
+            account_sid.as_ptr(),
+        ) != 0
+    })
+}
+
+fn remove_legacy_filters(offline_sid: &str, online_sid: &str) -> Result<(), String> {
+    let engine = Engine::open()?;
+    let mut transaction = engine.transaction()?;
+    remove_legacy_account_filters(engine.handle, offline_sid, AccountRole::Offline)?;
+    remove_legacy_account_filters(engine.handle, online_sid, AccountRole::Online)?;
+    transaction.commit()
+}
+
+fn verify_no_legacy_filters_for_account(account: &str, proxy: bool) -> Result<(), String> {
+    let sid = sid_string_for_account(account)?;
+    let account_sid = LocalSid::from_string(&sid)?;
+    let role = if proxy {
+        AccountRole::Online
+    } else {
+        AccountRole::Offline
+    };
+    let engine = Engine::open()?;
+    for key in legacy_filter_keys(role) {
+        let disposition = inspect_legacy_filter(engine.handle, key, &account_sid)?;
+        if legacy_filter_requires_migration(disposition) {
+            return Err(
+                "legacy Windows sandbox firewall rules remain; run setup or repair".to_string(),
+            );
+        }
+        if disposition == LegacyFilterDisposition::MalformedAcePolicy {
+            return Err(
+                "legacy Windows sandbox firewall rule has no verifiable account identity; administrator cleanup is required"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn remove_legacy_account_filters(
+    engine: HANDLE,
+    sid: &str,
+    role: AccountRole,
+) -> Result<(), String> {
+    let account_sid = LocalSid::from_string(sid)?;
+    for key in legacy_filter_keys(role) {
+        match inspect_legacy_filter(engine, key, &account_sid)? {
+            LegacyFilterDisposition::CurrentIdentity => delete_filter(engine, &key)?,
+            LegacyFilterDisposition::MalformedAcePolicy => {
+                return Err(
+                    "legacy Windows sandbox firewall rule has no verifiable account identity; administrator cleanup is required"
+                        .to_string(),
+                );
+            }
+            LegacyFilterDisposition::Missing
+            | LegacyFilterDisposition::Foreign
+            | LegacyFilterDisposition::OtherIdentity => {}
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyFilterDisposition {
+    Missing,
+    Foreign,
+    CurrentIdentity,
+    OtherIdentity,
+    MalformedAcePolicy,
+}
+
+fn inspect_legacy_filter(
+    engine: HANDLE,
+    key: GUID,
+    account_sid: &LocalSid,
+) -> Result<LegacyFilterDisposition, String> {
+    let mut filter: *mut FWPM_FILTER0 = null_mut();
+    let status = unsafe { FwpmFilterGetByKey0(engine, &key, &mut filter) };
+    if status == FWP_E_FILTER_NOT_FOUND as u32 || status == FWP_E_NOT_FOUND as u32 {
+        return Ok(LegacyFilterDisposition::Missing);
+    }
+    check(
+        status,
+        "FwpmFilterGetByKey0 while inspecting legacy sandbox rules",
+    )?;
+    let Some(value) = (unsafe { filter.as_ref() }) else {
+        unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
+        return Err("Windows returned an empty legacy sandbox filter".to_string());
+    };
+    let owned_by_legacy_policy = unsafe { value.providerKey.as_ref() }
+        .is_some_and(|provider| same_key(provider, &LEGACY_PROVIDER_KEY))
+        && same_key(&value.subLayerKey, &LEGACY_SUBLAYER_KEY);
+    let disposition = if !owned_by_legacy_policy {
+        LegacyFilterDisposition::Foreign
+    } else {
+        match filter_user_condition_matches(value, account_sid) {
+            Some(true) => LegacyFilterDisposition::CurrentIdentity,
+            Some(false) => LegacyFilterDisposition::OtherIdentity,
+            None => LegacyFilterDisposition::MalformedAcePolicy,
+        }
+    };
+    unsafe { FwpmFreeMemory0((&mut filter as *mut *mut FWPM_FILTER0).cast()) };
+    Ok(disposition)
+}
+
+fn legacy_filter_requires_migration(disposition: LegacyFilterDisposition) -> bool {
+    disposition == LegacyFilterDisposition::CurrentIdentity
+}
+
+fn legacy_filter_keys(role: AccountRole) -> Vec<GUID> {
+    match role {
+        AccountRole::Offline => vec![LEGACY_OFFLINE_V4, LEGACY_OFFLINE_V6],
+        AccountRole::Online => vec![
+            LEGACY_ONLINE_PERMIT_V4,
+            LEGACY_ONLINE_PERMIT_V6,
+            LEGACY_ONLINE_BLOCK_V4,
+            LEGACY_ONLINE_BLOCK_V6,
+        ],
+    }
+}
+
+fn filter_user_condition_matches(filter: &FWPM_FILTER0, account_sid: &LocalSid) -> Option<bool> {
+    const MAX_INSPECTED_CONDITIONS: u32 = 16;
+    if filter.filterCondition.is_null()
+        || filter.numFilterConditions == 0
+        || filter.numFilterConditions > MAX_INSPECTED_CONDITIONS
+    {
+        return None;
+    }
+    let conditions = unsafe {
+        std::slice::from_raw_parts(filter.filterCondition, filter.numFilterConditions as usize)
+    };
+    let mut user_conditions = conditions
+        .iter()
+        .filter(|condition| same_key(&condition.fieldKey, &FWPM_CONDITION_ALE_USER_ID));
+    let condition = user_conditions.next()?;
+    if user_conditions.next().is_some()
+        || condition.matchType != FWP_MATCH_EQUAL
+        || condition.conditionValue.r#type != FWP_SECURITY_DESCRIPTOR_TYPE
+    {
+        return None;
+    }
+    let descriptor = unsafe { condition.conditionValue.Anonymous.sd.as_ref() }?;
+    if !user_condition_is_valid(descriptor) {
+        return None;
+    }
+    Some(user_condition_matches(descriptor, account_sid))
+}
+
+fn delete_account_policy(engine: HANDLE, keys: &AccountWfpKeys) -> Result<(), String> {
+    for key in [keys.block_v4, keys.block_v6, keys.permit_v4, keys.permit_v6] {
+        delete_filter(engine, &key)?;
+    }
+    allow_missing(
+        unsafe { FwpmSubLayerDeleteByKey0(engine, &keys.sublayer) },
+        "FwpmSubLayerDeleteByKey0",
+    )?;
+    allow_missing(
+        unsafe { FwpmProviderDeleteByKey0(engine, &keys.provider) },
+        "FwpmProviderDeleteByKey0",
+    )
 }
 
 fn same_key(left: &GUID, right: &GUID) -> bool {
@@ -358,17 +678,12 @@ struct UserCondition {
     blob: FWP_BYTE_BLOB,
 }
 impl UserCondition {
-    fn new(account: &str) -> Result<Self, String> {
-        let account = wide(account);
+    fn for_sid(sid: &LocalSid) -> Result<Self, String> {
         let mut access: EXPLICIT_ACCESS_W = unsafe { zeroed() };
+        access.grfAccessPermissions = FWP_ACTRL_MATCH_FILTER;
+        access.grfAccessMode = GRANT_ACCESS;
         unsafe {
-            BuildExplicitAccessWithNameW(
-                &mut access,
-                account.as_ptr(),
-                FWP_ACTRL_MATCH_FILTER,
-                GRANT_ACCESS,
-                0,
-            );
+            BuildTrusteeWithSidW(&mut access.Trustee, sid.as_ptr());
         }
         let mut descriptor = null_mut();
         let mut length = 0;
@@ -405,10 +720,10 @@ impl Drop for UserCondition {
     }
 }
 
-fn ensure_provider(engine: HANDLE) -> Result<(), String> {
-    let name = wide("Ace sandbox WFP");
+fn ensure_provider(engine: HANDLE, keys: &AccountWfpKeys) -> Result<(), String> {
+    let name = wide("Ace sandbox WFP identity");
     let provider = FWPM_PROVIDER0 {
-        providerKey: PROVIDER_KEY,
+        providerKey: keys.provider,
         displayData: FWPM_DISPLAY_DATA0 {
             name: name.as_ptr() as *mut _,
             description: null_mut(),
@@ -423,11 +738,11 @@ fn ensure_provider(engine: HANDLE) -> Result<(), String> {
     )
 }
 
-fn ensure_sublayer(engine: HANDLE) -> Result<(), String> {
-    let name = wide("Ace sandbox WFP");
-    let provider = PROVIDER_KEY;
+fn ensure_sublayer(engine: HANDLE, keys: &AccountWfpKeys) -> Result<(), String> {
+    let name = wide("Ace sandbox WFP identity");
+    let provider = keys.provider;
     let sublayer = FWPM_SUBLAYER0 {
-        subLayerKey: SUBLAYER_KEY,
+        subLayerKey: keys.sublayer,
         displayData: FWPM_DISPLAY_DATA0 {
             name: name.as_ptr() as *mut _,
             description: null_mut(),
@@ -450,6 +765,7 @@ fn replace_filter(
     user: &UserCondition,
     permit_proxy: bool,
     security: &FilterSecurity,
+    keys: &AccountWfpKeys,
 ) -> Result<(), String> {
     delete_filter(engine, &key)?;
     let mut conditions = vec![FWPM_FILTER_CONDITION0 {
@@ -487,7 +803,7 @@ fn replace_filter(
     } else {
         "Ace block sandbox outbound"
     });
-    let provider = PROVIDER_KEY;
+    let provider = keys.provider;
     let filter = FWPM_FILTER0 {
         filterKey: key,
         displayData: FWPM_DISPLAY_DATA0 {
@@ -498,7 +814,7 @@ fn replace_filter(
         providerKey: &provider as *const _ as *mut _,
         providerData: empty_blob(),
         layerKey: layer,
-        subLayerKey: SUBLAYER_KEY,
+        subLayerKey: keys.sublayer,
         weight: FWP_VALUE0 {
             r#type: FWP_UINT8,
             Anonymous: FWP_VALUE0_0 {
@@ -578,23 +894,94 @@ mod tests {
     use super::*;
     use std::mem::size_of;
     #[test]
-    fn stable_filter_keys_are_unique() {
+    fn policy_keys_are_stable_and_scoped_to_the_account_identity() {
+        let first = AccountWfpKeys::new("S-1-5-21-100", AccountRole::Offline);
+        let repeated = AccountWfpKeys::new("S-1-5-21-100", AccountRole::Offline);
+        let other_account = AccountWfpKeys::new("S-1-5-21-200", AccountRole::Offline);
+        let online_role = AccountWfpKeys::new("S-1-5-21-100", AccountRole::Online);
         let keys = [
-            OFFLINE_V4,
-            OFFLINE_V6,
-            ONLINE_PERMIT_V4,
-            ONLINE_PERMIT_V6,
-            ONLINE_BLOCK_V4,
-            ONLINE_BLOCK_V6,
+            first.provider,
+            first.sublayer,
+            first.block_v4,
+            first.block_v6,
+            first.permit_v4,
+            first.permit_v6,
+            other_account.provider,
+            other_account.sublayer,
+            other_account.block_v4,
+            other_account.block_v6,
+            other_account.permit_v4,
+            other_account.permit_v6,
+            online_role.provider,
+            online_role.sublayer,
+            online_role.block_v4,
+            online_role.block_v6,
+            online_role.permit_v4,
+            online_role.permit_v6,
         ];
-        // windows_sys::core::GUID doesn't derive PartialEq in 0.52; compare field tuples.
+        assert!(same_key(&first.provider, &repeated.provider));
         for (index, key) in keys.iter().enumerate() {
-            let dup = keys[..index].iter().any(|k| {
-                (k.data1, k.data2, k.data3, k.data4) == (key.data1, key.data2, key.data3, key.data4)
-            });
-            assert!(!dup, "duplicate WFP filter key at index {index}");
+            let duplicate = keys[..index].iter().any(|other| same_key(other, key));
+            assert!(
+                !duplicate,
+                "duplicate per-identity WFP key at index {index}"
+            );
         }
+        assert_eq!(size_of::<GUID>(), 16);
     }
+
+    #[test]
+    fn legacy_migration_requires_confirmed_current_identity() {
+        assert!(legacy_filter_requires_migration(
+            LegacyFilterDisposition::CurrentIdentity
+        ));
+        assert!(!legacy_filter_requires_migration(
+            LegacyFilterDisposition::MalformedAcePolicy
+        ));
+        assert!(!legacy_filter_requires_migration(
+            LegacyFilterDisposition::OtherIdentity
+        ));
+        assert!(!legacy_filter_requires_migration(
+            LegacyFilterDisposition::Foreign
+        ));
+        assert!(!legacy_filter_requires_migration(
+            LegacyFilterDisposition::Missing
+        ));
+    }
+
+    #[test]
+    fn legacy_rule_owner_is_readable_even_when_its_shape_changed() {
+        let account = std::env::var("USERNAME").unwrap();
+        let account_sid =
+            LocalSid::from_string(&sid_string_for_account(&account).unwrap()).unwrap();
+        let unrelated_sid = LocalSid::from_string("S-1-1-0").unwrap();
+        let user = UserCondition::for_sid(&account_sid).unwrap();
+        let mut condition = FWPM_FILTER_CONDITION0 {
+            fieldKey: FWPM_CONDITION_ALE_USER_ID,
+            matchType: FWP_MATCH_EQUAL,
+            conditionValue: FWP_CONDITION_VALUE0 {
+                r#type: FWP_SECURITY_DESCRIPTOR_TYPE,
+                Anonymous: FWP_CONDITION_VALUE0_0 {
+                    sd: &user.blob as *const _ as *mut _,
+                },
+            },
+        };
+        let mut filter: FWPM_FILTER0 = unsafe { zeroed() };
+        filter.numFilterConditions = 1;
+        filter.filterCondition = &mut condition;
+
+        assert_eq!(
+            filter_user_condition_matches(&filter, &account_sid),
+            Some(true)
+        );
+        assert_eq!(
+            filter_user_condition_matches(&filter, &unrelated_sid),
+            Some(false)
+        );
+        filter.numFilterConditions = 17;
+        assert_eq!(filter_user_condition_matches(&filter, &account_sid), None);
+    }
+
     #[test]
     fn filter_security_grants_only_metadata_read_to_the_installing_user() {
         let security = FilterSecurity::with_user_read(null_mut()).unwrap();
@@ -628,9 +1015,9 @@ mod tests {
     #[test]
     fn verification_rejects_a_filter_bound_to_another_account() {
         let account = std::env::var("USERNAME").unwrap();
-        let rule = UserCondition::new(&account).unwrap();
         let account_sid =
             LocalSid::from_string(&sid_string_for_account(&account).unwrap()).unwrap();
+        let rule = UserCondition::for_sid(&account_sid).unwrap();
         let everyone = LocalSid::from_string("S-1-1-0").unwrap();
         assert!(user_condition_matches(&rule.blob, &account_sid));
         assert!(!user_condition_matches(&rule.blob, &everyone));

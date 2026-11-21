@@ -507,12 +507,13 @@
 <p class="evidence">Ace <code>crew/security/runtime_client.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/agent/executor/builtin.py</code>、<code>desktop/src/ui/chat-render.ts</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/executor/permission-flow.ts</code>。</p>
 </article>
 <article id="windows-sandbox-profile-ownership">
-<h3>D7j · 多份 Windows 配置共用机器级防火墙规则</h3>
-<p>每个桌面用户数据目录保存自己的 Windows 沙箱身份。原生安装与修复用固定的六个过滤器 GUID 替换机器级 WFP 规则，规则再按本次安装的沙箱账号 SID 匹配。准备另一份配置会把这些规则绑定到另一组 SID，前一份配置可能再次要求管理员确认。</p>
+<h3>D7j · 多份 Windows 配置共用机器级防火墙规则（代码已修复，待提权验收）</h3>
+<p>每个桌面用户数据目录保存自己的 Windows 沙箱身份。原生安装与修复过去共用 provider、sublayer 和六个过滤器 GUID，规则却按本次安装的 SID 匹配；另一份配置会覆盖机器上的同一组规则，前一份配置随后自检失败。</p>
 <p><strong>实机证据</strong> 普通 Windows 用户用同一个已随包发布的 x64 运行组件执行只读 <code>--windows-check-setup</code>。隔离预览配置返回就绪，常用桌面配置返回防火墙规则与沙箱账号不匹配。自检期间没有执行安装、修复、卸载或改写防火墙，现场错误另见 <a href="#security-turn-error-diagnostics">D7i</a>。</p>
-<p><strong>修复门槛</strong> 本地 Codex 以固定机器级身份复用对应规则。Ace 目前保留独立身份。后续应让 WFP 规则按身份独立归属，验证现有安装迁移、交替修复、卸载与重启，并保留运行前的规则校验。实机验证需要可独立修改防火墙的 Windows 环境。</p>
-<p><strong>原生候选与验收矩阵</strong> 已在私有副本实现按沙箱 SID 和规则角色定键的候选，独立的新版 provider 与 sublayer 对应仍保留的旧规则。新规则自检通过后继续使用普通宿主权限。卸载通过事务仅清理本身份规则。Windows Release 编译、5 项原生逻辑单测以及旧版基线编译通过。候选补丁 <code>c42793e2131fc252de481c3f0eaddd85ee6502e43d7484e74c30bba7a20a918f</code> 配套扩展仓库既有 Windows 2025 安全流水线，覆盖双目录交替安装和修复、同目录迁移与两种独立配置卸载顺序。共享分支当前仍使用原生原版，实际 WFP 规则验证、跨 Windows 账号及重启用例仍待隔离宿主。</p>
-<p class="evidence">Ace <code>security-runtime/src/windows/identity.rs</code>、<code>wfp.rs</code>。Codex <code>codex-rs/windows-sandbox-rs/src/setup.rs</code>、<code>wfp.rs</code>、<code>identity.rs</code>。</p>
+<p><strong>修复 · 当前工作树</strong> provider、sublayer 与 filter key 由规范 SID、离线/联网角色和对象类型派生。安装先以事务写入并核对新规则，再只清理旧 Ace provider/sublayer 下可确认属于当前 SID 的旧规则；规则形状变化但 SID 可读时仍按身份迁移，其他配置的旧规则保留。若旧规则 SID 无法验证，准备失败并要求管理员处理，不按固定 GUID 删除。身份缺失时不做全局卸载清理，运行前拒绝当前 SID 的遗留规则或无法验证所有权的旧 Ace 规则。实际 Codex 使用固定的 <code>CodexSandboxOffline</code> 沙箱账号和静态 WFP GUID，由提权 setup helper 安装；Ace 每份状态目录生成独立账号，因此 key 需要包含 SID 和角色。</p>
+<p><strong>ZCode 差异</strong> ZCode 的 Bash handler 将命令交给 <code>ExecutionPort.run</code>，Node adapter 再通过 <code>child_process.spawn</code> 启动；<code>NetworkEgressEnvPolicy</code> 将代理、no-proxy 与证书配置写入子进程环境。检索 <code>apps/zcode-cli</code> 源码未发现 FWPM/WFP 安装路径，因此 D7j 对应 Ace 的 Windows WFP 多配置所有权与本机网络隔离要求。</p>
+<p><strong>非提权验证</strong> Windows 原生 helper 全套 <code>cargo test --manifest-path security-runtime/Cargo.toml --release --locked</code> 共 85 项通过（主测试目标 64 项和平台集成测试 21 项），包含键稳定/身份隔离、旧规则 SID 归属判定、卸载账号筛选与现有 WFP 结构核验。<code>windows_install_matrix.ps1</code> 已扩展为双状态目录、交替修复和两种卸载顺序，PowerShell 语法检查通过；本轮没有在当前机器安装持久 WFP 规则。该矩阵及新旧规则同时存在时的实际网络准入仍须在干净提权 Windows VM 执行。</p>
+<p class="evidence">Ace <code>security-runtime/src/windows/identity.rs</code>、<code>wfp.rs</code>。ZCode <code>apps/zcode-cli/packages/core/src/tool/handlers/bash.ts</code>、<code>packages/adapters/src/exec/node-execution-adapter-run.ts</code>、<code>node-execution-adapter-process.ts</code>、<code>execution-command.ts</code>、<code>network/subprocess-env.ts</code>。Codex <code>codex-rs/windows-sandbox-rs/src/setup.rs</code>、<code>setup_provisioning.rs</code>、<code>wfp_setup.rs</code>、<code>wfp.rs</code>、<code>wfp/filter_specs.rs</code>。</p>
 </article>
 <article id="windows-sandbox-owner-mismatch">
 <h3>D7k · Windows 沙箱自动准备在提权账号不匹配后重复弹窗</h3>
