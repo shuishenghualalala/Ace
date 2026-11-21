@@ -186,7 +186,7 @@ python scripts/record_replay_fixture.py --trace ... --output ... --force</code><
   </ul>
 
   <h2>6. 提交前检查</h2>
-  <p>按改动面选择命令，不要默认跑全量；在 PR 描述中写清实际运行的命令和结果。CI 为每个 pytest 用例设置 300 秒上限，任务异常结束导致等待永不返回时会打印堆栈并失败；需要本地复现时可安装 <code>pytest-timeout</code> 并使用 <code>--timeout=300</code>。</p>
+  <p>按改动面选择命令，不要默认跑全量；在 PR 描述中写清实际运行的命令和结果。CI 为每个 pytest 用例设置 300 秒上限，任务异常结束导致等待永不返回时会打印堆栈并失败；安全流水线对 <code>tests/security</code> 使用 600 秒上限。需要本地复现时可安装 <code>pytest-timeout</code> 并使用相同参数。</p>
   <table>
     <thead><tr><th>改动</th><th>至少运行</th></tr></thead>
     <tbody>

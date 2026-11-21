@@ -20,6 +20,7 @@ jobs:
         with:
           node-version: '22'
       - run: uv sync --extra dev
+      - run: uv pip install pytest-timeout
       - run: python scripts/audit_runtime_npm.py
       - run: >-
           cargo build --manifest-path security-runtime/Cargo.toml --release --locked
@@ -32,7 +33,7 @@ jobs:
           --target aarch64-apple-darwin
         env:
           ACE_REQUIRE_NATIVE_TESTS: '1'
-      - run: uv run pytest tests/security -q
+      - run: uv run pytest tests/security -q --timeout=600
       - run: >-
           python tests/security/security_matrix.py
           --platform macos

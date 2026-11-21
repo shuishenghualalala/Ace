@@ -22,6 +22,7 @@ jobs:
         with:
           node-version: '22'
       - run: uv sync --extra dev
+      - run: uv pip install pytest-timeout
       - run: python scripts/audit_runtime_npm.py
       - run: cargo build --manifest-path security-runtime/Cargo.toml --release --locked --target x86_64-pc-windows-msvc
       - run: cargo fmt --manifest-path security-runtime/Cargo.toml --check
@@ -39,7 +40,7 @@ jobs:
           ACE_WINDOWS_NATIVE_STATE_DIR: '${{ runner.temp }}\ace-security-state'
           ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
       - run: node desktop/scripts/prepare-security-runtime.mjs --runtime security-runtime/target/x86_64-pc-windows-msvc/release/ace-security-runtime.exe --output desktop/security-runtime-bin
-      - run: uv run pytest tests/security -q
+      - run: uv run pytest tests/security -q --timeout=600
         env:
           ACE_SECURITY_STATE_DIR: '${{ runner.temp }}\ace-security-state'
           ACE_WINDOWS_NATIVE_STATE_DIR: '${{ runner.temp }}\ace-security-state'

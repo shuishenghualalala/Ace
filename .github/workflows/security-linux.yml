@@ -33,6 +33,7 @@ jobs:
         with:
           node-version: '22'
       - run: uv sync --extra dev
+      - run: uv pip install pytest-timeout
       - run: python scripts/audit_runtime_npm.py
       - run: cargo build --manifest-path security-runtime/Cargo.toml --release --locked
       - run: cargo check --manifest-path security-runtime/Cargo.toml --all-targets --locked
@@ -54,7 +55,7 @@ jobs:
           }
           PROFILE
           sudo apparmor_parser -r /etc/apparmor.d/crew-ci-packaged-bwrap
-      - run: uv run pytest tests/security -q --basetemp "$RUNNER_TEMP/ace-security-tests"
+      - run: uv run pytest tests/security -q --basetemp "$RUNNER_TEMP/ace-security-tests" --timeout=600
       - run: python tests/security/security_matrix.py --platform linux --runtime security-runtime/target/release/ace-security-runtime
         env:
           ACE_REQUIRE_NATIVE_SECURITY: '1'
