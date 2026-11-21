@@ -448,6 +448,12 @@
 <p><strong>验收</strong> 阻塞状态连接时，基线的 HTML 和网址两例在切换会话后均返回打开成功。候选拒绝两例及切走再切回原会话的迟到结果。组装测试实际点击对话产物按钮、切换会话，确认只请求原会话，新的看板不会显示。桌面定向回归 170 项通过，TypeScript 和隔离生产构建通过。连接边界使用受控夹具，未启动安装态 Electron。任务看板的产物按钮仍使用系统打开路径，文件预览缓存与任务看板内嵌入口单独核对。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/browser-panel.ts</code>、<code>conversation-renderer.ts:176–205</code>、<code>kanban-board.ts:390–413</code>。ZCode <code>packages/ui/src/browser-use/useBrowserScreenshotSurfaceRequest.ts:10–54、106–141</code>。</p>
 </article>
+<article id="team-board-artifact-preview">
+<h3>协作看板产物打开应用内预览</h3>
+<p>ZCode 的执行侧栏和对话卡片都把父会话、运行 ID 和产物 ID 传入同一侧栏入口；宿主根据内容类型选择预览，HTML 可进入浏览器标签页。Ace 的对话文件卡已有「文件」面板，协作看板节点和产物列表此前直接调用系统打开。现在两处对已有渲染器支持的文件复用当前会话的文件面板，只展开被点击的文件。HTML 使用离线预览；不插入额外浏览器标签、不扩大桌面 IPC 的读取范围。没有应用内预览的格式沿用原系统打开。异步加载面板后再次核对当前会话。</p>
+<p><strong>验收</strong> Markdown 回归在基线实际调用系统打开一次。候选从同一协作看板点击后，在真实文件预览容器显示正文且不调用系统打开。桌面五组组合回归 101 项通过，TypeScript 与隔离生产构建通过。Windows Chrome 在隔离夹具中运行实际桌面看板及文件面板代码，点击产物并核对独立临时文件的正文。夹具替换了桌面 IPC 传输，未调用真实系统应用。本项只覆盖 Desktop 协作看板，不宣称通用任务看板或浏览器远程预览已完成。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/team-collaboration-board.ts</code>、<code>conversation-renderer.ts:215–250</code>、<code>inspector.ts</code>。ZCode <code>packages/ui/src/app-shell/WorkflowRunSidePane.tsx:317–335</code>、<code>packages/ui/src/v4/ConversationWorkflowCompletion.tsx:74–91</code>。</p>
+</article>
 <article id="renderer-heartbeat-probe">
 <h3>D7h · 丢失定时心跳时确认当前渲染器仍能应答</h3>
 <p>ZCode 主要用 Chromium 的原生无响应和恢复事件记录冻结，并独立处理浏览网页的来宾进程。Ace 继续处理原生事件，并在补充的前台定时心跳路径上增加一次即时应答确认。超过 16 秒后向当前可信主文档发探测，最多等待一个检查周期（当前 4 秒）。原定时心跳或探测应答都会续上本代计时。</p>

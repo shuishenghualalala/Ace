@@ -388,6 +388,36 @@ describe('协作看板 HTML', () => {
     expect(expandedHtml).not.toContain('工具调用：apply_patch');
   });
 
+  it('预览协作看板中的 Markdown 产物，不启动系统应用', async () => {
+    const path = '/tmp/ace-team-preview-report.md';
+    const openPath = vi.fn().mockResolvedValue('');
+    const readTextFile = vi.fn().mockResolvedValue('# 看板产物正文');
+    vi.stubGlobal('Crew', { openPath, readTextFile, pathExists: vi.fn().mockResolvedValue(true) });
+    try {
+      vi.mocked(backendApi.tasks).mockResolvedValue([{ ...tasks[1], output_ref: path }]);
+      setActiveSessionId(SESSION_ID);
+      messageStore.set({ messages: {
+        [SESSION_ID]: [{ id: 'user-preview', role: 'user', content: '生成报告', timestamp: 1 }],
+      } });
+      await refreshTeamCollaborationBoard(SESSION_ID);
+      const mount = () => {
+        document.body.innerHTML = `<div id="chat-inspector"><div id="chat-inspector-body">${buildTeamCollaborationBoardHtml(SESSION_ID)}</div></div>`;
+        activateTeamCollaborationBoard(SESSION_ID);
+      };
+      mount();
+      document.querySelector<HTMLButtonElement>('[data-team-files]')!.click();
+      mount();
+      document.querySelector<HTMLButtonElement>(`[data-team-open-path="${path}"]`)!.click();
+
+      expect(openPath).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(document.querySelector('.inspector-file__markdown-preview')?.textContent ?? '')
+        .toContain('看板产物正文'));
+      expect(readTextFile).toHaveBeenCalledWith(path);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('为节点生成对应团队消息的定位目标', () => {
     const node = makeTeamFlowNodes([tasks[1]])[0];
     expect(nodeMessageId(node, [

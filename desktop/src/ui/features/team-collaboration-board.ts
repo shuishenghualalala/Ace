@@ -15,6 +15,7 @@ import {
   type TeamMemberModelBinding,
 } from '../backend-client';
 import type { ChatMessage, ToolCallInfo } from '../chat-render';
+import { filePreviewKind, isBinaryPreviewKind, isTextPreviewKind } from '../file-preview';
 import { escapeHtml, notify, state, newMessageId } from '../state';
 import { setRuntimeStyle } from '../components/runtime-style';
 import {
@@ -1160,16 +1161,26 @@ export function buildTeamCollaborationBoardHtml(sessionId: string | null | undef
   </aside></div>`;
 }
 
-async function openPath(filePath: string): Promise<void> {
-  if (!window.Crew?.openPath) {
-    notify('当前环境不支持打开文件');
-    return;
-  }
+async function openTeamArtifact(sessionId: string, filePath: string): Promise<void> {
+  if (state.activeSessionId !== sessionId) return;
+  const kind = filePreviewKind(filePath);
   try {
+    if (isTextPreviewKind(kind) || isBinaryPreviewKind(kind)) {
+      const { openInspectorToTab } = await import('./inspector');
+      if (state.activeSessionId !== sessionId) return;
+      openInspectorToTab('files', { expandFilePath: filePath, filePaths: [filePath] });
+      return;
+    }
+    if (!window.Crew?.openPath) {
+      notify('当前环境不支持打开文件');
+      return;
+    }
     const result = await window.Crew.openPath(filePath);
     if (result) notify(`打开失败：${result}`);
   } catch (error) {
-    notify(`打开失败：${error instanceof Error ? error.message : String(error)}`);
+    if (state.activeSessionId === sessionId) {
+      notify(`打开失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 
@@ -1219,7 +1230,7 @@ export function activateTeamCollaborationBoard(sessionId: string | null | undefi
   document.querySelectorAll<HTMLButtonElement>('[data-team-open-path]').forEach((button) => {
     button.addEventListener('click', () => {
       const path = button.dataset.teamOpenPath;
-      if (path) void openPath(path);
+      if (path) void openTeamArtifact(sessionId, path);
     });
   });
   document.querySelectorAll<HTMLSelectElement>('[data-team-member-model]').forEach((select) => {
