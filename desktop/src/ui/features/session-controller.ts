@@ -55,6 +55,7 @@ import {
   setStatusWithUi,
   chatOutboxObserver,
   consumePending,
+  dropNonGoalFrameDuringPostStopRepair,
   flushPendingChunks,
   getMessages,
   jumpChatToBottom,
@@ -939,6 +940,7 @@ function handleGatewayChunk(chunk: ChatChunk): void {
   }
   const recovery = sessionId && getSessionStreamRecovery(sessionId);
   if (sessionId && recovery) {
+    if (dropNonGoalFrameDuringPostStopRepair(sessionId, chunk)) return;
     if (INCOMPLETE_STREAM_KINDS.has(chunk.kind)
       || (chunk.kind === 'feature_event' && chunk.body?.feature === 'team' && chunk.body?.event === 'internal_message')) {
       if (isDuplicateGatewayChunk(sessionId, chunk)) return;

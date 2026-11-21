@@ -740,6 +740,60 @@ describe('conversation recovery after a socket outage', () => {
     expect(sessionStore.get().busySessions[sid]).toBe(true);
   });
 
+  it('keeps late ordinary replay out of post-stop Goal repair while honoring the exact Stop terminal', async () => {
+    const goalId = `goal_${'c'.repeat(32)}`;
+    const store = 'b'.repeat(32);
+    authStore.set({ userInfo: { uid: 'post-stop-test-owner' } });
+    vi.spyOn(chatOutbox, 'transportIdentity').mockReturnValue({ scope: 'owner-a', storeId: store });
+    const status = vi.spyOn(backendApi, 'sessionStatus').mockResolvedValue({
+      ...settledStatus, live: 'running', active_request_id: oldRequest,
+    });
+    emitSocket({ type: 'open' });
+    emitSocket({ type: 'message', data: JSON.stringify({ kind: 'send_receipt_capability', body: { version: 1, request_stop: 1, store_id: store } }) });
+    await vi.advanceTimersByTimeAsync(0);
+    emitFrame('delta', 1, { text: 'Frozen ordinary output' });
+    stopGeneration(sid);
+    status.mockResolvedValue({ ...settledStatus, live: 'running', active_request_id: goalId });
+    emitFrame('delta', 2, { text: 'Current Goal output' }, 'epoch-1', goalId);
+    await vi.advanceTimersByTimeAsync(0);
+    const recovery = getSessionStreamRecovery(sid);
+    expect(recovery).toBeDefined();
+    const previousProgress = recovery?.progress;
+    const repair = snapshotRequests().at(-1);
+    expect(repair?.repair_id).toBeTruthy();
+
+    emitFrame('delta', 3, { text: 'Stale ordinary replay' });
+    emitSocket({ type: 'message', data: JSON.stringify({
+      kind: 'delta', session_id: sid, gateway_epoch: 'epoch-1', gateway_sequence: 4, sequence: 4,
+      body: { text: 'Anonymous late ordinary replay' }, is_final: false,
+    }) });
+    emitSocket({ type: 'message', data: JSON.stringify({
+      kind: 'error', session_id: sid, request_id: oldRequest, gateway_epoch: 'epoch-1', gateway_sequence: 5, sequence: 5,
+      body: { outcome: { status: 'stopped', reason: 'user_stop' } }, is_final: true,
+    }) });
+    expect(getSessionStreamRecovery(sid)?.progress).toBe(previousProgress);
+    expect(messageStore.get().messages[sid][0]?.turnOutcome?.status).toBe('stopped');
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe(goalId);
+
+    emitFrame('gateway_resync', 6, {
+      ...snapshotBody(), reason: 'client_stream_gap', repair_id: repair!.repair_id,
+      turn_snapshot: {
+        request_id: goalId, started_at: 1_700_000_000,
+        history: {
+          ...historyResult([{ role: 'assistant', content: 'Frozen ordinary output', request_id: oldRequest },
+            { role: 'user', content: 'Canonical Goal prompt', request_id: goalId }]),
+        },
+        frames: [{ ...snapshotFrame('delta', 2, { text: 'Current Goal output' }), request_id: goalId }],
+      },
+    }, 'epoch-1', goalId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getSessionStreamRecovery(sid)).toBeUndefined();
+    expect(messageStore.get().messages[sid].map(({ content }) => content)).toEqual([
+      'Frozen ordinary output', 'Canonical Goal prompt', 'Current Goal output',
+    ]);
+    expect(sessionStore.get().busySessions[sid]).toBe(true);
+  });
+
   it('discards a stopped click if another request starts while the original outbox withdrawal is pending', async () => {
     const deferred = Promise.withResolvers<void>();
     const withdraw = vi.spyOn(chatOutbox, 'withdraw').mockReturnValue(deferred.promise);

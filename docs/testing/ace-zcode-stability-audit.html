@@ -346,6 +346,12 @@
 <p><strong>验收</strong> 目标面板与回合门禁 72 项、相邻多面板与看板 36 项通过，TypeScript、定向 ESLint 与隔离生产构建通过。真实桌面渲染器在 Windows Chrome 通过隔离 IPC 适配器连接真实 Gateway。先启动 Goal，再在同会话提交普通消息；正常消息等到 Goal 结束且读到独立历史后发出一次。第二轮关闭再打开仍是同一 ID，暂停只停止该次推进，恢复不重放。未运行正式 Electron 安装包；普通回合由本地停止后留下的会话级晚帧抑制需要另做组合验收。尚无自动续跑或独立验收。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/session-goal.ts</code>、<code>desktop/src/ui/features/chat-controller.ts</code>。ZCode <code>packages/ui/src/v4/ConversationStatusPanel.tsx:463–557</code>。</p>
 </article>
+<article id="desktop-stop-then-goal">
+<h3>桌面同会话停止普通回合后可以继续推进 Goal</h3>
+<p>ZCode 将停止请求绑定到预期的前台执行 ID，Goal 复用独立的前台执行控制。Ace 桌面原来的会话级晚帧屏蔽会顺便丢掉随后由 REST 启动的新 Goal。候选只接受当前账号、连接和网关代际中可证明较新的服务端 Goal 请求，保留对旧普通回合乃至匿名迟到片段的屏蔽；快照补读同样核对请求身份。</p>
+<p><strong>验收</strong> 用真实主输入框定向复现旧行为；修复后的 137 项桌面回归、TypeScript、定向 ESLint 与构建通过。在 Windows Chrome 运行实际桌面渲染器和隔离 Gateway，点击普通回合停止按钮后，由 <code>/goal</code> 推进一轮；真实历史保留旧回合的部分输出，新 Goal 独立显示持久用户行和实时回复，随后普通消息仅发送一次。使用受控模型和隔离 IPC，不是正式 Electron 安装包。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts</code>、<code>desktop/src/ui/features/session-controller.ts</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/session-flow.ts:292–322</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/runtime-command-queue.ts:418–453</code>。</p>
+</article>
 <article id="cli-session-resume">
 <h3>CLI 交互续接已保存的会话</h3>
 <p>Kimi 的 CLI 提供显式会话 ID 和按当前目录续接最近会话两种入口。显式 ID 路径查询会话索引，不存在或目录不符时报错。Ace 的非交互 <code>run</code> 已能指定会话；交互 <code>chat</code> 现在也可以用 <code>--session-id</code>，在打开输入前核对账号的公开会话目录和所选工作空间，保持原审批流程。启动和 <code>/new</code> 显示当前 ID；未指定时维持新建。自动续接最近会话不在本次变更中。</p>

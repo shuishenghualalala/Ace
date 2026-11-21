@@ -166,6 +166,44 @@ function stubGoalHistory(sid: string) {
 }
 
 describe('server-owned Goal steps', () => {
+  it('adopts a newer Goal after stopping the exact ordinary reply on the same session', async () => {
+    const sid = 'goal-after-local-stop';
+    const stop = vi.fn(async () => true);
+    Object.assign(uiStore.get().socket!, { stop });
+    sessionStore.set({ activeSessionId: sid });
+    const { input, send } = mountMainComposer();
+    setInput(input, 'Ordinary request to stop');
+    send.click();
+    await vi.waitFor(() => expect(socketSend()).toHaveBeenCalledTimes(1));
+    const requestId = socketSend().mock.calls[0]?.[0].request_id;
+    const ordinary = (sequence: number, text: string) => ({ ...goalFrame(sid, 'delta', sequence, text), request_id: requestId });
+    applyChunk(ordinary(1, 'Frozen partial reply'));
+    const stopButton = document.querySelector<HTMLButtonElement>('[data-composer-stop]')!;
+    expect(stopButton.disabled || stopButton.hidden).toBe(false);
+    stopButton.click();
+    expect(stop.mock.calls[0]?.slice(0, 2)).toEqual([sid, requestId]);
+    applyChunk(ordinary(2, 'Late ordinary text before Goal'));
+    expect(messageStore.get().messages[sid]?.some(({ content }) => content.includes('Late ordinary text'))).toBe(false);
+    applyChunk({ ...goalFrame(sid, 'delta', 98, 'Wrong Gateway epoch'), gateway_epoch: 'old-epoch' });
+    const owner = authStore.get().userInfo;
+    authStore.set({ userInfo: { uid: 'other-owner' } });
+    applyChunk(goalFrame(sid, 'delta', 99, 'Wrong owner'));
+    authStore.set({ userInfo: owner });
+    expect(state.suppressChunks.has(sid)).toBe(true);
+    expect(sessionStore.get().busySessions[sid]).toBeFalsy();
+
+    expect(applyChunk(goalFrame(sid, 'delta', 4, 'Fresh Goal output'))).toBe('repair');
+    expect(sessionStore.get().books[sid]?.activeRequestId).toBe(serverGoalId);
+    expect(sessionStore.get().busySessions[sid]).toBe(true);
+    applyChunk({ ...ordinary(5, 'Late anonymous ordinary text'), request_id: undefined });
+    applyChunk(ordinary(6, 'Late ordinary text after Goal'));
+    expect(messageStore.get().messages[sid]?.map(({ content }) => content)).toEqual(['Ordinary request to stop', 'Frozen partial reply']);
+    setInput(input, 'Ordinary input waits for Goal');
+    send.click();
+    await vi.waitFor(() => expect(getPendingQueue(sid).map(({ query }) => query)).toEqual(['Ordinary input waits for Goal']));
+    expect(socketSend()).toHaveBeenCalledTimes(1);
+  });
+
   it('adopts a verified frame after sealed history, queues ordinary input, and hydrates the real Goal boundary before sending', async () => {
     const sid = 'external-goal-queued-ordinary';
     sealedGoalSession(sid);

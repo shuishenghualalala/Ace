@@ -12,7 +12,7 @@
  * 本文件所有函数均为「原样搬迁」，行为与抽离前的 index.ts 完全一致。
  */
 
-import { getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, peekGatewaySequence, touchStreamActivity } from './gateway-sequence';
+import { getGatewayCursors, getLastGatewaySequences, isDuplicateGatewayChunk, noteGatewaySequence, peekGatewaySequence, touchStreamActivity } from './gateway-sequence';
 import { noteDelta, noteDeltaBoundary, resetSession } from '../stream-reassembly';
 import {
   type ChatMessage,
@@ -1129,6 +1129,61 @@ function reportObservationClientEvent(payload: Record<string, unknown>): void {
   }
 }
 
+type GoalStopFence = {
+  requestId: string;
+  owner: string;
+  socket: NonNullable<typeof state.socket>;
+  generation: number | undefined;
+  epoch: string | undefined;
+  resumedRequestId?: string;
+};
+const goalStopFences = new Map<string, GoalStopFence>();
+
+function stopFenceIsCurrent(fence: GoalStopFence): boolean {
+  return interactiveOwnerKey() === fence.owner && state.socket === fence.socket
+    && state.backendReadiness?.generation === fence.generation;
+}
+
+function goalStopFenceFor(sessionId: string): GoalStopFence | undefined {
+  const fence = goalStopFences.get(sessionId);
+  // A replaced transport and a replaced book cannot inherit the old handoff.
+  // A still-suppressed or still-Goal book instead retains its fail-closed fence.
+  if (fence?.resumedRequestId && state.socket && state.socket !== fence.socket
+    && !state.suppressChunks.has(sessionId) && sessionStore.get().books[sessionId]?.activeRequestId !== fence.resumedRequestId) {
+    goalStopFences.delete(sessionId);
+    return undefined;
+  }
+  return fence;
+}
+
+function serverGoalRequestId(sessionId: string, chunk: ChatChunk): string | undefined {
+  const requestId = chunk.request_id;
+  if (chunk.session_id !== sessionId || typeof requestId !== 'string' || !/^goal_[a-f0-9]{32}$/.test(requestId)
+    || !isRendererLoggedIn() || !hasGatewayDeltaSequence(chunk.gateway_sequence)
+    || typeof chunk.gateway_epoch !== 'string' || !chunk.gateway_epoch) return undefined;
+  if (chunk.kind === 'delta' || chunk.kind === 'thinking' || chunk.kind === 'final'
+    || (chunk.kind === 'status' && chunk.body.control !== true) || (chunk.kind === 'error' && chunk.is_final)) return requestId;
+  return undefined;
+}
+
+function goalMatchesStopFence(sessionId: string, chunk: ChatChunk, fence: GoalStopFence, requestId?: string): boolean {
+  if (!requestId || fence.requestId === requestId || !stopFenceIsCurrent(fence)) return false;
+  // A stop before the first stream frame may learn its epoch from the exact
+  // stopped terminal. Never let a candidate Goal frame establish its own fence.
+  const cursor = getGatewayCursors([sessionId])[sessionId];
+  return Boolean(cursor && cursor.epoch === chunk.gateway_epoch && (!fence.epoch || fence.epoch === cursor.epoch));
+}
+
+/** Keep the old stop fence before the recovery interceptor can consume replay. */
+export function dropNonGoalFrameDuringPostStopRepair(sessionId: string, chunk: ChatChunk): boolean {
+  const fence = goalStopFenceFor(sessionId);
+  if (!fence?.resumedRequestId) return false;
+  const requestId = serverGoalRequestId(sessionId, chunk);
+  if (requestId === fence.resumedRequestId && goalMatchesStopFence(sessionId, chunk, fence, requestId)) return false;
+  applyLocalStopFrame(sessionId, chunk);
+  return true;
+}
+
 function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   const originalSource = incomingChunk.kind === 'followup_question' && incomingChunk.body.interaction_source_session_id;
   const sourceSid = typeof originalSource === 'string' && originalSource
@@ -1164,11 +1219,18 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
     receiveFirstText(sid, requestId, chunk.body.text.length);
   }
   const featureEvent = featureEventFrameOf(chunk);
-  // 撤回/中断后忽略该会话的迟到分片，避免重建已被删除的幽灵助手消息。
+  // The exact stopped turn keeps its receipts. Only a newer, authenticated Goal
+  // on that same stream can replace the session-wide suppression with a Goal fence.
   if (applyLocalStopFrame(sid, chunk)) return;
-  if (state.suppressChunks.has(sid)) {
-    logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });
-    return;
+  const goalRequestId = serverGoalRequestId(sid, chunk);
+  const stopFence = goalStopFenceFor(sid);
+  const wasSuppressed = state.suppressChunks.has(sid);
+  if (wasSuppressed || stopFence?.resumedRequestId) {
+    const inStopScope = stopFence && goalMatchesStopFence(sid, chunk, stopFence, goalRequestId);
+    if (!inStopScope || (wasSuppressed && (!bookFor(sid).turnSealed || (chunk.gateway_sequence ?? 0) <= peekGatewaySequence(sid)))) {
+      logStream('apply-chunk', 'drop-suppressed', { sid, kind: chunk.kind });
+      return;
+    }
   }
   if (chunk.kind === 'session_title') {
     const title = String((chunk.body as { title?: string })?.title || '').trim();
@@ -1269,8 +1331,6 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   if (isDuplicateGatewayChunk(sid, chunk)) {
     return;
   }
-  const goalRequestId = typeof chunk.request_id === 'string' && /^goal_[a-f0-9]{32}$/.test(chunk.request_id)
-    ? chunk.request_id : null;
   const previousSequence = goalRequestId ? peekGatewaySequence(sid) : 0;
   if (chunk.kind !== 'delta' && chunk.kind !== 'tool') noteGatewaySequence(sid, chunk);
   touchStreamActivity(sid);
@@ -1294,10 +1354,7 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
   const reqId = chunkRequestId(parsed, chunk.request_id);
   // Goal IDs are reserved at server ingress. Never open a turn from a 202,
   // client-supplied body metadata, or a frame without a verified stream position.
-  const goalFrame = chunk.session_id === sid && typeof chunk.gateway_epoch === 'string' && !!chunk.gateway_epoch
-    && hasGatewayDeltaSequence(chunk.gateway_sequence) && Boolean(goalRequestId) && isRendererLoggedIn()
-    && (parsed.kind === 'delta' || parsed.kind === 'thinking' || parsed.kind === 'final'
-      || (parsed.kind === 'status' && parsed.body.control !== true) || (parsed.kind === 'error' && chunk.is_final));
+  const goalFrame = goalRequestId !== undefined;
   const hasGoalBoundary = goalFrame && (getMessages(sid).findLast((message) => message.role === 'user' && message.requestId === reqId) !== undefined);
   if (goalFrame && reqId && (chunk.gateway_sequence ?? 0) > previousSequence
     && book.turnSealed && book.activeRequestId !== reqId && !hasGoalBoundary) {
@@ -1307,6 +1364,11 @@ function applyChunkInner(incomingChunk: ChatChunk): 'repair' | void {
       assistantId: null, firstChunkAt: null, toolMap: new Map(), deltaSpans: [], legacyDeltaText: '',
       hadTeamInternal: false, pendingStopOutcome: undefined,
     });
+    if (stopFence && (wasSuppressed || stopFence.resumedRequestId)) {
+      stopFence.resumedRequestId = reqId;
+      stopFence.epoch ??= chunk.gateway_epoch;
+      removeSuppressedSession(sid);
+    }
     setBusyWithUi(sid, true);
     setStatusWithUi(sid, 'running');
     book = bookFor(sid);
@@ -1998,6 +2060,7 @@ async function dispatchQuery(
     notify('消息超过发送大小限制，草稿已保留');
     return false;
   }
+  goalStopFences.delete(sessionId);
   removeSuppressedSession(sessionId);
   // 修订式引导可能已经插入气泡。只记住本次发送创建的气泡，供发送失败时撤销。
   const optimisticUserMessageId = dispatchOptions.optimisticUserMessageId;
@@ -2320,9 +2383,24 @@ function stopGenerationNow(sessionId: string, requestId: string | null, trackOut
   if (trackOutcome && assistantId) patchMessage(sessionId, assistantId, { stopNotice });
   const pendingStop: StoppedTurn | undefined = trackOutcome && requestId
     ? { requestId, assistantId, owner } : undefined;
+  goalStopFences.delete(sessionId);
   if (pendingStop) {
     stoppedTurns.set(stoppedTurnKey(owner, sessionId, pendingStop.requestId), pendingStop);
     if (stoppedTurns.size > 200) stoppedTurns.delete(stoppedTurns.keys().next().value!);
+    const socket = state.socket;
+    if (owner && socket) {
+      goalStopFences.set(sessionId, {
+        requestId: pendingStop.requestId, owner, socket, generation: state.backendReadiness?.generation,
+        epoch: getGatewayCursors([sessionId])[sessionId]?.epoch,
+      });
+      if (goalStopFences.size > 200) {
+        const oldest = goalStopFences.keys().next().value!;
+        const evicted = goalStopFences.get(oldest);
+        goalStopFences.delete(oldest);
+        // Capacity pressure may revoke a handoff, but never open its old replay.
+        if (evicted?.resumedRequestId && stopFenceIsCurrent(evicted)) addSuppressedSession(oldest);
+      }
+    }
   }
   cancelSessionStreamRecovery(sessionId);
   // 修法3：用户主动停止是终态（每会话仅一个活跃回合）→ 清该会话 delta 重组缓冲，防泄漏。
