@@ -115,7 +115,7 @@ async function measureMultipleGroups(): Promise<{ initialRows: number; scrolledR
   host.id = 'session-history-root';
   host.className = 'mw-assistant-context';
   document.querySelector('#mount')!.append(host);
-  const view = createSessionHistoryView(host, options);
+  createSessionHistoryView(host, options);
   const list = host.querySelector<HTMLElement>('[data-session-history-list]')!;
   const initialRows = list.querySelectorAll('.mw-session-history__row').length;
   assert.ok(initialRows < 80, 'initial multi-group view must remain bounded, got ' + initialRows);
@@ -142,8 +142,6 @@ async function measureMultipleGroups(): Promise<{ initialRows: number; scrolledR
   assert.equal(window.__openedSession, targetId);
   const scrolledRows = list.querySelectorAll('.mw-session-history__row').length;
   assert.ok(scrolledRows < 100, 'scrolling must keep the multi-group DOM bounded, got ' + scrolledRows);
-  view.dispose();
-  host.remove();
   return { initialRows, scrolledRows, opened: targetId };
 }
 
@@ -200,6 +198,7 @@ fs.writeFileSync(path.join(appRoot, 'package.json'), JSON.stringify({
 }));
 const mainSource = `
 const { app, BrowserWindow } = require('electron');
+const assert = require('node:assert/strict');
 const path = require('node:path');
 app.setPath('userData', path.join(__dirname, 'user-data'));
 app.commandLine.appendSwitch('disable-background-timer-throttling');
@@ -220,6 +219,23 @@ app.whenReady().then(async () => {
       if (!result) await new Promise((resolve) => setTimeout(resolve, 25));
     }
     if (!result) throw new Error('Electron session history benchmark timed out');
+    window.webContents.debugger.attach('1.3');
+    try {
+      await window.webContents.debugger.sendCommand('Accessibility.enable');
+      const { nodes } = await window.webContents.debugger.sendCommand('Accessibility.getFullAXTree');
+      const navigation = nodes.some((node) => node.role?.value === 'navigation' && node.name?.value === '最近会话');
+      const openButton = nodes.some((node) => node.role?.value === 'button' && node.name?.value === '打开会话：Session 19999');
+      if (!navigation || !openButton) {
+        console.error('AX_SNAPSHOT ' + JSON.stringify(nodes.map((node) => ({
+          role: node.role?.value, name: node.name?.value, ignored: node.ignored,
+        })).slice(-60)));
+      }
+      assert.ok(navigation, 'Electron accessibility tree must expose the session list navigation name');
+      assert.ok(openButton, 'Electron accessibility tree must expose a virtualized session open button');
+      result.accessibility = { navigation, openButton };
+    } finally {
+      window.webContents.debugger.detach();
+    }
     console.log('BENCH_RESULT ' + JSON.stringify(result));
   } catch (error) {
     console.error('BENCH_ERROR ' + (error?.stack || String(error)));
