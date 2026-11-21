@@ -205,7 +205,7 @@
 <p class="evidence">Ace <code>crew/agent/executor/builtin.py</code>、<code>crew/agent/loop/tool_runner.py</code>、<code>crew/providers/openai_provider.py</code>、<code>crew/providers/anthropic_provider.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/streaming-tool-coordinator.ts:122</code>、<code>:373</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/tools.ts:49</code>。</p>
 <h3>A16 · P1 · MCP 截止时间错误被记为工具成功</h3>
 <p>源代码及真实本机 stdio 复现了同服务器队列的等待。慢调用挂起时，另一会话的快调用未抵达服务端，放开后才执行。用实际 MCP SDK 直连同一夹具，慢调用仍在等待时快调用已能完成。独立快调用可以在排队时超过截止，服务端收到零次。取消慢调用后，服务端确认该调用退出，快调用随后成功。ZCode 默认按会话租用 MCP 连接，工作区共享需要显式配置，连接就绪后每个调用分别携带取消与超时。</p>
-<p>旧版将排队和执行中两种截止时间错误作为普通结果返回，模型正文虽有错误，工具事件与 SQLite 回执均标记成功。现在复用既有结构化工具错误。排队截止为 <code>mcp_queue_timeout</code>，副作用状态 <code>none</code>。派发后截止为 <code>mcp_call_timeout</code>，副作用状态 <code>unknown</code>。两类都保留原错误正文和绝对截止时间，交由模型看到失败结果。队列并发仍为单独待验收项。</p>
+<p>旧版将排队和执行中两种截止时间错误作为普通结果返回，模型正文虽有错误，工具事件与 SQLite 回执均标记成功。现在复用既有结构化工具错误。排队截止为 <code>mcp_queue_timeout</code>，副作用状态 <code>none</code>。派发后截止为 <code>mcp_call_timeout</code>，副作用状态 <code>unknown</code>。两类都保留原错误正文和绝对截止时间，交由模型看到失败结果。同一服务的队列并发与独占栅栏已在后续专项中验收，详见下节。</p>
 <p><strong>验收</strong> 两个截止时间回归在旧版失败。使用实际 stdio 子进程运行 ToolRunner 并重开 SQLite，两类候选失败分别确认零次和一次实际派发。原错误正文、工具结果事件和持久回执一致，均不可自动重试且各提交一次。等待期间的另一个调用继续成功，单个取消与 stdio 回收均通过。MCP 生命周期、MCP 功能和工具执行管线的 83 项回归通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/tools/registry.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/mcp/pool.ts:532</code>、<code>apps/zcode-cli/packages/adapters/src/mcp/index.ts:1118</code>、<code>apps/zcode-cli/packages/core/src/mcp/index.ts:129</code>。</p>
 
