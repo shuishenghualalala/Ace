@@ -590,6 +590,7 @@ async def test_main_agent_driver_holds_preset_lease_for_entire_turn():
             yield Agent()
 
     app = object.__new__(CrewApp)
+    app.config = SimpleNamespace(agent_executor="builtin")
     app.agent_presets = runtime.agent_presets
     app.agents = Agents()
     app._session_agent_config = lambda _session_id, owner_account_id: {
