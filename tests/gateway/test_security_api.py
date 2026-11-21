@@ -922,6 +922,43 @@ async def test_windows_setup_action_requires_a_repairable_probe_error(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("detail", [
+    "Windows sandbox account is missing",
+    "Windows sandbox account is disabled",
+    "Windows sandbox account password is expired",
+])
+async def test_windows_account_health_failure_requires_operator_action(api, tmp_path, monkeypatch, detail):
+    from crew.gateway.routers import security as security_router
+    from crew.security.runtime_client import NativeRuntimeError, RuntimeErrorCode
+
+    state_dir = tmp_path / "security-state"
+    state_dir.mkdir()
+    helper = tmp_path / "ace-security-runtime.exe"
+    helper.write_bytes(b"fixture")
+
+    async def failed_probe(*, on_error):
+        on_error(NativeRuntimeError(RuntimeErrorCode.SANDBOX_UNAVAILABLE, detail))
+        return None, True, False, "windows"
+
+    monkeypatch.setenv("ACE_SECURITY_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(security_router.platform, "system", lambda: "Windows")
+    monkeypatch.setattr("crew.security.launch.packaged_runtime_argv", lambda: (str(helper),))
+    monkeypatch.setattr("crew.security.launch.runtime_source_stale", lambda *_args: False)
+    monkeypatch.setattr(security_router, "_live_filesystem_runtime", failed_probe)
+    path = "/api/security/capabilities"
+    transport = ASGITransport(app=api, client=("127.0.0.1", 12345))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers=_headers("GET", path))
+
+    assert response.status_code == 200
+    capabilities = response.json()
+    assert capabilities["status"] == "unavailable"
+    assert capabilities["setup_required"] is False
+    assert capabilities["reason"] == "windows_sandbox_account_repair_required"
+    assert "自动准备不会更改账号" in capabilities["detail"]
+
+
+@pytest.mark.asyncio
 async def test_windows_acl_recovery_rejects_invalid_helper(tmp_path, monkeypatch):
     from crew.gateway.routers import security as security_router
 

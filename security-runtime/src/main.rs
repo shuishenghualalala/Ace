@@ -87,7 +87,11 @@ fn main() {
                 println!("Windows sandbox setup is ready");
                 return;
             }
-            Err(error) => {
+            Err(windows::identity::SetupCheckError::AccountRepairRequired(error)) => {
+                eprintln!("Windows sandbox account requires explicit repair: {error}");
+                std::process::exit(5);
+            }
+            Err(windows::identity::SetupCheckError::NotReady(error)) => {
                 eprintln!("Windows sandbox setup is not ready: {error}");
                 std::process::exit(1);
             }

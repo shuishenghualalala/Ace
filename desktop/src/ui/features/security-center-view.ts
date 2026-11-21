@@ -130,6 +130,11 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
     label = '正在恢复 Windows 沙箱';
     description = 'Ace 正在撤回上次执行留下的临时权限。若涉及较大的目录，Windows 可能需要几分钟。';
     tone = 'neutral';
+  } else if (capabilities?.reason === 'windows_sandbox_account_repair_required') {
+    label = 'Windows 沙箱账号需要管理员检查';
+    description = capabilities.detail
+      ?? '请由管理员检查本机 Ace 沙箱账号并恢复后重新检测。自动准备不会更改账号。';
+    tone = 'warning';
   } else if (setupRequired) {
     label = 'Windows 防护需要设置';
     description = 'Windows 会请求一次管理员确认。完成后，Ace 自动使用本机防护。';

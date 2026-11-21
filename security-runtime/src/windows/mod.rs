@@ -72,6 +72,8 @@ fn run_with_control(
         identity::load(&state_dir)
     }
     .map_err(|message| error("sandbox_unavailable", message))?;
+    identity::ensure_account_usable(&credentials.username)
+        .map_err(|message| error("sandbox_unavailable", message.to_string()))?;
     // H-20 (SEC-P2-003): the cross-process ACL mutex acquired by ``AclLease``
     // is the serialization boundary for managed runs. We start the proxy
     // *after* acquiring it and drop the proxy *before* releasing it (see the

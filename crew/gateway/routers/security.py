@@ -381,11 +381,17 @@ async def probe_security_capabilities(*, workspace_network_access: bool) -> dict
     elif helper_present:
         detail = "原生安全运行组件已找到，文件沙箱自检未通过"
     ready = filesystem and (direct_network if workspace_network_access else network)
+    account_repair_required = (
+        system == "windows"
+        and any(_windows_sandbox_account_repair_required(error) for error in errors)
+    )
     setup_required = (
-        not ready and helper_present and not stale and system == "windows"
+        not ready and helper_present and not stale and system == "windows" and not account_repair_required
         and any(_windows_sandbox_setup_required(error) for error in errors)
     )
-    if setup_required:
+    if account_repair_required:
+        detail = "Windows 沙箱账号缺失、禁用或密码过期。请由管理员检查账号后重新检测；自动准备不会更改账号。"
+    elif setup_required:
         detail = "Windows 沙箱需要完成一次防护设置"
     return {
         "platform": system,
@@ -400,7 +406,18 @@ async def probe_security_capabilities(*, workspace_network_access: bool) -> dict
         "local_binding_control": local_binding,
         "runtime_stale": stale,
         "detail": detail,
+        **({"reason": "windows_sandbox_account_repair_required"} if account_repair_required else {}),
     }
+
+
+def _windows_sandbox_account_repair_required(error: NativeRuntimeError) -> bool:
+    """Detect account states that need operator action, not automatic elevation."""
+    detail = str(error)
+    return detail.startswith((
+        "Windows sandbox account is missing",
+        "Windows sandbox account is disabled",
+        "Windows sandbox account password is expired",
+    ))
 
 
 def _windows_sandbox_setup_required(error: NativeRuntimeError) -> bool:

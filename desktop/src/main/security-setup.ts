@@ -7,7 +7,7 @@ export type SecuritySetupResult = {
   ok: boolean;
   exitCode: number | null;
   detail?: string;
-  code?: 'uac_cancelled' | 'uac_disabled' | 'uac_restart_required' | 'windows_setup_owner_mismatch' | 'windows_setup_retry_deferred';
+  code?: 'uac_cancelled' | 'uac_disabled' | 'uac_restart_required' | 'windows_setup_owner_mismatch' | 'windows_setup_retry_deferred' | 'windows_sandbox_account_repair_required';
 };
 export type UacEnableResult = SecuritySetupResult & { restartRequired?: boolean };
 
@@ -16,6 +16,7 @@ const POWERSHELL_UAC_REGISTRY_PATH = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\Curre
 const ERROR_CANCELLED = 1223;
 // Exit status from the bundled native helper's --windows-setup command.
 const SETUP_OWNER_MISMATCH = 4;
+const SETUP_ACCOUNT_REPAIR_REQUIRED = 5;
 const DEFERRED_CONSENT_FILE = 'windows-setup-consent-deferred';
 const OWNER_MISMATCH_FILE = 'windows-setup-owner-mismatch';
 const SETUP_FAILURE_FILE = 'windows-setup-failure-deferred';
@@ -301,6 +302,16 @@ export async function provisionInstalledWindowsSandbox(
   if (before.ok) {
     clearDeferrals();
     return before;
+  }
+  if (before.exitCode === SETUP_ACCOUNT_REPAIR_REQUIRED) {
+    return {
+      ...before,
+      code: 'windows_sandbox_account_repair_required',
+      detail: [
+        before.detail,
+        '自动准备没有更改 Windows 账号。请由管理员检查并恢复 Ace 沙箱账号，然后重新验证。',
+      ].filter(Boolean).join('\n'),
+    };
   }
   if (before.exitCode !== 1) return before;
   if (automatic && fs.existsSync(ownerMismatch)) return ownerMismatchSetup();

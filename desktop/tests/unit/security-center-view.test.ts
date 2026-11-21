@@ -163,6 +163,24 @@ describe('Security Center view', () => {
     expect(view.element.querySelector('[data-security-action="refresh"]')?.textContent).toBe('重新检测');
   });
 
+  it('explains sandbox account repair without offering automatic setup', () => {
+    const view = createSecurityCenterView(makeHandlers());
+    view.update({
+      loading: false, error: '', workspaceId: 'workspace-a', rules: [], audits: [],
+      capabilities: {
+        ...setupRequiredCapabilities,
+        status: 'unavailable',
+        setup_required: false,
+        reason: 'windows_sandbox_account_repair_required',
+        detail: 'Windows 沙箱账号缺失、禁用或密码过期。请由管理员检查账号后重新检测。',
+      },
+    });
+    expect(view.element.textContent).toContain('Windows 沙箱账号需要管理员检查');
+    expect(view.element.textContent).toContain('请由管理员检查账号后重新检测');
+    expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
+    expect(view.element.querySelector('[data-security-action="refresh"]')?.textContent).toBe('重新检测');
+  });
+
   it.each([['darwin', 'macOS'], ['linux', 'Linux']])('reports automatic %s protection without an install action', (platform, label) => {
     const view = createSecurityCenterView(makeHandlers());
     view.update({

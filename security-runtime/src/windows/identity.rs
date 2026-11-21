@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_ACCESS_DENIED, HLOCAL};
 use windows_sys::Win32::NetworkManagement::NetManagement::{
-    NERR_Success, NetUserAdd, NetUserDel, UF_DONT_EXPIRE_PASSWD, UF_PASSWD_CANT_CHANGE, UF_SCRIPT,
-    USER_INFO_1, USER_PRIV_USER,
+    NERR_Success, NERR_UserNotFound, NetApiBufferFree, NetUserAdd, NetUserDel, NetUserGetInfo,
+    UF_ACCOUNTDISABLE, UF_DONT_EXPIRE_PASSWD, UF_PASSWD_CANT_CHANGE, UF_PASSWORD_EXPIRED,
+    UF_SCRIPT, USER_INFO_1, USER_PRIV_USER,
 };
 use windows_sys::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_LOCAL_MACHINE, CRYPTPROTECT_UI_FORBIDDEN,
@@ -48,6 +49,38 @@ pub enum SetupError {
     Provision(String),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetupCheckError {
+    NotReady(String),
+    AccountRepairRequired(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AccountHealthError {
+    Missing,
+    Disabled,
+    PasswordExpired,
+    DisabledAndPasswordExpired,
+    Query(String),
+}
+
+impl std::fmt::Display for AccountHealthError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => formatter.write_str("Windows sandbox account is missing"),
+            Self::Disabled => formatter.write_str("Windows sandbox account is disabled"),
+            Self::PasswordExpired => {
+                formatter.write_str("Windows sandbox account password is expired")
+            }
+            Self::DisabledAndPasswordExpired => formatter
+                .write_str("Windows sandbox account is disabled and its password is expired"),
+            Self::Query(error) => {
+                write!(formatter, "cannot inspect Windows sandbox account: {error}")
+            }
+        }
+    }
+}
+
 /// Installer-only elevated setup. Runtime never invokes this automatically.
 pub fn setup(state_dir: &Path, expected_owner_sid: Option<&str>) -> Result<(), SetupError> {
     if let Some(expected_sid) = expected_owner_sid {
@@ -72,6 +105,8 @@ fn provision(state_dir: &Path) -> Result<(), String> {
     if let Some(bytes) = super::state::read_optional_file(&path)? {
         let offline = load(state_dir)?;
         let online = load_online(state_dir)?;
+        ensure_account_usable(&offline.username).map_err(|error| error.to_string())?;
+        ensure_account_usable(&online.username).map_err(|error| error.to_string())?;
         super::token::sid_string_for_account(&offline.username)?;
         super::token::sid_string_for_account(&online.username)?;
         super::wfp::install(&offline.username, &online.username)?;
@@ -127,15 +162,74 @@ fn provision(state_dir: &Path) -> Result<(), String> {
 }
 
 /// Installer preflight for an existing installation under the normal user.
-pub fn check_setup(state_dir: &Path) -> Result<(), String> {
+pub fn check_setup(state_dir: &Path) -> Result<(), SetupCheckError> {
     if !state_dir.is_absolute() {
-        return Err("security state directory must be absolute".to_string());
+        return Err(SetupCheckError::NotReady(
+            "security state directory must be absolute".to_string(),
+        ));
     }
-    let offline = load(state_dir)?;
-    let online = load_online(state_dir)?;
-    load_direct(state_dir)?;
-    super::wfp::verify_installed(&offline.username, false)?;
-    super::wfp::verify_installed(&online.username, true)
+    let offline = load(state_dir).map_err(SetupCheckError::NotReady)?;
+    let online = load_online(state_dir).map_err(SetupCheckError::NotReady)?;
+    for credentials in [&offline, &online] {
+        match ensure_account_usable(&credentials.username) {
+            Ok(()) => {}
+            Err(AccountHealthError::Query(error)) => {
+                return Err(SetupCheckError::NotReady(error));
+            }
+            Err(error) => {
+                return Err(SetupCheckError::AccountRepairRequired(error.to_string()));
+            }
+        }
+    }
+    let direct = load_direct(state_dir).map_err(SetupCheckError::NotReady)?;
+    match ensure_account_usable(&direct.username) {
+        Ok(()) => {}
+        Err(AccountHealthError::Query(error)) => {
+            return Err(SetupCheckError::NotReady(error));
+        }
+        Err(error) => {
+            return Err(SetupCheckError::AccountRepairRequired(error.to_string()));
+        }
+    }
+    super::token::sid_string_for_account(&offline.username).map_err(SetupCheckError::NotReady)?;
+    super::token::sid_string_for_account(&online.username).map_err(SetupCheckError::NotReady)?;
+    super::token::sid_string_for_account(&direct.username).map_err(SetupCheckError::NotReady)?;
+    super::wfp::verify_installed(&offline.username, false).map_err(SetupCheckError::NotReady)?;
+    super::wfp::verify_installed(&online.username, true).map_err(SetupCheckError::NotReady)
+}
+
+pub fn ensure_account_usable(username: &str) -> Result<(), AccountHealthError> {
+    let flags = local_user_flags(username).map_err(AccountHealthError::Query)?;
+    account_health_from_flags(flags)
+}
+
+fn account_health_from_flags(flags: Option<u32>) -> Result<(), AccountHealthError> {
+    let Some(flags) = flags else {
+        return Err(AccountHealthError::Missing);
+    };
+    let disabled = flags & UF_ACCOUNTDISABLE != 0;
+    let expired = flags & UF_PASSWORD_EXPIRED != 0;
+    match (disabled, expired) {
+        (true, true) => Err(AccountHealthError::DisabledAndPasswordExpired),
+        (true, false) => Err(AccountHealthError::Disabled),
+        (false, true) => Err(AccountHealthError::PasswordExpired),
+        (false, false) => Ok(()),
+    }
+}
+
+fn local_user_flags(username: &str) -> Result<Option<u32>, String> {
+    let mut username = wide(username);
+    let mut buffer = std::ptr::null_mut();
+    let status = unsafe { NetUserGetInfo(std::ptr::null(), username.as_mut_ptr(), 1, &mut buffer) };
+    if status == NERR_UserNotFound {
+        return Ok(None);
+    }
+    if status != NERR_Success {
+        return Err(format!("NetUserGetInfo returned status {status}"));
+    }
+    let flags = unsafe { (*buffer.cast::<USER_INFO_1>()).usri1_flags };
+    unsafe { NetApiBufferFree(buffer.cast()) };
+    Ok(Some(flags))
 }
 
 fn setup_owner_matches(expected_sid: &str) -> Result<bool, String> {
@@ -148,6 +242,7 @@ fn setup_owner_matches(expected_sid: &str) -> Result<bool, String> {
 fn provision_direct_identity(path: &Path, mut stored: StoredIdentity) -> Result<(), String> {
     if let Some(account) = stored.direct.as_ref() {
         if direct_password(account).is_ok() {
+            ensure_account_usable(&account.username).map_err(|error| error.to_string())?;
             return Ok(());
         }
         if !valid_direct_account(&account.username) {
@@ -487,6 +582,67 @@ mod tests {
         let state = parent.path().join("not-installed");
         assert!(check_setup(&state).is_err());
         assert!(!state.exists());
+    }
+
+    #[test]
+    fn account_health_rejects_missing_disabled_and_expired_accounts() {
+        assert_eq!(
+            account_health_from_flags(None),
+            Err(AccountHealthError::Missing)
+        );
+        assert_eq!(
+            account_health_from_flags(Some(UF_ACCOUNTDISABLE)),
+            Err(AccountHealthError::Disabled)
+        );
+        assert_eq!(
+            account_health_from_flags(Some(UF_PASSWORD_EXPIRED)),
+            Err(AccountHealthError::PasswordExpired)
+        );
+        assert_eq!(
+            account_health_from_flags(Some(UF_ACCOUNTDISABLE | UF_PASSWORD_EXPIRED)),
+            Err(AccountHealthError::DisabledAndPasswordExpired)
+        );
+        assert_eq!(account_health_from_flags(Some(0)), Ok(()));
+        assert_eq!(
+            account_health_from_flags(Some(UF_DONT_EXPIRE_PASSWD)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn local_user_flag_query_reports_a_missing_local_account() {
+        let suffix: String = thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(12)
+            .map(char::from)
+            .collect();
+        let username = format!("AceProbe{suffix}");
+        assert_eq!(local_user_flags(&username).unwrap(), None);
+    }
+
+    #[test]
+    fn setup_check_classifies_a_missing_sandbox_account_before_sid_lookup() {
+        let parent = tempfile::tempdir().unwrap();
+        let suffix: String = thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        let stored = StoredIdentity {
+            version: IDENTITY_VERSION,
+            username: format!("AceSbOff_{suffix}"),
+            protected_password: protect(b"offline-test-password").unwrap(),
+            online_username: format!("AceSbNet_{suffix}"),
+            online_protected_password: protect(b"online-test-password").unwrap(),
+            direct: None,
+        };
+        write_identity(&identity_path(parent.path()), &stored).unwrap();
+
+        assert!(matches!(
+            check_setup(parent.path()),
+            Err(SetupCheckError::AccountRepairRequired(message))
+                if message == "Windows sandbox account is missing"
+        ));
     }
 
     #[test]

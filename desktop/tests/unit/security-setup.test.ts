@@ -69,6 +69,31 @@ describe('Windows security setup elevation', () => {
     );
   });
 
+  it('does not elevate when the native check reports an invalid sandbox account', async () => {
+    const spawnProcess = vi.fn(() => {
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('close', 5));
+      return child;
+    });
+    const result = await provisionInstalledWindowsSandbox(
+      'C:\\Program Files\\Crew\\ace-security-runtime.exe',
+      'C:\\Users\\A\\AppData\\Roaming\\Crew\\security',
+      spawnProcess as unknown as typeof spawn,
+      { automatic: true },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      exitCode: 5,
+      code: 'windows_sandbox_account_repair_required',
+      detail: expect.stringContaining('自动准备没有更改 Windows 账号'),
+    });
+    expect(spawnProcess).toHaveBeenCalledExactlyOnceWith(
+      'C:\\Program Files\\Crew\\ace-security-runtime.exe',
+      ['--windows-check-setup', 'C:\\Users\\A\\AppData\\Roaming\\Crew\\security'],
+      expect.objectContaining({ windowsHide: true }),
+    );
+  });
+
   it.runIf(process.platform === 'win32').each([
     [1223, 'uac_cancelled'],
     [4, 'windows_setup_owner_mismatch'],

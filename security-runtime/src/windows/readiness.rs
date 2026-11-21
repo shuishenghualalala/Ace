@@ -29,6 +29,9 @@ pub fn probe(state_dir: &Path) -> Readiness {
         Ok(c) => c,
         Err(error) => return not_ready(error),
     };
+    if let Err(error) = identity::ensure_account_usable(&credentials.username) {
+        return not_ready(error.to_string());
+    }
     if let Err(error) = super::token::sid_string_for_account(&credentials.username) {
         return not_ready(error);
     }
@@ -36,7 +39,20 @@ pub fn probe(state_dir: &Path) -> Readiness {
         Ok(c) => c,
         Err(error) => return not_ready(error),
     };
+    if let Err(error) = identity::ensure_account_usable(&online.username) {
+        return not_ready(error.to_string());
+    }
     if let Err(error) = super::token::sid_string_for_account(&online.username) {
+        return not_ready(error);
+    }
+    let direct = match identity::load_direct(state_dir) {
+        Ok(c) => c,
+        Err(error) => return not_ready(error),
+    };
+    if let Err(error) = identity::ensure_account_usable(&direct.username) {
+        return not_ready(error.to_string());
+    }
+    if let Err(error) = super::token::sid_string_for_account(&direct.username) {
         return not_ready(error);
     }
     match super::job::KillOnCloseJob::new() {
