@@ -290,6 +290,40 @@ async def test_gateway_cancel_while_awaiting_approval_leaves_config_unchanged(ga
     assert gateway.io == []
 
 
+async def test_gateway_admin_updates_installed_server_after_one_approval(gateway):
+    session_id = "mcp-update-fixture"
+    updated_args = {**ARGS, "headers": {"X-Ace-Fixture": "updated"}}
+    async with open_ws(gateway.app) as (send, receive):
+        await begin_install(gateway, send, "update-seed", session_id=session_id)
+        card, frames = await read_until(
+            receive, lambda row: is_permission_card(row) or row.get("is_final"),
+        )
+        assert is_permission_card(card), frames
+        await reply_permission(send, session_id, "update-seed", card)
+        final, frames = await read_until(receive, lambda row: row.get("is_final") is True)
+        assert final["kind"] == "final", frames
+
+        query = "fixture requests chat MCP update"
+        gateway.provider.script[query] = ToolCall("update-1", "mcp_update", updated_args)
+        await send({
+            "session_id": session_id, "request_id": "update", "query": query, "mode": "agent",
+            "workspace_id": "default", "plan_active": False,
+        })
+        card, frames = await read_until(
+            receive, lambda row: is_permission_card(row) or row.get("is_final"),
+        )
+        assert is_permission_card(card), frames
+        assert "headers" not in config_servers(gateway)[ARGS["name"]]
+        await reply_permission(send, session_id, "update", card)
+        final, frames = await read_until(receive, lambda row: row.get("is_final") is True)
+        assert final["kind"] == "final", frames
+        payload = payload_for(gateway, "update-1")
+        assert payload["changed"] is True
+        assert payload["reloaded"] is True
+        assert config_servers(gateway)[ARGS["name"]]["headers"] == {"X-Ace-Fixture": "updated"}
+        assert f"{ARGS['name']}__echo" in gateway.crew.registry.names()
+
+
 async def test_gateway_plan_never_exposes_install_or_writes_on_guessed_call(gateway):
     assert TOOL in gateway.crew.registry.names()
     original = gateway.config_file.read_bytes()
