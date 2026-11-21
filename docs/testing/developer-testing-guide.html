@@ -77,6 +77,12 @@
         <td>独立 <code>security-*.yml</code>，不在主 <code>ci.yml</code> 中跑</td>
       </tr>
       <tr>
+        <td>无密钥回放（组装态）</td>
+        <td>真实 App/Provider/工具/持久化，回放录制的模型响应</td>
+        <td><code>pytest tests/test_replay_e2e.py -q</code></td>
+        <td>普通 pytest，无需 Key</td>
+      </tr>
+      <tr>
         <td>后端真实模型 E2E</td>
         <td>从产品入口走完整对话、工具、文件、Wiki、外援运行时</td>
         <td><code>.venv\Scripts\python.exe scripts/run_e2e_batch.py --case write_file</code><br /><code>--category wiki</code>、<code>--fail-on-skip</code></td>
@@ -157,6 +163,9 @@ cd web &amp;&amp; npm run typecheck</code></pre>
     <li>缺少外部 CLI（Codex/Claude/Kimi 等）时用例应标记 <code>skipped</code>；<code>--fail-on-skip</code> 只用于明确要求“跳过也算失败”的验收。</li>
   </ul>
 
+  <h3>4.1 无密钥回放（组装态）</h3>
+  <p><code>tests/e2e/replay_server.py</code> 用录制的 JSONL 响应替代模型 HTTP 边界；应用仍走真实 <code>build_app</code>、Provider、工具、SQLite 和会话入口，不需要 API Key。当前最小样例是 <code>tests/test_replay_e2e.py</code> + <code>tests/e2e/fixtures/replay/partial_failure.jsonl</code>：一次响应产生两个并行 <code>file_read</code>，第二次响应返回一个成功、一个失败的部分结果。响应耗尽时服务器返回失败，不会静默重复最后一条。新增场景时先录制真实响应的 <code>text</code>/<code>tool_calls</code>，再按稳定顺序写入 fixture；提交前审查是否含本地路径、用户数据或密钥。</p>
+
   <h2>5. 稳定性与防 flake</h2>
   <ul>
     <li><strong>不要用固定 sleep 等待。</strong>用 <code>asyncio.Event</code>、<code>wait_for</code>、持久化完成信号、DOM/WS 事件或真实进程退出信号；只有时间本身是被测对象时才用假时钟。</li>
@@ -199,7 +208,7 @@ cd web &amp;&amp; npm run typecheck</code></pre>
   <h2>7. 当前缺口与后续方向</h2>
   <p>下面这些是尚未落地的能力，不应在 PR 中声称已有；需要时先单独设计，不要用临时脚本冒充：</p>
   <ul>
-    <li><strong>无密钥录制/回放层。</strong>用真实模型录制一次会话，随后在 CI 中回放模型边界，仍然走完整产品入口。这样可以把模型可见行为纳入无密钥门禁。</li>
+    <li><strong>回放场景覆盖。</strong>已有一个无密钥组装态样例；更多模型可见流程、录制工具、fixture 审查流程和 CI 矩阵仍需补齐，不能因为有一个样例就宣称所有模型行为都已覆盖。</li>
     <li><strong>覆盖率门禁。</strong>当前只有 <code>test:coverage</code> 命令，没有按文件强制阈值；覆盖率只应作为“死代码/漏测”的删除检测器，不能替代行为断言。</li>
     <li><strong>受影响测试选择。</strong>前端可用 Vitest 的 related/changed 机制；后端需要稳定的测试映射或依赖分析后再接入 pre-push，避免“猜一个子集”造成假绿。</li>
     <li><strong>桌面视觉与打包 E2E 的 CI 化。</strong>目前视觉测试和部分真实安装包场景仍以本地/专项为主，nightly 只构建产物。</li>

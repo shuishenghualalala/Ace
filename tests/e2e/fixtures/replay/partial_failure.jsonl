@@ -1,0 +1,2 @@
+{"text": "", "tool_calls": [{"id": "call_replay_missing", "name": "file_read", "arguments": {"path": "missing.txt"}}, {"id": "call_replay_marker", "name": "file_read", "arguments": {"path": "marker.txt"}}], "finish_reason": "tool_calls", "reasoning": ""}
+{"text": "marker.txt 内容：PRESENT-REPLAY\n\nmissing.txt 状态：读取失败（文件不存在）。", "tool_calls": [], "finish_reason": "stop", "reasoning": ""}
