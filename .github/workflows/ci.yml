@@ -40,13 +40,15 @@ jobs:
       # wiki/docx/xlsx extras 与 README「验证安装」一致；office 技能测试需要
       # defusedxml/openpyxl，缺失时会在收集阶段报 ModuleNotFoundError。
       - run: uv sync --extra dev --extra wiki --extra docx --extra xlsx
+      # 单用例硬上限：任务异常结束导致测试永久等待时，CI 超时并打印堆栈。
+      - run: uv pip install pytest-timeout
       # 静态检查与 OS 无关，只在 Linux 一份上跑，避免矩阵三倍重复
       - run: uv run ruff check .
         if: runner.os == 'Linux'
       - run: uv run lint-imports
         if: runner.os == 'Linux'
       # tests/security 需要构建 Rust 原生运行时，由 security-*.yml 专门覆盖
-      - run: uv run pytest -q --ignore=tests/security
+      - run: uv run pytest -q --ignore=tests/security --timeout=300
 
   web:
     name: web build + test
