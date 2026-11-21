@@ -1032,6 +1032,44 @@ class CronJobStore:
 
         return self._writer.execute(_claim)
 
+    @staticmethod
+    def _terminal_run_write(
+        conn: sqlite3.Connection,
+        run_id: int,
+        status: str,
+        error_message: str,
+    ) -> int:
+        cursor = conn.execute(
+            """
+            UPDATE cron_job_runs
+            SET finished_at = ?, status = ?, error_message = ?
+            WHERE id = ? AND status = 'running'
+            """,
+            (time.time(), status, error_message or "", run_id),
+        )
+        return int(cursor.rowcount)
+
+    @staticmethod
+    def _terminal_summary_write(
+        conn: sqlite3.Connection,
+        job_id: str,
+        run_id: int,
+        status: str,
+    ) -> None:
+        conn.execute(
+            """
+            UPDATE cron_jobs SET last_status = ?
+            WHERE id = ?
+              AND ? = (
+                  SELECT id FROM cron_job_runs
+                  WHERE job_id = ?
+                  ORDER BY claimed_at DESC, id DESC
+                  LIMIT 1
+              )
+            """,
+            (status, job_id, run_id, job_id),
+        )
+
     def finish_job_run(
         self,
         run_id: int,
@@ -1048,18 +1086,38 @@ class CronJobStore:
         }:
             raise ValueError(f"非法 Cron Fire 终态: {status}")
 
-        def _write(conn):
-            cursor = conn.execute(
-                """
-                UPDATE cron_job_runs
-                SET finished_at = ?, status = ?, error_message = ?
-                WHERE id = ? AND status = 'running'
-                """,
-                (time.time(), status, error_message or "", run_id),
-            )
-            return cursor.rowcount
+        return self._writer.execute(
+            lambda conn: self._terminal_run_write(conn, run_id, status, error_message)
+        ) == 1
 
-        return self._writer.execute(_write) == 1
+    async def finish_fire_async(
+        self,
+        job_id: str,
+        run_id: int,
+        status: str,
+        error_message: str = "",
+    ) -> bool:
+        """Commit the Fire terminal state and Job summary in one worker transaction.
+
+        Returns whether this caller won the Fire's running -> terminal update.
+        The two rows are written together so a successful return always means
+        both the run record and the Job summary describe the same terminal Fire.
+        """
+        if status not in {
+            "completed",
+            "failed",
+            "cancelled_by_logout",
+            "abandoned",
+        }:
+            raise ValueError(f"非法 Cron Fire 终态: {status}")
+
+        def _write(conn: sqlite3.Connection) -> bool:
+            if self._terminal_run_write(conn, run_id, status, error_message) != 1:
+                return False
+            self._terminal_summary_write(conn, job_id, run_id, status)
+            return True
+
+        return await self._writer.execute_async(_write)
 
     def recover_running_fires_as_abandoned(self) -> int:
         """将上次进程遗留的 running Fire 收敛为 abandoned，且绝不重放。"""
@@ -1108,22 +1166,9 @@ class CronJobStore:
     def mark_fire_finished(self, job_id: str, run_id: int, status: str) -> None:
         """Update Job summary only when this Fire remains the latest claim."""
 
-        def _write(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                """
-                UPDATE cron_jobs SET last_status = ?
-                WHERE id = ?
-                  AND ? = (
-                      SELECT id FROM cron_job_runs
-                      WHERE job_id = ?
-                      ORDER BY claimed_at DESC, id DESC
-                      LIMIT 1
-                  )
-                """,
-                (status, job_id, run_id, job_id),
-            )
-
-        self._writer.execute(_write)
+        self._writer.execute(
+            lambda conn: self._terminal_summary_write(conn, job_id, run_id, status)
+        )
 
     def session_has_running_job_run(self, session_id: str, owner_account_id: str) -> bool:
         """该会话下是否仍有 status=running 的 cron_job_runs。"""

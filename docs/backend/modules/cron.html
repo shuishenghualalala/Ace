@@ -96,6 +96,7 @@ await app.update_managed_feature(next_bundle.definition)</code></pre>
   <p>启动时，Cron 先通过 SQLite 异步写入收口进程退出前遗留的 <code>running</code> Fire，统一标记为 <code>abandoned</code>。数据库等待由写入线程承担，Gateway 事件循环仍可接收本地会话。从恢复完成到调度器启动，当前 Feature 按顺序执行，随后重新读取 Active Owner 并挂载待执行任务。恢复期间已登录或已连接的 Owner 一并挂载。同一宿主复用持久 Store 的在线重启沿用首次恢复结果，避免把后续正在执行的 Fire 当成遗留记录。恢复失败时调度器尚未启动，由 FeatureRuntime 公布启动失败并回收本代资源。</p>
   <p>Owner 挂载与登录准入解耦。WebSocket 或本地登录只调用 <code>request_owner_mount</code> 登记票据，准备事务在 SQLite 写线程推进；主端口签名请求、聊天准入和注销都不等待 <code>cron.db</code> 写锁。同一 Owner 的重复请求复用同一个挂载任务。准备期间发生的创建、暂停、恢复和删除记入票据，安装前重读这些 Job 后一次合并，避免装入准备开始前的旧快照。注销立即让票据失效；尚未提交的准备事务回滚，已经准备好的快照不再安装。单个 Owner 挂载失败只记录日志，<code>product.cron</code> 保持运行，该 Owner 下次激活时重试。工具、HTTP 路由、会话删除和 Fire 收尾在访问共享 Store 前等待同一准备屏障，避免读到挂载事务提交前的任务集合。</p>
   <p>手动执行与 Fire 重试接口只在 Owner 已挂载时受理。挂载准备中返回 409 <code>cron_owner_mount_pending</code>，未激活返回 409 <code>cron_owner_not_mounted</code>，两者都不创建 Fire。前端据此区分“正在准备”和“需要重新连接会话”两种状态。</p>
+  <p>Fire 终态与 Job 摘要由同一个异步写事务提交：只有从 <code>running</code> 赢得终态更新的调用者会同时更新 <code>last_status</code>，重复或迟到的终态不会覆盖。写事务在 SQLite 工作线程执行，不阻塞事件循环；终态回调只在该调用者赢得更新时触发。</p>
   <p>只有 <code>channel=cron</code> 的 Envelope 产生 fragment；任务名来自 <code>cron_job_name</code>。<code>product.cron</code> 在宿主事件循环中激活，六个工具和每次 Fire 都持有本 Generation Lease。更新采用 <code>restart</code>：先取消并清理旧代，再启动新 Scheduler，最后重新挂载当前 Active Owner；失败由 FeatureRuntime 恢复旧定义。</p>
 
   <h2>5. 当前存在的问题 / TODO</h2>
@@ -115,6 +116,7 @@ await app.update_managed_feature(next_bundle.definition)</code></pre>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-20</td><td>Fire 终态与 Job 摘要在同一异步 SQLite 事务提交；重复/迟到终态不覆盖，终态回调只在赢得更新时触发。</td><td>Fire 收尾、作业摘要、事件循环响应。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-09-03</td><td>定时任务触发文案迁入 Prompt Context Contributor，并绑定 Cron 开关与 FeatureScope。</td><td>Agent Runtime、Cron 启停边界和请求上下文。</td></tr>
       <tr><td>2026-09-04</td><td>完成 <code>product.cron</code> Runtime Feature：Scheduler、Tools、Context、Owner mount 和 Host Binding 统一归属 Generation，支持 restart 更新与失败回滚。</td><td>Cron 生命周期、CrewApp 启停清单、Gateway Logout 动态服务解析。</td></tr>

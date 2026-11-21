@@ -360,9 +360,10 @@ class CronService:
 
     async def _finish_fire(self, row: dict, run_id: int, status: str, error_message: str) -> None:
         await self._store.wait_for_preparation()
-        if self._store.finish_job_run(run_id, status, error_message=error_message):
-            self._store.mark_fire_finished(str(row["id"]), run_id, status)
-        self._emit_run_finished(row, status, error_message)
+        if await self._store.finish_fire_async(
+            str(row["id"]), run_id, status, error_message=error_message,
+        ):
+            self._emit_run_finished(row, status, error_message)
 
     def _emit_run_finished(self, row: dict, status: str, error_message: str) -> None:
         """向装配层回调 Fire 终态。任何回调异常只记日志，不影响 cron 引擎本身。"""

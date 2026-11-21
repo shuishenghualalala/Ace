@@ -506,6 +506,33 @@ def test_manual_fire_does_not_change_periodic_schedule(tmp_path):
     assert store.get_job_runs(job["id"])[0]["status"] == "completed"
 
 
+async def test_finish_fire_async_commits_run_and_job_summary_together(tmp_path):
+    store = CronJobStore(str(tmp_path / "c.db"))
+    job = store.create(
+        name="async-finish",
+        schedule="every 1h",
+        query="run",
+        session_id="s1",
+        owner_account_id=OWNER,
+    )
+    fire = store.claim_scheduled_fire(
+        job["id"], owner_account_id=OWNER, now=job["next_run_at"] + 1,
+    )
+    assert fire is not None
+
+    assert await store.finish_fire_async(
+        job["id"], fire["id"], "completed",
+    ) is True
+    assert store.get_job_runs(job["id"])[0]["status"] == "completed"
+    assert store.get(job["id"], owner_account_id=OWNER)["last_status"] == "completed"
+
+    assert await store.finish_fire_async(
+        job["id"], fire["id"], "failed", "late",
+    ) is False
+    assert store.get_job_runs(job["id"])[0]["status"] == "completed"
+    assert store.get(job["id"], owner_account_id=OWNER)["last_status"] == "completed"
+
+
 def test_recover_running_fire_marks_abandoned_without_replay(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
     job = store.create(
