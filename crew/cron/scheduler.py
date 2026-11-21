@@ -102,6 +102,7 @@ class CronService:
         self._mount_retry_delays = tuple(float(value) for value in mount_retry_delays)
         self._mount_retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._mount_retry_attempts: dict[str, int] = {}
+        self._mount_retry_suppressed: set[str] = set()
         self._scheduler: AsyncIOScheduler | None = None
         self._running = False
         self._start_error = ""
@@ -487,6 +488,7 @@ class CronService:
         owner = str(owner_account_id or "").strip()
         if not owner:
             raise ValueError("owner_account_id 必填")
+        self._mount_retry_suppressed.discard(owner)
         if not self._running or self._scheduler is None:
             raise RuntimeError("CronService 尚未启动")
         if owner in self._mounted_owners:
@@ -530,6 +532,8 @@ class CronService:
             self._mount_retry_tasks.pop(owner, None)
 
     def _schedule_mount_retry(self, owner: str) -> None:
+        if owner in self._mount_retry_suppressed:
+            return
         if not self._running or owner in self._mounted_owners or owner in self._pending_mounts:
             return
         if self._owner_active is not None and not self._owner_active(owner):
@@ -555,6 +559,8 @@ class CronService:
         except asyncio.CancelledError:
             return
         if not self._running or owner in self._mounted_owners or owner in self._pending_mounts:
+            return
+        if owner in self._mount_retry_suppressed:
             return
         if self._owner_active is not None and not self._owner_active(owner):
             return
@@ -611,6 +617,7 @@ class CronService:
         log.info("CronService 已挂载 Owner: owner=%s jobs=%d", owner, len(jobs))
         self._mount_errors.pop(owner, None)
         self._mount_retry_attempts.pop(owner, None)
+        self._mount_retry_suppressed.discard(owner)
         self._cancel_mount_retry(owner)
         return len(jobs)
 
@@ -630,6 +637,7 @@ class CronService:
             pending[0].revoked.set()
         self._mount_errors.pop(owner, None)
         self._mount_retry_attempts.pop(owner, None)
+        self._mount_retry_suppressed.add(owner)
         self._cancel_mount_retry(owner)
         if not owner or owner not in self._mounted_owners:
             return 0
@@ -660,6 +668,7 @@ class CronService:
             self._running = False
             self._mount_errors.clear()
             self._mount_retry_attempts.clear()
+            self._mount_retry_suppressed.clear()
             retry_tasks = list(self._mount_retry_tasks.values())
             for owner in list(self._mount_retry_tasks):
                 self._cancel_mount_retry(owner)

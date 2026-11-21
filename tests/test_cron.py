@@ -545,6 +545,7 @@ async def test_stale_owner_mount_failure_does_not_degrade_newer_mount():
     service._pending_mounts = {}
     service._mount_retry_tasks = {}
     service._mount_retry_attempts = {}
+    service._mount_retry_suppressed = set()
     service._mount_retry_delays = ()
     service._owner_active = None
 
@@ -571,6 +572,7 @@ async def test_mount_retry_is_bounded_and_checks_owner_activity():
     service._mount_errors = {}
     service._mount_retry_tasks = {}
     service._mount_retry_attempts = {}
+    service._mount_retry_suppressed = set()
     service._mount_retry_delays = (0.0,)
     service._owner_active = lambda owner: owner == "A"
     requests: list[str] = []
@@ -579,6 +581,12 @@ async def test_mount_retry_is_bounded_and_checks_owner_activity():
     service._schedule_mount_retry("A")
     await asyncio.sleep(0.05)
     assert requests == ["A"]
+
+    service._mount_retry_suppressed.add("A")
+    service._mount_retry_attempts.clear()
+    service._schedule_mount_retry("A")
+    await asyncio.sleep(0.05)
+    assert requests == ["A"], "an unmounted owner must not be retried automatically"
 
     service._schedule_mount_retry("B")
     await asyncio.sleep(0.05)
