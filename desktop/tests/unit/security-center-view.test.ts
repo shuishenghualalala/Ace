@@ -163,7 +163,7 @@ describe('Security Center view', () => {
     expect(view.element.querySelector('[data-security-action="refresh"]')?.textContent).toBe('重新检测');
   });
 
-  it('explains sandbox account repair without offering automatic setup', () => {
+  it('offers explicit administrator repair for unhealthy sandbox accounts', () => {
     const view = createSecurityCenterView(makeHandlers());
     view.update({
       loading: false, error: '', workspaceId: 'workspace-a', rules: [], audits: [],
@@ -175,10 +175,25 @@ describe('Security Center view', () => {
         detail: 'Windows 沙箱账号缺失、禁用或密码过期。请由管理员检查账号后重新检测。',
       },
     });
-    expect(view.element.textContent).toContain('Windows 沙箱账号需要管理员检查');
+    expect(view.element.textContent).toContain('Windows 沙箱账号需要管理员修复');
     expect(view.element.textContent).toContain('请由管理员检查账号后重新检测');
     expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
+    const repair = view.element.querySelector<HTMLButtonElement>('[data-security-action="repair"]');
+    expect(repair?.textContent).toBe('管理员修复 Windows 沙箱');
     expect(view.element.querySelector('[data-security-action="refresh"]')?.textContent).toBe('重新检测');
+    const onInstall = vi.fn();
+    const interactive = createSecurityCenterView(makeHandlers({ onInstall }));
+    interactive.update({
+      loading: false, error: '', workspaceId: 'workspace-a', rules: [], audits: [],
+      capabilities: {
+        ...setupRequiredCapabilities,
+        status: 'unavailable',
+        setup_required: false,
+        reason: 'windows_sandbox_account_repair_required',
+      },
+    });
+    interactive.element.querySelector<HTMLButtonElement>('[data-security-action="repair"]')?.click();
+    expect(onInstall).toHaveBeenCalledOnce();
   });
 
   it.each([['darwin', 'macOS'], ['linux', 'Linux']])('reports automatic %s protection without an install action', (platform, label) => {

@@ -204,7 +204,8 @@ describe('Windows security setup elevation', () => {
     expect(command.executable.toLowerCase()).toContain('powershell.exe');
     const encoded = command.argv.at(-1) ?? '';
     const script = Buffer.from(encoded, 'base64').toString('utf16le');
-    expect(script).toContain('--windows-setup');
+    expect(script).toContain('--windows-repair');
+    expect(script).not.toContain('--windows-setup');
     expect(script).toContain('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value');
     expect(script).toContain("'--expected-owner-sid', $ownerSid");
     expect(script).toContain("$start.Verb = 'runas'");

@@ -540,7 +540,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
         <tr><td>正在检测本机防护</td><td>正在检查运行组件及本机对当前文件和联网策略的实际支持。</td></tr>
         <tr><td>本机防护已就绪</td><td>文件沙箱及所配置的代理或直连能力已通过自检，可用于受管命令。</td></tr>
         <tr><td>Windows 防护需要设置</td><td>本机还需初始化专用账号或系统网络策略，可从状态卡启动系统确认。</td></tr>
-        <tr><td>Windows 沙箱账号需要检查</td><td>账号缺失、禁用或密码过期时，能力探针会关闭并阻止受管命令；自动启动不会改写系统账号。由管理员恢复后重新验证。</td></tr>
+        <tr><td>Windows 沙箱账号需要修复</td><td>账号缺失、禁用或密码过期时，能力探针与受管命令失败关闭；自动启动不会改写账号。「设置 → 安全」提供显式管理员修复。修复先写入受保护 journal，并阻断运行时准入；离线/代理账号在禁用状态下重建或轮换凭据，按当前 SID 安装并核验 WFP 后才启用。完成身份文件更新和最终核验后清除 journal，失败则保留状态供再次修复。</td></tr>
         <tr><td>正在恢复 Windows 沙箱 / Windows 沙箱正忙</td><td>正在清理旧的临时访问权限，或有进程占用沙箱。恢复完成后可继续检测。</td></tr>
         <tr><td>本机防护暂不可用 / 暂时无法确认本机防护状态</td><td>组件缺失、版本不匹配、自检失败或 Gateway 暂时无法返回状态。可在界面重新检测。</td></tr>
       </tbody>
@@ -669,6 +669,7 @@ helper 响应
     <h4>4.1.3 Windows 网络身份与 WFP 生命周期</h4>
     <p>Windows 安装准备为每个状态目录生成离线和联网技术账号。WFP provider、sublayer 与 filter key 由规范 SID、角色和对象类型共同派生，因此同一机器上的不同配置可以分别准备、修复和卸载规则。联网身份保留 loopback 代理端口 permit 与其余出站 block，离线身份保持全阻断；过滤器仍通过 <code>FWPM_CONDITION_ALE_USER_ID</code> 绑定实际进程账号。</p>
     <p>安装先在事务中提交身份专属规则并读取核验，再将旧固定 GUID 过滤器迁移到新规则。只删除旧 Ace provider/sublayer 下可确认属于当前 SID 的过滤器；规则形状变化但 SID 可读时仍按身份迁移。属于其他 SID 的旧规则保持原位，无法验证 SID 的旧 Ace 对象则让准备失败并要求管理员处理。运行时拒绝当前身份残留的旧过滤器或所有权无法验证的旧对象。卸载只读取受保护 identity 中的离线/联网账号，清理它们派生的 WFP 对象和可核实的旧规则；身份缺失时不做全局删除。旧版共享 provider/sublayer 若已无过滤器，可以作为不携带有效过滤器的策略元数据留存。</p>
+    <p>安全中心只在 Gateway 报告账号修复状态时显示管理员修复按钮；preload 将 <code>repair</code> 操作交给 main process 的 setup coordinator，并构造独立的 <code>--windows-repair</code> 提权调用。native helper 校验原始用户 SID，再读取受保护身份并创建 repair journal。journal 存在期间就绪检查和所有凭据加载均失败关闭。恢复流程只为当前离线/联网账号执行 <code>wfp::install</code> 并核验 SID 规则；账号被删时以禁用状态重建并记录新 SID，之后才启用。直连账号可在安全重建后恢复或更换；旧直连身份只有在 journal SID 与本机 SID 相同的情况下才删除。旧 SID 已无法从当前账号名验证时，不删除旧 WFP 对象；这些对象继续只匹配已删除的 SID，不给新身份增加网络权限。密码与新受保护身份文件写入成功、三类账号健康且 WFP 复核通过后才删除 journal；中断可通过安全中心重试。</p>
 
   <h3 id="gateway-api">4.2 Desktop 安全 API</h3>
   <p>这些接口位于 <code>/api/security</code>。模式和审批写入从已认证上下文中校验 owner、工作区及会话。<a href="#control-plane">桌面端身份校验</a></p>

@@ -104,6 +104,7 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
   const isWindows = isWindowsPlatform(platform);
   const isMacOS = isMacOSPlatform(platform);
   const setupRequired = windowsSetupRequired(capabilities);
+  const accountRepairRequired = capabilities?.reason === 'windows_sandbox_account_repair_required';
   const networkAccess = capabilities?.workspace_network_access === true;
   const recovering = capabilities?.status === 'recovering';
   const ready = capabilities?.status === 'ready' || (capabilities?.status === undefined
@@ -131,9 +132,9 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
     description = 'Ace 正在撤回上次执行留下的临时权限。若涉及较大的目录，Windows 可能需要几分钟。';
     tone = 'neutral';
   } else if (capabilities?.reason === 'windows_sandbox_account_repair_required') {
-    label = 'Windows 沙箱账号需要管理员检查';
+    label = 'Windows 沙箱账号需要管理员修复';
     description = capabilities.detail
-      ?? '请由管理员检查本机 Ace 沙箱账号并恢复后重新检测。自动准备不会更改账号。';
+      ?? '管理员确认后，Ace 会验证并恢复本机沙箱账号及其网络规则。已删除账号会使用新账号重新建立。';
     tone = 'warning';
   } else if (setupRequired) {
     label = 'Windows 防护需要设置';
@@ -176,6 +177,12 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
     install.disabled = Boolean(snapshot.settingUp);
     install.setAttribute('aria-busy', String(Boolean(snapshot.settingUp)));
     actions.append(install);
+  }
+  if (accountRepairRequired && !snapshot.loading) {
+    const repair = button(snapshot.settingUp ? '正在修复…' : '管理员修复 Windows 沙箱', 'repair', 'primary');
+    repair.disabled = Boolean(snapshot.settingUp);
+    repair.setAttribute('aria-busy', String(Boolean(snapshot.settingUp)));
+    actions.append(repair);
   }
   if (!snapshot.loading && !snapshot.settingUp && !recovering) {
     if (!ready && !setupRequired) actions.append(button('重新检测', 'refresh'));
@@ -476,7 +483,7 @@ export function createSecurityCenterView(
     }
     const action = target.dataset.securityAction;
     if (action === 'refresh') actions.onRefresh();
-    else if (action === 'install') actions.onInstall();
+    else if (action === 'install' || action === 'repair') actions.onInstall();
     else if (action === 'audit-menu') {
       showActions(target, '账号审计记录', [
         { id: 'export', label: '导出账号全部审计记录', onSelect: actions.onAuditExport },

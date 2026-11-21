@@ -213,12 +213,13 @@ async function refreshRules(): Promise<void> {
 }
 
 async function setupProtection(): Promise<void> {
-  if (snapshot.settingUp || snapshot.loading || !windowsSetupRequired(snapshot.capabilities)) return;
+  const repair = snapshot.capabilities?.reason === 'windows_sandbox_account_repair_required';
+  if (snapshot.settingUp || snapshot.loading || (!repair && !windowsSetupRequired(snapshot.capabilities))) return;
   const stillActive = activePageGuard();
   snapshot = { ...snapshot, settingUp: true };
   render();
   try {
-    const result = await window.Crew?.securitySetup?.({ action: 'install' });
+    const result = await window.Crew?.securitySetup?.({ action: repair ? 'repair' : 'install' });
     if (!stillActive()) return;
     if (result?.code === 'uac_cancelled') {
       notify('已取消 Windows 管理员确认。');
@@ -234,7 +235,7 @@ async function setupProtection(): Promise<void> {
     }
     if (!result?.ok) {
       const detail = result?.detail ? `：${result.detail}` : '';
-      notify(`Windows 防护设置未完成${detail}`);
+      notify(`${repair ? 'Windows 防护修复' : 'Windows 防护设置'}未完成${detail}`);
     }
     await refreshCapabilities();
   } catch (error) {

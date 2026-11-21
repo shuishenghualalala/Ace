@@ -51,6 +51,7 @@ const CrewMock = {
   securityDeleteRule: vi.fn(async (_args: unknown) => ({ ok: true, body: { changed: true } })),
   securityAudit: vi.fn(async (_args: unknown) => ({ ok: true, body: { events: [] as SecurityAuditView[], total: 0 } })),
   securityAuditPurge: vi.fn(async (_args: unknown) => ({ ok: true, body: { deleted: 2 } })),
+  securitySetup: vi.fn(async (_args: unknown) => ({ ok: true, exitCode: 0 })),
 };
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -149,6 +150,27 @@ describe('Security 页面生命周期', () => {
 });
 
 describe('Security center requests', () => {
+  it('sends account repair through the explicit native repair action', async () => {
+    CrewMock.securityCapabilities.mockResolvedValueOnce({
+      ok: true,
+      body: {
+        platform: 'win32',
+        helper_present: true,
+        filesystem_sandbox: false,
+        managed_network: false,
+        status: 'unavailable',
+        setup_required: false,
+        reason: 'windows_sandbox_account_repair_required',
+        detail: 'Windows 沙箱账号禁用或密码过期',
+      },
+    });
+    await initSecurityPage();
+    click('[data-security-action="repair"]');
+    await flush();
+
+    expect(CrewMock.securitySetup).toHaveBeenCalledExactlyOnceWith({ action: 'repair' });
+  });
+
   it('keeps the combined filters and ignores slower audit and whole-page refresh results', async () => {
     type AuditResponse = Awaited<ReturnType<typeof CrewMock.securityAudit>>;
     const oldRefresh = deferred<AuditResponse>();

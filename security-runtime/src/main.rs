@@ -72,6 +72,29 @@ fn main() {
     }
 
     #[cfg(windows)]
+    if env::args().nth(1).as_deref() == Some("--windows-repair") {
+        let (state_dir, expected_owner_sid) = parse_windows_repair_args(env::args_os().skip(2))
+            .unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2);
+            });
+        match windows::identity::repair(&state_dir, expected_owner_sid.as_deref()) {
+            Ok(()) => {
+                println!("Windows sandbox identity repair completed");
+                return;
+            }
+            Err(windows::identity::SetupError::OwnerMismatch) => {
+                eprintln!("Windows sandbox identity repair requires the Windows account that started Ace setup");
+                std::process::exit(4);
+            }
+            Err(windows::identity::SetupError::Provision(error)) => {
+                eprintln!("Windows sandbox identity repair failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(windows)]
     if env::args().nth(1).as_deref() == Some("--windows-check-setup") {
         let mut args = env::args_os().skip(2);
         let state_dir = args
@@ -170,6 +193,31 @@ fn parse_windows_setup_args(
     };
     if args.next().is_some() {
         return Err("unexpected --windows-setup argument");
+    }
+    Ok((state_dir, expected_owner_sid))
+}
+
+#[cfg(windows)]
+fn parse_windows_repair_args(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(PathBuf, Option<String>), &'static str> {
+    let state_dir = args
+        .next()
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or("--windows-repair requires an absolute state directory")?;
+    let expected_owner_sid = match args.next() {
+        None => None,
+        Some(flag) if flag == "--expected-owner-sid" => Some(
+            args.next()
+                .and_then(|sid| sid.into_string().ok())
+                .filter(|sid| !sid.is_empty())
+                .ok_or("--expected-owner-sid requires a Windows user SID")?,
+        ),
+        Some(_) => return Err("unknown --windows-repair argument"),
+    };
+    if args.next().is_some() {
+        return Err("unexpected --windows-repair argument");
     }
     Ok((state_dir, expected_owner_sid))
 }

@@ -85,7 +85,8 @@ export function buildElevatedSecuritySetup(
     throw new Error('invalid packaged security runtime path');
   }
   if (!path.win32.isAbsolute(stateDir)) throw new Error('security state directory must be absolute');
-  const runtimeArg = action === 'uninstall' ? '--windows-uninstall' : '--windows-setup';
+  const runtimeArg = action === 'uninstall' ? '--windows-uninstall'
+    : action === 'repair' ? '--windows-repair' : '--windows-setup';
   const originalUser = action === 'uninstall'
     ? ''
     : '$ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value;';
@@ -231,7 +232,7 @@ export async function runElevatedSecuritySetup(
       };
     }
   }
-  // Native setup verifies that UAC kept the original user's Windows identity.
+  // Native install and repair verify that UAC kept the original user's Windows identity.
   fs.mkdirSync(stateDir, { recursive: true });
   const result = await runSetupCommand(buildElevatedSecuritySetup(runtimePath, stateDir, action), spawnProcess);
   if (result.exitCode === ERROR_CANCELLED) return cancelledSetup();
@@ -309,7 +310,7 @@ export async function provisionInstalledWindowsSandbox(
       code: 'windows_sandbox_account_repair_required',
       detail: [
         before.detail,
-        '自动准备没有更改 Windows 账号。请由管理员检查并恢复 Ace 沙箱账号，然后重新验证。',
+        '自动准备没有更改 Windows 账号。可在「设置 → 安全」显式请求管理员修复；账号已删除时会按原身份名重建，并在网络规则核验后启用。',
       ].filter(Boolean).join('\n'),
     };
   }
