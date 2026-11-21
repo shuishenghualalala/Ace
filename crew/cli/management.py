@@ -511,7 +511,7 @@ def _session_usage(args: Any, ctx: CliContext) -> CliResult:
 async def _session_delete(args: Any, ctx: CliContext) -> CliResult:
     app = ctx.app
     _require_session(app, args.session_id, ctx.owner)
-    block = _session_has_blocking_cron(app, args.session_id, ctx.owner)
+    block = await _session_has_blocking_cron(app, args.session_id, ctx.owner)
     if block:
         raise CliError(block, exit_code=409)
     await hook_registry.emit("session:end", {"session_id": args.session_id, "owner_account_id": ctx.owner})
@@ -599,7 +599,7 @@ async def _workspace_delete(args: Any, ctx: CliContext) -> CliResult:
     sessions = app.session_store.list_sessions(workspace_id, owner_account_id=owner)
     session_ids = [str(row.get("session_id") or "") for row in sessions if row.get("session_id")]
     for sid in session_ids:
-        block = _session_has_blocking_cron(app, sid, owner)
+        block = await _session_has_blocking_cron(app, sid, owner)
         if block:
             raise CliError(block, exit_code=409)
     snapshots = {
