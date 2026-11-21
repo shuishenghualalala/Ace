@@ -31,6 +31,7 @@ MCP_INSTALL_TOOL = "mcp_install"
 MCP_STATUS_TOOL = "mcp_status"
 MCP_REMOVE_TOOL = "mcp_remove"
 MCP_RELOAD_TOOL = "mcp_reload"
+MCP_UPDATE_TOOL = "mcp_update"
 SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _VALID_TRANSPORTS = {"stdio", "http", "sse"}
 _STATUS_MAX_TOOLS = 50
@@ -90,12 +91,15 @@ class _OneShotApproval:
 
 
 _approved_install: ContextVar[_OneShotApproval | None] = ContextVar("approved_mcp_install", default=None)
+_approved_update: ContextVar[_OneShotApproval | None] = ContextVar("approved_mcp_update", default=None)
 _approved_remove: ContextVar[_OneShotApproval | None] = ContextVar("approved_mcp_remove", default=None)
 
 
-def _proposal(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _proposal(args: dict[str, Any], action: str = "安装") -> tuple[str, dict[str, Any]]:
     if not current_mcp_install_allowed.get() or not current_tool_call_id.get():
-        raise StructuredToolError("请在有管理权限的前台对话中安装 MCP。", code="permission_denied")
+        raise StructuredToolError(
+            f"请在有管理权限的前台对话中{action} MCP。", code="permission_denied",
+        )
     name = str(args.get("name") or "").strip()
     if not SERVER_NAME_RE.fullmatch(name):
         raise StructuredToolError("MCP 名称只能使用字母、数字、下划线或连字符。", code="invalid_arguments")
@@ -182,6 +186,20 @@ def _removal_digest(config_path: str, name: str, config: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _update_digest(
+    config_path: str,
+    name: str,
+    previous: dict[str, Any],
+    config: dict[str, Any],
+) -> str:
+    scope = (
+        current_owner_account_id.get(), current_session_id.get(), current_request_id.get(),
+        current_tool_call_id.get(), config_path, "update", name, previous, config,
+    )
+    encoded = json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _install_status(app: Any, name: str, config: dict[str, Any], *, already: bool = False) -> str:
     rows = app.mcp_manager.status() if app.mcp_manager is not None else ()
     status = next((row for row in rows if row["name"] == name), {})
@@ -237,6 +255,22 @@ def _public_server_status(row: dict[str, Any]) -> dict[str, Any]:
     if error:
         result["error"] = error
     return result
+
+
+def _current_server_status(app: Any, name: str, config: dict[str, Any]) -> dict[str, Any]:
+    manager = getattr(app, "mcp_manager", None)
+    rows = manager.status() if manager is not None else ()
+    row = next((item for item in rows if str(item.get("name") or "") == name), None)
+    if row is None:
+        row = {
+            "name": name,
+            "transport": "stdio" if config.get("command") else str(config.get("transport") or ""),
+            "connected": False,
+            "state": "not_started",
+            "tools": [],
+            "config": dict(config),
+        }
+    return _public_server_status(row)
 
 
 def _public_url_origin(url: str) -> str:
@@ -492,6 +526,130 @@ def register_mcp_tools(app: Any) -> None:
         permission_approver=confirm_remove_permission,
     )
 
+    def describe_update_permission(args: dict[str, Any]) -> ToolPermissionDecision:
+        try:
+            name, config = _proposal(args, "更新")
+        except StructuredToolError as exc:
+            return ToolPermissionDecision("deny", str(exc))
+        previous = app.config.mcp_servers.get(name)
+        if previous is None:
+            return ToolPermissionDecision("deny", f"MCP 服务不存在: {name}")
+        if previous == config:
+            return ToolPermissionDecision("allow")
+        if config.get("command") and host_stdio_block_reason():
+            return ToolPermissionDecision(
+                "deny", "当前运行策略不允许启动宿主 stdio MCP。可使用同服务的 HTTP 或 SSE 地址。",
+            )
+        if not app.config.config_path:
+            return ToolPermissionDecision("deny", "当前配置没有可写入的配置文件。")
+        return ToolPermissionDecision(
+            "ask",
+            f"将更新 {name} 的 MCP 设置并重连。",
+            allow_always=False,
+            approval_token=_update_digest(
+                app.config.config_path, name, previous, config,
+            ),
+        )
+
+    def confirm_update_permission(digest: str, args: dict[str, Any]) -> bool:
+        try:
+            name, config = _proposal(args, "更新")
+        except StructuredToolError:
+            return False
+        previous = app.config.mcp_servers.get(name)
+        if previous is None or digest != _update_digest(
+            app.config.config_path, name, previous, config,
+        ):
+            return False
+        _approved_update.set(_OneShotApproval(digest))
+        return True
+
+    async def update(args: dict[str, Any]) -> str:
+        name, config = _proposal(args, "更新")
+        previous = app.config.mcp_servers.get(name)
+        if previous is None:
+            raise StructuredToolError(f"MCP 服务不存在: {name}", code="mcp_server_not_found")
+        if previous == config:
+            return tool_result(
+                name=name,
+                changed=False,
+                reloaded=False,
+                server=_current_server_status(app, name, config),
+            )
+        approved = _approved_update.get()
+        if (
+            approved is None or approved.consumed
+            or approved.digest != _update_digest(
+                app.config.config_path, name, previous, config,
+            )
+        ):
+            raise StructuredToolError("此 MCP 更新缺少有效的一次性批准。", code="approval_required")
+        approved.consumed = True
+        if config.get("command") and host_stdio_block_reason():
+            raise StructuredToolError("当前运行策略不允许启动宿主 stdio MCP。", code="permission_denied")
+
+        try:
+            app.config.update_mcp_server(name, config)
+        except KeyError as exc:
+            raise StructuredToolError(f"MCP 服务不存在: {name}", code="mcp_server_not_found") from exc
+        except Exception as exc:
+            log.exception("保存 MCP 配置失败 name=%s", name)
+            raise StructuredToolError("MCP 配置保存失败。", code="mcp_save_failed") from exc
+
+        manager = getattr(app, "mcp_manager", None)
+        reloaded = False
+        if manager is not None:
+            try:
+                reloaded = bool(await manager.reload_one(name, config))
+            except Exception:  # noqa: BLE001 - the configuration is already durable
+                log.exception("更新后重连 MCP server 失败 name=%s", name)
+        payload: dict[str, Any] = {
+            "name": name,
+            "changed": True,
+            "reloaded": reloaded,
+            "server": _current_server_status(app, name, config),
+        }
+        if not reloaded:
+            payload["warning"] = (
+                "配置已更新，但运行实例重连未完成；可使用 mcp_reload 重试。"
+                if manager is not None
+                else "配置已更新；MCP 管理器未初始化，重启后生效。"
+            )
+        return tool_result(**payload)
+
+    app.registry.register(
+        name=MCP_UPDATE_TOOL,
+        toolset="mcp_management",
+        schema={
+            "name": MCP_UPDATE_TOOL,
+            "description": (
+                "Replace the configuration of an existing MCP server and try to "
+                "reconnect it. The user approves the exact previous and new "
+                "configuration. Changing the transport, command, URL, environment "
+                "or headers is supported; use mcp_install for a new name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Exact existing server name"},
+                    "transport": {"type": "string", "enum": ["stdio", "http", "sse"]},
+                    "command": {"type": "string", "description": "Executable name or absolute path for stdio"},
+                    "args": {"type": "array", "items": {"type": "string"}},
+                    "url": {"type": "string", "description": "Full HTTP or SSE endpoint"},
+                    "env": string_map,
+                    "headers": string_map,
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+        handler=update,
+        is_async=True,
+        display_name="更新 MCP",
+        permission_resolver=describe_update_permission,
+        permission_approver=confirm_update_permission,
+    )
+
     async def reload_server(args: dict[str, Any]) -> str:
         name = _reload_name(args)
         config = app.config.mcp_servers.get(name)
@@ -501,21 +659,10 @@ def register_mcp_tools(app: Any) -> None:
         if manager is None:
             raise StructuredToolError("MCP 管理器未初始化。", code="mcp_unavailable")
         reloaded = await manager.reload_one(name)
-        rows = manager.status()
-        row = next((item for item in rows if str(item.get("name") or "") == name), None)
-        if row is None:
-            row = {
-                "name": name,
-                "transport": str(config.get("transport") or ""),
-                "connected": False,
-                "state": "not_started",
-                "tools": [],
-                "config": dict(config),
-            }
         return tool_result(
             name=name,
             reloaded=bool(reloaded),
-            server=_public_server_status(row),
+            server=_current_server_status(app, name, config),
         )
 
     app.registry.register(

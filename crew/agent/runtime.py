@@ -636,7 +636,7 @@ class SingleAgent(Agent):
             if names is not None:
                 names = [
                     name for name in names
-                    if name not in {"mcp_install", "mcp_status", "mcp_remove", "mcp_reload"}
+                    if name not in {"mcp_install", "mcp_status", "mcp_remove", "mcp_reload", "mcp_update"}
                 ]
         return self.registry.list_schemas(names), names, plan_active
 

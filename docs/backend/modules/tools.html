@@ -345,6 +345,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
       <tr><td>2026-11-20</td><td>新增 <code>mcp_remove</code>：对话内一次批准后删除指定 MCP 配置并断开运行实例；批准绑定当前配置摘要，已不存在的服务幂等返回。</td><td><code>crew/tools/mcp_management.py</code>、MCP 配置事务与运行实例移除。</td></tr>
       <tr><td>2026-11-20</td><td><code>mcp_status</code> 增加 <code>state</code>：区分已连接、重连中、预算耗尽失败、启动中和未启动，避免仅凭 <code>connected=false</code> 猜测。</td><td><code>crew/tools/mcp_client.py</code>、<code>crew/tools/mcp_management.py</code>。</td></tr>
       <tr><td>2026-11-20</td><td>新增 <code>mcp_reload</code>：管理员前台用现有配置重连单个服务并重置重连预算，不修改配置。</td><td><code>crew/tools/mcp_management.py</code>、MCP 连接恢复。</td></tr>
+      <tr><td>2026-11-20</td><td>新增 <code>mcp_update</code>：管理员一次批准后替换既有服务配置并重连；批准绑定旧、新配置摘要。</td><td><code>crew/tools/mcp_management.py</code>、MCP 配置管理。</td></tr>
       <tr><td>2026-11-22</td><td>内置浏览器提供 <code>/web-gui-tester</code>，沿用原会话与权限规则。</td><td>浏览器技能目录和模型技能索引。</td></tr>
       <tr><td>2026-09-01</td><td>文档初始建立</td><td>—</td></tr>
       <tr><td>2026-09-01</td><td>统一整读上限 <code>MAX_READ_FILE_BYTES=512 MiB</code>；<code>file_read</code> / <code>patch</code> / <code>file_write</code> / <code>grep</code> 读前拒绝超大文件；<code>patch</code> 的读 / 写改 <code>asyncio.to_thread</code></td><td><code>crew/tools/file_utils.py</code>、<code>builtin.py</code>、<code>file_tools.py</code></td></tr>
@@ -374,6 +375,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <p>只读工具 <code>mcp_status</code> 列出当前已配置服务的名称、传输、脱敏目标、连接状态（<code>connected</code>/<code>reconnecting</code>/<code>failed</code>/<code>starting</code>/<code>not_started</code>）、工具数与有限错误正文，用于对话内诊断。它不返回 <code>env</code>、<code>headers</code> 或完整 URL；无法解析或端口非法的旧地址只返回空目标，不使整个查询失败。仅在管理员前台上下文中可见，子 Agent、Plan 和普通账号的前台请求继续隐藏。</p>
   <p>移除使用 <code>mcp_remove</code>：管理员在前台对话确认一次，批准绑定账号、会话、请求、调用、配置文件和当前服务配置摘要。配置删除后断开运行实例；已不存在的服务按幂等返回；配置已删除但运行实例移除失败时如实返回 warning，不回滚配置。服务配置在批准后发生变化时，原批准失效。</p>
   <p>重连使用 <code>mcp_reload</code>：用现有已批准配置停止旧 worker 并新建连接，重置重连预算；不修改配置文件。返回 <code>reloaded</code> 与该服务当前状态，失败后仍可通过 <code>mcp_status</code> 查看原因。</p>
+  <p>更新使用 <code>mcp_update</code>：一次批准同时绑定旧配置与新配置摘要，批准后旧配置被替换则拒绝执行。配置持久化后停止旧 worker 并重连，返回 <code>changed</code>、<code>reloaded</code> 与当前状态；重连失败保留新配置并提示可用 <code>mcp_reload</code> 重试，传输方式、命令、URL、环境变量和请求头均可替换。</p>
   <h2 id="mcp-structured-result">MCP 工具结果</h2>
   <p>Worker 从 MCP SDK 中读取文本、图片和结构化字段。非空结构进入模型的工具正文，标记为 <code>Structured content</code>。当原文本已包含同一 JSON 对象时保留原文。结构字段保持文本载荷，图片仍由协议图片块提供。MCP <code>isError</code> 响应继续结算为工具失败，正文同时保留可用的结构化错误详情。</p>
   <p>混合结果先为完整图片保留外层 JSON 的预算，再按转义后的字符数截取文字的首尾。图片组本身放不进预算时，正文显示原因且省略该图片组。Worker 诊断采集将结构字段传为映射，复用既有敏感键脱敏。模型、历史和回执仍通过原工具结果的权限及持久化链路。</p>

@@ -867,6 +867,137 @@ def test_mcp_status_invalid_port_does_not_break_projection():
     assert public["name"] == "bad-port"
 
 
+async def test_mcp_update_applies_approved_config_and_reloads():
+    from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
+    from crew.tools.mcp_management import (
+        _approved_update,
+        _OneShotApproval,
+        _proposal,
+        _update_digest,
+        register_mcp_tools,
+    )
+
+    registry = Registry()
+    previous = {"transport": "http", "url": "https://old.example.com/v1"}
+
+    class ConfigStub:
+        config_path = "/tmp/mcp-config.yaml"
+
+        def __init__(self):
+            self.mcp_servers = {"echo": dict(previous)}
+
+        def update_mcp_server(self, name, config):
+            self.mcp_servers[name] = dict(config)
+
+    class ManagerStub:
+        def __init__(self):
+            self.reloads = []
+            self.server_config = dict(previous)
+
+        async def reload_one(self, name, cfg=None):
+            self.reloads.append((name, dict(cfg or {})))
+            self.server_config = dict(cfg or {})
+            return True
+
+        def status(self):
+            return [{
+                "name": "echo",
+                "transport": "http",
+                "connected": True,
+                "state": "connected",
+                "tools": ["echo"],
+                "config": dict(self.server_config),
+            }]
+
+    manager = ManagerStub()
+    app = SimpleNamespace(config=ConfigStub(), mcp_manager=manager, registry=registry)
+    register_mcp_tools(app)
+    new_args = {
+        "name": "echo",
+        "transport": "http",
+        "url": "https://new.example.com/v1?token=secret-value",
+    }
+    authority = current_mcp_install_allowed.set(True)
+    call_id = current_tool_call_id.set("update-call")
+    try:
+        _, new_config = _proposal(new_args, "更新")
+        approval = _approved_update.set(_OneShotApproval(_update_digest(
+            app.config.config_path, "echo", previous, new_config,
+        )))
+        try:
+            result = await registry.execute(ToolCall("update-1", "mcp_update", new_args))
+        finally:
+            _approved_update.reset(approval)
+    finally:
+        current_tool_call_id.reset(call_id)
+        current_mcp_install_allowed.reset(authority)
+
+    assert not result.is_error
+    payload = json.loads(result.content)
+    assert payload["changed"] is True
+    assert payload["reloaded"] is True
+    assert payload["server"]["state"] == "connected"
+    assert payload["server"]["target"] == "https://new.example.com"
+    assert "secret-value" not in result.content
+    assert app.config.mcp_servers["echo"] == new_config
+    assert manager.reloads == [("echo", new_config)]
+
+
+async def test_mcp_update_rejects_a_stale_approval_and_unknown_server():
+    from crew.core.runctx import current_mcp_install_allowed, current_tool_call_id
+    from crew.tools.mcp_management import (
+        _approved_update,
+        _OneShotApproval,
+        _proposal,
+        _update_digest,
+        register_mcp_tools,
+    )
+
+    registry = Registry()
+    previous = {"transport": "http", "url": "https://old.example.com/v1"}
+
+    class ConfigStub:
+        config_path = "/tmp/mcp-config.yaml"
+
+        def __init__(self):
+            self.mcp_servers = {"echo": dict(previous)}
+            self.updates = []
+
+        def update_mcp_server(self, name, config):
+            self.updates.append((name, dict(config)))
+            self.mcp_servers[name] = dict(config)
+
+    app = SimpleNamespace(config=ConfigStub(), mcp_manager=None, registry=registry)
+    register_mcp_tools(app)
+    new_args = {"name": "echo", "transport": "http", "url": "https://new.example.com/v1"}
+    authority = current_mcp_install_allowed.set(True)
+    call_id = current_tool_call_id.set("update-call-2")
+    try:
+        _, new_config = _proposal(new_args, "更新")
+        approval = _approved_update.set(_OneShotApproval(_update_digest(
+            app.config.config_path, "echo", previous, new_config,
+        )))
+        try:
+            app.config.mcp_servers["echo"] = {
+                "transport": "http", "url": "https://other.example.com/v1",
+            }
+            stale = await registry.execute(ToolCall("update-2", "mcp_update", new_args))
+            missing = await registry.execute(ToolCall("update-3", "mcp_update", {
+                "name": "missing", "transport": "http", "url": "https://missing.example.com/v1",
+            }))
+        finally:
+            _approved_update.reset(approval)
+    finally:
+        current_tool_call_id.reset(call_id)
+        current_mcp_install_allowed.reset(authority)
+
+    assert stale.is_error
+    assert "批准" in stale.content
+    assert missing.is_error
+    assert "不存在" in missing.content
+    assert app.config.updates == []
+
+
 def test_mcp_worker_state_distinguishes_starting_from_reconnecting():
     from crew.tools.mcp_client import _ServerWorker
 
