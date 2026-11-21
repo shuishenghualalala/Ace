@@ -874,6 +874,44 @@ async def test_manager_cleans_up_a_worker_adopted_during_shutdown():
     assert manager._workers == []
 
 
+async def test_manager_close_wins_over_a_slow_reload(monkeypatch):
+    from crew.tools import mcp_client
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FakeWorker:
+        name = "echo"
+
+        def __init__(self, *_args, **_kwargs):
+            self.stopped = False
+
+        def _unregister_tools(self):
+            pass
+
+        async def stop(self):
+            self.stopped = True
+
+        async def start(self):
+            started.set()
+            await release.wait()
+            return True
+
+    monkeypatch.setattr(mcp_client, "_ServerWorker", FakeWorker)
+    manager = mcp_client.MCPClientManager({"echo": {"url": "https://example.invalid/mcp"}})
+    manager._registry = Registry()
+    manager._start_task = asyncio.create_task(asyncio.sleep(0))
+    await manager._start_task
+
+    reloading = asyncio.create_task(manager.reload_one("echo"))
+    await started.wait()
+    await manager.aclose()
+    release.set()
+    await reloading
+
+    assert manager._workers == []
+
+
 async def test_manager_serializes_concurrent_server_reloads(monkeypatch):
     from crew.tools import mcp_client
 
