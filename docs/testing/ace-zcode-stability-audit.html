@@ -162,10 +162,12 @@
 <p class="evidence">Ace <code>crew/agent/loop/tool_runner.py:391</code>、<code>crew/agent/executor/builtin.py:1777</code>、<code>crew/state/tool_checkpoints.py</code>、<code>crew/state/session_store.py:2542</code>、<code>crew/app.py:2504</code>；测试 <code>tests/test_agent_loop.py</code>、<code>tests/test_session_events.py</code>、<code>tests/test_tool_pipeline.py</code>、<code>tests/gateway/test_gateway_api.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/agent/session-history-hydrator.ts:184</code>。</p>
 </article>
 <article id="agent-stop">
-<h3>A12 · P1 · 工具的实际退出缺少独立确认</h3>
-<p>桌面的停止目前主要发送会话 ID。工具运行器对未退出的任务做有界等待，超时后仍可写入取消结果。会话停止和工具实际退出可能发生在不同时间，后续回合需要知道前一工具是否仍占用进程或可能改写资源。</p>
-<p><strong>修复</strong> 停止绑定具体回合，记录已请求停止、已确认退出或结果待核实。持续收尾和注销超时的任务，必要时隔离可杀死的执行单元。分别测量从停止到界面反馈、终端或 MCP 实际退出的时间，并验证停止后无新增写入、相邻新回合不被误停。</p>
-<p class="evidence">Ace <code>desktop/src/ui/features/chat-controller.ts:2030</code>，<code>crew/gateway/ws.py:744</code>，<code>crew/agent/loop/tool_runner.py:859</code>。</p>
+<h3>A12 · P1 · 停止绑定回合并确认工具退出（已修复）</h3>
+<p><strong>基线差异</strong> 会话级停止无法区分排队中的新请求与用户刚停止的旧请求；等待方被取消也不能证明同步线程、子进程或远端 MCP 已退出。ZCode 从 <code>turn.ts</code> 建立回合取消信号，经 <code>batch-runner.ts</code> 和 <code>call-runner.ts</code> 传给工具执行，并用 <code>executeWithTimeout</code> 中止执行入口。</p>
+<p><strong>修复 · <code>97449657</code></strong> Gateway 用账号、会话和请求 ID 处理定向停止。Ace 的工具调用各自收集退出探针：同步线程等待 worker 完成，终端核对进程注册表的完成事件，MCP 仅取消自己的 SDK 请求并等待远端回执，异步工具在共享宽限期内收尾。退出确认作为工具结果元数据进入历史；仍运行或缺少远端退出证明时返回 <code>tool_exit_unconfirmed</code>、<code>exit_confirmed=false</code> 和未知副作用状态。桌面和 Web 将停止回执、回合终态及迟到的工具退出提示绑定到原请求。</p>
+<p><strong>验收 · 本轮复验</strong> 同步线程未退出时的错误状态、指定回合停止与队列后续请求、MCP 单请求取消、文件修改路径在 worker 退出前保持串行，后端各 1 项通过；Desktop 51 项与 Web 47 项通过。另有 <a href="#handoff">Windows 实际 Gateway 停止验收</a>：真实终端停止后约 33.5 毫秒退出，随后 250 毫秒未再写入文件；Electron 和独立 Web 的旧停止请求迟到时，后续排队回合仍完成。该提交的全量结果记录为后端 264 项、桌面 125 项、Web 293 项通过。</p>
+<p><strong>剩余边界</strong> 运行中的 Python 同步线程不能被安全强杀，未响应的远端 MCP 也无法由本地证明已退出；系统保留待核实结果并禁止将其描述为已取消。文件修改按路径继续串行到 worker 返回。</p>
+<p class="evidence">Ace <code>crew/gateway/ws.py:1050</code>、<code>crew/gateway/dispatcher.py:406</code>、<code>crew/core/runctx.py:36</code>、<code>crew/agent/loop/tool_runner.py:1053</code>、<code>crew/tools/registry.py:60</code>、<code>crew/tools/mcp_client.py:1042</code>、<code>desktop/src/ui/features/chat-controller.ts:2170</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/turn.ts:182</code>、<code>apps/zcode-cli/packages/core/src/tool/executor/batch-runner.ts:44</code>、<code>call-runner.ts:214</code>、<code>timeout.ts:93</code>。</p>
 </article>
 <article id="evolution-result-scope">
 <h3 id="parallel-children-on-turn-cancellation">回合直接取消时收尾自己启动的并行工具</h3>
@@ -648,10 +650,12 @@
 <p class="evidence">Ace <code>crew/state/session_store.py</code>、<code>crew/gateway/routers/sessions.py</code>、<code>desktop/src/ui/features/session-controller.ts</code>、<code>desktop/src/ui/features/conversation-viewport.ts</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/conversation-topic-publisher.ts:833</code>、<code>packages/ui/src/v4/conversationProjectionStore.ts:1058</code>、<code>packages/ui/src/v4/ConversationTimeline.tsx:825</code>。</p>
 </article>
 <article id="startup">
-<h3>F4 · 首屏依赖全量会话列表和串行初始化</h3>
-<p>初次 hydrate 串行等待会话列表、状态、工作区、配置和渠道处理，侧栏存在包含归档项的全量读取。存储查询未分页，批查配置还会生成随列表增长的绑定参数。用内存 SQLite 3.45.3 和 Ace 当前查询及索引合成 100/1000/5000/20000 会话，25 次采样的数据库查询加配置批读 P95 约为 3.7/46.4/112.7/519.1 ms，基础 JSON 约 17 KB/175 KB/878 KB/3.52 MB。查询计划还出现临时排序，现有索引缺少置顶排序组成项。测量不含 HTTP、附属数据和 UI。后端启动时还有同步的旧 owner 回填与中断恢复。ZCode V4 按工作区订阅会话索引，侧栏顶层列表按可见区渲染，Desktop E2E 检查首次打开多个项目时只预热活动项目。</p>
-<p><strong>修复</strong> 以当前工作区最近会话和首条聊天就绪作为关键路径。按依赖关系并行有界请求，延后归档、次要配置和非首屏资源。为启动回填与恢复分段计时，将明确线程安全的同步工作移出事件循环。服务端给会话列表稳定分页和轻量 DTO，前端按 workspace 缓存和接收有版本的变化。用 100/1000/10000 会话测启动、打开侧栏、检索、切换工作区与首次可发送。</p>
-<p class="evidence">Ace <code>desktop/src/ui/features/session-controller.ts:543</code>，<code>desktop/src/ui/features/workspaces.ts:1144</code>、<code>:1201</code>，<code>crew/state/session_store.py:2267</code>、<code>:2462</code>，<code>crew/app.py:2422</code>、<code>:2480</code>。ZCode <code>packages/ui/src/v4/agentSessionsIndexTransport.ts:80</code>，<code>packages/ui/src/project-sidebar/grouped/virtualized-top-level-list.tsx:132</code>。</p>
+<h3>F4 · 首屏列表性能（分页已落地；冷启动归因待补）</h3>
+<p><strong>已核实的现状</strong> 旧记录把初次 hydrate 描述为串行、把会话列表描述为不分页，并称工作区会话排序索引缺少 pinned 项；这些已被后续实现覆盖，不能再作为当前缺陷。Ace 的 <code>/api/sessions</code> 支持稳定游标、session ID 和侧栏状态；存储按 pinned/更新时间/session ID 排序读取，配置批查也已按 512 条分块。桌面首屏请求活动工作区最多 32 条，其余请求与工作区、配置、渠道读取并发；完整含归档目录随后以每页 256 条顺序补齐。发送准入依据 Gateway ready 与 WebSocket connected，不等待完整历史。历史记录中的 SQLite 100–20,000 条 P95（3.7/46.4/112.7/519.1 ms）及 JSON 体积仅是数据库查询基线，未测 HTTP 往返或桌面首屏。</p>
+<p><strong>本次修复与测量</strong> 会话历史侧栏原先为每个可见工作区分别过滤整份普通会话数组，再次扫描归档数组。现在在 <code>session-history-view.ts</code> 中单次遍历并按工作区分桶，随后保持原有排序、搜索、隐藏项目、默认对话和归档规则。隔离 Node 投影基准使用 20,000 条会话、100 个工作区、3 轮预热及 15 次计时，中位数由 29.212 ms 降至 1.098 ms；两版都生成 20,000 个对应条目。该基准不包含 DOM、网络、Gateway 或 Electron 冷启动。</p>
+<p><strong>ZCode 路径差异</strong> ZCode 的 <code>useWorkspaceSessionsIndexItems</code> 从各 workspace 的 V4 sessions-index 聚合实时摘要，持久任务行由 tasks-index 提供；<code>VirtualizedGroupedTaskList</code> 在组内任务超过 80 条时只渲染视口窗口。它优化的是任务侧栏投影，不等同于完整归档历史管理。Ace 当前历史侧栏每组初显 10 条，搜索和用户显式「显示全部」仍处理完整目录。</p>
+<p><strong>剩余缺口</strong> 侧栏大组「显示全部」仍会创建全部匹配行的 DOM；尚无同一发行包、相同数据下的冷启动、首会话可发送和首轮首字配对测量，不能据此宣称 F4 完成。继续用隔离数据测量 100/1,000/10,000/20,000 条目录下的活动会话预览、侧栏绘制和首次可发送时间，并评估大组窗口化。</p>
+<p class="evidence">Ace <code>desktop/src/ui/api/feature-session.ts:1306</code>、<code>desktop/src/ui/features/workspaces.ts:1138</code>、<code>desktop/src/ui/features/session-controller.ts:1184</code>、<code>desktop/src/ui/features/backend-status-guard.ts:224</code>、<code>desktop/src/ui/features/session-history-view.ts:186</code>、<code>crew/gateway/routers/sessions.py</code>、<code>crew/state/session_store.py</code>。ZCode <code>packages/ui/src/v4/useWorkspaceSessionsIndexItems.ts:94</code>、<code>packages/ui/src/project-sidebar/grouped/virtualized-group-task-list.tsx:17</code>、<code>:137</code>.</p>
 </article>
 <article id="backpressure">
 <h3>F5 · 慢订阅与回放占用实时推送路径（已修复）</h3>

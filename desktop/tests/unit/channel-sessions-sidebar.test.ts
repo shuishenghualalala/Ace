@@ -8,6 +8,7 @@ import { __resetAllStoresForTest, sessionStore, workspaceStore } from '../../src
 import { createSessionHistoryView, type SessionHistoryView } from '../../src/ui/features/session-history-view';
 import { isChannelSessionId } from '../../src/ui/features/channel-sessions';
 import type { SessionRow } from '../../src/ui/state';
+import type { Workspace } from '../../src/ui/backend-client';
 
 const CHANNELS_SECTION = '[data-session-section="Crew.historyChannelsCollapsed"]';
 
@@ -21,6 +22,22 @@ function channelSession(id: string, platform = 'feishu'): SessionRow {
     badge: platform,
     channelPlatform: platform,
   };
+}
+
+function historySession(id: string, workspaceId: string, options: { archived?: boolean; updatedAt?: number } = {}): SessionRow {
+  return {
+    id,
+    title: id,
+    workspaceId,
+    updatedAt: options.updatedAt ?? 2000,
+    preview: '',
+    badge: '',
+    archived: options.archived,
+  };
+}
+
+function workspace(id: string, name: string, hidden = false): Workspace {
+  return { id, name, description: '', instructions: '', root_path: '', hidden } as unknown as Workspace;
 }
 
 let view: SessionHistoryView | null = null;
@@ -95,6 +112,27 @@ describe('渠道侧栏分区', () => {
     mountView();
     expect(document.querySelector(CHANNELS_SECTION)).toBeNull();
     expect(document.querySelector('[data-session-group="conversation:default"]')).not.toBeNull();
+  });
+
+  it('对大历史目录按工作空间归组并保留归档与默认对话边界', () => {
+    workspaceStore.set({ workspaces: [workspace('ws-a', '项目 A'), workspace('ws-b', '项目 B'), workspace('ws-hidden', '隐藏项目', true)] });
+    sessionStore.set({ sessions: [
+      historySession('a-new', 'ws-a', { updatedAt: 3000 }),
+      historySession('a-old', 'ws-a', { updatedAt: 1000 }),
+      historySession('b-only', 'ws-b'),
+      historySession('default-only', 'default'),
+      historySession('a-archived', 'ws-a', { archived: true }),
+      historySession('hidden-only', 'ws-hidden'),
+    ] });
+    mountView();
+
+    const ids = (selector: string) => Array.from(document.querySelectorAll<HTMLElement>(selector))
+      .map((element) => element.dataset.sessionId);
+    expect(ids('[data-session-group="workspace:ws-a"] [data-session-id]')).toEqual(['a-new', 'a-old']);
+    expect(ids('[data-session-group="workspace:ws-b"] [data-session-id]')).toEqual(['b-only']);
+    expect(ids('[data-session-group="conversation:default"] [data-session-id]')).toEqual(['default-only']);
+    expect(ids('[data-session-group="archived"] [data-session-id]')).toEqual(['a-archived']);
+    expect(document.querySelector('[data-session-id="hidden-only"]')).toBeNull();
   });
 
   it('有渠道分组时渲染平台文件夹与会话行', () => {

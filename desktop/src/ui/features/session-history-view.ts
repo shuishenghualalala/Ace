@@ -184,17 +184,34 @@ function filteredSessions(group: SessionGroup, query: string): SessionRow[] {
 }
 
 function buildGroups(query: string): SessionGroup[] {
-  const visibleWorkspaceIds = new Set(visibleWorkspaces().map((workspace) => workspace.id));
-  const ordinary = state.sessions
-    .filter((session) => !session.archived)
-    .filter((session) => !isChannelSessionId(session.id))
-    .filter(isSessionVisibleWithExternalAgentsFlag);
-  const projects = visibleWorkspaces().map((workspace): SessionGroup => ({
+  const workspaces = visibleWorkspaces();
+  const visibleWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+  const ordinaryByWorkspace = new Map<string, SessionRow[]>();
+  const defaultConversations: SessionRow[] = [];
+  const archivedSessions: SessionRow[] = [];
+
+  for (const session of state.sessions) {
+    if (isChannelSessionId(session.id) || !isSessionVisibleWithExternalAgentsFlag(session)) continue;
+    if (session.archived) {
+      if (session.workspaceId === 'default' || visibleWorkspaceIds.has(session.workspaceId)) {
+        archivedSessions.push(session);
+      }
+      continue;
+    }
+    if (session.workspaceId === 'default') defaultConversations.push(session);
+    if (visibleWorkspaceIds.has(session.workspaceId)) {
+      const bucket = ordinaryByWorkspace.get(session.workspaceId);
+      if (bucket) bucket.push(session);
+      else ordinaryByWorkspace.set(session.workspaceId, [session]);
+    }
+  }
+
+  const projects = workspaces.map((workspace): SessionGroup => ({
     id: `workspace:${workspace.id}`,
     label: workspace.name,
     kind: 'workspace',
     workspace,
-    sessions: ordinary.filter((session) => session.workspaceId === workspace.id),
+    sessions: ordinaryByWorkspace.get(workspace.id) ?? [],
   }));
   const channels = state.channelSessionGroups.map((channel): SessionGroup => ({
     id: `channel:${channel.platform}`,
@@ -207,18 +224,13 @@ function buildGroups(query: string): SessionGroup[] {
     id: 'conversation:default',
     label: '对话',
     kind: 'conversation',
-    sessions: ordinary.filter((session) => session.workspaceId === 'default'),
+    sessions: defaultConversations,
   };
   const archived: SessionGroup = {
     id: 'archived',
     label: '已归档',
     kind: 'archived',
-    sessions: state.sessions
-      .filter((session) => session.archived)
-      .filter((session) => !isChannelSessionId(session.id))
-      .filter(isSessionVisibleWithExternalAgentsFlag)
-      .filter((session) =>
-        session.workspaceId === 'default' || visibleWorkspaceIds.has(session.workspaceId)),
+    sessions: archivedSessions,
   };
 
   return [...projects, ...channels, conversations, archived]
