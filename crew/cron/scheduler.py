@@ -660,8 +660,11 @@ class CronService:
             self._running = False
             self._mount_errors.clear()
             self._mount_retry_attempts.clear()
+            retry_tasks = list(self._mount_retry_tasks.values())
             for owner in list(self._mount_retry_tasks):
                 self._cancel_mount_retry(owner)
+            if retry_tasks:
+                await asyncio.gather(*retry_tasks, return_exceptions=True)
             for owner in set(self._mounted_owners).union(self._pending_mounts):
                 await self.unmount_owner(owner, terminal_status="abandoned")
             if self._mount_tasks:
