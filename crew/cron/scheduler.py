@@ -504,6 +504,11 @@ class CronService:
             return
         error = task.exception()
         if error is not None:
+            if owner in self._mounted_owners or owner in self._pending_mounts:
+                # A later mount for the same Owner already succeeded or is in
+                # flight; this task's failure is stale and must not degrade it.
+                log.debug("忽略过期的 CronService Owner 挂载失败: owner=%s", owner, exc_info=error)
+                return
             self._mount_errors[owner] = str(error)[:500]
             log.error("CronService Owner 挂载失败", exc_info=error)
 

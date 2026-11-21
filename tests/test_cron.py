@@ -536,6 +536,28 @@ async def test_finish_fire_async_commits_run_and_job_summary_together(tmp_path):
     assert store.get(job["id"], owner_account_id=OWNER)["last_status"] == "completed"
 
 
+async def test_stale_owner_mount_failure_does_not_degrade_newer_mount():
+    service = object.__new__(CronService)
+    service._mount_tasks = set()
+    service._mount_errors = {}
+    service._mounted_owners = {OWNER}
+    service._pending_mounts = {}
+
+    async def fail():
+        raise sqlite3.OperationalError("old lock")
+
+    stale = asyncio.create_task(fail())
+    await asyncio.gather(stale, return_exceptions=True)
+    service._owner_mount_finished(OWNER, stale)
+    assert service.mount_failures == {}
+
+    service._mounted_owners.discard(OWNER)
+    current = asyncio.create_task(fail())
+    await asyncio.gather(current, return_exceptions=True)
+    service._owner_mount_finished(OWNER, current)
+    assert OWNER in service.mount_failures
+
+
 def test_recover_running_fire_marks_abandoned_without_replay(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
     job = store.create(
