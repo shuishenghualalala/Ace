@@ -73,7 +73,7 @@
   <table>
     <thead><tr><th>命令</th><th>覆盖能力</th></tr></thead>
     <tbody>
-      <tr><td><code>chat</code> / <code>run</code></td><td>交互 REPL；一次性对话（<code>--mode</code>、<code>--session-id</code>、<code>--output-format</code>、<code>--permission-mode</code>、<code>--yes</code>）。</td></tr>
+      <tr><td><code>chat</code> / <code>run</code></td><td>交互 REPL（<code>--session-id</code> 续接已有会话）；一次性对话（<code>--mode</code>、<code>--session-id</code>、<code>--output-format</code>、<code>--permission-mode</code>、<code>--yes</code>）。</td></tr>
       <tr><td><code>config</code></td><td>配置查看、模型 profile 增删改查与默认模型切换。</td></tr>
       <tr><td><code>session</code></td><td>会话列表/历史/标题/归档/置顶/待办/计划/模型/Agent 配置/状态/上下文/删除/用量。</td></tr>
       <tr><td><code>workspace</code></td><td>工作空间增删改查（删除级联会话清理）。</td></tr>
@@ -95,6 +95,11 @@
       <tr><td><code>migrate claim-legacy</code></td><td>认领未归属历史数据。</td></tr>
     </tbody>
   </table>
+
+  <h3 id="chat-resume">3.1 交互会话续接</h3>
+  <pre><code>crew session list
+crew chat --workspace-id &lt;工作空间 ID&gt; --session-id &lt;会话 ID&gt;</code></pre>
+  <p><code>crew chat</code> 启动与执行 <code>/new</code> 后显示当前会话 ID。显式续接在开启输入前查询当前账号的公开会话目录，并核对所选工作空间。不存在、属于其他账号、内部会话或工作空间不符时直接退出，不创建替代会话。续接用原 ID 读取历史和会话配置；终端不重印旧消息，可用 <code>crew session show</code> 查看。未传 ID 时沿用新建流程，非交互 <code>crew run</code> 的语义不变。</p>
 
   <h2>4. 安全命令</h2>
   <p>安全命令直接调用 <code>crew.security_service</code> / <code>security_rules</code> / <code>security_audit</code>，等价于本机宿主身份，不需要桌面端 proof。安全写操作全部是显式子命令，不提供隐式一键放行开关。</p>

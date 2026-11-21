@@ -36,6 +36,7 @@ HELP = """[bold]命令[/bold]
 
 def register(subparsers, handlers: dict[str, Any]) -> None:
     chat = subparsers.add_parser("chat", help="启动交互式对话")
+    chat.add_argument("--session-id", metavar="ID", help="续接当前账号与工作空间中的已有会话")
     chat.set_defaults(handler=_chat)
     run = subparsers.add_parser("run", help="一次性非交互对话")
     run.add_argument("prompt", help="要发送的消息")
@@ -58,17 +59,34 @@ def register(subparsers, handlers: dict[str, Any]) -> None:
 
 
 async def _chat(args: Any, ctx: CliContext) -> CliResult:
+    session_id = args.session_id.strip() if args.session_id is not None else None
+    if session_id == "":
+        raise CliError("--session-id 不能为空")
     async with ctx.running_app() as app:
-        await _repl(app, ctx)
+        if session_id is not None:
+            rows = await asyncio.to_thread(
+                app.session_store.list_sessions,
+                owner_account_id=ctx.owner,
+                include_archived=True,
+                session_id=session_id,
+                limit=1,
+            )
+            if not rows:
+                raise CliError("当前账号下未找到可续接的会话；请用 crew session list 查询")
+            workspace_id = rows[0]["workspace_id"]
+            if workspace_id != ctx.workspace_id:
+                raise CliError(f"会话属于其他工作空间；请用 --workspace-id {workspace_id} 续接")
+        await _repl(app, ctx, session_id=session_id)
     return CliResult(data=None)
 
 
-async def _repl(app: Any, ctx: CliContext) -> None:
+async def _repl(app: Any, ctx: CliContext, *, session_id: str | None = None) -> None:
     session = PromptSession()
-    session_id = f"cli_{uuid.uuid4().hex[:8]}"
+    session_id = session_id or f"cli_{uuid.uuid4().hex[:8]}"
     mode = "agent"
 
     console.print(BANNER)
+    console.print("当前会话 ID：", session_id, markup=False)
     if not app.config.has_llm_key:
         console.print(
             "[yellow]提示：未配置模型 API Key，当前为 FakeProvider 演示模式，"
@@ -97,6 +115,7 @@ async def _repl(app: Any, ctx: CliContext) -> None:
                     app.plan_manager.reset(session_id, owner_account_id=ctx.owner)
                 session_id = f"cli_{uuid.uuid4().hex[:8]}"
                 console.print("[green]已新建会话。[/green]")
+                console.print("当前会话 ID：", session_id, markup=False)
             elif cmd == "/team":
                 mode = "team"
                 console.print("[magenta]已切换到 Team 模式。[/magenta]")

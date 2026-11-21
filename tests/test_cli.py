@@ -70,6 +70,88 @@ def test_help_lists_all_command_groups(capsys, cli_home):
         assert name in out
 
 
+def test_chat_resumes_saved_session_through_cli(capsys, cli_home, tmp_path, monkeypatch):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from crew.core.mocks import FakeProvider
+    from crew.core.types import ChatResponse, Message
+    from crew.state.config import Config
+    from crew.state.session_store import SQLiteSessionStore
+
+    cfg = Config(db_path=str(tmp_path / "cli-sessions.db"), cron_enabled=False, title_auto=False)
+    provider = FakeProvider(script=[ChatResponse(text="续接成功", finish_reason="stop")])
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: cfg)
+    monkeypatch.setattr("crew.app.build_provider", lambda _cfg: provider)
+    owner = "cli-test"
+    sid = "saved-cli-chat"
+    original = [Message.user("Previous request"), Message.assistant("Saved history marker")]
+    store = SQLiteSessionStore(cfg.db_path)
+    try:
+        store.save(sid, original, owner_account_id=owner)
+    finally:
+        store.close()
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        pipe.send_text("Continue this task\n/quit\n")
+        code, output = run_cli(capsys, "chat", "--owner", owner, "--session-id", sid)
+
+    assert code == 0
+    assert sid in output and "续接成功" in output
+    assert len(provider.calls) == 1
+    assert [m.content for m in provider.calls[0] if m.role == "assistant"] == ["Saved history marker"]
+    reopened = SQLiteSessionStore(cfg.db_path)
+    try:
+        assert [m.content for m in reopened.load(sid, owner_account_id=owner)] == [
+            "Previous request", "Saved history marker", "Continue this task", "续接成功",
+        ]
+        assert [row["session_id"] for row in reopened.list_sessions(owner_account_id=owner)] == [sid]
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    ("sid", "owner", "workspace_id", "error"),
+    [
+        ("missing", "cli-test", "default", "未找到"),
+        ("known", "another-owner", "default", "未找到"),
+        ("known", "cli-test", "default", "工作空间"),
+        ("known::child", "cli-test", "stored-workspace", "未找到"),
+    ],
+    ids=["missing", "foreign-owner", "wrong-workspace", "internal-session"],
+)
+def test_chat_resume_rejects_unavailable_target(
+    capsys, cli_home, tmp_path, monkeypatch, sid, owner, workspace_id, error,
+):
+    from crew.core.mocks import FakeProvider
+    from crew.state.config import Config
+    from crew.state.session_store import SQLiteSessionStore
+
+    cfg = Config(db_path=str(tmp_path / "cli-sessions.db"), cron_enabled=False, title_auto=False)
+    provider = FakeProvider()
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: cfg)
+    monkeypatch.setattr("crew.app.build_provider", lambda _cfg: provider)
+    real_owner = "cli-test"
+    store = SQLiteSessionStore(cfg.db_path)
+    try:
+        store.ensure_session("known", workspace_id="stored-workspace", owner_account_id=real_owner)
+        store.ensure_session("known::child", workspace_id="stored-workspace", owner_account_id=real_owner)
+    finally:
+        store.close()
+
+    code = main(["chat", "--owner", owner, "--workspace-id", workspace_id, "--session-id", sid])
+    assert code == 1
+    assert error in capsys.readouterr().err
+    assert provider.calls == []
+    reopened = SQLiteSessionStore(cfg.db_path)
+    try:
+        assert [row["session_id"] for row in reopened.list_sessions(owner_account_id=real_owner)] == ["known"]
+        assert reopened.list_sessions(owner_account_id="another-owner") == []
+    finally:
+        reopened.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["once", "reject", None], ids=["approve-once", "reject", "eof"])
 async def test_chat_plan_file_approval_preserves_selected_workspace(
