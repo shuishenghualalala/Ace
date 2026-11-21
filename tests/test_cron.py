@@ -590,6 +590,51 @@ async def test_mount_retry_is_bounded_and_checks_owner_activity():
     assert requests == ["A"], "stopped services must not schedule retries"
 
 
+async def test_mount_retry_recovers_from_a_transient_prepare_failure(tmp_path, monkeypatch):
+    store = CronJobStore(str(tmp_path / "retry.db"))
+    store.create(
+        name="retry-job",
+        schedule="every 1h",
+        query="run",
+        session_id="retry-session",
+        owner_account_id=OWNER,
+    )
+
+    async def runner(_envelope):
+        return None
+
+    original = store.prepare_owner_jobs_for_mount_async
+    attempts = 0
+
+    async def flaky(owner, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("temporarily locked")
+        return await original(owner, **kwargs)
+
+    monkeypatch.setattr(store, "prepare_owner_jobs_for_mount_async", flaky)
+    service = CronService(
+        store,
+        runner,
+        owner_active=lambda owner: owner == OWNER,
+        mount_retry_delays=(0.01, 0.05),
+    )
+    await service.start()
+    try:
+        task = service.request_owner_mount(OWNER)
+        await asyncio.gather(task, return_exceptions=True)
+        for _ in range(100):
+            if OWNER in service.mounted_owners:
+                break
+            await asyncio.sleep(0.01)
+        assert OWNER in service.mounted_owners
+        assert attempts == 2
+        assert service.mount_failures == {}
+    finally:
+        await service.stop()
+
+
 def test_recover_running_fire_marks_abandoned_without_replay(tmp_path):
     store = CronJobStore(str(tmp_path / "c.db"))
     job = store.create(
