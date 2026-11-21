@@ -1202,11 +1202,18 @@ export async function hydrateBackendState(): Promise<void> {
   if (!sessionLoadError && !workspaceLoadError) await restoreRendererCheckpointNavigation(openSession);
   updateGatewayDot();
   refreshSidebarAfterHydrate(openSession);
-  const sessions = await list.complete;
-  if (owner === interactiveOwnerKey() && sessions.length && !sessions[0]?.sidebar_status) {
-    const statuses = await backendApi.sessionsStatus().catch(() => ({}));
-    if (owner === interactiveOwnerKey() && isRendererLoggedIn()) seedStatuses(statuses);
-  }
+  // The preview already renders the actionable sidebar. Let the full directory
+  // finish in the background so a large history cannot delay first-session use;
+  // status seeding still happens once that snapshot arrives.
+  void list.complete
+    .then(async (sessions) => {
+      if (owner !== interactiveOwnerKey() || !isRendererLoggedIn()) return;
+      if (sessions.length && !sessions[0]?.sidebar_status) {
+        const statuses = await backendApi.sessionsStatus().catch(() => ({}));
+        if (owner === interactiveOwnerKey() && isRendererLoggedIn()) seedStatuses(statuses);
+      }
+    })
+    .catch(() => {});
 }
 
 export async function ensureDesktopGateway(): Promise<void> {
