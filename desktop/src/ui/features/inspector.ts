@@ -424,8 +424,9 @@ function parseToolPath(args: string | undefined): string | null {
 }
 
 function resetFileDiffCache(sessionId: string | null): void {
-  if (fileDiffCacheSessionId === sessionId) return;
-  fileDiffCacheSessionId = sessionId;
+  const owner = interactiveOwnerKey();
+  if (fileCacheScope?.sessionId === sessionId && fileCacheScope.owner === owner) return;
+  fileCacheScope = { owner, sessionId };
   fileDiffCache.clear();
   fileDiffHydrateInflight.clear();
   fileContentCache.clear();
@@ -557,47 +558,52 @@ function currentFileChanges(): FileChange[] {
   return prioritize(scopedFilePaths.map((path) => byPath.get(path) ?? fileChangeFromPath(path)));
 }
 
+function beginFileRead(inflight: Map<string, symbol>, path: string) {
+  const token = Symbol();
+  const sessionId = state.activeSessionId;
+  const owner = interactiveOwnerKey();
+  inflight.set(path, token);
+  const current = () => inflight.get(path) === token
+    && state.activeSessionId === sessionId && interactiveOwnerKey() === owner;
+  return {
+    current,
+    settle() {
+      const accepted = current();
+      // An invalidated read may finish while its replacement still owns this path.
+      if (inflight.get(path) === token) inflight.delete(path);
+      return accepted;
+    },
+  };
+}
+
 async function hydrateFileDiffIfNeeded(filePath: string): Promise<void> {
   if (!filePath || fileDiffCache.has(filePath) || fileDiffHydrateInflight.has(filePath)) return;
   if (fileMissingOnDisk.has(filePath)) return;
   const sid = state.activeSessionId;
   const backendFile = sid ? getBookFileChanges(sid).find((f) => f.path === filePath) : undefined;
-  if (backendFile?.status === 'deleted') return;
-  if (backendFile?.diff?.length) return;
-  if (!window.Crew?.readTextFile) return;
-  fileDiffHydrateInflight.add(filePath);
-  let listChanged = false;
+  if (backendFile?.status === 'deleted' || backendFile?.diff?.length) return;
+  const crew = window.Crew;
+  if (!crew?.readTextFile) return;
+  const read = beginFileRead(fileDiffHydrateInflight, filePath);
+  let missing = false;
+  let text: string | undefined;
   try {
-    // 先静默探测，避免对已删临时文件调用 readTextFile 刷主进程 ENOENT
-    if (window.Crew?.pathExists && !(await window.Crew.pathExists(filePath))) {
-      fileMissingOnDisk.add(filePath);
-      fileDiffCache.set(filePath, []);
-      expandedFiles.delete(filePath);
-      listChanged = true;
-    } else {
-      const text = await window.Crew.readTextFile(filePath);
-      if (typeof text !== 'string' || !text) {
-        fileMissingOnDisk.add(filePath);
-        fileDiffCache.set(filePath, []);
-        listChanged = true;
-      } else {
-        const rows = buildDiffFromTexts(null, text);
-        if (rows.length > 0) fileDiffCache.set(filePath, rows);
-      }
-    }
+    missing = Boolean(crew.pathExists && !(await crew.pathExists(filePath)));
+    if (!missing && read.current()) text = await crew.readTextFile(filePath);
   } catch {
-    // 路径不存在 / 无权限：记缺失，避免展开时反复读盘，并从看板列表剔除
+    missing = true;
+  }
+  if (!read.settle()) return;
+  if (missing || typeof text !== 'string' || !text) {
     fileMissingOnDisk.add(filePath);
     fileDiffCache.set(filePath, []);
-    expandedFiles.delete(filePath);
-    listChanged = true;
-  } finally {
-    fileDiffHydrateInflight.delete(filePath);
+    if (missing) expandedFiles.delete(filePath);
+    renderTabs();
+  } else {
+    const rows = buildDiffFromTexts(null, text);
+    if (rows.length > 0) fileDiffCache.set(filePath, rows);
   }
-  if (state.activeSessionId !== fileDiffCacheSessionId) return;
-  // 列表变短时必须同步 tab 角标，否则会出现「内容 1 个文件、角标仍 10」
-  if (listChanged) renderTabs();
-  if (activeTab === 'files') renderBody();
+  if (inspectorOpen && activeTab === 'files') renderBody();
 }
 
 /** Build an offline HTML preview document without inheriting host privileges. */
@@ -617,31 +623,28 @@ async function hydrateFileContentIfNeeded(filePath: string): Promise<void> {
   ) {
     return;
   }
-  fileContentHydrateInflight.add(filePath);
+  const read = beginFileRead(fileContentHydrateInflight, filePath);
   fileContentErrors.delete(filePath);
+  const crew = window.Crew;
+  let result: string | FileBinaryPreview | { error: string } = { error: '当前环境不支持读取此文件' };
   try {
-    if (window.Crew?.pathExists && !(await window.Crew.pathExists(filePath))) {
-      fileContentErrors.set(filePath, '文件不存在，无法生成页面预览');
-    } else if (isTextPreviewKind(kind) && window.Crew?.readTextFile) {
-      const text = await window.Crew.readTextFile(filePath);
-      if (typeof text === 'string') fileContentCache.set(filePath, text);
-      else fileContentErrors.set(filePath, '文件内容无法读取');
-    } else if (isBinaryPreviewKind(kind) && window.Crew?.readFileBase64) {
-      const payload = await window.Crew.readFileBase64(filePath);
-      if (payload?.base64) fileBinaryCache.set(filePath, payload);
-      else fileContentErrors.set(filePath, '文件内容无法读取');
-    } else {
-      fileContentErrors.set(filePath, '当前环境不支持读取此文件');
+    if (crew?.pathExists && !(await crew.pathExists(filePath))) {
+      result = { error: '文件不存在，无法生成页面预览' };
+    } else if (read.current() && isTextPreviewKind(kind) && crew?.readTextFile) {
+      const text = await crew.readTextFile(filePath);
+      result = typeof text === 'string' ? text : { error: '文件内容无法读取' };
+    } else if (read.current() && isBinaryPreviewKind(kind) && crew?.readFileBase64) {
+      const payload = await crew.readFileBase64(filePath);
+      result = payload?.base64 ? payload : { error: '文件内容无法读取' };
     }
   } catch (error) {
-    fileContentErrors.set(
-      filePath,
-      `页面预览加载失败：${error instanceof Error ? error.message : String(error)}`,
-    );
-  } finally {
-    fileContentHydrateInflight.delete(filePath);
+    result = { error: `页面预览加载失败：${error instanceof Error ? error.message : String(error)}` };
   }
-  if (state.activeSessionId === fileDiffCacheSessionId && activeTab === 'files') renderBody();
+  if (!read.settle()) return;
+  if (typeof result === 'string') fileContentCache.set(filePath, result);
+  else if ('error' in result) fileContentErrors.set(filePath, result.error);
+  else fileBinaryCache.set(filePath, result);
+  if (inspectorOpen && activeTab === 'files') renderBody();
 }
 
 /** Plan tab：读后端 todo 快照（与真实状态同步）。无 todo 工具调用时返回空。 */
@@ -816,18 +819,19 @@ function filterOutPlanDocuments(files: FileChange[]): FileChange[] {
 
 /** 磁盘回读 / 参数回退生成的 diff 缓存（按会话内文件路径）。 */
 const fileDiffCache = new Map<string, BackendDiffRow[]>();
-const fileDiffHydrateInflight = new Set<string>();
+const fileDiffHydrateInflight = new Map<string, symbol>();
 type FileViewMode = 'preview' | 'code';
+type FileBinaryPreview = { base64: string; mimeType: string };
 const fileContentCache = new Map<string, string>();
-const fileBinaryCache = new Map<string, { base64: string; mimeType: string }>();
-const fileContentHydrateInflight = new Set<string>();
+const fileBinaryCache = new Map<string, FileBinaryPreview>();
+const fileContentHydrateInflight = new Map<string, symbol>();
 const fileContentErrors = new Map<string, string>();
 const fileViewMode = new Map<string, FileViewMode>();
 const fileEditMode = new Set<string>();
 const fileSaveInflight = new Set<string>();
 /** 读盘确认不存在的路径（临时脚本写了又删）；看板不再展示，也不再重试读盘。 */
 const fileMissingOnDisk = new Set<string>();
-let fileDiffCacheSessionId: string | null = null;
+let fileCacheScope: { owner: string; sessionId: string | null } | undefined;
 
 function renderInspectorHeader(): string {
   const c = computeContextStats();
@@ -1800,6 +1804,8 @@ function collectOfficeEditorBlockEdits(filePath: string): Array<{ index: number;
 }
 
 function invalidateFilePreviewCache(filePath: string): void {
+  fileContentHydrateInflight.delete(filePath);
+  fileDiffHydrateInflight.delete(filePath);
   fileContentCache.delete(filePath);
   fileBinaryCache.delete(filePath);
   fileContentErrors.delete(filePath);
@@ -2758,14 +2764,7 @@ export function getInspectorActiveTab(): TabKey {
 }
 
 export function invalidateFileDiffCachePaths(paths: string[]): void {
-  for (const p of paths) {
-    fileDiffCache.delete(p);
-    fileDiffHydrateInflight.delete(p);
-    fileContentCache.delete(p);
-    fileBinaryCache.delete(p);
-    fileContentHydrateInflight.delete(p);
-    fileContentErrors.delete(p);
-  }
+  for (const path of paths) invalidateFilePreviewCache(path);
 }
 
 export function refreshInspector(): void {

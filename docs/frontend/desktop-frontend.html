@@ -872,5 +872,9 @@
   <p>验证覆盖：健康探针不重叠、loop lag 连续样本和恢复迟滞、状态横幅文案、legacy connected 兼容，以及发送能力在 transport 断开时的隔离。</p>
 </section>
 
+<section id="inspector-file-preview-reads">
+  <h2>对话文件卡与看板预览</h2>
+  <p>对话文件卡把文件范围交给看板 Files 面板。看板按类型读取受主进程校验的文件，再渲染预览或 diff。每次异步读取登记账号、会话、路径和本次请求。保存、收到文件变更或切换账号/会话时，旧请求失效；旧结果与错误都不写入缓存，不清除替代请求，也不重绘当前预览。HTML 的离线 CSP、iframe 沙箱和文件 IPC 校验保持原样。</p>
+</section>
 </body>
 </html>

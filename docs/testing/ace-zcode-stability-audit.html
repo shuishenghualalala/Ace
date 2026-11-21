@@ -380,6 +380,13 @@
 <p><strong>Linux 原生诊断导出 · <code>93631f3d</code></strong> UOS 正式包的 Electron 43.1 在 Debian 12.15 / WSL2 的独立 Xvfb、普通用户和原 Chromium 沙箱下运行。对四个不同的实际渲染进程逐个注入崩溃。前三次分别在 1.374、1.847、2.643 秒恢复，双端口均通过同一 Gateway 的实例校验。第四次出现原生错误对话框，从中选取导出，使用 GTK 保存窗口将诊断写入临时目录。2,917 字节的 JSON 含四次失败、三次重试、一次耗尽，总计 16 条事件，与主进程恢复日志逐项一致。通过原生按钮退出后，桌面及 Gateway 均返回 0，双端口可重新绑定。最小 Debian 测试环境缺少中文字体，原生按钮中的中文以缺字框显示。</p>
 <p class="evidence">Ace <code>desktop/src/main/index.ts:1164</code>、<code>:1189</code>、<code>:1199</code>。ZCode <code>packages/desktop/src/main/desktopCrashCapture.ts:360</code>、<code>:422</code>，<code>desktopStabilityTelemetry.ts:864</code>。</p>
 </article>
+<article id="file-preview-read-order">
+<h3>迟到的文件读取会覆盖已更新的看板预览</h3>
+<p>在对话文件卡打开看板 Files 后，同一路径的读取可以在文件变更期间交叠。基线先显示新 HTML，较早的读取随后返回，却把看板重绘为旧页面。ZCode 的 PreviewPane 在查看目标更新或卸载时让旧读取失效；工作流产物读取同时绑定会话、运行、产物和版本。</p>
+<p>Ace 在预览与 diff 的读取入口绑定账号、会话、路径和本次请求。文件变更、本地保存或切换作用域后，迟到的成功或错误均不能修改缓存、结束替代读取或重绘看板。此项不改变原有离线 HTML 沙箱、文件授权或浏览器接管。</p>
+<p><strong>验收</strong> 用同一路径两次读取的闸门夹具复现基线覆盖，候选保留新页面及同一 iframe；迟到错误也不能替换结果。文件、Office、Excel 与看板预览回归 42 项通过，桌面 TypeScript 检查通过。隔离的 Windows Electron 以真实对话文件卡打开看板、通过 IPC 读取临时文件，确认修订后的沙箱文档实际加载；释放第一笔旧读取后仍保留当前 iframe，共两次读盘，退出码为 0。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/inspector.ts</code>、<code>conversation-renderer.ts:215–250</code>。ZCode <code>packages/ui/src/PreviewPane.tsx:936–998</code>、<code>packages/ui/src/hooks/useWorkflowRunArtifactBytes.ts:88–146</code>。</p>
+</article>
 <article id="browser-control-handoff">
 <h3>D7a · 同一浏览器标签切换控制权时页面闪烁</h3>
 <p>现场预览版 <code>5b647266</code> 在本地时间 11:51:03 成功打开本地 HTML。截图时间为 11:51:40，随后诊断在 11:51:56.552 记录前台渲染器心跳超时，11:51:57.510 新窗口就绪。隔离 Windows Electron 43.1 另复现同一内嵌 HTML 标签由人工切换到 AI 时，原生视图被隐藏、移除并重新挂载。ZCode 用稳定的 guest generation 保留浏览器视图，控制权由浏览器管理器更新。</p>

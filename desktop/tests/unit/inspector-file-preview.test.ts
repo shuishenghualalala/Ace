@@ -5,7 +5,7 @@ import JSZip from 'jszip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { __resetAllStoresForTest, messageStore, sessionStore } from '../../src/ui/stores/stores';
 import { ensureSessionBook, patchBook, setActiveSessionId } from '../../src/ui/state';
-import { buildHtmlPreviewDocument, openInspectorToTab } from '../../src/ui/features/inspector';
+import { buildHtmlPreviewDocument, invalidateFileDiffCachePaths, openInspectorToTab, refreshInspector } from '../../src/ui/features/inspector';
 
 vi.mock('../../src/ui/backend-client', () => ({
   backendApi: {
@@ -207,6 +207,44 @@ describe('Inspector HTML 文件预览', () => {
     await vi.waitFor(() => expect(readFileBase64).toHaveBeenCalledWith('/tmp/demo/history.pptx'));
     await vi.waitFor(() => expect(document.querySelector('.inspector-office-preview--pptx')).toBeTruthy());
     expect(document.body.textContent).not.toContain('正在加载PPT 预览');
+  });
+
+  it.each(['旧内容', '旧错误'])('同一路径更新后，迟到的%s不会替换已显示的新预览', async (outcome) => {
+    const path = '/tmp/demo/revision-preview.html';
+    const sid = `preview-${outcome}`;
+    setActiveSessionId(sid);
+    messageStore.set({ messages: { [sid]: [{ id: 'u1', role: 'user', content: '预览页面', timestamp: 1 }] } });
+    patchBook(sid, {
+      fileChanges: [{ path, name: 'revision-preview.html', added: 1, removed: 0, status: 'modified', diff: [{ line: 1, kind: 'add', text: 'Demo' }] }],
+    });
+    let returnOld!: () => void;
+    const oldReply = new Promise<string>((resolve, reject) => {
+      returnOld = outcome === '旧内容'
+        ? () => resolve('<h1>Outdated preview</h1>')
+        : () => reject(new Error('Outdated read failed'));
+    });
+    let startOld!: () => void;
+    let startNew!: () => void;
+    const oldStarted = new Promise<void>((resolve) => { startOld = resolve; });
+    const newStarted = new Promise<void>((resolve) => { startNew = resolve; });
+    const newReply = Promise.resolve('<h1>Updated preview</h1>');
+    readTextFile.mockImplementationOnce(() => { startOld(); return oldReply; });
+    readTextFile.mockImplementationOnce(() => { startNew(); return newReply; });
+
+    openInspectorToTab('files', { expandFilePath: path, filePaths: [path] });
+    await oldStarted;
+    invalidateFileDiffCachePaths([path]);
+    refreshInspector();
+    await newStarted;
+    await newReply;
+    const frame = () => document.querySelector<HTMLIFrameElement>('.inspector-file__preview-frame');
+    expect(frame()?.getAttribute('srcdoc')).toContain('Updated preview');
+    const mounted = frame();
+
+    returnOld();
+    await oldReply.catch(() => {});
+    expect(frame()?.getAttribute('srcdoc')).toContain('Updated preview');
+    expect(frame()).toBe(mounted);
   });
 
   it('HTML 文件默认展示沙箱页面，按钮可切换到代码并切回预览', async () => {
