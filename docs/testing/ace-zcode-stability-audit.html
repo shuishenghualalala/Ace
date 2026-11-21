@@ -506,10 +506,11 @@
 <p class="evidence">Ace <code>desktop/src/ui/app.ts</code>、<code>features/composer-mention.ts</code>、<code>conversation-panel.ts</code>。ZCode <code>packages/ui/src/v4/SessionPane.tsx:2856–2865</code>、<code>packages/ui/src/SlashCommandPlugin.tsx:283–305</code>。</p>
 </article>
 <article id="renderer-heartbeat-probe">
-<h3>D7h · 丢失定时心跳时确认当前渲染器仍能应答</h3>
-<p>ZCode 主要用 Chromium 的原生无响应和恢复事件记录冻结，并独立处理浏览网页的来宾进程。Ace 继续处理原生事件，并在补充的前台定时心跳路径上增加一次即时应答确认。超过 16 秒后向当前可信主文档发探测，最多等待一个检查周期（当前 4 秒）。原定时心跳或探测应答都会续上本代计时。</p>
-<p><strong>验收</strong> Windows Electron 43.1 在隔离隐藏窗口中使用真实 preload、主进程与 IPC，人工注入前台监控条件，同时令 Chromium 文档实际隐藏以停止定时心跳。旧版在 16.001 秒判为无响应，同一渲染进程在 16.110 秒仍能通过受信 IPC 在 2 毫秒内应答。候选在 16.003 秒发探测，16.004 秒收到答复，保留原文档。独立的实时 JS 阻塞控制仍触发恢复，使用缩短的测试阈值。正常应答路径未发送探测。34 项回归与完整 TypeScript 检查通过。现场前台窗口为什么漏心跳仍待核对。</p>
-<p class="evidence">Ace <code>desktop/src/main/renderer-recovery.ts</code>、<code>preload.ts</code>。ZCode <code>packages/desktop/src/main/desktopStabilityTelemetry.ts:857</code>。</p>
+<h3>D7h · 丢失定时心跳时确认渲染器并记录诊断上下文</h3>
+<p>ZCode 的 <code>desktopStabilityTelemetry.ts</code> 监听 Chromium 的 <code>unresponsive</code>/<code>responsive</code>，再计时上报 ANR 与 freeze。Ace 保留相同原生事件恢复，并额外监控可见、非最小化且聚焦的主窗口：心跳年龄超过 16 秒后经当前可信 preload 发即时探测，最多等一个检查周期（4 秒）。</p>
+<p><strong>诊断改进</strong> 原日志只写“心跳失败”，无法看出探测是否发出、渲染器是否应答或当时窗口是否确实处于监控状态。现在现有 <code>renderer-recovery.jsonl</code> 分别记录探测发出/应答；事件带最后心跳年龄、主进程检查间隔、探测往返毫秒和窗口可见/最小化/焦点状态。监控重置事件注明主进程长暂停或窗口进入/离开监控范围；失败事件保存当时状态，便于区分计时暂停、窗口条件变化和 renderer 无应答。记录不包含 URL、会话或账号信息。</p>
+<p><strong>验收</strong> Windows Electron 43.1 隔离窗口使用真实 preload、主进程与 IPC，注入前台监控条件并令 Chromium 文档实际隐藏以停止定时心跳。旧版在 16.001 秒判为无响应，同一渲染进程在 16.110 秒仍能通过受信 IPC 在 2 毫秒内应答。候选在 16.003 秒发探测，16.004 秒收到答复，保留原文档。独立的实时 JS 阻塞控制仍触发恢复，正常应答不发探测。新增字段在 10 项恢复状态机回归中核对；TypeScript 与目标文件 ESLint 通过。新增遥测尚未用实际现场复现验证，因此原始漏心跳原因仍待核实。</p>
+<p class="evidence">Ace <code>desktop/src/main/renderer-recovery.ts</code>、<code>desktop/src/main/index.ts</code>、<code>desktop/src/main/preload.ts</code>。ZCode <code>packages/desktop/src/main/desktopStabilityTelemetry.ts:806</code>、<code>:864</code>。</p>
 </article>
 <article id="security-turn-error-diagnostics">
 <h3>D7i · 聊天区区分沙箱未就绪、权限拒绝和运行时错误</h3>

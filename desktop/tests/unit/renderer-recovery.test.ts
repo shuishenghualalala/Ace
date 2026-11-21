@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { RendererRecovery } from '../../src/main/renderer-recovery';
+import { RendererRecovery, type RendererWatchState } from '../../src/main/renderer-recovery';
 
 const timings = { startupMs: 1_000, hangMs: 400, heartbeatMs: 800, stableMs: 5_000, retryDelaysMs: [10, 20] };
 
-function fixture(watchHeartbeat?: () => boolean, probeHeartbeat?: (documentId: number) => void) {
+const activeWindow: RendererWatchState = { visible: true, minimized: false, focused: true };
+
+function fixture(watchHeartbeat?: () => RendererWatchState | null, probeHeartbeat?: (documentId: number) => void) {
   const callbacks = {
     record: vi.fn(), release: vi.fn(), restart: vi.fn(), exhausted: vi.fn(), watchHeartbeat, probeHeartbeat,
   };
@@ -74,7 +76,7 @@ describe('main renderer recovery', () => {
 
   it('recovers a foreground renderer with no heartbeat even if Electron reports no native hang', () => {
     let foreground = false;
-    const { recovery, release, restart, record } = fixture(() => foreground);
+    const { recovery, release, restart, record } = fixture(() => foreground ? activeWindow : null);
     const id = recovery.begin();
     recovery.ready(id);
     vi.advanceTimersByTime(2_000);
@@ -97,15 +99,26 @@ describe('main renderer recovery', () => {
 
   it('keeps a renderer that answers the active probe after its interval heartbeat is missing', () => {
     const probe = vi.fn();
-    const { recovery, release } = fixture(() => true, probe);
+    const { recovery, release, record } = fixture(() => activeWindow, probe);
     const id = recovery.begin();
     recovery.ready(id);
 
     vi.advanceTimersByTime(800);
     expect(probe).toHaveBeenCalledExactlyOnceWith(id);
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'renderer-heartbeat-probe-sent',
+      heartbeatAgeMs: 800,
+      monitorDelayMs: 200,
+      windowState: activeWindow,
+    }));
     expect(release).not.toHaveBeenCalled();
 
-    recovery.heartbeat(id);
+    recovery.heartbeat(id, 'probe');
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'renderer-heartbeat-probe-responded',
+      heartbeatAgeMs: 800,
+      probeElapsedMs: 0,
+    }));
     vi.advanceTimersByTime(600);
     expect(recovery.isReady(id)).toBe(true);
     expect(release).not.toHaveBeenCalled();
@@ -114,7 +127,7 @@ describe('main renderer recovery', () => {
 
   it('still recovers when neither the interval heartbeat nor the active probe returns', () => {
     const probe = vi.fn();
-    const { recovery, release, restart, record } = fixture(() => true, probe);
+    const { recovery, release, restart, record } = fixture(() => activeWindow, probe);
     const id = recovery.begin();
     recovery.ready(id);
 
@@ -126,14 +139,19 @@ describe('main renderer recovery', () => {
     expect(release).toHaveBeenCalledExactlyOnceWith(id);
     expect(restart).toHaveBeenCalledExactlyOnceWith(id);
     expect(record).toHaveBeenCalledWith(expect.objectContaining({
-      event: 'renderer-failed', failure: { reason: 'unresponsive', signal: 'heartbeat' },
+      event: 'renderer-failed',
+      failure: { reason: 'unresponsive', signal: 'heartbeat' },
+      heartbeatAgeMs: 1_000,
+      probeElapsedMs: 200,
+      monitorDelayMs: 200,
+      windowState: activeWindow,
     }));
   });
 
   it('clears an outstanding heartbeat probe when the window leaves the foreground', () => {
     const probe = vi.fn();
     let foreground = true;
-    const { recovery, release } = fixture(() => foreground, probe);
+    const { recovery, release, record } = fixture(() => foreground ? activeWindow : null, probe);
     const id = recovery.begin();
     recovery.ready(id);
 
@@ -141,6 +159,10 @@ describe('main renderer recovery', () => {
     expect(probe).toHaveBeenCalledExactlyOnceWith(id);
     foreground = false;
     vi.advanceTimersByTime(600);
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'renderer-heartbeat-monitor-reset',
+      monitorResetReason: 'window-not-monitored',
+    }));
 
     foreground = true;
     vi.advanceTimersByTime(799);
@@ -149,18 +171,28 @@ describe('main renderer recovery', () => {
     vi.advanceTimersByTime(1);
     expect(probe).toHaveBeenCalledTimes(2);
     expect(recovery.isReady(id)).toBe(true);
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'renderer-heartbeat-monitor-reset',
+      monitorResetReason: 'window-monitored',
+      windowState: activeWindow,
+    }));
   });
 
   it('grants a fresh heartbeat interval after the main process wakes from a long pause', () => {
     let now = 0;
     const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
-    const { recovery, release } = fixture(() => true);
+    const { recovery, release, record } = fixture(() => activeWindow);
     try {
       const id = recovery.begin();
       recovery.ready(id);
       now += 60_000;
       vi.advanceTimersByTime(200);
       expect(release).not.toHaveBeenCalled();
+      expect(record).toHaveBeenCalledWith(expect.objectContaining({
+        event: 'renderer-heartbeat-monitor-reset',
+        monitorResetReason: 'main-process-pause',
+        monitorDelayMs: 60_000,
+      }));
       for (let i = 0; i < 3; i++) {
         now += 200;
         vi.advanceTimersByTime(200);

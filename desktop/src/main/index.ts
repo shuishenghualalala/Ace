@@ -261,8 +261,12 @@ const rendererRecovery = new RendererRecovery({
   },
   watchHeartbeat: (documentId) => {
     const win = mainWindow;
-    return !isQuitting && rendererDocumentId === documentId && win !== null && !win.isDestroyed()
-      && win.isVisible() && !win.isMinimized() && win.isFocused();
+    if (isQuitting || rendererDocumentId !== documentId || !win || win.isDestroyed()) return null;
+    return {
+      visible: win.isVisible(),
+      minimized: win.isMinimized(),
+      focused: win.isFocused(),
+    };
   },
 });
 
@@ -3214,9 +3218,9 @@ function registerIpc() {
     }
     return { ok: true };
   });
-  ipcMain.on('renderer:heartbeat', (event) => {
+  ipcMain.on('renderer:heartbeat', (event, source: unknown) => {
     try { assertTrustedRenderer(event); } catch { return; }
-    rendererRecovery.heartbeat(rendererDocumentId);
+    rendererRecovery.heartbeat(rendererDocumentId, source === 'probe' ? 'probe' : 'interval');
   });
   trustedHandle('update:start-download', async (_e, raw: unknown) => {
     const args = parseOrThrow(UpdateStartDownloadArgs.parse(raw), 'update:start-download');
