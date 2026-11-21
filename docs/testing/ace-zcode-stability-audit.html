@@ -320,6 +320,12 @@
 <p>Windows 两个真实本机 Gateway 进程使用同一隔离数据目录。强制终止前分别观察到一个已接收未取得执行权的步骤、一个模型确实已进入的步骤；重启后两者保留各自请求 ID、暂停目标并标记中断，未重放。显式恢复目标后，必须再次提交新版推进命令才有新模型调用。日志按同一请求 ID 记录接收、取得执行权、收尾或重启中断，并仅记录状态、原因与耗时。桌面和 Web 的推进控件、自动续跑和独立验收仍未接入。</p>
 <p class="evidence">Ace <code>crew/gateway/goal_steps.py</code>、<code>crew/gateway/dispatcher.py</code>、<code>crew/state/session_goals.py</code>、<code>tests/gateway/test_session_goals.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/target-continuation-loop.ts:45–85</code>、<code>target-completion-verification.ts:40–87,132–145</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts:371–425</code>。</p>
 </article>
+<article id="independent-goal-verification">
+<h3>Goal 单轮结束后的独立验收</h3>
+<p>ZCode 的续跑路径给独立模型空工具清单，再把验收结论加入目标记录。Ace 在此前台推进基础上提供版本化的 <code>verify</code>，仅针对当前已结束的一轮，使用当前会话模型检查有上限的已保存证据。模型只给出判定和确切引文，服务端核对引文确实出现过、至少一条来自该轮回复，并在原账号、会话实例、目标和证据修订均有效时提交。无效 JSON、假引文、工具调用或超时均不完成目标。除请求模型外，验收不读写文件或访问外部服务，也不写聊天历史。</p>
+<p><strong>验收</strong> 真实生产入口先复现未实现验收以及归档、退出账号、SQLite 提交前退出三处竞态。候选组合 203 项后端回归及 1 项主库归属检查通过，Ruff 通过。用受控模型验证一次正向验收、证据不足、伪造或过滤后的引文、意外工具请求、超时、计划文件改动后重新进入 Plan、普通历史在验收期间变更、暂停、归档与退出。Windows 隔离 Gateway 在模型已开始验收后强制终止；新进程保留原验收 ID、标记中断且不重放。重新显式恢复并验收通过后，公开历史响应仍逐字节相同。</p>
+<p class="evidence">Ace <code>crew/gateway/goal_verification.py</code>、<code>crew/gateway/goal_steps.py</code>、<code>crew/state/session_goals.py</code>、<code>tests/gateway/test_session_goals.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/target-completion-verification.ts:40–87,132–145,197–218</code>。本次验收入口为 Gateway API；界面和自动续跑不在该切片。</p>
+</article>
 <article id="web-session-goal">
 <h3>Web 从 /goal 管理已保存的会话目标</h3>
 <p>ZCode 由输入层识别完整斜杠词及参数，目标通过专用命令进入会话。Ace Web 在已有内置主会话中用 <code>/goal</code> 打开编辑器，参数可预填；用户保存后从真实目标接口更新版本和状态。编辑、操作和冲突恢复都不生成聊天帧。</p>

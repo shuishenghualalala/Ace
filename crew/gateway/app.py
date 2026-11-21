@@ -203,6 +203,7 @@ def create_app(crew: CrewApp | None = None, *, desktop_managed: bool = False) ->
         team_manager=crew.team,
         interaction_bridge=interaction_bridge,
         security_service=crew.security_service,
+        stop_goal_verification=goal_steps.stop_verification_for_owner if goal_steps is not None else None,
     )
     crew.logout_coordinator = logout_coordinator
     def _prepare_owner_storage() -> None:

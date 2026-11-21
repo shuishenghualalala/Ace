@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from crew.core.runctx import current_owner_account_id
 from crew.state.logging import get_logger
@@ -51,6 +51,7 @@ class LogoutCoordinator:
         team_manager: Any | None = None,
         interaction_bridge: Any | None = None,
         security_service: Any | None = None,
+        stop_goal_verification: Callable[[str], Awaitable[None]] | None = None,
         logout_timeout_seconds: float = 10.0,
     ) -> None:
         self._active_owner = active_owner
@@ -65,6 +66,7 @@ class LogoutCoordinator:
         self._team_manager = team_manager
         self._interaction_bridge = interaction_bridge
         self._security_service = security_service
+        self._stop_goal_verification = stop_goal_verification
         self._logout_timeout_seconds = max(0.001, float(logout_timeout_seconds))
         self._lock = asyncio.Lock()
         self._draining_owners: set[str] = set()
@@ -284,6 +286,12 @@ class LogoutCoordinator:
             closed_sockets = 0
             requires_gateway_restart = False
 
+            if self._stop_goal_verification is not None:
+                try:
+                    await self._stop_goal_verification(owner)
+                except Exception:
+                    log.exception("Logout 停止目标验收失败 owner=%s", owner)
+                    errors.append("goal_verification: cleanup failed")
             await self._cancel_activation(owner)
             cron_service = self._current_cron_service()
             if cron_service is not None:

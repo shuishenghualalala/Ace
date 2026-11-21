@@ -6,13 +6,22 @@ import asyncio
 import time
 from collections.abc import Coroutine
 from contextlib import aclosing
+from threading import Event
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from crew.core.envelope import Envelope, TurnOutcome
 from crew.features.outbound import format_outbound_payload
 from crew.gateway.dispatcher import ForegroundAdmission
+from crew.gateway.goal_verification import VerificationVerdict, verify_goal
 from crew.state.logging import get_logger
-from crew.state.session_goals import GoalSnapshot, GoalStepConflict, ReservedGoalStep, SessionGoalStore, StepTerminal
+from crew.state.session_goals import (
+    GoalSnapshot,
+    GoalStepConflict,
+    ReservedGoalStep,
+    ReservedGoalVerification,
+    SessionGoalStore,
+    StepTerminal,
+)
 
 if TYPE_CHECKING:
     from crew.app import CrewApp
@@ -32,6 +41,8 @@ class GoalSteps:
         self._goals = goals
         self._closing = False
         self._tasks: set[asyncio.Task] = set()
+        self._verification_worker: tuple[str, Event, asyncio.Task[GoalSnapshot | None]] | None = None
+        self._verification_call: tuple[ReservedGoalVerification, asyncio.Task[VerificationVerdict]] | None = None
 
     def _start(self, operation: Coroutine[Any, Any, _T], *, name: str) -> asyncio.Task[_T]:
         task = asyncio.create_task(operation, name=name)
@@ -48,6 +59,102 @@ class GoalSteps:
     async def recover(self) -> None:
         for request_id in await asyncio.to_thread(self._goals.recover_steps):
             log.info("goal_step_interrupted entry_point=http_goal request_id=%s code=gateway_restarted", request_id)
+        for request_id in await asyncio.to_thread(self._goals.recover_verifications):
+            log.info("goal_verification_interrupted entry_point=http_goal_verify request_id=%s code=gateway_restarted", request_id)
+
+    async def verify(self, owner: str, session_id: str, version: str) -> GoalSnapshot | None:
+        blocker = self._dispatcher.foreground_blocker(session_id, owner)
+        previous = self._verification_worker
+        if previous is not None and not previous[2].done():
+            blocker = "goal_verifier_busy"
+        if self._closing or blocker:
+            if await asyncio.to_thread(self._goals.read, owner, session_id) is None:
+                return None
+            raise GoalStepConflict(blocker or "goal_gateway_draining", "会话或验收服务正在使用，暂不能验收目标")
+        cancelled = Event()
+        worker = self._start(self._verify(owner, session_id, version, self._dispatcher.owner_epoch(owner), cancelled),
+                             name="goal-verification")
+        self._verification_worker = (owner, cancelled, worker)
+        return await asyncio.shield(worker)
+
+    async def stop_verification_for_owner(self, owner: str) -> None:
+        active = self._verification_worker
+        if active is None or active[0] != owner or active[2].done():
+            return
+        _, cancelled, worker = active
+        cancelled.set()
+        if self._verification_call is not None and self._verification_call[0].owner == owner:
+            self._verification_call[1].cancel()
+        # Pending SQLite writes are allowed to settle while logout retains the lease.
+        await asyncio.shield(worker)
+
+    async def _verify(
+        self, owner: str, session_id: str, version: str, epoch: int, cancelled: Event,
+    ) -> GoalSnapshot | None:
+        if await self._crew.tasks.active_stop_targets(session_id, owner):
+            if await asyncio.to_thread(self._goals.read, owner, session_id) is None:
+                return None
+            raise GoalStepConflict("goal_session_busy", "会话还有任务未结束，暂不能验收目标")
+        executor = self._crew.config.agent_executor
+        check = await asyncio.to_thread(self._goals.reserve_verification, owner, session_id, version, executor)
+        if check is None:
+            return None
+        rid = check.check.request_id
+        start = time.monotonic()
+        log.info("goal_verification_started entry_point=http_goal_verify request_id=%s step_request_id=%s",
+                 rid, check.check.step_request_id)
+        def scope_lost() -> bool:
+            return (cancelled.is_set() or self._closing or self._dispatcher.owner_epoch(owner) != epoch
+                    or self._dispatcher.owner_is_blocked(owner))
+
+        async def check_plan() -> str:
+            manager = self._crew.plan_manager
+            try:
+                return "goal_plan_active" if manager is not None and await asyncio.to_thread(
+                    manager.is_active, session_id, owner_account_id=owner,
+                ) else ""
+            except Exception:
+                return "goal_plan_unconfirmed"
+
+        async def call_verifier() -> VerificationVerdict:
+            current = await asyncio.to_thread(self._goals.read, owner, session_id, check.incarnation)
+            if scope_lost() or current is None or current.version != check.version:
+                return VerificationVerdict("interrupted", "goal_verification_scope_lost")
+            return await verify_goal(self._crew, check)
+
+        plan_blocker = await check_plan()
+        if scope_lost():
+            verdict = VerificationVerdict("interrupted", "goal_verification_scope_lost")
+        elif plan_blocker:
+            verdict = VerificationVerdict("interrupted", plan_blocker)
+        elif self._dispatcher.foreground_blocker(session_id, owner):
+            verdict = VerificationVerdict("interrupted", "goal_session_busy")
+        else:
+            call = asyncio.create_task(call_verifier(), name=rid)
+            self._verification_call = (check, call)
+            try:
+                verdict = await call
+            except asyncio.CancelledError:
+                verdict = VerificationVerdict("interrupted", "goal_verification_cancelled")
+            except Exception:
+                verdict = VerificationVerdict("unconfirmed", "goal_verification_failed")
+            finally:
+                self._verification_call = None
+        if verdict.state == "passed" and (plan_blocker := await check_plan()):
+            verdict = VerificationVerdict("interrupted", plan_blocker)
+        if scope_lost():
+            verdict = VerificationVerdict("interrupted", "goal_verification_scope_lost")
+        elif self._dispatcher.foreground_blocker(session_id, owner) not in {"", "goal_gateway_busy"}:
+            verdict = VerificationVerdict("interrupted", "goal_evidence_changed")
+        result = await asyncio.to_thread(
+            self._goals.finish_verification, check, verdict.state, verdict.code, verdict.citations, executor, cancelled.is_set,
+        )
+        settled = result.verification if result is not None else None
+        own_result = settled is not None and settled.request_id == rid
+        log.info("goal_verification_settled entry_point=http_goal_verify request_id=%s state=%s code=%s elapsed_ms=%.1f",
+                 rid, settled.state if own_result else "discarded", settled.code if own_result else "goal_changed",
+                 (time.monotonic() - start) * 1000)
+        return result
 
     async def advance(self, owner: str, session_id: str, version: str) -> GoalSnapshot | None:
         dispatcher = self._dispatcher
@@ -87,6 +194,11 @@ class GoalSteps:
         snapshot = await asyncio.to_thread(self._goals.apply, owner, session_id, "pause", version)
         if snapshot is not None and snapshot.run is not None and snapshot.run.state == "stopping":
             await self._dispatcher.stop_request(session_id, snapshot.run.request_id, owner_account_id=owner)
+        if snapshot is not None and snapshot.verification is not None and self._verification_call is not None:
+            check, call = self._verification_call
+            if (owner, session_id, snapshot.verification.request_id) == (check.owner, check.session_id, check.check.request_id):
+                if snapshot.verification.state == "interrupted":
+                    call.cancel()
         return snapshot
 
     async def _run(self, step: ReservedGoalStep, epoch: int) -> None:
@@ -166,6 +278,10 @@ class GoalSteps:
 
     async def close(self) -> None:
         self._closing = True
+        if self._verification_worker is not None:
+            self._verification_worker[1].set()
+        if self._verification_call is not None:
+            self._verification_call[1].cancel()
         if not self._tasks:
             return
         # The dispatcher owns interruption and protects already-settling writes.

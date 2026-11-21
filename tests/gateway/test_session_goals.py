@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from threading import Event
 from time import monotonic, sleep
@@ -10,6 +12,7 @@ from time import monotonic, sleep
 import pytest
 from starlette.testclient import TestClient
 
+from crew.agent.plan import write_plan
 from crew.app import build_app
 from crew.core.mocks import FakeProvider
 from crew.core.types import ChatResponse, ToolCall
@@ -143,6 +146,249 @@ def test_advance_goal_runs_one_foreground_step_without_marking_the_goal_complete
                 if item["role"] in {"user", "assistant"} and item["content"]] == [
             ("user", "推进已保存的会话目标。"), ("assistant", "goal fixture reply"),
         ]
+
+
+class VerificationModel(FakeProvider):
+    def __init__(self, transform=lambda result: result):
+        super().__init__()
+        self.checks = []
+        self.transform = transform
+
+    async def chat(self, messages, tools=None, **kwargs):
+        if kwargs.get("purpose") != "goal-completion-verification":
+            self.calls.append(messages)
+            return ChatResponse(text="Synthetic invoice subtotal: 72 credits", finish_reason="stop")
+        self.checks.append((messages, tools))
+        data = json.loads(messages[-1].content)
+        entry = next(row for row in data["evidence"] if row["text"] == "Synthetic invoice subtotal: 72 credits")
+        verdict = {"passed": True, "citations": [{"seq": entry["seq"], "quote": entry["text"]}]}
+        result = self.transform(verdict)
+        if isinstance(result, ChatResponse):
+            return result
+        return ChatResponse(text=json.dumps(result), finish_reason="stop")
+
+
+def test_goal_verification_uses_separate_no_tool_model_call_and_saved_evidence(goal_gateway):
+    provider = VerificationModel()
+    objective = "Return the exact synthetic invoice subtotal"
+    sid = "verified-goal"
+    path = f"/api/session/{sid}/goal"
+    with goal_gateway(provider) as (client, _crew):
+        assert client.post(f"/api/session/{sid}/ensure", json={}).status_code == 200
+        saved = _set(client, path, client.get(path).json()["version"], objective).json()
+        assert saved["supports_verify"] is True
+        unopened = client.post(path, json={"action": "verify", "version": saved["version"]})
+        assert unopened.status_code == 409 and unopened.json()["code"] == "goal_verification_no_step"
+        assert client.post(path, json={"action": "advance", "version": saved["version"]}).status_code == 202
+        step = _wait_run(client, path, "finished")
+        assert step["goal"]["status"] == "active" and provider.checks == []
+        before_history = client.get(f"/api/session/{sid}/history").json()
+        reviewed = client.post(path, json={"action": "verify", "version": step["version"]})
+        assert reviewed.status_code == 200, reviewed.text
+        final = reviewed.json()
+        assert final["goal"] == {"objective": objective, "status": "completed"}
+        assert final["version"] != step["version"]
+        assert final["run"] == step["run"]
+        assert final["verification"]["state"] == "passed"
+        assert final["verification"]["step_request_id"] == step["run"]["request_id"]
+        assert len(final["verification"]["evidence_sequences"]) == 1
+        assert len(provider.calls) == 1 and len(provider.checks) == 1
+        assert provider.checks[0][1] == []
+        assert client.get(f"/api/session/{sid}/history").json() == before_history
+        assert client.post(path, json={"action": "verify", "version": step["version"]}).status_code == 409
+        assert len(provider.checks) == 1
+    with goal_gateway(VerificationModel()) as (client, _crew):
+        assert client.get(path).json() == final
+
+
+def _finished_fixture_goal(client, sid):
+    path, saved = _active_goal(client, sid)
+    assert client.post(path, json={"action": "advance", "version": saved["version"]}).status_code == 202
+    return path, _wait_run(client, path, "finished")
+
+
+@pytest.mark.parametrize(("transform", "state", "code"), [
+    pytest.param(lambda _: {"passed": False, "citations": []}, "incomplete", "goal_evidence_insufficient", id="incomplete"),
+    pytest.param(lambda _: ChatResponse(text="Done!", finish_reason="stop"), "unconfirmed", "goal_verification_bad_response",
+                 id="invalid-json"),
+    pytest.param(lambda verdict: {**verdict, "citations": [{**verdict["citations"][0], "quote": "Unseen evidence"}]},
+                 "unconfirmed", "goal_verification_bad_citations", id="invented-quote"),
+    pytest.param(lambda verdict: ChatResponse(text=json.dumps(verdict), finish_reason="stop",
+                 tool_calls=[ToolCall("fixture-call", "fixture-no-tool")]), "unconfirmed", "goal_verification_tool_call",
+                 id="attempted-tool-call"),
+])
+def test_goal_verification_does_not_complete_without_positive_valid_evidence(goal_gateway, transform, state, code):
+    provider = VerificationModel(transform)
+    with goal_gateway(provider) as (client, _crew):
+        path, step = _finished_fixture_goal(client, "goal-verify-fail-closed")
+        result = client.post(path, json={"action": "verify", "version": step["version"]})
+        assert result.status_code == 200, result.text
+        assert result.json()["goal"]["status"] == "active"
+        assert result.json()["verification"]["state"] == state
+        assert result.json()["verification"]["code"] == code
+        assert result.json()["verification"]["evidence_sequences"] == []
+        assert len(provider.checks) == 1
+
+
+def test_goal_verification_refuses_a_reopened_plan_without_calling_the_model(goal_gateway):
+    provider = VerificationModel()
+    sid = "goal-verify-reopened-plan"
+    with goal_gateway(provider) as (client, crew):
+        path, step = _finished_fixture_goal(client, sid)
+        crew.plan_manager.enter(sid, owner_account_id="local")
+        plan = write_plan(sid, "# Previously approved fixture", owner_account_id="local")
+        crew.plan_manager.request_approval(sid, owner_account_id="local")
+        crew.plan_manager.approve(sid, owner_account_id="local")
+        assert client.get(f"/api/session/{sid}/plan").json()["phase"] == "approved"
+        # Simulate a real edit of an approved Plan. The next manager read
+        # restores it to active, even though SQLite still shows approved.
+        plan.write_text("# Edited plan requires new approval", encoding="utf-8")
+        response = client.post(path, json={"action": "verify", "version": step["version"]})
+        assert response.status_code == 200, response.text
+        assert response.json()["goal"]["status"] == "active"
+        assert response.json()["verification"]["state"] == "interrupted"
+        assert response.json()["verification"]["code"] == "goal_plan_active"
+        assert provider.checks == []
+
+
+@pytest.mark.parametrize("prefix_length", [24, 1776])
+def test_goal_verifier_redacts_before_truncation_and_cannot_cite_a_generated_placeholder(goal_gateway, prefix_length):
+    secret = "fake_fixture_token_not_a_credential"
+
+    class RedactionProbe(FakeProvider):
+        async def chat(self, messages, tools=None, **kwargs):
+            if kwargs.get("purpose") != "goal-completion-verification":
+                return ChatResponse(text="Test line " + "a" * prefix_length + f" token={secret}", finish_reason="stop")
+            self.calls.append(messages)
+            evidence = json.loads(messages[-1].content)["evidence"]
+            row = next(record for record in evidence if record["step_reply"])
+            return ChatResponse(text=json.dumps({
+                "passed": True, "citations": [{"seq": row["seq"], "quote": "token=[REDACTED]"}],
+            }), finish_reason="stop")
+
+    provider = RedactionProbe()
+    with goal_gateway(provider) as (client, _crew):
+        path, step = _finished_fixture_goal(client, "goal-verify-redacted-evidence")
+        result = client.post(path, json={"action": "verify", "version": step["version"]})
+        assert result.status_code == 200, result.text
+        assert result.json()["goal"]["status"] == "active"
+        assert result.json()["verification"]["code"] == "goal_verification_bad_citations"
+        assert len(provider.calls) == 1
+        evidence = json.loads(provider.calls[0][-1].content)["evidence"]
+        row = next(record for record in evidence if record["step_reply"])
+        assert secret[:6] not in row["text"] and "token=[" in row["text"]
+
+
+class HeldVerificationModel(VerificationModel):
+    def __init__(self):
+        super().__init__()
+        self.entered = Event()
+        self.exited = Event()
+        self.release = asyncio.Event()
+
+    async def chat(self, messages, tools=None, **kwargs):
+        if kwargs.get("purpose") == "goal-completion-verification":
+            self.entered.set()
+            try:
+                await self.release.wait()
+            finally:
+                self.exited.set()
+        return await super().chat(messages, tools, **kwargs)
+
+
+def test_goal_verification_deadline_cancels_without_changing_the_target(goal_gateway, monkeypatch):
+    monkeypatch.setattr("crew.gateway.goal_verification.VERIFICATION_TIMEOUT_SECONDS", 0.3)
+    provider = HeldVerificationModel()
+    with goal_gateway(provider) as (client, _crew):
+        path, step = _finished_fixture_goal(client, "goal-verify-deadline")
+        response = client.post(path, json={"action": "verify", "version": step["version"]})
+        assert response.status_code == 200, response.text
+        assert provider.entered.is_set() and provider.exited.is_set()
+        current = response.json()
+        assert current["goal"]["status"] == "active"
+        assert current["verification"]["state"] == "unconfirmed"
+        assert current["verification"]["code"] == "goal_verification_timeout"
+
+
+@pytest.mark.parametrize("change", ["ordinary", "pause", "archive", "logout"])
+def test_goal_verification_cannot_publish_success_after_history_or_target_changes(goal_gateway, change):
+    provider = HeldVerificationModel()
+    sid = "goal-verification-race"
+    with goal_gateway(provider) as (client, _crew):
+        path, step = _finished_fixture_goal(client, sid)
+        with ThreadPoolExecutor(max_workers=1) as thread:
+            pending = thread.submit(client.post, path, json={"action": "verify", "version": step["version"]})
+            try:
+                assert provider.entered.wait(5)
+                checking = client.get(path).json()
+                assert checking["verification"]["state"] == "running"
+                conflicting = client.post(path, json={"action": "verify", "version": checking["version"]})
+                assert conflicting.status_code == 409
+                if change == "ordinary":
+                    _send(client, sid, "Add committed history while the verdict is pending")
+                elif change == "pause":
+                    paused = client.post(path, json={"action": "pause", "version": checking["version"]})
+                    assert paused.status_code == 200
+                    assert paused.json()["goal"]["status"] == "paused"
+                    assert provider.exited.wait(5), "exact verifier call was not cancelled by pause"
+                elif change == "archive":
+                    archive = f"/api/session/{sid}/archive"
+                    assert client.put(archive, json={"archived": True}).status_code == 200
+                    assert client.get(path).status_code == 404
+                    assert client.put(archive, json={"archived": False}).status_code == 200
+                    assert client.get(path).json()["verification"]["state"] == "interrupted"
+                else:
+                    released = client.post("/api/auth/logout")
+                    assert released.status_code == 200 and released.json()["released"]
+                    assert provider.exited.is_set(), "logout must not leave a verifier holding the old owner scope"
+            finally:
+                client.portal.call(provider.release.set)
+            response = pending.result(timeout=8)
+        assert response.status_code == 200
+        expected = {
+            "ordinary": ("active", "goal_evidence_changed"),
+            "pause": ("paused", "goal_changed"),
+            "archive": ("active", "goal_session_archived"),
+            "logout": ("active", "goal_verification_scope_lost"),
+        }[change]
+        snapshot = response.json()
+        assert snapshot["verification"]["request_id"] == checking["verification"]["request_id"]
+        assert snapshot["verification"]["state"] == "interrupted"
+        assert (snapshot["goal"]["status"], snapshot["verification"]["code"]) == expected
+        assert client.get(path).json() == snapshot
+
+
+def test_logout_fences_a_verdict_waiting_for_the_sqlite_commit(goal_gateway, monkeypatch):
+    provider = VerificationModel()
+    with goal_gateway(provider) as (client, crew):
+        path, step = _finished_fixture_goal(client, "verify-during-logout")
+        commit_entered, release = Event(), Event()
+        original = crew.session_store.goals.finish_verification
+
+        def held_finish(*args, **kwargs):
+            commit_entered.set()
+            assert release.wait(8)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(crew.session_store.goals, "finish_verification", held_finish)
+        with ThreadPoolExecutor(max_workers=2) as threads:
+            pending = threads.submit(client.post, path, json={"action": "verify", "version": step["version"]})
+            try:
+                assert commit_entered.wait(5)
+                logout = threads.submit(client.post, "/api/auth/logout")
+                deadline = monotonic() + 4
+                while not logout.done() and client.get(path).status_code != 423:
+                    assert monotonic() < deadline
+                    sleep(0.01)
+                assert not logout.done(), "logout released the Owner while its verifier had not settled"
+            finally:
+                release.set()
+            assert pending.result(timeout=5).status_code == 200
+            assert logout.result(timeout=5).json()["released"] is True
+        current = client.get(path).json()
+        assert current["goal"]["status"] == "active"
+        assert current["verification"]["state"] == "interrupted"
+        assert current["verification"]["code"] == "goal_verification_scope_lost"
 
 
 class HeldModel(FakeProvider):

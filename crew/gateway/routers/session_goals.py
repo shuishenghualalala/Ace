@@ -16,7 +16,7 @@ from crew.state.session_goals import GoalAction, GoalSnapshot, GoalStepConflict,
 
 
 class GoalChange(BaseModel):
-    action: GoalAction | Literal["advance"]
+    action: GoalAction | Literal["advance", "verify"]
     version: Annotated[str, Field(min_length=1, max_length=128)]
     objective: Annotated[str, Field(max_length=4000)] = ""
 
@@ -24,9 +24,11 @@ class GoalChange(BaseModel):
 def _response(snapshot: GoalSnapshot | None, *, status: int = 200) -> JSONResponse:
     if snapshot is None:
         return JSONResponse({"error": "当前账号下没有可设置目标的会话"}, status_code=404)
-    body = {**asdict(snapshot), "supports_advance": True}
+    body = {**asdict(snapshot), "supports_advance": True, "supports_verify": True}
     if snapshot.run is None:
         body.pop("run")
+    if snapshot.verification is None:
+        body.pop("verification")
     return JSONResponse(body, status_code=status)
 
 
@@ -44,6 +46,8 @@ def create_session_goals_router(goals: SessionGoalStore, steps: GoalSteps) -> AP
         try:
             if change.action == "advance":
                 return _response(await steps.advance(owner, session_id, change.version), status=202)
+            if change.action == "verify":
+                return _response(await steps.verify(owner, session_id, change.version))
             if change.action == "pause":
                 return _response(await steps.pause(owner, session_id, change.version))
             snapshot = await asyncio.to_thread(

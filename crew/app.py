@@ -3202,8 +3202,10 @@ class CrewApp:
     async def owner_provider(
         self,
         owner_account_id: str,
+        *,
+        session_model: str | None = None,
     ) -> AsyncIterator[LLMProvider]:
-        """Yield the owner-default Provider for a request-scoped auxiliary task.
+        """Yield the effective Provider for a request-scoped auxiliary task.
 
         Owner-local model profiles need their own client because their API Key is
         intentionally isolated from the process-wide environment.  A profile
@@ -3213,8 +3215,11 @@ class CrewApp:
         """
 
         owner = str(owner_account_id or "").strip()
-        profile = self.config.owner_default_model_profile(owner) if owner else None
-        owns_provider = bool(owner and profile is not None and profile.has_key)
+        if session_model is None:
+            profile = self.config.owner_default_model_profile(owner) if owner else None
+            owns_provider = bool(owner and profile is not None and profile.has_key)
+        else:
+            profile, owns_provider, _ = self._resolve_session_provider_profile(owner, session_model)
         provider = (
             build_provider_for_profile(
                 profile, self.config.stream_read_timeout, owner_account_id=owner, config=self.config,
