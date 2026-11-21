@@ -110,6 +110,7 @@
   </table>
 
   <h3>2.1 静态检查</h3>
+  <p class="note">pytest 默认由 <code>pyproject.toml</code> 的 <code>addopts = -m 'not e2e'</code> 跳过真实模型用例；单跑 E2E 用 <code>-m e2e</code>，确实需要全量时显式 <code>-m ""</code>。</p>
   <pre><code>uv run ruff check .
 uv run lint-imports
 cd desktop &amp;&amp; npm run typecheck &amp;&amp; npm run lint
