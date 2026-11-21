@@ -82,27 +82,50 @@ async def _open_ws(app):
 
 
 @pytest.mark.asyncio
-async def test_gateway_replays_mcp_update_approval(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("tool_name", "tool_arguments", "final_text", "expected_header"),
+    [
+        (
+            "mcp_update",
+            {
+                "name": "echo",
+                "transport": "http",
+                "url": "__MCP_URL__",
+                "headers": {"X-Replay": "1"},
+            },
+            "updated",
+            "X-Replay",
+        ),
+        ("mcp_remove", {"name": "echo"}, "removed", None),
+    ],
+)
+async def test_gateway_replays_mcp_approval(
+    tmp_path,
+    monkeypatch,
+    tool_name,
+    tool_arguments,
+    final_text,
+    expected_header,
+):
     from crew.app import build_app
 
     process, mcp_url = _start_http_mcp()
-    fixture = tmp_path / "mcp_update.jsonl"
+    arguments = {
+        key: mcp_url if value == "__MCP_URL__" else value
+        for key, value in tool_arguments.items()
+    }
+    fixture = tmp_path / f"{tool_name}.jsonl"
     fixture.write_text(
         json.dumps({
             "text": "",
             "tool_calls": [{
-                "id": "call_replay_update",
-                "name": "mcp_update",
-                "arguments": {
-                    "name": "echo",
-                    "transport": "http",
-                    "url": mcp_url,
-                    "headers": {"X-Replay": "1"},
-                },
+                "id": f"call_replay_{tool_name}",
+                "name": tool_name,
+                "arguments": arguments,
             }],
             "finish_reason": "tool_calls",
         }) + "\n" + json.dumps({
-            "text": "updated",
+            "text": final_text,
             "tool_calls": [],
             "finish_reason": "stop",
         }) + "\n",
@@ -149,7 +172,7 @@ async def test_gateway_replays_mcp_update_approval(tmp_path, monkeypatch):
     crew.active_owner.claim("local")
     app = create_app(crew)
     workspace_id = "default"
-    session_id = "replay-mcp-update"
+    session_id = f"replay-{tool_name}"
     crew.session_store.ensure_session(
         session_id, workspace_id=workspace_id, owner_account_id="local",
     )
@@ -160,13 +183,13 @@ async def test_gateway_replays_mcp_update_approval(tmp_path, monkeypatch):
             if rows and all(row.get("connected") for row in rows):
                 break
             await asyncio.sleep(0.05)
-        request_id = "replay-mcp-update-turn"
+        request_id = f"replay-{tool_name}-turn"
         frames = []
         async with _open_ws(app) as (send, receive):
             await send({
                 "session_id": session_id,
                 "request_id": request_id,
-                "query": "Update the echo MCP server headers.",
+                "query": "Change the echo MCP server.",
                 "mode": "agent",
                 "workspace_id": workspace_id,
             })
@@ -181,7 +204,7 @@ async def test_gateway_replays_mcp_update_approval(tmp_path, monkeypatch):
                             "session_id": session_id,
                             "request_id": request_id,
                             "question_id": body.get("question_id"),
-                            "submission_id": "approve-update",
+                            "submission_id": f"approve-{tool_name}",
                             "answers": [{"id": "perm", "answers": ["allow_once"]}],
                         })
                 if event.get("is_final") is True:
@@ -189,10 +212,14 @@ async def test_gateway_replays_mcp_update_approval(tmp_path, monkeypatch):
         assert any(
             event.get("kind") == "followup_question" for event in frames
         ), frames
-        assert "X-Replay" in config_file.read_text(encoding="utf-8")
+        persisted = config_file.read_text(encoding="utf-8")
+        if expected_header:
+            assert expected_header in persisted
+        else:
+            assert "echo:" not in persisted
         assert any(
             event.get("is_final") is True
-            and (event.get("body") or {}).get("text") == "updated"
+            and (event.get("body") or {}).get("text") == final_text
             for event in frames
         ), frames
     finally:
