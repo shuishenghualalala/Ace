@@ -110,6 +110,8 @@
   <pre><code>get_crew_home()/skills/lark-doc  --symlink-->  ~/.agents/skills/lark-doc</code></pre>
   <p><code>list_skills</code> 的 <code>is_user</code> 判定用 <code>resolve_skill_path</code>：软链 skill 因受信任根放行通过，正确标记 <code>source=user</code>（不误判 builtin）。</p>
 
+  <p>技能市场只列随包可选项与本地共享源，不提供填写远程市场索引、Git 仓库或网页地址的入口。远程 HTTP/SSE MCP 端点可在设置的「MCP 服务」中单独配置，不会作为技能市场源。</p>
+
   <h2>5. 安全校验（核心）</h2>
   <p><code>resolve_skill_path(path, allowed_root)</code> 解析路径（跟随软链），证明最终目标在 allowed_root 内，越界则抛 <code>SkillPathError</code>。被 <code>scan_skills</code> / <code>_scan_dir</code> / <code>_iter_skill_files</code> / <code>_validate_skill_tree</code> / <code>read_skill_text</code> / <code>uninstall</code> 全链路调用。</p>
   <div class="warn">

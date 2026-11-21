@@ -304,6 +304,12 @@
 <p>Windows 官方 Gateway 副本的旧版在正常删除源后，仍共享前缀的子孙历史各返回 HTTP 400。加载最终候选后，同一类子孙均能读取原四行，逐行来源和消息 ID 不变。两个分叉各含一对子孙，四个会话均继续聊天并完成，共七次回环模型请求。新连接查得四个完成回执。重启不重跑模型，四个会话的原始历史和回执响应逐字节相同。两次进程正常退出并释放双端口。</p>
 <p class="evidence">Ace <code>crew/state/session_store.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/session-fork.ts:585</code>、<code>:660</code>，<code>apps/zcode-cli/packages/adapters/src/storage/session-store/sqlite-session-store.ts:374</code>。</p>
 </article>
+<article id="external-marketplace-sources">
+<h3>技能市场源与 MCP 服务地址是不同配置</h3>
+<p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
+<p>Ace 的技能市场请求随包可选源和本机共享目录，只按现有目录项安装，不接收自定义市场源地址。设置的 MCP 服务表单已支持填写 HTTP 或 SSE 服务端点；具有管理资格的前台对话可在一次确认后用 <code>mcp_install</code> 走同一配置与连接流程。当前记录为源码核对，未接入第三方市场或服务。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/skills-page.ts:592–606</code>、<code>settings-mcp.ts:552–579</code>、<code>crew/gateway/routers/misc.py:174–186、223–229</code>、<code>crew/gateway/routers/mcp_servers.py:77–98</code>。ZCode <code>packages/ui/src/settings/AddMarketplaceSourceDialog.tsx:43–55</code>、<code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/plugins.ts:294–310</code>、<code>packages/adapters/src/plugins/marketplace.ts:291–337</code>。</p>
+</article>
 </section>
 
 <section id="desktop">
