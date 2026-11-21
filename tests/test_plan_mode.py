@@ -1033,6 +1033,7 @@ def test_effective_tool_filter_narrows_in_plan():
 
     class _Stub:
         tool_filter = None
+        _tool_filter_resolver = None
         plan_manager = mgr
         registry = reg
 
@@ -1074,6 +1075,7 @@ def test_effective_tool_filter_plan_active_owner_isolated():
 
     class _Stub:
         tool_filter = ["file_read", "enter_plan_mode", "exit_plan_mode"]
+        _tool_filter_resolver = None
         plan_manager = mgr
 
     stub = _Stub()
