@@ -233,8 +233,22 @@ def build_cron_feature(
         async with lease_factory[0](label):
             await base_runner(envelope)
 
+    def _owner_active(owner: str) -> bool:
+        try:
+            return any(
+                str(getattr(lease, "owner_account_id", "")) == owner
+                for lease in host.active_owner.list()
+            )
+        except Exception:  # noqa: BLE001 - an unavailable owner snapshot means no retry
+            return False
+
     service = (
-        CronService(store, run_with_lease, max_parallel_jobs=max_parallel_jobs)
+        CronService(
+            store,
+            run_with_lease,
+            max_parallel_jobs=max_parallel_jobs,
+            owner_active=_owner_active,
+        )
         if enabled
         else None
     )

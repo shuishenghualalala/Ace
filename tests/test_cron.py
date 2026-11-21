@@ -538,10 +538,15 @@ async def test_finish_fire_async_commits_run_and_job_summary_together(tmp_path):
 
 async def test_stale_owner_mount_failure_does_not_degrade_newer_mount():
     service = object.__new__(CronService)
+    service._running = False
     service._mount_tasks = set()
     service._mount_errors = {}
     service._mounted_owners = {OWNER}
     service._pending_mounts = {}
+    service._mount_retry_tasks = {}
+    service._mount_retry_attempts = {}
+    service._mount_retry_delays = ()
+    service._owner_active = None
 
     async def fail():
         raise sqlite3.OperationalError("old lock")
@@ -556,6 +561,33 @@ async def test_stale_owner_mount_failure_does_not_degrade_newer_mount():
     await asyncio.gather(current, return_exceptions=True)
     service._owner_mount_finished(OWNER, current)
     assert OWNER in service.mount_failures
+
+
+async def test_mount_retry_is_bounded_and_checks_owner_activity():
+    service = object.__new__(CronService)
+    service._running = True
+    service._mounted_owners = set()
+    service._pending_mounts = {}
+    service._mount_errors = {}
+    service._mount_retry_tasks = {}
+    service._mount_retry_attempts = {}
+    service._mount_retry_delays = (0.0,)
+    service._owner_active = lambda owner: owner == "A"
+    requests: list[str] = []
+    service.request_owner_mount = lambda owner: requests.append(owner)  # type: ignore[method-assign]
+
+    service._schedule_mount_retry("A")
+    await asyncio.sleep(0.05)
+    assert requests == ["A"]
+
+    service._schedule_mount_retry("B")
+    await asyncio.sleep(0.05)
+    assert requests == ["A"], "inactive owners must not be re-mounted"
+
+    service._running = False
+    service._schedule_mount_retry("A")
+    await asyncio.sleep(0.05)
+    assert requests == ["A"], "stopped services must not schedule retries"
 
 
 def test_recover_running_fire_marks_abandoned_without_replay(tmp_path):

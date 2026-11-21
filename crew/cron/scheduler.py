@@ -92,10 +92,16 @@ class CronService:
         runner: JobRunner,
         *,
         max_parallel_jobs: int = 2,
+        owner_active: Callable[[str], bool] | None = None,
+        mount_retry_delays: tuple[float, ...] = (5.0, 15.0, 30.0),
     ) -> None:
         self._store = store
         self._runner = runner
         self._max_parallel_jobs = max(1, int(max_parallel_jobs or 1))
+        self._owner_active = owner_active
+        self._mount_retry_delays = tuple(float(value) for value in mount_retry_delays)
+        self._mount_retry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._mount_retry_attempts: dict[str, int] = {}
         self._scheduler: AsyncIOScheduler | None = None
         self._running = False
         self._start_error = ""
@@ -488,6 +494,7 @@ class CronService:
         pending = self._pending_mounts.get(owner)
         if pending is not None:
             return pending[1]
+        self._cancel_mount_retry(owner)
 
         mount = _OwnerMount(self._scheduler)
         task = asyncio.create_task(self._complete_owner_mount(owner, mount), name=f"cron-mount:{owner}")
@@ -511,6 +518,54 @@ class CronService:
                 return
             self._mount_errors[owner] = str(error)[:500]
             log.error("CronService Owner 挂载失败", exc_info=error)
+            self._schedule_mount_retry(owner)
+
+    def _cancel_mount_retry(self, owner: str) -> None:
+        task = self._mount_retry_tasks.pop(owner, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _mount_retry_finished(self, owner: str, task: asyncio.Task[None]) -> None:
+        if self._mount_retry_tasks.get(owner) is task:
+            self._mount_retry_tasks.pop(owner, None)
+
+    def _schedule_mount_retry(self, owner: str) -> None:
+        if not self._running or owner in self._mounted_owners or owner in self._pending_mounts:
+            return
+        if self._owner_active is not None and not self._owner_active(owner):
+            return
+        attempt = self._mount_retry_attempts.get(owner, 0)
+        if attempt >= len(self._mount_retry_delays):
+            return
+        self._cancel_mount_retry(owner)
+        delay = self._mount_retry_delays[attempt]
+        self._mount_retry_attempts[owner] = attempt + 1
+        task = asyncio.create_task(
+            self._retry_owner_mount(owner, delay),
+            name=f"cron-mount-retry:{owner}",
+        )
+        self._mount_retry_tasks[owner] = task
+        task.add_done_callback(
+            lambda done, owner=owner: self._mount_retry_finished(owner, done)
+        )
+
+    async def _retry_owner_mount(self, owner: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        if not self._running or owner in self._mounted_owners or owner in self._pending_mounts:
+            return
+        if self._owner_active is not None and not self._owner_active(owner):
+            return
+        # This task is the current retry; remove it before requesting so the
+        # request path cannot cancel itself.
+        self._mount_retry_tasks.pop(owner, None)
+        try:
+            self.request_owner_mount(owner)
+        except Exception:  # noqa: BLE001 - a failed retry must not kill the timer callback
+            log.exception("CronService Owner 挂载重试失败: owner=%s", owner)
+            self._schedule_mount_retry(owner)
 
     async def mount_owner_async(self, owner_account_id: str) -> int:
         """Await the same mount as Gateway admission, even if this waiter is cancelled."""
@@ -555,6 +610,8 @@ class CronService:
             raise
         log.info("CronService 已挂载 Owner: owner=%s jobs=%d", owner, len(jobs))
         self._mount_errors.pop(owner, None)
+        self._mount_retry_attempts.pop(owner, None)
+        self._cancel_mount_retry(owner)
         return len(jobs)
 
     async def unmount_owner(
@@ -572,6 +629,8 @@ class CronService:
         if pending is not None:
             pending[0].revoked.set()
         self._mount_errors.pop(owner, None)
+        self._mount_retry_attempts.pop(owner, None)
+        self._cancel_mount_retry(owner)
         if not owner or owner not in self._mounted_owners:
             return 0
         self._mounted_owners.discard(owner)
@@ -600,6 +659,9 @@ class CronService:
         async with self._lifecycle_lock:
             self._running = False
             self._mount_errors.clear()
+            self._mount_retry_attempts.clear()
+            for owner in list(self._mount_retry_tasks):
+                self._cancel_mount_retry(owner)
             for owner in set(self._mounted_owners).union(self._pending_mounts):
                 await self.unmount_owner(owner, terminal_status="abandoned")
             if self._mount_tasks:
