@@ -85,7 +85,13 @@ def build_health_components(
     elif cron_service is None:
         cron_status = {"status": "disabled"}
     elif bool(getattr(cron_service, "is_running", False)):
-        cron_status = {"status": "ready"}
+        if getattr(cron_service, "mount_failures", None):
+            cron_status = {
+                "status": "degraded",
+                "message": "部分账号的定时任务未挂载，请重新连接或查看 Gateway 日志",
+            }
+        else:
+            cron_status = {"status": "ready"}
     elif str(getattr(cron_service, "start_error", "") or ""):
         cron_status = {"status": "failed", "message": "定时任务启动失败，请查看 Gateway 日志"}
     else:

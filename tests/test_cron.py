@@ -223,10 +223,13 @@ async def test_cron_feature_keeps_running_when_one_owner_mount_fails(tmp_path, m
         service = app.cron_service
         assert service is not None and service.is_running
         assert service.mounted_owners == frozenset()
+        await asyncio.sleep(0)
+        assert OWNER in service.mount_failures
 
         await service.mount_owner_async(OWNER)
 
         assert service.mounted_owners == {OWNER}
+        assert service.mount_failures == {}
         assert attempts == 2
     finally:
         await app.shutdown()

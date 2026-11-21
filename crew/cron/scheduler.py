@@ -103,6 +103,7 @@ class CronService:
         self._mounted_owners: set[str] = set()
         self._pending_mounts: dict[str, tuple[_OwnerMount, asyncio.Task[int]]] = {}
         self._mount_tasks: set[asyncio.Task[int]] = set()
+        self._mount_errors: dict[str, str] = {}
         self._mounted_job_ids: set[str] = set()
         self._mounted_job_ids_by_owner: dict[str, set[str]] = {}
         self._owner_tasks: dict[str, set[asyncio.Task]] = {}
@@ -401,6 +402,12 @@ class CronService:
 
         return self._start_error
 
+    @property
+    def mount_failures(self) -> dict[str, str]:
+        """Return Owner mount failures until that Owner mounts or unmounts."""
+
+        return dict(self._mount_errors)
+
     async def tick(self, owner_account_id: str | None = None) -> int:
         """Test/compatibility hook that runs due Jobs for mounted Owners."""
 
@@ -486,12 +493,18 @@ class CronService:
         task = asyncio.create_task(self._complete_owner_mount(owner, mount), name=f"cron-mount:{owner}")
         self._pending_mounts[owner] = (mount, task)
         self._mount_tasks.add(task)
-        task.add_done_callback(self._owner_mount_finished)
+        task.add_done_callback(
+            lambda done, owner=owner: self._owner_mount_finished(owner, done)
+        )
         return task
 
-    def _owner_mount_finished(self, task: asyncio.Task[int]) -> None:
+    def _owner_mount_finished(self, owner: str, task: asyncio.Task[int]) -> None:
         self._mount_tasks.discard(task)
-        if not task.cancelled() and (error := task.exception()) is not None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self._mount_errors[owner] = str(error)[:500]
             log.error("CronService Owner 挂载失败", exc_info=error)
 
     async def mount_owner_async(self, owner_account_id: str) -> int:
@@ -536,6 +549,7 @@ class CronService:
             self._mounted_job_ids_by_owner.pop(owner, None)
             raise
         log.info("CronService 已挂载 Owner: owner=%s jobs=%d", owner, len(jobs))
+        self._mount_errors.pop(owner, None)
         return len(jobs)
 
     async def unmount_owner(
@@ -552,6 +566,7 @@ class CronService:
         pending = self._pending_mounts.pop(owner, None)
         if pending is not None:
             pending[0].revoked.set()
+        self._mount_errors.pop(owner, None)
         if not owner or owner not in self._mounted_owners:
             return 0
         self._mounted_owners.discard(owner)
@@ -579,6 +594,7 @@ class CronService:
     async def stop(self) -> None:
         async with self._lifecycle_lock:
             self._running = False
+            self._mount_errors.clear()
             for owner in set(self._mounted_owners).union(self._pending_mounts):
                 await self.unmount_owner(owner, terminal_status="abandoned")
             if self._mount_tasks:

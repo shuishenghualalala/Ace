@@ -162,13 +162,23 @@ def test_health_thread_server_stop_closes_port(health_server):
 
 def test_build_health_components_statuses():
     class _Cron:
-        def __init__(self, *, running: bool = False, start_error: str = "") -> None:
+        def __init__(
+            self, *, running: bool = False, start_error: str = "",
+            mount_failures: dict[str, str] | None = None,
+        ) -> None:
             self.is_running = running
             self.start_error = start_error
+            self.mount_failures = mount_failures or {}
 
     ready = build_health_components("ready", _Cron(running=True))
     assert ready["startup"]["status"] == "ready"
     assert ready["cron"]["status"] == "ready"
+
+    degraded = build_health_components(
+        "ready", _Cron(running=True, mount_failures={"A:uid-a": "database is locked"}),
+    )
+    assert degraded["cron"]["status"] == "degraded"
+    assert "A:uid-a" not in degraded["cron"]["message"]
 
     failed = build_health_components("failed", _Cron(start_error="boom"))
     assert failed["startup"]["status"] == "failed"
