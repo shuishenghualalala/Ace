@@ -2,7 +2,11 @@
 
 import asyncio
 import json
+import os
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -50,6 +54,84 @@ def test_gateway_wires_interaction_bridge_to_team_manager(tmp_path):
     assert crew.interaction_bridge is not None
     assert crew.team is not None
     assert crew.team.interaction_bridge is crew.interaction_bridge
+
+
+@pytest.mark.asyncio
+async def test_startup_recovers_tool_checkpoints_after_writer_process_exit(tmp_path, monkeypatch):
+    db_path = tmp_path / "crew.db"
+    crew_home = tmp_path / ".crew"
+    changed_file = tmp_path / "changed.txt"
+    monkeypatch.setenv("CREW_HOME", str(crew_home))
+    child_source = """
+import os
+import sys
+from pathlib import Path
+from crew.core.types import Message
+from crew.state.session_store import SQLiteSessionStore, SessionEventType
+
+db_path, crew_home, changed_path = sys.argv[1:]
+os.environ["CREW_HOME"] = crew_home
+store = SQLiteSessionStore(db_path)
+
+def seed(session_id, request_id, tool_call_id, tool_name, arguments, result=None):
+    user = Message.user("继续")
+    user.request_id = request_id
+    store.save(session_id, [user], owner_account_id="local")
+    store.set_status(session_id, "running", owner_account_id="local")
+    call = {"tool_call_id": tool_call_id, "name": tool_name, "arguments": arguments}
+    common = {"step": 1, "request_id": request_id}
+    store.record_durable_event(
+        session_id, owner_account_id="local", kind=SessionEventType.ASSISTANT_TOOL_CALLS,
+        payload={**common, "tool_calls": [call]},
+    )
+    store.record_durable_event(
+        session_id, owner_account_id="local", kind=SessionEventType.TOOL_EXECUTION_INTENT,
+        payload={**common, **call},
+    )
+    if result is not None:
+        store.record_durable_event(
+            session_id, owner_account_id="local", kind=SessionEventType.TOOL_RESULT_COMMIT,
+            payload={**common, **call, "status": "ok", "result": result},
+        )
+
+seed("uncertain", "request-uncertain", "write-1", "file_write",
+     {"path": changed_path, "content": "applied-once"})
+with Path(changed_path).open("a", encoding="utf-8") as target:
+    target.write("applied-once\\n")
+seed("committed", "request-committed", "read-1", "file_read",
+     {"path": changed_path}, "observed-before-restart")
+os._exit(0)
+"""
+    subprocess.run(
+        [sys.executable, "-c", child_source, str(db_path), str(crew_home), str(changed_file)],
+        cwd=Path(__file__).resolve().parents[2],
+        env=os.environ.copy(),
+        check=True,
+        timeout=20,
+    )
+
+    crew = build_app(
+        config=Config(db_path=str(db_path), cron_enabled=False, plugins_enabled=[]),
+        enable_team=False,
+    )
+    try:
+        await crew.startup_core()
+
+        uncertain_history = crew.session_store.load("uncertain", owner_account_id="local")
+        uncertain_result = next(message for message in uncertain_history if message.role == "tool")
+        assert "先核对实际状态" in uncertain_result.content
+        assert changed_file.read_text(encoding="utf-8").splitlines() == ["applied-once"]
+        uncertain_outcome = crew.session_store.get_status_details("uncertain", owner_account_id="local")[2]
+        assert uncertain_outcome["code"] == "tool_outcome_unknown"
+
+        committed_history = crew.session_store.load("committed", owner_account_id="local")
+        committed_results = [message for message in committed_history if message.role == "tool"]
+        assert [message.content for message in committed_results] == ["observed-before-restart"]
+        committed_outcome = crew.session_store.get_status_details("committed", owner_account_id="local")[2]
+        assert committed_outcome["code"] == "tool_checkpoints_recovered"
+        assert crew.session_store.recover_interrupted_tool_checkpoints() == 0
+    finally:
+        await crew.shutdown()
 
 
 @pytest.mark.asyncio

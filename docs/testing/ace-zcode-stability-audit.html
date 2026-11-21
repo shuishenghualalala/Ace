@@ -155,10 +155,11 @@
 <p><strong>Plan 断线专项复验 · <code>df400913</code></strong> 原测试没有维持 Gateway 的 lifespan，客户端关闭时，临时宿主也会取消回合。同一提交下，原用例的 16 次 Windows 运行均结束且记录为取消。维持 Gateway 后执行同样操作，4 次任务均从 <code>running</code> 进入 <code>completed</code>。更新后的回归通过真实回环 WebSocket 提交手改稿，在模型执行入口核对文件内容，然后断开提交客户端，确认原请求归属的任务仍完成。Windows 重复 12 次通过，Plan 与审批回执组合 21 项通过。独立副本模拟漏写时，测试读到旧稿并失败。历史 Linux 全量停顿缺少等待时的线程栈，根因未确认。</p>
 </article>
 <article id="agent-execution-recovery">
-<h3>A11 · P1 · 已完成的工作缺少可安全接续的执行检查点</h3>
-<p>Ace 的 D4 将旧 Gateway 已派发的请求标记为不确定，工具审计会补上中断事件和未知副作用状态。它还不能将已完成的工具结果与在途中断的调用重新组装成模型可见上下文。模型流中途失败目前能接续文字，但会取消并清理预执行调用，其中可能包含已完成的只读结果。ZCode 会重建已持久化的工具结果，并为非终态调用补出带中断语义的工具结果。</p>
-<p><strong>修复</strong> 按回合、步骤和工具调用 ID 确认执行意图、结果或可读引用。工具已完成的验证结果只注入一次，对没有完整参数的调用标记未执行，可能已经产生副作用的调用停在核对边界。验收分别在工具结果已完成后断开模型流、文件变更后杀 Gateway、持久结果提交后重启三个位置验证。</p>
-<p class="evidence">Ace <code>crew/gateway/send_inbox.py:88</code>，<code>crew/state/session_store.py:2122</code>，<code>crew/agent/executor/builtin.py:1627</code>。ZCode <code>apps/zcode-cli/packages/core/src/agent/session-history-hydrator.ts:184</code>。</p>
+<h3>A11 · P1 · 已完成工作的工具结果恢复（已修复）</h3>
+<p><strong>基线差异</strong> D4 能识别旧 Gateway 已派发但未收尾的请求，工具审计也会记录未知副作用；基线仍不能把已提交的工具结果重建到下一次模型上下文，流中断时也可能丢掉已经完成的预执行读取。ZCode 在 <code>session-history-hydrator.ts</code> 按持久消息部件恢复完成结果、错误内容和中断占位，并保留原工具调用 ID 与顺序。</p>
+<p><strong>修复 · <code>27343746</code></strong> Ace 在工具派发前持久化调用声明和执行意图，在返回后提交模型可见结果、状态、媒体及大结果文件摘要。<code>CrewApp.startup_core</code> 在任务准入前检查失效写者，按账号、会话分支、请求、步骤和调用 ID 重建工具消息；参数或结果冲突不会被当成成功。已提交且可验证的结果恢复一次，未开始的调用标记未派发，已开始但没有完整结果的调用要求核对实际副作用，不自动重放。活进程中的模型流失败则由 <code>recover_prewarms</code> 结算已派发调用，再把结果放回续写上下文。</p>
+<p><strong>验收 · 本轮复验</strong> 流中断只恢复已派发读取的四种组合通过；冷检查点与分支筛选 3 项、结果与大文件检查点 2 项通过。新增 <code>CrewApp.startup_core</code> 集成测试用独立子进程写入检查点后直接退出：一条在文件副作用后、结果提交前退出，重启后显示待核对且文件只含一次写入；另一条在结果已提交后退出，重启后恢复原结果且没有重复消息。第二次恢复扫描无新增记录。该集成测试通过。</p>
+<p class="evidence">Ace <code>crew/agent/loop/tool_runner.py:391</code>、<code>crew/agent/executor/builtin.py:1777</code>、<code>crew/state/tool_checkpoints.py</code>、<code>crew/state/session_store.py:2542</code>、<code>crew/app.py:2504</code>；测试 <code>tests/test_agent_loop.py</code>、<code>tests/test_session_events.py</code>、<code>tests/test_tool_pipeline.py</code>、<code>tests/gateway/test_gateway_api.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/agent/session-history-hydrator.ts:184</code>。</p>
 </article>
 <article id="agent-stop">
 <h3>A12 · P1 · 工具的实际退出缺少独立确认</h3>
