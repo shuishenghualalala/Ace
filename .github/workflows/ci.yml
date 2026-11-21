@@ -37,8 +37,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.11'
-      # wiki extra 与 README「验证安装」一节保持一致；e2e 标记默认跳过
-      - run: uv sync --extra dev --extra wiki
+      # wiki/docx/xlsx extras 与 README「验证安装」一致；office 技能测试需要
+      # defusedxml/openpyxl，缺失时会在收集阶段报 ModuleNotFoundError。
+      - run: uv sync --extra dev --extra wiki --extra docx --extra xlsx
       # 静态检查与 OS 无关，只在 Linux 一份上跑，避免矩阵三倍重复
       - run: uv run ruff check .
         if: runner.os == 'Linux'
