@@ -1612,6 +1612,34 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
+  it('shares the account Session across tabs from distinct Crew sessions', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+
+    const otherSessionHash = createHash('sha256').update('session-two').digest('hex').slice(0, 32);
+    await host.handleRpc({
+      type: 'request',
+      id: 'two',
+      runtime_key: RUNTIME_KEY,
+      method: 'execute',
+      params: {
+        profile_dir: PROFILE,
+        command: 'tab',
+        args: ['new', '--label', `s${otherSessionHash}-1`, 'https://second.example/'],
+        proxy_url: PROXY_URL,
+        mutating: true,
+      },
+    });
+
+    expect(electron.sessions).toHaveLength(1);
+    expect(electron.sessions[0].profilePath).toBe(PROFILE);
+    expect(electron.views).toHaveLength(2);
+    expect(electron.views[0].options.webPreferences.session)
+      .toBe(electron.views[1].options.webPreferences.session);
+
+    await host.dispose();
+  });
+
   it('materializes an initial blank document before debugger setup and target navigation', async () => {
     electron.initialWebContentsURL = '';
     const host = new BrowserHost(() => fakeWindow());
