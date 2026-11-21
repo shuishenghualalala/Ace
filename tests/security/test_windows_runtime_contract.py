@@ -24,8 +24,10 @@ def test_sandbox_accounts_cannot_read_the_machine_dpapi_identity_file():
     identity = _read("identity.rs")
     state = _read("state.rs")
 
-    assert "offline_sid" not in identity
-    assert "online_sid" not in identity
+    # Account SIDs feed identity-scoped WFP rules; the identity file itself is
+    # still written through the protected state seam.
+    assert "super::wfp::install(&offline.username, &online.username)" in identity
+    assert "super::wfp::install(&stored.username, &stored.online_username)" in identity
     assert "read_write = FILE_GENERIC_READ | FILE_GENERIC_WRITE" not in identity
     assert "super::state::prepare_directory(state_dir)" in identity
     assert "super::state::read_file(&identity_path(state_dir))" in identity
