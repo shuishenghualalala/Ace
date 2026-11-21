@@ -983,5 +983,10 @@ cd web && npm run build
   <p>Wiki 入口可用性从旧配置标志迁到统一能力状态源：<code>lib/featureFlags.ts</code> 新增 <code>WIKI_FEATURE_ID = product.wiki</code> 与 <code>wikiFeatureAvailable</code>（复用共享 <code>featureCapabilityAvailable</code>）；<code>wiki-navigation.ts</code> 的 <code>wikiNavigationEnabled</code> 改为能力优先——<code>feature_capabilities</code> 字段存在时以 <code>product.wiki</code> 条目为准（条目缺席或 <code>available ≠ true</code> 不可用，Runtime <code>failed</code> 时入口/页面同步下线），字段缺席（旧后端 / 加载中）回落旧 <code>wiki.enabled</code> 语义（<code>!== false</code> 默认可见）。<code>canNavigateToSidebarView</code> / <code>resolveSidebarViewAfterCapabilitiesChange</code> 参数放宽为 <code>AppConfig</code>，宿主 <code>App.tsx</code> 传入的 <code>wikiEnabled</code> 上下文来源对齐，Sidebar / 页面投影 / wiki 事件 handler 安装门 / 视图回退全部同源。</p>
   <p>已验收：typecheck 与全量 259 tests 通过（wiki-navigation / featureFlags 能力用例：failed 不可见、恢复可见、legacy 回落）。验证见 <a href="../testing/review-fixes-batch-2026-09-14.html">整改批次测试记录</a>。</p>
 </section>
+<section id="composer-slash-commands">
+  <h2>输入框的斜杠命令与技能</h2>
+  <p>当输入框只有开头的斜杠词时，Composer 在输入框下方分组显示「命令」和「技能」。命令由当前面板提供的回调决定，无需等待技能目录。输入前缀缩小候选，方向键移动选择，Enter 或 Tab 选中，Escape 关闭并保留输入。选择技能后焦点留在输入框。</p>
+  <p><code>/plan</code> 和 <code>/craft</code> 使用既有模式切换；<code>/new</code> 在主聊天使用当前工作空间的新建入口。选中命令或直接提交完整命令不会产生聊天请求。技能候选来自 <code>GET /api/skills</code>，选择只填入 <code>/slug</code> 与一个空格，保留后续输入和正常提交。带附件、编辑草稿或场景的输入仍走原消息路径，不拦截为命令。</p>
+</section>
 </body>
 </html>

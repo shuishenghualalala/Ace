@@ -3726,7 +3726,7 @@ button { font-family: inherit; cursor: pointer; }
   cursor: pointer; font-size: 12px; color: var(--text-2);
   transition: background .1s;
 }
-.at-popover__item:hover { background: var(--bg-hover); }
+.at-popover__item:hover, .at-popover__item[aria-selected="true"] { background: var(--bg-hover); }
 .at-popover__icon { font-size: 13px; font-style: normal; width: 16px; text-align: center; }
 .at-popover__icon--agent { color: var(--accent); }
 .at-popover__display { font-weight: 500; color: var(--text); }

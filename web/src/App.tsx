@@ -436,12 +436,6 @@ export default function App() {
   };
 
   const handleSend = (text: string, sendAttachments: Attachment[], subScenario?: string, userMentions?: UserAgentMention[]) => {
-    const cmd = text.trim().toLowerCase();
-    // 与 CLI 一致：/plan 进入 Plan 模式（不发给模型）
-    if (!editDraft && cmd === "/plan") {
-      chat.enterPlan(currentSessionId);
-      return;
-    }
     const query = editDraft
       ? `继续执行未完成任务。\n\n这是我修改后的需求：\n${text.trim()}`
       : text;
@@ -742,6 +736,7 @@ export default function App() {
               planActive={chat.planActive}
               onEnterPlan={() => chat.enterPlan(currentSessionId)}
               onExitPlan={() => chat.exitPlan(currentSessionId)}
+              onNewSession={() => newSession(currentWorkspaceId)}
               onPlanDecision={(action, review) => chat.decidePlan(action, review, currentSessionId, mode, currentWorkspaceId)}
               followupQuestion={chat.followupQuestion}
               onAnswerFollowup={(questionId, answers) => chat.answerFollowup(currentSessionId, questionId, answers)}

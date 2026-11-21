@@ -42,6 +42,7 @@ export interface Props {
   planActive?: boolean;
   onEnterPlan?: () => void;
   onExitPlan?: () => void;
+  onNewSession?: () => void;
   onPlanDecision?: PlanDecisionHandler;
   onAsk?: (text: string) => void;
   followupQuestion?: FollowupQuestion | null;
@@ -99,6 +100,7 @@ export default function ChatPanel({
   planActive,
   onEnterPlan,
   onExitPlan,
+  onNewSession,
   onPlanDecision,
   onAsk,
   followupQuestion,
@@ -289,6 +291,7 @@ export default function ChatPanel({
               planActive={planActive}
               onEnterPlan={onEnterPlan}
               onExitPlan={onExitPlan}
+              onNewSession={onNewSession}
               prefillText={prefillText}
               prefillNonce={prefillNonce}
               scenarioChip={scenarioChip ? { label: scenarioChip.label, onClear: () => setScenarioChip(null) } : null}
@@ -370,6 +373,7 @@ export default function ChatPanel({
             planActive={planActive}
             onEnterPlan={onEnterPlan}
             onExitPlan={onExitPlan}
+            onNewSession={onNewSession}
             editDraft={editDraft}
             onCancelEdit={onCancelEdit}
             uploadContext={uploadContext}

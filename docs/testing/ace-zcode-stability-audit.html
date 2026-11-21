@@ -428,6 +428,13 @@
 <p><strong>剩余差距</strong> Ace 的独立 Gateway/CLI 仍要求桌面宿主，已存在的 ManagedChromiumEngine 未接入生产 Browser RPC。无桌面浏览器、Windows 后台截图及其它平台原生验证分开验收。</p>
 <p class="evidence">Ace <code>plugins/browser/tool.py:1857</code>、<code>crew/gateway/ws.py:685–703</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/app/built-in-node-repl.ts:16–51</code>、<code>node-repl-browser-broker.ts:162–197</code>、<code>packages/adapters/src/browser/executable.ts:64–87</code>。Kimi Code <code>packages/agent-core-v2/src/app/capability/entries/kimiWebbridge.ts:36–49、195–273</code>。</p>
 </article>
+<article id="web-slash-commands">
+<h3>Web 输入斜杠时区分命令与技能</h3>
+<p>ZCode 的协议目录组合内置与自定义命令；输入层另合并当前面板的应用命令与技能。应用命令选中即调用本地动作，技能只插入输入。Ace Web 旧版只从工具栏选择技能，手输完整 <code>/plan</code> 则在发送入口截获，甚至忽略同次提交的附件。</p>
+<p>Ace Web 在同一补全位置显示不同分组。<code>/plan</code>、<code>/craft</code> 和主聊天的 <code>/new</code> 使用原 Plan/Craft 与新建会话动作；技能目录异步复用现有接口，选择后仍由用户填写或提交。带附件、场景或编辑稿时不截获消息。Desktop 的命令目录与 CLI 入口仍待独立对齐。</p>
+<p><strong>验收</strong> 定向回归在基线无法找到 <code>/plan</code> 候选。候选 Web 40 个文件、304 项通过；TypeScript 与生产构建通过。Windows Chrome 加载实际生产页面并连接隔离 Gateway。键盘进入 Plan 后，下一条正常请求在同一会话携带 <code>plan_active=true</code>；点击 <code>/craft</code> 发出该会话的 <code>plan_exit</code>。<code>/new</code> 保留工作空间但切到新的会话，技能选择只补全文本，明确提交后模型收到真实激活正文。全程只发两条聊天请求，两段公开历史分别落在对应会话。检查了实际菜单画面；Gateway 正常退出并回收两个端口。模型使用可控提供方。</p>
+<p class="evidence">Ace <code>web/src/components/Composer.tsx</code>、<code>ComposerSlashMenu.tsx</code>、<code>web/src/App.tsx</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol/slash-commands.ts:21–51</code>、<code>packages/ui/src/v4/SessionPane.tsx:2856–2865</code>、<code>packages/ui/src/SlashCommandPlugin.tsx:283–305</code>。</p>
+</article>
 <article id="renderer-heartbeat-probe">
 <h3>D7h · 丢失定时心跳时确认当前渲染器仍能应答</h3>
 <p>ZCode 主要用 Chromium 的原生无响应和恢复事件记录冻结，并独立处理浏览网页的来宾进程。Ace 继续处理原生事件，并在补充的前台定时心跳路径上增加一次即时应答确认。超过 16 秒后向当前可信主文档发探测，最多等待一个检查周期（当前 4 秒）。原定时心跳或探测应答都会续上本代计时。</p>

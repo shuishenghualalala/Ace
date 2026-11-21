@@ -1,5 +1,10 @@
+/** @vitest-environment happy-dom */
+
+import { act, type ComponentProps } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "../api";
 import Composer, { formatTeamMentionToken, teamMemberMentionId } from "./Composer";
 import ExternalAgentAvatar from "./ExternalAgentAvatar";
 import { EXTERNAL_AGENTS_FEATURE_ID } from "../lib/featureFlags";
@@ -110,6 +115,117 @@ describe("Composer team member mention display", () => {
   it("keeps spaced names readable", () => {
     expect(formatTeamMentionToken({ agentId: "crew-builtin", name: " Crew   内置智能体 " }))
       .toBe("@Crew 内置智能体");
+  });
+});
+
+describe("Composer slash input", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function mount(props: Partial<ComponentProps<typeof Composer>> = {}) {
+    await act(async () => root.render(
+      <Composer config={null} busy={false} attachments={[]} onSend={noop} onAttachmentsChange={noop} {...props} />,
+    ));
+    return container.querySelector("textarea")!;
+  }
+
+  async function type(input: HTMLTextAreaElement, value: string) {
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, value);
+      input.setSelectionRange(value.length, value.length);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function press(input: HTMLTextAreaElement, key: string) {
+    act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })));
+  }
+
+  it("offers the Plan command before the skill catalog arrives and executes without a chat turn", async () => {
+    let deliver!: (value: []) => void;
+    const pending = new Promise<[]>((resolve) => { deliver = resolve; });
+    const loadSkills = vi.spyOn(api, "skills").mockReturnValue(pending);
+    const onEnterPlan = vi.fn();
+    const onSend = vi.fn();
+    const input = await mount({ onEnterPlan, onSend });
+    await type(input, "/");
+    await type(input, "/pl");
+    expect(container.querySelector('[role="option"]')?.textContent).toContain("/plan");
+    expect(loadSkills).toHaveBeenCalledTimes(1);
+    press(input, "Enter");
+    expect(onEnterPlan).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe("");
+    await act(async () => deliver([]));
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it("moves the keyboard selection and reuses the New Session action", async () => {
+    vi.spyOn(api, "skills").mockResolvedValue([]);
+    const onEnterPlan = vi.fn();
+    const onNewSession = vi.fn();
+    const input = await mount({ onEnterPlan, onNewSession });
+    await type(input, "/");
+    press(input, "ArrowDown");
+    expect(container.querySelector('[aria-selected="true"]')?.textContent).toContain("/new");
+    press(input, "Enter");
+    expect(onNewSession).toHaveBeenCalledTimes(1);
+    expect(onEnterPlan).not.toHaveBeenCalled();
+  });
+
+  it("distinguishes skills from commands and only fills the input when a skill is selected", async () => {
+    vi.spyOn(api, "skills").mockResolvedValue([{
+      slug: "web-gui-tester", name: "Web GUI", description: "Test a web page", category: "testing",
+      source: "builtin", featured: false,
+    }]);
+    const onSend = vi.fn();
+    const input = await mount({ onEnterPlan: noop, onSend });
+    await type(input, "/");
+    const menu = container.querySelector('[role="listbox"]')!;
+    expect(menu.textContent).toContain("命令");
+    expect(menu.textContent).toContain("技能");
+    const skill = menu.querySelector<HTMLButtonElement>('button[aria-label^="技能 /web-gui-tester"]')!;
+    act(() => skill.click());
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe("/web-gui-tester ");
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("does not interpret a slash token as a command when it has attachments", async () => {
+    const attachments = [{ id: "f", name: "fixture.txt", path: "fixture.txt", type: "file" as const }];
+    const onSend = vi.fn();
+    const onEnterPlan = vi.fn();
+    const input = await mount({ attachments, onSend, onEnterPlan });
+    await type(input, "/plan");
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+    press(input, "Enter");
+    expect(onEnterPlan).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith("/plan", attachments, undefined, undefined);
+  });
+
+  it("keeps a scenario-bound slash token in the regular message path", async () => {
+    const onSend = vi.fn();
+    const onEnterPlan = vi.fn();
+    const input = await mount({ onSend, onEnterPlan, subScenario: "review" });
+    await type(input, "/plan");
+    press(input, "Enter");
+    expect(onEnterPlan).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith("/plan", [], "review", undefined);
   });
 });
 

@@ -1,8 +1,9 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useRef, useState } from "react";
 import type { AppConfig, Attachment, ExternalAgent, Session, Skill, TeamExecutionTier, TeamMemberView, UserAgentMention } from "../types";
 import { api } from "../api";
 import { externalAgentsAvailable } from "../lib/featureFlags";
 import AttachmentList from "./AttachmentList";
+import { ComposerSlashMenu, composerSlashAction, composerSlashItems, composerSlashQuery, type ComposerCommandActions, type ComposerSlashItem } from "./ComposerSlashMenu";
 import ExternalAgentAvatar from "./ExternalAgentAvatar";
 
 interface Props {
@@ -33,6 +34,7 @@ interface Props {
   planActive?: boolean;
   onEnterPlan?: () => void;
   onExitPlan?: () => void;
+  onNewSession?: () => void;
   /** 场景化推荐：预填文本（nonce 变化即注入）+ 场景 chip + 携带的细分玩法 id */
   prefillText?: string;
   prefillNonce?: number;
@@ -82,6 +84,7 @@ export default function Composer({
   planActive,
   onEnterPlan,
   onExitPlan,
+  onNewSession,
   prefillText,
   prefillNonce,
   scenarioChip,
@@ -99,6 +102,10 @@ export default function Composer({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillQuery, setSkillQuery] = useState("");
+  const skillRequestRef = useRef<Promise<void> | null>(null);
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const slashMenuId = useId();
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [agents, setAgents] = useState<ExternalAgent[]>([]);
   const [agentBusy, setAgentBusy] = useState(false);
@@ -163,11 +170,17 @@ export default function Composer({
     setAgents([]);
   }, [externalAgentsEnabled]);
 
+  const refreshSkills = () => {
+    skillRequestRef.current ??= api.skills().then(setSkills).catch(() => {}).finally(() => {
+      skillRequestRef.current = null;
+    });
+  };
+
   const toggleTools = () => {
     const next = !toolsOpen;
     setToolsOpen(next);
     if (next) {
-      if (skills.length === 0) api.skills().then(setSkills).catch(() => setSkills([]));
+      refreshSkills();
       if (externalAgentsEnabled && agents.length === 0) {
         api.externalAgents().then(setAgents).catch(() => setAgents([]));
       }
@@ -177,10 +190,8 @@ export default function Composer({
   };
 
   const toggleSkills = () => {
-    if (!skillsOpen && skills.length === 0) {
-      api.skills().then(setSkills).catch(() => setSkills([]));
-    }
     if (skillsOpen) setSkillQuery("");
+    else refreshSkills();
     setSkillsOpen(!skillsOpen);
   };
 
@@ -229,10 +240,43 @@ export default function Composer({
     setText(prefillText ?? "");
   }, [prefillNonce]);
 
+  const slashEligible = !editDraft && !scenarioChip && !subScenario && attachments.length === 0;
+  const slashActions: ComposerCommandActions = slashEligible ? {
+    "/plan": onEnterPlan && (() => { if (!planActive) onEnterPlan(); }),
+    "/craft": onExitPlan && (() => { if (planActive) onExitPlan(); }),
+    "/new": onNewSession,
+  } : {};
+  const slashQuery = slashOpen && slashEligible ? composerSlashQuery(text) : null;
+  const slashItems = slashQuery === null ? [] : composerSlashItems(slashQuery, slashActions, skills);
+  const activeSlashIndex = Math.min(slashIndex, slashItems.length - 1);
+  const activeSlash = slashItems[activeSlashIndex];
+
+  const runSlashCommand = (value: string) => {
+    const action = composerSlashAction(value, slashActions);
+    if (!action) return false;
+    setSlashOpen(false);
+    setText("");
+    textareaRef.current?.focus();
+    action();
+    return true;
+  };
+
+  const selectSlashItem = (item: ComposerSlashItem) => {
+    if (item.kind === "command") {
+      runSlashCommand(item.token);
+      return;
+    }
+    setSlashOpen(false);
+    setText(`${item.token} `);
+    textareaRef.current?.focus();
+  };
+
   const submit = () => {
     const t = text.trim();
     // 忙时也允许发送：后端会按会话排队，前端显示「正在队列中」卡片
     if (!t && attachments.length === 0) return;
+    if (runSlashCommand(t)) return;
+    setSlashOpen(false);
     const userMentions = Object.entries(agentMentionsRef.current)
       .filter(([token]) => new RegExp(`(^|\\s)${token.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}(?=\\s|$)`).test(t))
       .map(([, mention]) => mention);
@@ -331,6 +375,25 @@ export default function Composer({
     // 此时 isComposing=false 且 keyCode!=229，需用 justComposedRef 捕获确认选字的 Enter
     if (justComposedRef.current && e.key === "Enter") return;
 
+    if (slashOpen && e.key === "Escape") {
+      e.preventDefault();
+      setSlashOpen(false);
+      return;
+    }
+    if (activeSlash && !e.shiftKey) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const next = Math.max(0, Math.min(activeSlashIndex + (e.key === "ArrowDown" ? 1 : -1), slashItems.length - 1));
+        setSlashIndex(next);
+        document.getElementById(`${slashMenuId}-${next}`)?.scrollIntoView?.({ block: "nearest" });
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        selectSlashItem(activeSlash);
+        return;
+      }
+    }
     if (atOpen && atResults.length > 0 && (e.key === "Tab" || (e.key === "Enter" && atOpen))) {
       e.preventDefault();
       selectAtItem(atResults[0]);
@@ -352,6 +415,10 @@ export default function Composer({
     setText(val);
 
     const cursorPos = e.target.selectionStart;
+    const nextSlashOpen = slashEligible && cursorPos === val.length && composerSlashQuery(val) !== null;
+    if (nextSlashOpen && !slashOpen) refreshSkills();
+    setSlashOpen(nextSlashOpen);
+    setSlashIndex(0);
     const textBeforeCursor = val.slice(0, cursorPos);
     const atMatch = textBeforeCursor.match(/@([^\s]*)$/);
     if (atMatch) {
@@ -472,8 +539,12 @@ export default function Composer({
             rows={compact ? 1 : 2}
             placeholder="输入消息..."
             value={text}
+            aria-controls={activeSlash ? slashMenuId : undefined}
+            aria-activedescendant={activeSlash ? `${slashMenuId}-${activeSlashIndex}` : undefined}
+            aria-autocomplete="list"
             onChange={handleChange}
             onKeyDown={handleKeyDown}
+            onBlur={() => setSlashOpen(false)}
             onPaste={handlePaste}
             onCompositionStart={() => (composingRef.current = true)}
             onCompositionEnd={() => {
@@ -486,6 +557,9 @@ export default function Composer({
             }}
           />
         </div>
+        {activeSlash && (
+          <ComposerSlashMenu id={slashMenuId} items={slashItems} selected={activeSlashIndex} onSelect={selectSlashItem} />
+        )}
         {atOpen && atResults.length > 0 && (
           <div className="at-popover">
             {atResults.map((r, i) => {
