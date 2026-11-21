@@ -12,23 +12,35 @@ from pydantic import BaseModel, Field
 
 from crew.gateway.auth import account_from_request
 from crew.gateway.goal_steps import GoalSteps
-from crew.state.session_goals import GoalAction, GoalSnapshot, GoalStepConflict, GoalVersionConflict, SessionGoalStore
+from crew.state.session_goals import (
+    DEFAULT_CONTINUE_BUDGET,
+    MAX_CONTINUE_BUDGET,
+    GoalAction,
+    GoalSnapshot,
+    GoalStepConflict,
+    GoalVersionConflict,
+    SessionGoalStore,
+)
 
 
 class GoalChange(BaseModel):
-    action: GoalAction | Literal["advance", "verify"]
+    action: GoalAction | Literal["advance", "verify", "continue", "stop_continue"]
     version: Annotated[str, Field(min_length=1, max_length=128)]
     objective: Annotated[str, Field(max_length=4000)] = ""
+    budget: Annotated[int, Field(ge=1, le=MAX_CONTINUE_BUDGET)] = DEFAULT_CONTINUE_BUDGET
 
 
 def _response(snapshot: GoalSnapshot | None, *, status: int = 200) -> JSONResponse:
     if snapshot is None:
         return JSONResponse({"error": "当前账号下没有可设置目标的会话"}, status_code=404)
-    body = {**asdict(snapshot), "supports_advance": True, "supports_verify": True}
+    body = {**asdict(snapshot), "supports_advance": True, "supports_verify": True,
+            "supports_continue": True, "max_continue_budget": MAX_CONTINUE_BUDGET}
     if snapshot.run is None:
         body.pop("run")
     if snapshot.verification is None:
         body.pop("verification")
+    if snapshot.continuation is None:
+        body.pop("continuation")
     return JSONResponse(body, status_code=status)
 
 
@@ -46,6 +58,12 @@ def create_session_goals_router(goals: SessionGoalStore, steps: GoalSteps) -> AP
         try:
             if change.action == "advance":
                 return _response(await steps.advance(owner, session_id, change.version), status=202)
+            if change.action == "continue":
+                return _response(
+                    await steps.start_continuation(owner, session_id, change.version, change.budget), status=202,
+                )
+            if change.action == "stop_continue":
+                return _response(await steps.stop_continuation(owner, session_id, change.version))
             if change.action == "verify":
                 prefer = request.headers.get("prefer", "")
                 respond_async = any(part.split(";", 1)[0].strip().lower() == "respond-async" for part in prefer.split(","))

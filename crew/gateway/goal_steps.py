@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Coroutine
 from contextlib import aclosing
+from dataclasses import dataclass
 from threading import Event
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -15,9 +16,11 @@ from crew.gateway.dispatcher import ForegroundAdmission
 from crew.gateway.goal_verification import VerificationVerdict, verify_goal
 from crew.state.logging import get_logger
 from crew.state.session_goals import (
+    ContinuationTerminal,
     GoalSnapshot,
     GoalStepConflict,
     GoalVersionConflict,
+    ReservedGoalContinuation,
     ReservedGoalStep,
     ReservedGoalVerification,
     SessionGoalStore,
@@ -34,6 +37,15 @@ STEP_QUERY = "推进已保存的会话目标。"
 _T = TypeVar("_T")
 
 
+@dataclass
+class _Continuation:
+    request_id: str
+    cancelled: Event
+    task: asyncio.Task | None
+    step_request_id: str = ""
+    verification_request_id: str = ""
+
+
 class GoalSteps:
     def __init__(self, crew: CrewApp, connections: ConnectionManager, goals: SessionGoalStore):
         self._crew = crew
@@ -44,6 +56,7 @@ class GoalSteps:
         self._tasks: set[asyncio.Task] = set()
         self._verification_worker: tuple[str, Event, asyncio.Task[GoalSnapshot | None]] | None = None
         self._verification_call: tuple[ReservedGoalVerification, asyncio.Task[VerificationVerdict]] | None = None
+        self._continues: dict[tuple[str, str], _Continuation] = {}
 
     def _start(self, operation: Coroutine[Any, Any, _T], *, name: str) -> asyncio.Task[_T]:
         task = asyncio.create_task(operation, name=name)
@@ -58,6 +71,9 @@ class GoalSteps:
         return task
 
     async def recover(self) -> None:
+        for request_id in await asyncio.to_thread(self._goals.recover_continuations):
+            log.info("goal_continuation_interrupted entry_point=http_goal_continue request_id=%s code=gateway_restarted",
+                     request_id)
         for request_id in await asyncio.to_thread(self._goals.recover_steps):
             log.info("goal_step_interrupted entry_point=http_goal request_id=%s code=gateway_restarted", request_id)
         for request_id in await asyncio.to_thread(self._goals.recover_verifications):
@@ -192,7 +208,10 @@ class GoalSteps:
             self._reserve(owner, session_id, version, epoch), name="goal-reservation",
         ))
 
-    async def _reserve(self, owner: str, session_id: str, version: str, epoch: int) -> GoalSnapshot | None:
+    async def _reserve(
+        self, owner: str, session_id: str, version: str, epoch: int, *,
+        wait: bool = False, worker: _Continuation | None = None,
+    ) -> GoalSnapshot | None:
         if await self._crew.tasks.active_stop_targets(session_id, owner):
             if await asyncio.to_thread(self._goals.read, owner, session_id) is None:
                 return None
@@ -206,6 +225,15 @@ class GoalSteps:
             await asyncio.to_thread(self._goals.finish_step, step, "interrupted", "gateway_shutdown")
             return await asyncio.to_thread(self._goals.read, owner, session_id, step.incarnation)
         log.info("goal_step_accepted entry_point=http_goal request_id=%s", step.request_id)
+        if wait:
+            if worker is not None:
+                worker.step_request_id = step.request_id
+            try:
+                await self._run(step, epoch)
+            finally:
+                if worker is not None:
+                    worker.step_request_id = ""
+            return await asyncio.to_thread(self._goals.read, owner, session_id, step.incarnation)
         self._start(self._run(step, epoch), name=step.request_id)
         return step.snapshot
 
@@ -215,6 +243,10 @@ class GoalSteps:
 
     async def _pause(self, owner: str, session_id: str, version: str) -> GoalSnapshot | None:
         snapshot = await asyncio.to_thread(self._goals.apply, owner, session_id, "pause", version)
+        if snapshot is not None:
+            worker = self._continues.get((owner, session_id))
+            if worker is not None:
+                worker.cancelled.set()
         if snapshot is not None and snapshot.run is not None and snapshot.run.state == "stopping":
             await self._dispatcher.stop_request(session_id, snapshot.run.request_id, owner_account_id=owner)
         if snapshot is not None and snapshot.verification is not None and self._verification_call is not None:
@@ -223,6 +255,220 @@ class GoalSteps:
                 if snapshot.verification.state == "interrupted":
                     call.cancel()
         return snapshot
+
+    async def start_continuation(
+        self, owner: str, session_id: str, version: str, budget: int,
+    ) -> GoalSnapshot | None:
+        if self._closing:
+            if await asyncio.to_thread(self._goals.read, owner, session_id) is None:
+                return None
+            raise GoalStepConflict("goal_gateway_draining", "网关闭中，暂不能自动推进目标")
+        blocker = self._dispatcher.foreground_blocker(session_id, owner)
+        if blocker:
+            if await asyncio.to_thread(self._goals.read, owner, session_id) is None:
+                return None
+            raise GoalStepConflict(blocker, "当前会话或网关仍有任务，暂不自动推进目标")
+        if await self._crew.tasks.active_stop_targets(session_id, owner):
+            if await asyncio.to_thread(self._goals.read, owner, session_id) is None:
+                return None
+            raise GoalStepConflict("goal_session_busy", "会话还有独立任务在运行，暂不自动推进目标")
+        reserved = await asyncio.to_thread(
+            self._goals.start_continuation, owner, session_id, version, budget, self._crew.config.agent_executor,
+        )
+        if reserved is None:
+            return None
+        loop, snapshot = reserved
+        log.info("goal_continuation_accepted entry_point=http_goal_continue request_id=%s budget=%d",
+                 loop.request_id, loop.budget)
+        self._start(self._continue_loop(loop), name="goal-continuation")
+        return snapshot
+
+    async def stop_continuation(self, owner: str, session_id: str, version: str) -> GoalSnapshot | None:
+        async def stop() -> GoalSnapshot | None:
+            snapshot = await asyncio.to_thread(self._goals.stop_continuation, owner, session_id, version)
+            if snapshot is None:
+                return None
+            worker = self._continues.get((owner, session_id))
+            if worker is not None:
+                worker.cancelled.set()
+            if snapshot.run is not None and snapshot.run.state == "stopping":
+                await self._dispatcher.stop_request(session_id, snapshot.run.request_id, owner_account_id=owner)
+            if snapshot.verification is not None and self._verification_call is not None:
+                check, call = self._verification_call
+                if (owner, session_id, snapshot.verification.request_id) == (
+                    check.owner, check.session_id, check.check.request_id,
+                ):
+                    if snapshot.verification.state == "interrupted":
+                        call.cancel()
+            return snapshot
+
+        return await asyncio.shield(self._start(stop(), name="goal-continue-stop"))
+
+    async def stop_goal_work_for_owner(self, owner: str) -> None:
+        loops = [(key, worker) for key, worker in list(self._continues.items()) if key[0] == owner]
+        for (_, session_id), worker in loops:
+            worker.cancelled.set()
+            if worker.step_request_id:
+                try:
+                    await self._dispatcher.stop_request(session_id, worker.step_request_id, owner_account_id=owner)
+                except Exception:
+                    log.exception("goal_continuation_stop_failed owner=%s session=%s", owner, session_id)
+        await self.stop_verification_for_owner(owner)
+        for (_, session_id), worker in loops:
+            if worker.task is None:
+                continue
+            try:
+                await asyncio.shield(worker.task)
+            except (GoalStepConflict, GoalVersionConflict):
+                pass
+            except Exception:
+                log.exception("goal_continuation_cleanup_failed owner=%s session=%s", owner, session_id)
+
+    @staticmethod
+    def _continuation_conflict(code: str) -> tuple[ContinuationTerminal, str]:
+        if code in {"goal_session_busy", "goal_step_active", "goal_verification_active", "goal_continue_active"}:
+            return "yielded", "goal_continue_yielded"
+        if code == "goal_plan_active":
+            return "stopped", code
+        if code == "goal_not_active":
+            return "stopped", code
+        return "failed", code or "goal_continue_failed"
+
+    @staticmethod
+    def _continuation_step_code(run: Any) -> tuple[ContinuationTerminal, str]:
+        code = str(getattr(run, "code", "") or "")
+        if code in {"goal_session_busy", "goal_step_active", "goal_verification_active", "goal_gateway_busy"}:
+            return "yielded", "goal_continue_yielded"
+        if code == "goal_plan_active":
+            return "stopped", code
+        if code.startswith("goal_") and code != "goal_no_terminal":
+            terminal = {"stopped": "stopped", "failed": "failed", "interrupted": "interrupted"}.get(
+                getattr(run, "state", ""), "failed",
+            )
+            return terminal, code
+        return "failed", "goal_continue_step_failed"
+
+    async def _continue_loop(self, loop: ReservedGoalContinuation) -> None:
+        owner, sid, loop_id = loop.owner, loop.session_id, loop.request_id
+        epoch = self._dispatcher.owner_epoch(owner)
+        worker = _Continuation(loop_id, Event(), asyncio.current_task())
+        self._continues[(owner, sid)] = worker
+        iterations = 0
+        last_step = ""
+        last_check = ""
+        terminal: ContinuationTerminal = "failed"
+        code = "goal_continue_failed"
+        started_at = time.monotonic()
+        try:
+            while True:
+                if worker.cancelled.is_set():
+                    terminal, code = "stopped", "goal_continue_cancelled"
+                    break
+                if self._closing:
+                    terminal, code = "interrupted", "gateway_shutdown"
+                    break
+                if self._dispatcher.owner_epoch(owner) != epoch or self._dispatcher.owner_is_blocked(owner):
+                    terminal, code = "interrupted", "goal_continue_scope_lost"
+                    break
+                current = await asyncio.to_thread(self._goals.read, owner, sid, loop.incarnation)
+                if current is None:
+                    terminal, code = "failed", "goal_continue_session_lost"
+                    break
+                active = current.continuation
+                if active is None or active.request_id != loop_id or active.state != "running":
+                    terminal, code = "stopped", "goal_continue_cancelled"
+                    break
+                if current.goal is None or current.goal.status != "active":
+                    terminal, code = "stopped", "goal_not_active"
+                    break
+                if iterations >= loop.budget:
+                    terminal, code = "exhausted", "goal_continue_budget"
+                    break
+                if (self._dispatcher.foreground_blocker(sid, owner)
+                        or await self._crew.tasks.active_stop_targets(sid, owner)):
+                    terminal, code = "yielded", "goal_continue_yielded"
+                    break
+                try:
+                    stepped = await self._reserve(owner, sid, current.version, epoch, wait=True, worker=worker)
+                except GoalVersionConflict:
+                    terminal, code = "stopped", "goal_continue_changed"
+                    break
+                except GoalStepConflict as exc:
+                    terminal, code = self._continuation_conflict(exc.code)
+                    break
+                if stepped is None:
+                    terminal, code = "failed", "goal_continue_session_lost"
+                    break
+                if stepped.run is None or stepped.run.state != "finished":
+                    terminal, code = self._continuation_step_code(stepped.run)
+                    break
+                iterations += 1
+                last_step = stepped.run.request_id
+                await asyncio.to_thread(
+                    self._goals.record_continuation, loop, iterations, last_step, last_check,
+                )
+                if worker.cancelled.is_set():
+                    terminal, code = "stopped", "goal_continue_cancelled"
+                    break
+                try:
+                    checked = await self.verify(owner, sid, stepped.version)
+                except GoalVersionConflict:
+                    terminal, code = "stopped", "goal_continue_changed"
+                    break
+                except GoalStepConflict as exc:
+                    terminal, code = self._continuation_conflict(exc.code)
+                    break
+                if checked is None:
+                    terminal, code = "failed", "goal_continue_session_lost"
+                    break
+                check = checked.verification
+                if check is None:
+                    terminal, code = "failed", "goal_continue_verification_missing"
+                    break
+                last_check = check.request_id
+                await asyncio.to_thread(
+                    self._goals.record_continuation, loop, iterations, last_step, last_check,
+                )
+                if check.state == "passed":
+                    terminal, code = "passed", "goal_continue_passed"
+                    break
+                if check.state == "interrupted":
+                    if check.code in {"goal_evidence_changed", "goal_session_busy"}:
+                        terminal, code = "yielded", "goal_continue_yielded"
+                    else:
+                        terminal, code = "interrupted", check.code or "goal_continue_interrupted"
+                    break
+                if check.state != "incomplete":
+                    # The verifier could not judge, so more model work would be guesswork.
+                    terminal, code = "stopped", "goal_continue_uncertain"
+                    break
+                if worker.cancelled.is_set():
+                    terminal, code = "stopped", "goal_continue_cancelled"
+                    break
+        except asyncio.CancelledError:
+            terminal, code = "interrupted", "goal_continue_cancelled"
+            raise
+        except Exception:
+            terminal, code = "failed", "goal_continue_failed"
+            log.exception("goal_continuation_failed entry_point=http_goal_continue request_id=%s", loop_id)
+        finally:
+            if self._continues.get((owner, sid)) is worker:
+                self._continues.pop((owner, sid), None)
+            if self._closing and terminal == "failed":
+                terminal, code = "interrupted", "gateway_shutdown"
+            try:
+                settled = await asyncio.to_thread(
+                    self._goals.finish_continuation, loop, terminal, code, iterations, last_step, last_check,
+                )
+            except Exception:
+                log.exception("goal_continuation_settlement_unconfirmed entry_point=http_goal_continue request_id=%s",
+                              loop_id)
+            else:
+                log.info("goal_continuation_settled entry_point=http_goal_continue request_id=%s state=%s code=%s "
+                         "iterations=%d elapsed_ms=%.1f", loop_id, terminal, code, iterations,
+                         (time.monotonic() - started_at) * 1000)
+                if settled is None:
+                    log.warning("goal_continuation_snapshot_missing entry_point=http_goal_continue request_id=%s", loop_id)
 
     async def _run(self, step: ReservedGoalStep, epoch: int) -> None:
         sid, rid, owner = step.session_id, step.request_id, step.owner
@@ -301,6 +547,8 @@ class GoalSteps:
 
     async def close(self) -> None:
         self._closing = True
+        for worker in self._continues.values():
+            worker.cancelled.set()
         if self._verification_worker is not None:
             self._verification_worker[1].set()
         if self._verification_call is not None:

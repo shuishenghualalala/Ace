@@ -364,6 +364,13 @@
 <p><strong>验收</strong> 桌面面板、回合与回放 148 项通过；原生路由与相邻 IPC 和网关就绪/重启组合 119 项通过（包含面板测试），TypeScript、定向 ESLint 和构建通过。原生发送的行为等价基线会重试断线的 Goal POST。候选在网关就绪后复查提交时的渲染文档、账号（含同账号重新登录）和 Gateway 代际，不重试目标写入、不跟随重定向。实际回环 HTTP 分别在读完写入后断开与返回 307，两种情况都只观察到一次物理 POST；其他路由仍沿用启动重试。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/session-goal.ts</code>、<code>desktop/src/main/gateway-fetch-dispatch.ts</code>、<code>desktop/tests/unit/gateway-fetch-dispatch.test.ts</code>。渲染器用隔离 IPC 适配器连接真实网关；原生传输异常另通过真实回环插座验证，不是正式 Electron 安装包的故障注入。</p>
 </article>
+<article id="bounded-goal-continuation">
+<h3>由用户启动的有界 Goal 自动推进</h3>
+<p>ZCode 的续跑由用户提交触发，在每次继续前重新验收目标；验收通过、目标变化、等待用户命令或后台任务时停止。Ace 新增 <code>continue</code> 与 <code>stop_continue</code>，只有显式提交才启动。每次运行保存独立 <code>continue_</code> 标识、当前目标版本、轮次上限和已完成次数，默认 4 轮、上限 12 轮；设置目标本身仍不会启动任何模型调用。循环串行复用已交付的单轮推进与独立验收：每轮先推进一个无工具前台回合，再以已保存证据验收；验收通过即完成目标，明确证据不足才消耗下一轮预算，判定不确定、证据变化或无法确认时停止而不是继续猜测。</p>
+<p>暂停在保存目标状态时同事务停止自动运行，并定向停止当前步骤或验收；<code>stop_continue</code> 只停止自动运行，保留启用中的目标。普通用户回合、已接收的持久消息、Plan、独立后台任务和登出都会让循环先行让出或收尾，不绕过既有准入。网关重启把运行中的自动推进保存为中断且不重放，只保留原目标、步骤和验收记录。每次接收、让出、停止和收尾只记录标识、状态、原因、轮次与耗时，不记录目标正文。</p>
+<p><strong>验收</strong> 真实 Gateway 定向复现未实现入口、自动运行期间非暂停写入、停止时的在途验收、用户回合与验收竞态。候选 Goal 组合 40 项通过，网关退出协调 8 项、主库归属 7 项通过，Ruff 通过。受控模型覆盖两轮后通过、预算耗尽、不确定判定立即停止、精确暂停、保留目标的停止、用户回合先行、活动 Plan 拒绝、预算校验和重启不重放；每轮工具清单为空，公开聊天历史只新增两轮固定推进说明和助手回复。Web 与桌面入口在下一节。</p>
+<p class="evidence">Ace <code>crew/gateway/goal_steps.py</code>、<code>crew/state/session_goals.py</code>、<code>crew/gateway/routers/session_goals.py</code>、<code>tests/gateway/test_session_goals.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/target-continuation-loop.ts:45–85</code>、<code>apps/zcode-cli/packages/core/src/runtime/methods/target.ts:77–180</code>。</p>
+</article>
 <article id="desktop-stop-then-goal">
 <h3>桌面同会话停止普通回合后可以继续推进 Goal</h3>
 <p>ZCode 将停止请求绑定到预期的前台执行 ID，Goal 复用独立的前台执行控制。Ace 桌面原来的会话级晚帧屏蔽会顺便丢掉随后由 REST 启动的新 Goal。候选只接受当前账号、连接和网关代际中可证明较新的服务端 Goal 请求，保留对旧普通回合乃至匿名迟到片段的屏蔽；快照补读同样核对请求身份。</p>

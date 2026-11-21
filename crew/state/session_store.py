@@ -3024,7 +3024,7 @@ class SQLiteSessionStore(SessionStore):
                     "WHERE session_id = ? AND owner_account_id = ?",
                     (archived_int, session_id, owner_account_id),
                 )
-                SessionGoalStore.archive_verification_in_transaction(conn, owner_account_id, session_id)
+                SessionGoalStore.archive_goal_in_transaction(conn, owner_account_id, session_id)
             else:
                 conn.execute(
                     "UPDATE sessions SET archived = ? "

@@ -18,6 +18,7 @@ from crew.core.mocks import FakeProvider
 from crew.core.types import ChatResponse, ToolCall
 from crew.features.hooks import hook_registry
 from crew.gateway.app import create_app
+from crew.gateway.goal_steps import GoalSteps
 from crew.gateway.send_inbox import DesktopSendInbox
 from crew.state.config import Config
 
@@ -762,3 +763,313 @@ def test_goal_not_owned_or_replaced_is_not_mutated(goal_gateway):
         assert _set(client, path, old_version, "Stale target").status_code == 409
         assert client.get(path).json()["goal"] is None
         assert crew.session_store.session_belongs_to("target", owner_account_id="another-owner")
+
+
+class LoopModel(FakeProvider):
+    """Replies to Goal steps and returns scripted verification verdicts."""
+
+    def __init__(self, verdicts=()):
+        super().__init__()
+        self.verdicts = list(verdicts)
+        self.checks = []
+        self.tools_seen = []
+        self.steps = 0
+
+    async def chat(self, messages, tools=None, **kwargs):
+        if kwargs.get("purpose") != "goal-completion-verification":
+            self.calls.append(list(messages))
+            self.tools_seen.append(tools)
+            self.steps += 1
+            return ChatResponse(text=f"Step {self.steps} completed a synthetic checklist item", finish_reason="stop")
+        self.checks.append((messages, tools))
+        verdict = self.verdicts.pop(0) if self.verdicts else {"passed": False, "citations": []}
+        if callable(verdict):
+            verdict = verdict(messages)
+        if isinstance(verdict, ChatResponse):
+            return verdict
+        return ChatResponse(text=json.dumps(verdict), finish_reason="stop")
+
+
+def _passed(messages):
+    data = json.loads(messages[-1].content)
+    entry = next(row for row in data["evidence"] if row["step_reply"])
+    return {"passed": True, "citations": [{"seq": entry["seq"], "quote": entry["text"]}]}
+
+
+def _wait_continuation(client, path, *states):
+    deadline = monotonic() + 10
+    snapshot = {}
+    while monotonic() < deadline:
+        snapshot = client.get(path).json()
+        if (snapshot.get("continuation") or {}).get("state") in states:
+            return snapshot
+        sleep(0.01)
+    pytest.fail(f"Goal continuation did not reach {states}: {snapshot}")
+
+
+def test_explicit_bounded_continuation_runs_advance_and_verify_until_passed(goal_gateway):
+    provider = LoopModel([lambda _: {"passed": False, "citations": []}, _passed])
+    sid = "goal-continue-pass"
+    with goal_gateway(provider) as (client, _crew):
+        path, saved = _active_goal(client, sid)
+        assert provider.calls == []
+        accepted = client.post(path, json={"action": "continue", "version": saved["version"], "budget": 3})
+        assert accepted.status_code == 202, accepted.text
+        body = accepted.json()
+        assert body["supports_continue"] is True
+        assert body["max_continue_budget"] == 12
+        assert body["continuation"]["state"] == "running"
+        assert body["continuation"]["budget"] == 3
+        assert body["continuation"]["iterations"] == 0
+        assert body["continuation"]["request_id"].startswith("continue_")
+        assert body["goal"]["status"] == "active"
+        assert client.post(path, json={"action": "continue", "version": body["version"]}).status_code == 409
+        final = _wait_continuation(client, path, "passed", "failed", "interrupted", "exhausted", "stopped", "yielded")
+        assert final["continuation"]["state"] == "passed", final
+        assert final["continuation"]["code"] == "goal_continue_passed"
+        assert final["continuation"]["iterations"] == 2
+        assert final["continuation"]["step_request_id"] == final["run"]["request_id"]
+        assert final["continuation"]["verification_request_id"] == final["verification"]["request_id"]
+        assert final["goal"]["status"] == "completed"
+        assert final["verification"]["state"] == "passed"
+        assert provider.steps == 2 and len(provider.checks) == 2
+        assert all(not tools for tools in provider.tools_seen)
+        assert all(not tools for _, tools in provider.checks)
+        history = client.get(f"/api/session/{sid}/history").json()["items"]
+        visible = [(item["role"], item["content"]) for item in history
+                   if item["role"] in {"user", "assistant"} and item["content"]]
+        assert visible == [
+            ("user", "推进已保存的会话目标。"), ("assistant", "Step 1 completed a synthetic checklist item"),
+            ("user", "推进已保存的会话目标。"), ("assistant", "Step 2 completed a synthetic checklist item"),
+        ]
+
+
+def test_continuation_stops_at_its_explicit_budget_with_the_goal_still_active(goal_gateway):
+    provider = LoopModel()
+    with goal_gateway(provider) as (client, _crew):
+        path, saved = _active_goal(client, "goal-continue-budget")
+        accepted = client.post(path, json={"action": "continue", "version": saved["version"], "budget": 2})
+        assert accepted.status_code == 202, accepted.text
+        final = _wait_continuation(client, path, "exhausted", "failed", "interrupted", "stopped", "passed", "yielded")
+        assert final["continuation"]["state"] == "exhausted", final
+        assert final["continuation"]["code"] == "goal_continue_budget"
+        assert final["continuation"]["iterations"] == 2
+        assert final["goal"]["status"] == "active"
+        assert final["verification"]["state"] == "incomplete"
+        assert provider.steps == 2 and len(provider.checks) == 2
+
+
+def test_continuation_stops_on_an_unconfirmed_verdict_instead_of_iterating(goal_gateway):
+    provider = LoopModel([ChatResponse(text="It looks done to me", finish_reason="stop")])
+    with goal_gateway(provider) as (client, _crew):
+        path, saved = _active_goal(client, "goal-continue-uncertain")
+        assert client.post(path, json={"action": "continue", "version": saved["version"], "budget": 4}).status_code == 202
+        final = _wait_continuation(client, path, "stopped", "failed", "interrupted", "exhausted", "passed", "yielded")
+        assert final["continuation"]["state"] == "stopped", final
+        assert final["continuation"]["code"] == "goal_continue_uncertain"
+        assert final["continuation"]["iterations"] == 1
+        assert final["goal"]["status"] == "active"
+        assert provider.steps == 1 and len(provider.checks) == 1
+
+
+def test_pause_stops_the_automatic_run_and_its_exact_step(goal_gateway):
+    provider = HeldModel()
+    with goal_gateway(provider) as (client, _crew):
+        path, saved = _active_goal(client, "goal-continue-pause")
+        assert client.post(path, json={"action": "continue", "version": saved["version"], "budget": 3}).status_code == 202
+        assert provider.entered.wait(5)
+        current = client.get(path).json()
+        assert current["continuation"]["state"] == "running"
+        assert current["run"]["state"] == "running"
+        paused = client.post(path, json={"action": "pause", "version": current["version"]})
+        assert paused.status_code == 200, paused.text
+        assert paused.json()["goal"]["status"] == "paused"
+        assert paused.json()["continuation"]["state"] == "stopped"
+        assert paused.json()["continuation"]["code"] == "goal_continue_paused"
+        assert provider.exited.wait(5)
+        _wait_run(client, path, "stopped")
+        assert len(provider.calls) == 1
+        settled = _wait_continuation(client, path, "stopped", "interrupted", "failed")
+        assert settled["continuation"]["state"] == "stopped"
+        assert settled["continuation"]["iterations"] == 0
+
+
+def test_stop_continuation_keeps_the_goal_active_for_ordinary_work(goal_gateway):
+    provider = HeldModel()
+    with goal_gateway(provider) as (client, _crew):
+        sid = "goal-continue-stop"
+        path, saved = _active_goal(client, sid)
+        assert client.post(path, json={"action": "continue", "version": saved["version"], "budget": 3}).status_code == 202
+        assert provider.entered.wait(5)
+        current = client.get(path).json()
+        stopped = client.post(path, json={"action": "stop_continue", "version": current["version"]})
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["goal"]["status"] == "active"
+        assert stopped.json()["continuation"]["state"] == "stopped"
+        assert stopped.json()["continuation"]["code"] == "goal_continue_cancelled"
+        assert provider.exited.wait(5)
+        _wait_run(client, path, "stopped")
+        _send(client, sid, "Ordinary work after stopping the automatic run")
+        assert any("Ordinary work after stopping the automatic run" == message.content
+                   for message in provider.calls[-1])
+        assert client.get(path).json()["continuation"]["state"] == "stopped"
+
+
+class YieldModel(FakeProvider):
+    def __init__(self):
+        super().__init__()
+        self.verify_entered = Event()
+        self.ordinary_entered = Event()
+        self.release_verify = asyncio.Event()
+        self.release_ordinary = asyncio.Event()
+        self.steps = 0
+        self.checks = 0
+
+    async def chat(self, messages, tools=None, **kwargs):
+        if kwargs.get("purpose") == "goal-completion-verification":
+            self.checks += 1
+            self.verify_entered.set()
+            await self.release_verify.wait()
+            return ChatResponse(text=json.dumps({"passed": False, "citations": []}), finish_reason="stop")
+        query = next(m.content for m in reversed(messages) if m.role == "user" and not m.is_meta)
+        if query == "Ordinary query while the automatic run verifies":
+            self.ordinary_entered.set()
+            await self.release_ordinary.wait()
+        self.steps += 1
+        return ChatResponse(text=f"Reply to {query}", finish_reason="stop")
+
+
+def test_continuation_yields_to_a_user_turn_instead_of_starting_another_step(goal_gateway):
+    provider = YieldModel()
+    sid = "goal-continue-yield"
+    with goal_gateway(provider) as (client, _crew):
+        path, saved = _active_goal(client, sid)
+        assert client.post(path, json={"action": "continue", "version": saved["version"], "budget": 3}).status_code == 202
+        assert provider.verify_entered.wait(5)
+        with client.websocket_connect("/ws") as socket:
+            socket.send_json({"session_id": sid, "query": "Ordinary query while the automatic run verifies"})
+            assert provider.ordinary_entered.wait(5)
+            client.portal.call(provider.release_verify.set)
+            final = _wait_continuation(client, path, "yielded", "stopped", "failed")
+            assert final["continuation"]["state"] == "yielded", final
+            assert final["continuation"]["code"] == "goal_continue_yielded"
+            assert final["continuation"]["iterations"] == 1
+            assert final["goal"]["status"] == "active"
+            assert provider.checks == 1 and provider.steps == 1
+            client.portal.call(provider.release_ordinary.set)
+            terminal = _frame(socket, lambda frame: frame.get("is_final"))
+        assert terminal["body"]["outcome"]["status"] == "completed"
+        assert provider.steps == 2
+
+
+def test_a_restarted_gateway_interrupts_continuation_without_replaying_it(goal_gateway):
+    provider = LoopModel()
+    sid = "goal-continue-restart"
+    with goal_gateway(provider) as (client, crew):
+        path, saved = _active_goal(client, sid)
+        reserved, _snapshot = crew.session_store.goals.start_continuation("local", sid, saved["version"], 3, "builtin")
+        assert reserved is not None
+        assert provider.calls == []
+    fresh = LoopModel()
+    with goal_gateway(fresh) as (client, _crew):
+        current = client.get(path).json()
+        assert current["continuation"]["state"] == "interrupted"
+        assert current["continuation"]["code"] == "gateway_restarted"
+        assert current["goal"]["status"] == "active"
+        assert fresh.calls == []
+        assert fresh.checks == []
+
+
+def test_continuation_refuses_an_active_plan_before_any_model_work(goal_gateway):
+    provider = LoopModel()
+    with goal_gateway(provider) as (client, crew):
+        path, saved = _active_goal(client, "goal-continue-plan")
+        crew.plan_manager.enter("goal-continue-plan", owner_account_id="local")
+        refused = client.post(path, json={"action": "continue", "version": saved["version"], "budget": 2})
+        assert refused.status_code == 409 and refused.json()["code"] == "goal_plan_active"
+        assert provider.calls == []
+        assert client.get(path).json() == saved
+
+
+@pytest.mark.parametrize("budget", [0, 13])
+def test_continuation_budget_is_validated(goal_gateway, budget):
+    with goal_gateway(LoopModel()) as (client, _crew):
+        path, saved = _active_goal(client, "goal-continue-invalid-budget")
+        response = client.post(path, json={"action": "continue", "version": saved["version"], "budget": budget})
+        assert response.status_code == 422
+
+
+def test_a_live_continuation_blocks_non_pause_goal_changes(goal_gateway, monkeypatch):
+    provider = LoopModel([_passed])
+    sid = "goal-continue-guard"
+    with goal_gateway(provider) as (client, _crew):
+        path, saved = _active_goal(client, sid)
+        entered, release = Event(), asyncio.Event()
+
+        async def held_verify(steps, *args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await GoalSteps.verify(steps, *args, **kwargs)
+
+        monkeypatch.setattr(GoalSteps, "verify", held_verify)
+        assert client.post(path, json={"action": "continue", "version": saved["version"], "budget": 2}).status_code == 202
+        try:
+            assert entered.wait(5)
+            current = client.get(path).json()
+            assert current["continuation"]["state"] == "running"
+            assert current["run"]["state"] == "finished"
+            for action in ("complete", "set", "resume"):
+                denied = client.post(path, json={"action": action, "version": current["version"],
+                                                 "objective": "Do not change a live run"})
+                assert denied.status_code == 409 and denied.json()["code"] == "goal_continue_active"
+            stopped = client.post(path, json={"action": "stop_continue", "version": current["version"]})
+            assert stopped.status_code == 200, stopped.text
+            assert stopped.json()["goal"]["status"] == "active"
+            assert stopped.json()["continuation"]["state"] == "stopped"
+        finally:
+            client.portal.call(release.set)
+        final = _wait_continuation(client, path, "stopped", "interrupted", "failed", "passed", "exhausted")
+        assert final["continuation"]["state"] == "stopped"
+        assert final["goal"]["status"] == "active"
+        assert provider.steps == 1 and len(provider.checks) == 0
+
+
+class BlockingVerifyModel(LoopModel):
+    def __init__(self):
+        super().__init__()
+        self.verify_entered = asyncio.Event()
+        self.release_verify = asyncio.Event()
+
+    async def chat(self, messages, tools=None, **kwargs):
+        if kwargs.get("purpose") == "goal-completion-verification":
+            self.verify_entered.set()
+            await self.release_verify.wait()
+        return await super().chat(messages, tools, **kwargs)
+
+
+def test_stop_continuation_interrupts_an_in_flight_verification(goal_gateway):
+    provider = BlockingVerifyModel()
+    sid = "goal-continue-stop-verification"
+    with goal_gateway(provider) as (client, _crew):
+        path, saved = _active_goal(client, sid)
+        assert client.post(path, json={"action": "continue", "version": saved["version"], "budget": 3}).status_code == 202
+        assert client.portal.call(provider.verify_entered.wait) is True
+        current = client.get(path).json()
+        assert current["verification"]["state"] == "running"
+        assert current["continuation"]["state"] == "running"
+        stopped = client.post(path, json={"action": "stop_continue", "version": current["version"]})
+        assert stopped.status_code == 200, stopped.text
+        body = stopped.json()
+        assert body["goal"]["status"] == "active"
+        assert body["continuation"]["state"] == "stopped"
+        assert body["verification"]["state"] == "interrupted"
+        assert body["verification"]["code"] == "goal_continue_cancelled"
+        client.portal.call(provider.release_verify.set)
+        final = _wait_continuation(client, path, "stopped", "interrupted", "failed")
+        assert final["continuation"]["state"] == "stopped"
+        assert final["verification"]["state"] == "interrupted"
+        assert final["goal"]["status"] == "active"
+        assert provider.steps == 1 and provider.checks == []
+        _send(client, sid, "Ordinary work after stopping a live verification")
+        assert any("Ordinary work after stopping a live verification" == message.content
+                   for message in provider.calls[-1])

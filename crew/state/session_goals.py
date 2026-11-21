@@ -13,9 +13,13 @@ GoalAction = Literal["set", "pause", "resume", "complete"]
 GoalStatus = Literal["active", "paused", "completed"]
 StepTerminal = Literal["finished", "stopped", "failed", "interrupted"]
 VerificationTerminal = Literal["passed", "incomplete", "unconfirmed", "interrupted"]
+ContinuationTerminal = Literal["passed", "exhausted", "stopped", "yielded", "failed", "interrupted"]
 _MAX_OBJECTIVE_CHARS = 4000
 _VERIFICATION_HISTORY_LIMIT = 24
 STEP_REQUEST_PREFIX = "goal_"
+_CONTINUE_REQUEST_PREFIX = "continue_"
+MAX_CONTINUE_BUDGET = 12
+DEFAULT_CONTINUE_BUDGET = 4
 _LIVE_STEPS = frozenset({"accepted", "running", "stopping"})
 
 
@@ -52,11 +56,23 @@ class GoalVerification:
 
 
 @dataclass(frozen=True, slots=True)
+class GoalContinuation:
+    request_id: str
+    state: str
+    code: str = ""
+    iterations: int = 0
+    budget: int = 0
+    step_request_id: str = ""
+    verification_request_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class GoalSnapshot:
     version: str
     goal: SessionGoal | None
     run: GoalStep | None = None
     verification: GoalVerification | None = None
+    continuation: GoalContinuation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +105,16 @@ class ReservedGoalStep:
     incarnation: str
     workspace_id: str
     request_id: str
+    snapshot: GoalSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class ReservedGoalContinuation:
+    owner: str
+    session_id: str
+    incarnation: str
+    request_id: str
+    budget: int
     snapshot: GoalSnapshot
 
 
@@ -149,29 +175,56 @@ class SessionGoalStore:
             CREATE INDEX IF NOT EXISTS idx_session_goal_live_verifications ON session_goal_verifications(state)
             WHERE state='running'
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_goal_continues (
+                owner_account_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                history_incarnation TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN (
+                    'running', 'passed', 'exhausted', 'stopped', 'yielded', 'failed', 'interrupted'
+                )),
+                code TEXT NOT NULL DEFAULT '',
+                iterations INTEGER NOT NULL DEFAULT 0,
+                budget INTEGER NOT NULL,
+                step_request_id TEXT NOT NULL DEFAULT '',
+                verification_request_id TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (owner_account_id, session_id),
+                FOREIGN KEY (owner_account_id, session_id)
+                    REFERENCES session_goals (owner_account_id, session_id) ON DELETE CASCADE
+            )
+        """)
 
     @staticmethod
     def _read(conn, owner: str, session_id: str, incarnation: str | None = None) -> GoalSnapshot | None:
         row = conn.execute("""
             SELECT s.history_incarnation, g.version, g.objective, g.status, r.request_id, r.state, r.code,
-                   v.request_id, v.state, v.code, v.evidence_sequences
+                   v.request_id, v.state, v.code, v.evidence_sequences,
+                   c.request_id, c.state, c.code, c.iterations, c.budget, c.step_request_id,
+                   c.verification_request_id
             FROM sessions AS s
             LEFT JOIN session_goals AS g USING (owner_account_id, session_id)
             LEFT JOIN session_goal_steps AS r ON r.owner_account_id=s.owner_account_id
               AND r.session_id=s.session_id AND r.history_incarnation=s.history_incarnation
             LEFT JOIN session_goal_verifications AS v ON v.owner_account_id=r.owner_account_id
               AND v.session_id=r.session_id AND v.step_request_id=r.request_id
+            LEFT JOIN session_goal_continues AS c ON c.owner_account_id=s.owner_account_id
+              AND c.session_id=s.session_id AND c.history_incarnation=s.history_incarnation
             WHERE s.owner_account_id = ? AND s.session_id = ?
               AND s.session_id NOT LIKE '%::%' AND s.source_session_id = '' AND s.archived = 0
         """, (owner, session_id)).fetchone()
         if row is None or (incarnation is not None and row[0] != incarnation):
             return None
-        history_id, version, objective, status, request_id, state, code, check_id, check_state, check_code, evidence = row
+        (history_id, version, objective, status, request_id, state, code, check_id, check_state, check_code,
+         evidence, continue_id, continue_state, continue_code, continue_iterations, continue_budget,
+         continue_step, continue_check) = row
         return GoalSnapshot(
             version or history_id,
             SessionGoal(objective, status) if version else None,
             GoalStep(request_id, state, code) if request_id else None,
             GoalVerification(check_id, request_id, check_state, check_code, tuple(json.loads(evidence))) if check_id else None,
+            GoalContinuation(continue_id, continue_state, continue_code, continue_iterations, continue_budget,
+                             continue_step, continue_check) if continue_id else None,
         )
 
     def read(self, owner: str, session_id: str, incarnation: str | None = None) -> GoalSnapshot | None:
@@ -196,11 +249,14 @@ class SessionGoalStore:
             self._require_version(current, version)
             run = current.run
             verification = current.verification
+            continuation = current.continuation
             if action != "pause":
                 if run is not None and run.state in _LIVE_STEPS:
                     raise GoalStepConflict("goal_step_active", "请先暂停正在推进的目标并等待这轮收尾")
                 if verification is not None and verification.state == "running":
                     raise GoalStepConflict("goal_verification_active", "请等待验收完成或先暂停目标")
+                if continuation is not None and continuation.state == "running":
+                    raise GoalStepConflict("goal_continue_active", "请先停止自动推进目标")
             if action == "set":
                 goal = SessionGoal(text, "active")
             else:
@@ -222,11 +278,17 @@ class SessionGoalStore:
             """, (owner, session_id, new_version, goal.objective, goal.status))
             if action == "set":
                 conn.execute("DELETE FROM session_goal_steps WHERE owner_account_id=? AND session_id=?", (owner, session_id))
+                conn.execute("DELETE FROM session_goal_continues WHERE owner_account_id=? AND session_id=?", (owner, session_id))
             elif verification is not None and verification.state == "running":
                 conn.execute("""
                     UPDATE session_goal_verifications SET state='interrupted', code='goal_changed'
                     WHERE owner_account_id=? AND session_id=? AND request_id=?
                 """, (owner, session_id, verification.request_id))
+            if action == "pause" and continuation is not None and continuation.state == "running":
+                conn.execute("""
+                    UPDATE session_goal_continues SET state='stopped', code='goal_continue_paused'
+                    WHERE owner_account_id=? AND session_id=? AND request_id=?
+                """, (owner, session_id, continuation.request_id))
             if action == "pause" and run is not None and run.state in {"accepted", "running"}:
                 state = "stopped" if run.state == "accepted" else "stopping"
                 code = "paused_before_dispatch" if state == "stopped" else "pause_requested"
@@ -330,9 +392,13 @@ class SessionGoalStore:
         return row[0] if row is not None else None
 
     @staticmethod
-    def archive_verification_in_transaction(conn, owner: str, session_id: str) -> None:
+    def archive_goal_in_transaction(conn, owner: str, session_id: str) -> None:
         changed = conn.execute("""
             UPDATE session_goal_verifications SET state='interrupted', code='goal_session_archived'
+            WHERE owner_account_id=? AND session_id=? AND state='running'
+        """, (owner, session_id)).rowcount
+        changed += conn.execute("""
+            UPDATE session_goal_continues SET state='interrupted', code='goal_session_archived'
             WHERE owner_account_id=? AND session_id=? AND state='running'
         """, (owner, session_id)).rowcount
         if changed:
@@ -420,6 +486,125 @@ class SessionGoalStore:
             return self._read(conn, owner, sid)
 
         return self._store.transaction(finish)
+
+    def start_continuation(
+        self, owner: str, session_id: str, version: str, budget: int, default_executor: str,
+    ) -> tuple[ReservedGoalContinuation, GoalSnapshot] | None:
+        def start(conn):
+            current = self._read(conn, owner, session_id)
+            if current is None:
+                return None
+            self._require_version(current, version)
+            if current.goal is None or current.goal.status != "active":
+                raise GoalStepConflict("goal_not_active", "请先设置或恢复会话目标")
+            if current.run is not None and current.run.state in _LIVE_STEPS:
+                raise GoalStepConflict("goal_step_active", "本轮目标还在推进，请先等待或暂停")
+            if current.verification is not None and current.verification.state == "running":
+                raise GoalStepConflict("goal_verification_active", "目标正在验收，请等待或暂停")
+            if current.continuation is not None and current.continuation.state == "running":
+                raise GoalStepConflict("goal_continue_active", "目标已在自动推进")
+            incarnation, _ = self._step_context(conn, owner, session_id, default_executor)
+            request_id = f"{_CONTINUE_REQUEST_PREFIX}{uuid.uuid4().hex}"
+            bounded = max(1, min(int(budget), MAX_CONTINUE_BUDGET))
+            new_version = uuid.uuid4().hex
+            conn.execute("""
+                INSERT INTO session_goal_continues
+                    (owner_account_id, session_id, history_incarnation, request_id, state, iterations, budget)
+                VALUES (?, ?, ?, ?, 'running', 0, ?)
+                ON CONFLICT (owner_account_id, session_id) DO UPDATE SET
+                    history_incarnation=excluded.history_incarnation, request_id=excluded.request_id,
+                    state='running', code='', iterations=0, budget=excluded.budget,
+                    step_request_id='', verification_request_id=''
+            """, (owner, session_id, incarnation, request_id, bounded))
+            conn.execute("UPDATE session_goals SET version=? WHERE owner_account_id=? AND session_id=?",
+                         (new_version, owner, session_id))
+            continuation = GoalContinuation(request_id, "running", "", 0, bounded)
+            snapshot = replace(current, version=new_version, continuation=continuation)
+            return ReservedGoalContinuation(owner, session_id, incarnation, request_id, bounded, snapshot), snapshot
+
+        return self._store.transaction(start)
+
+    def record_continuation(
+        self, continuation: ReservedGoalContinuation, iterations: int, step_request_id: str,
+        verification_request_id: str,
+    ) -> None:
+        self._store.transaction(lambda conn: conn.execute("""
+            UPDATE session_goal_continues SET iterations=?, step_request_id=?, verification_request_id=?
+            WHERE owner_account_id=? AND session_id=? AND history_incarnation=? AND request_id=? AND state='running'
+        """, (iterations, step_request_id, verification_request_id, continuation.owner, continuation.session_id,
+              continuation.incarnation, continuation.request_id)))
+
+    def stop_continuation(self, owner: str, session_id: str, version: str) -> GoalSnapshot | None:
+        def stop(conn):
+            current = self._read(conn, owner, session_id)
+            if current is None:
+                return None
+            self._require_version(current, version)
+            continuation = current.continuation
+            if continuation is None or continuation.state != "running":
+                raise GoalStepConflict("goal_continue_inactive", "目标没有正在自动推进")
+            run = current.run
+            if run is not None and run.state in {"accepted", "running"}:
+                state = "stopped" if run.state == "accepted" else "stopping"
+                code = "stopped_before_dispatch" if state == "stopped" else "stop_requested"
+                conn.execute("""
+                    UPDATE session_goal_steps SET state=?, code=?
+                    WHERE owner_account_id=? AND session_id=? AND request_id=?
+                """, (state, code, owner, session_id, run.request_id))
+            if current.verification is not None and current.verification.state == "running":
+                conn.execute("""
+                    UPDATE session_goal_verifications SET state='interrupted', code='goal_continue_cancelled'
+                    WHERE owner_account_id=? AND session_id=? AND request_id=?
+                """, (owner, session_id, current.verification.request_id))
+            conn.execute("""
+                UPDATE session_goal_continues SET state='stopped', code='goal_continue_cancelled'
+                WHERE owner_account_id=? AND session_id=? AND request_id=?
+            """, (owner, session_id, continuation.request_id))
+            conn.execute("UPDATE session_goals SET version=? WHERE owner_account_id=? AND session_id=?",
+                         (uuid.uuid4().hex, owner, session_id))
+            return self._read(conn, owner, session_id)
+
+        return self._store.transaction(stop)
+
+    def finish_continuation(
+        self, continuation: ReservedGoalContinuation, state: ContinuationTerminal, code: str,
+        iterations: int, step_request_id: str, verification_request_id: str,
+    ) -> GoalSnapshot | None:
+        def finish(conn):
+            owner, sid = continuation.owner, continuation.session_id
+            current = self._read(conn, owner, sid, continuation.incarnation)
+            if current is None or current.continuation is None:
+                return current
+            if current.continuation.request_id != continuation.request_id or current.continuation.state != "running":
+                return current
+            conn.execute("""
+                UPDATE session_goal_continues
+                SET state=?, code=?, iterations=?, step_request_id=?, verification_request_id=?
+                WHERE owner_account_id=? AND session_id=? AND request_id=?
+            """, (state, code, iterations, step_request_id, verification_request_id,
+                  owner, sid, continuation.request_id))
+            conn.execute("UPDATE session_goals SET version=? WHERE owner_account_id=? AND session_id=?",
+                         (uuid.uuid4().hex, owner, sid))
+            return self._read(conn, owner, sid)
+
+        return self._store.transaction(finish)
+
+    def recover_continuations(self) -> list[str]:
+        """Stop every automatic run loop. A restarted Gateway never replays one."""
+        def recover(conn):
+            conn.execute("""
+                UPDATE session_goals SET version=lower(hex(randomblob(16)))
+                WHERE (owner_account_id,session_id) IN (
+                    SELECT owner_account_id,session_id FROM session_goal_continues WHERE state='running'
+                )
+            """)
+            rows = conn.execute("""
+                UPDATE session_goal_continues SET state='interrupted', code='gateway_restarted'
+                WHERE state='running' RETURNING request_id
+            """).fetchall()
+            return [row[0] for row in rows]
+
+        return self._store.transaction(recover)
 
     def recover_verifications(self) -> list[str]:
         def recover(conn):

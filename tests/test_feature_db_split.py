@@ -2526,6 +2526,7 @@ _CORE_MAIN_DB_TABLES = frozenset(
         "session_goals",
         "session_goal_steps",
         "session_goal_verifications",
+        "session_goal_continues",
     }
 )
 
