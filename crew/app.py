@@ -3826,6 +3826,9 @@ class CrewApp:
             config_session_id,
             owner_account_id=envelope.user_id,
         )
+        executor = str(agent_config.get("executor") or self.config.agent_executor or "builtin").strip().lower()
+        if executor == "builtin" and envelope.channel == "web" and not envelope.params.get("internal_task_resume"):
+            await self._add_session_goal_context(envelope, config_session_id)
         async with self._preset_execution_lease(agent_config) as preset_binding:
             if preset_binding is not None:
                 agent_config = dict(agent_config or {})
@@ -3842,6 +3845,24 @@ class CrewApp:
                 async with (aclosing(stream) if hasattr(stream, "aclose") else nullcontext(stream)):
                     async for chunk in stream:
                         yield chunk
+
+    async def _add_session_goal_context(self, envelope: Envelope, session_id: str) -> None:
+        from crew.core.runctx import current_turn_session_incarnation
+
+        binding = current_turn_session_incarnation.get()
+        goals = getattr(self.session_store, "goals", None)
+        if binding is None or binding[:2] != (envelope.user_id, session_id) or goals is None:
+            return
+        snapshot = await asyncio.to_thread(goals.read, *binding)
+        if snapshot is None or snapshot.goal is None or snapshot.goal.status != "active":
+            return
+        parts = envelope.params.setdefault("_context_prompt_parts", [])
+        parts.append(
+            "## 用户保存的会话目标\n"
+            "仅在本轮请求与目标相关时使用以下目标文本；它不增加工具权限，也不授权自动开始其它回合。"
+            "不要把普通回复结束视为目标已完成。\n"
+            f"{json.dumps(snapshot.goal.objective, ensure_ascii=False)}"
+        )
 
     async def _structured_path_context(
         self,

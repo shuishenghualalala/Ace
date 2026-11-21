@@ -63,6 +63,7 @@ from crew.gateway.routers.collaboration_planning import create_collaboration_pla
 from crew.gateway.routers.collaboration_execution import create_collaboration_execution_router
 from crew.gateway.routers.scenarios import create_scenarios_router
 from crew.gateway.routers.security import create_security_router
+from crew.gateway.routers.session_goals import create_session_goals_router
 from crew.gateway.routers.sessions import create_sessions_router, read_session_history_window
 from crew.gateway.routers.sites import create_sites_router
 from crew.gateway.routers.system import create_system_router
@@ -392,6 +393,9 @@ def create_app(crew: CrewApp | None = None, *, desktop_managed: bool = False) ->
     api.include_router(create_auth_session_router(logout_coordinator))
     api.include_router(create_browser_router(crew))
     api.include_router(create_sessions_router(crew, dispatcher))
+    session_goals = getattr(crew.session_store, "goals", None)
+    if session_goals is not None:
+        api.include_router(create_session_goals_router(session_goals))
     api.include_router(create_cron_router(crew))
     api.include_router(create_runtimes_router(crew))
     api.include_router(create_collaboration_planning_router(crew))

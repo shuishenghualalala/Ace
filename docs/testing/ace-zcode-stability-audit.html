@@ -304,6 +304,12 @@
 <p>Windows 官方 Gateway 副本的旧版在正常删除源后，仍共享前缀的子孙历史各返回 HTTP 400。加载最终候选后，同一类子孙均能读取原四行，逐行来源和消息 ID 不变。两个分叉各含一对子孙，四个会话均继续聊天并完成，共七次回环模型请求。新连接查得四个完成回执。重启不重跑模型，四个会话的原始历史和回执响应逐字节相同。两次进程正常退出并释放双端口。</p>
 <p class="evidence">Ace <code>crew/state/session_store.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/runtime/methods/session-fork.ts:585</code>、<code>:660</code>，<code>apps/zcode-cli/packages/adapters/src/storage/session-store/sqlite-session-store.ts:374</code>。</p>
 </article>
+<article id="session-goal-controls">
+<h3>会话 Goal 的持久化、版本校验和上下文</h3>
+<p>ZCode 将目标和普通聊天输入分开接收。目标有独立状态，暂停持久化后才取消活动执行；自动推进经过只读验收，并在下一次执行前复查目标和回合身份。Ace 的第一段先提供受账号和会话实例约束的持久目标、手动暂停/恢复/完成，以及前台内置模型的目标上下文，不启动自动执行。普通聊天完成不改变目标状态。</p>
+<p><strong>验收</strong> 通过真实 Gateway WebSocket、公开目标 API 与 SQLite，核对独立目标记录、版本冲突、已暂停目标重启后保持不注入、新会话实例拒绝旧版本、其他账号不能读写。仅替换模型。Goal、持久提交和 Plan 回归共 32 项通过；Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/state/session_goals.py</code>、<code>crew/gateway/routers/session_goals.py</code>、<code>crew/app.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts:241–425</code>、<code>packages/core/src/runtime/methods/target-continuation-loop.ts:45–85</code>。</p>
+</article>
 <article id="cli-session-resume">
 <h3>CLI 交互续接已保存的会话</h3>
 <p>Kimi 的 CLI 提供显式会话 ID 和按当前目录续接最近会话两种入口。显式 ID 路径查询会话索引，不存在或目录不符时报错。Ace 的非交互 <code>run</code> 已能指定会话；交互 <code>chat</code> 现在也可以用 <code>--session-id</code>，在打开输入前核对账号的公开会话目录和所选工作空间，保持原审批流程。启动和 <code>/new</code> 显示当前 ID；未指定时维持新建。自动续接最近会话不在本次变更中。</p>

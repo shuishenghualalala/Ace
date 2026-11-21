@@ -28,6 +28,7 @@ from crew.core.types import Message, ToolCall
 from crew.state._migration import backfill_empty_owner_rows, rebuild_table_pk
 from crew.state.logging import get_logger
 from crew.state.schema_version import stamp_baseline
+from crew.state.session_goals import SessionGoalStore
 from crew.state.sqlite import SQLiteWriteHelper, connect_sqlite
 
 log = get_logger("state.session_store")
@@ -343,6 +344,7 @@ class SQLiteSessionStore(SessionStore):
         self._conn = connect_sqlite(self._path, wal_enabled=wal_enabled)
         self._writer = SQLiteWriteHelper(self._conn, self._lock)
         self._writer.execute(self._init_schema)
+        self.goals = SessionGoalStore(self)
         # P1-4：legacy blob 回填移出启动关键路径（健康检查可用时间与 legacy 数据量解耦）
         self._start_legacy_backfill()
         # 投影缓存 LRU：会话数不设上限时，多账号/长历史场景下内存随会话总数线性
@@ -632,6 +634,7 @@ class SQLiteSessionStore(SessionStore):
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN owner_account_id TEXT NOT NULL DEFAULT ''")
         self._migrate_owned_aux_tables(conn)
         self._migrate_sessions_pk(conn)
+        SessionGoalStore.initialize(conn)
         if "history_incarnation" not in cols:
             conn.execute("UPDATE sessions SET history_incarnation = lower(hex(randomblob(16))) WHERE history_incarnation = ''")
         conn.execute("""
