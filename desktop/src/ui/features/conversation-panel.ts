@@ -101,7 +101,8 @@ export function createMainComposerActions(
   return {
     submit: async (text, userMentions, composerCheckpoint) => {
       if (!requireRendererLogin()) return false;
-      if (runComposerSlashCommand(text)) return true;
+      const command = runComposerSlashCommand(text);
+      if (command !== undefined) return command;
       const sessionId = state.activeSessionId;
       const editFrom = sessionId ? state.editFromIdx[sessionId] : null;
       const editedMessageId = sessionId && editFrom != null

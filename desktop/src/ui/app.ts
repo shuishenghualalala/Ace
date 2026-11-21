@@ -80,6 +80,7 @@ import { bindSettingsUi, disposeSettingsSecurityPane, openSettingsPane, register
 import { mountSettingsDataPanes } from './features/settings-data';
 import { isRendererLoggedIn, requireRendererLogin } from './features/auth-gate';
 import { canOpenDesktopSideChat, disposeDesktopSideChat, openDesktopSideChat } from './features/side-chat';
+import { closeDesktopSessionGoal, openDesktopSessionGoal } from './features/session-goal';
 import { initAuthFlow } from './features/login';
 import { disposeBackendStatusGuard, initBackendStatusGuard, isBackendConnected } from './features/backend-status-guard';
 import { bindHistoryPanelToggle, applyHistoryCollapsed } from './features/history-collapse';
@@ -244,6 +245,7 @@ const MAIN_CHAT_COMMANDS: readonly ComposerSlashCommand[] = [
     if (state.composerMode !== 'craft') applyComposerMode('craft');
   } },
   { token: '/new', detail: '在当前工作空间新建对话', run: () => startWorkspaceChat(composerWorkspaceId()) },
+  { token: '/goal', detail: '设置或管理会话目标', acceptsArgument: true, run: openDesktopSessionGoal },
 ];
 
 const SIDE_CHAT_COMMANDS: readonly ComposerSlashCommand[] = [
@@ -544,6 +546,7 @@ function bindGlobalEvents(): () => void {
     disposeNotificationCenter();
     disposeAttachments();
     disposeComposerMention();
+    closeDesktopSessionGoal();
     disposeDesktopSideChat();
     disposeComposerToolbar();
     disposeAgentsPage();

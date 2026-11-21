@@ -318,6 +318,12 @@
 <p><strong>验收</strong> Windows Chrome 使用生产 Web 与隔离 Gateway，实际输入并保存目标。独立请求改变版本后，旧按钮收到冲突并读回已暂停状态，没有自动重试；随后恢复、标记完成及重新打开均正确。合成模型只在活动状态的普通请求收到目标，持久聊天历史没有命令或目标正文。Web 308 项、TypeScript 和生产构建通过。此阶段不包含桌面入口或目标自动推进。</p>
 <p class="evidence">Ace <code>web/src/features/SessionGoal.tsx</code>、<code>web/src/components/ComposerSlashMenu.tsx</code>。ZCode <code>packages/ui/src/v4/slashCommands.ts:43–74</code>、<code>packages/ui/src/v4/SessionPane.tsx:3325–3388</code>。</p>
 </article>
+<article id="desktop-session-goal">
+<h3>桌面 /goal 管理持久目标</h3>
+<p>ZCode 先解析完整命令和上下文，再把不带附件的目标交给专用命令；状态区通过明确的暂停和恢复操作通报结果。Ace 桌面复用现有目标 API。主聊天的 <code>/goal</code> 打开面板，参数保留内部空格、换行，保存后仍不是聊天消息。未接收或遇到版本冲突时保留原草稿；收到不确定的写入结果后先读取，不自动重发。面板按主会话、账号和网关代际隔离旧响应。</p>
+<p><strong>验收</strong> 基线定向测试复现参数未被识别、提交后焦点回到主输入、被拒绝的目标文本丢失，以及过长文本缺少提示。最终桌面六组 102 项、Gateway 目标及回执 21 项通过；TypeScript、定向 ESLint 和隔离生产构建通过。使用 Windows Chrome、实际桌面渲染器、隔离 IPC 与真实 Gateway，验证目标保存、上下文只在启用时注入、版本冲突读取、暂停/恢复/完成及重开。裸目标命令和未接收的目标草稿不进聊天历史；附合成文本文件的同前缀输入仍按普通聊天处理。诊断区可用同一操作标识定位冲突与重读，不含目标文本。该切片未启动自动续跑，也未运行正式 Electron 安装包。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/session-goal.ts</code>、<code>desktop/src/ui/features/composer-mention.ts</code>、<code>desktop/tests/unit/desktop-session-goal.test.ts</code>。ZCode <code>packages/ui/src/v4/slashCommands.ts:43–74</code>、<code>packages/ui/src/v4/SessionPane.tsx:3325–3383</code>、<code>packages/ui/src/v4/ConversationStatusPanel.tsx:463–529</code>。</p>
+</article>
 <article id="cli-session-resume">
 <h3>CLI 交互续接已保存的会话</h3>
 <p>Kimi 的 CLI 提供显式会话 ID 和按当前目录续接最近会话两种入口。显式 ID 路径查询会话索引，不存在或目录不符时报错。Ace 的非交互 <code>run</code> 已能指定会话；交互 <code>chat</code> 现在也可以用 <code>--session-id</code>，在打开输入前核对账号的公开会话目录和所选工作空间，保持原审批流程。启动和 <code>/new</code> 显示当前 ID；未指定时维持新建。自动续接最近会话不在本次变更中。</p>

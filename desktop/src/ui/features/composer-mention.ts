@@ -69,7 +69,8 @@ interface MentionItem {
 export interface ComposerSlashCommand {
   token: `/${string}`;
   detail: string;
-  run: () => void;
+  acceptsArgument?: true;
+  run: (argument: string) => void | boolean;
 }
 
 interface CompactMention {
@@ -337,13 +338,15 @@ function lookupSlashCommand(token: string): ComposerSlashCommand | undefined {
   return getSlashCommands?.().find((command) => command.token === token.trim().toLowerCase());
 }
 
-/** Consume a directly submitted command only when it is available in the current context. */
-export function runComposerSlashCommand(text: string): boolean {
-  const command = lookupSlashCommand(text);
-  if (!command) return false;
+/** Undefined means ordinary chat; a rejected command still stays out of the send path. */
+export function runComposerSlashCommand(text: string): boolean | undefined {
+  const parts = /^(\S+)(?:\s+([\s\S]+))?$/.exec(text.trim());
+  if (!parts?.[1]) return undefined;
+  const command = lookupSlashCommand(parts[1]);
+  const argument = parts[2] ?? '';
+  if (!command || (argument && !command.acceptsArgument)) return undefined;
   closePopup();
-  command.run();
-  return true;
+  return command.run(argument) !== false;
 }
 
 function localCommandItems(token: string): MentionItem[] {
@@ -972,7 +975,7 @@ function pickSelected(): void {
     input.value = '';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.focus();
-    command.run();
+    command.run('');
     return;
   }
   const visibleText = compactMentionText(item);

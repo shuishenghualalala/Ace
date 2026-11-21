@@ -378,7 +378,8 @@ export function createComposerView(
     } finally {
       submitting = false;
       refresh();
-      if (!disposed) input.focus();
+      const focused = document.activeElement;
+      if (!disposed && (!focused || focused === document.body || root.contains(focused))) input.focus();
     }
   };
 

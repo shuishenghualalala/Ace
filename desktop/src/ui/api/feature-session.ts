@@ -62,6 +62,13 @@ export interface BackendSession {
   agent_binding?: SessionAgentBinding;
 }
 
+export type SessionGoalAction = 'set' | 'pause' | 'resume' | 'complete';
+
+export interface SessionGoalSnapshot {
+  version: string;
+  goal: { objective: string; status: 'active' | 'paused' | 'completed' } | null;
+}
+
 export interface BackendHistoryFileChange {
   path: string;
   name: string;
@@ -1345,6 +1352,17 @@ export const sessionApi = {
     getJSON<{ ok: true; session_id: string; source_session_id: string; workspace_id: string }>(
       `/api/session/${encodeURIComponent(parentId)}/side-chat`, { method: 'POST', signal, ...jsonBody({}) },
     ),
+  sessionGoal: (id: string, signal: AbortSignal) =>
+    getJSON<SessionGoalSnapshot>(`/api/session/${encodeURIComponent(id)}/goal`, { signal }),
+  changeSessionGoal: async (
+    id: string, change: { version: string; action: SessionGoalAction; objective?: string }, signal: AbortSignal,
+  ): Promise<SessionGoalSnapshot | null> => {
+    const path = `/api/session/${encodeURIComponent(id)}/goal`;
+    const response = await gatewayFetch(path, { method: 'POST', signal, ...jsonBody(change) });
+    // A stale write never applies. The view must read the current version before prompting another action.
+    if (response.status === 409) return null;
+    return readJsonResponse<SessionGoalSnapshot>(response, path);
+  },
   channelSessions: () =>
     getJSON<{
       platforms: Array<{

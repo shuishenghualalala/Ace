@@ -24,7 +24,8 @@ export type StreamDebugScope =
   | 'gate'
   | 'render'
   | 'watchdog'
-  | 'gateway-seq';
+  | 'gateway-seq'
+  | 'session-goal';
 
 export interface StreamDebugEntry {
   ts: number;

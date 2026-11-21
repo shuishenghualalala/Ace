@@ -24,6 +24,7 @@
 @import './modal.css' layer(components);
 @import './context-menu.css' layer(components);
 @import './chat.css' layer(features);
+@import './session-goal.css' layer(features);
 @import './config.css' layer(features);
 @import './channel-config.css' layer(features);
 @import './model-config.css' layer(features);

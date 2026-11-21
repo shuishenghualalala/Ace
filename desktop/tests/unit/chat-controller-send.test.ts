@@ -4,11 +4,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // 共享 mock 必须先于 chat-controller 加载，见 helpers/mock-chat-controller-deps.ts
 import './helpers/mock-chat-controller-deps';
+import { backendApi } from '../../src/ui/backend-client';
 import {
   _resetQueueEditDraftForTests, appendMessage, consumePending, dispatchWs,
   editQueueItem, finalizeStreamingTurn, sendMessage, sendNativeVisualMessage,
 } from '../../src/ui/features/chat-controller';
 import { createComposerView, type ComposerView } from '../../src/ui/features/composer-view';
+import { bindComposerMention } from '../../src/ui/features/composer-mention';
 import { createMainComposerActions } from '../../src/ui/features/conversation-panel';
 import { currentSecurityMode, rememberBrowserDraftSecurityScope, selectNextConversationMode } from '../../src/ui/features/security-approval';
 import { fullAccessChoiceEnabled, loadFullAccessChoice, preferredNewConversationMode } from '../../src/ui/features/security-permission-settings';
@@ -126,6 +128,46 @@ beforeEach(() => {
 });
 
 describe('sendMessage', () => {
+  it('submits a multiline goal to the local command without sending chat', async () => {
+    sessionStore.set({ activeSessionId: 'saved-goal-owner' });
+    const goalEditor = document.body.appendChild(document.createElement('textarea'));
+    const manageGoal = vi.fn(() => goalEditor.focus());
+    const { input, send } = mountMainComposer();
+    const skills = vi.spyOn(backendApi, 'skills').mockResolvedValue([]);
+    const unbind = bindComposerMention(() => [{
+      token: '/goal', detail: '管理会话目标', acceptsArgument: true, run: manageGoal,
+    }]);
+    try {
+      setInput(input, '/GOAL  Reconcile A  and B\nVerify the totals');
+      send.click();
+      await vi.waitFor(() => expect(manageGoal).toHaveBeenCalledWith('Reconcile A  and B\nVerify the totals'));
+      expect(socketSend()).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+      expect(document.activeElement).toBe(goalEditor);
+    } finally {
+      unbind();
+      skills.mockRestore();
+    }
+  });
+
+  it('retains a typed objective when its local Goal action cannot open', async () => {
+    const { input, send, status } = mountMainComposer();
+    const skills = vi.spyOn(backendApi, 'skills').mockResolvedValue([]);
+    const run = vi.fn(() => false);
+    const unbind = bindComposerMention(() => [{ token: '/goal', detail: '管理会话目标', acceptsArgument: true, run }]);
+    try {
+      setInput(input, '/goal Keep this text for later');
+      send.click();
+      await vi.waitFor(() => expect(run).toHaveBeenCalledWith('Keep this text for later'));
+      expect(input.value).toBe('/goal Keep this text for later');
+      expect(status.textContent).toContain('草稿已保留');
+      expect(socketSend()).not.toHaveBeenCalled();
+    } finally {
+      unbind();
+      skills.mockRestore();
+    }
+  });
+
   it('keeps text and attachments editable during startup while both entry points reject send', async () => {
     const sid = 'startup-draft';
     sessionStore.set({ activeSessionId: sid });
