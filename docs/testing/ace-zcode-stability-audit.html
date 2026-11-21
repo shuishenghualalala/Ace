@@ -1174,6 +1174,8 @@
 <p>本轮全量后端回归（不含 <code>tests/security</code>）为 <code>5044 passed, 30 skipped, 20 deselected</code>，0 failed，用时 29 分 28 秒。session goals 新建的 <code>session_goals</code>、<code>session_goal_steps</code>、<code>session_goal_verifications</code> 已加入主库 core 归属清单；此前失败的 session goals 验证与登出栅栏用例现已通过。</p>
 <h3>后端全量与安全基线</h3>
 <p>后端全量（不含 <code>tests/security</code>）为 <code>5044 passed, 30 skipped, 20 deselected</code>，0 failed，用时 29 分 28 秒。安全套件为 <code>478 passed, 2 failed, 10 skipped</code>；剩余两项均为预编译运行时清单与当前 WFP 源码摘要不一致，需跨平台重建后复验。Windows 原生执行路由在未配置安全身份时跳过，避免把环境缺失误报为产品失败。</p>
+<h3>桌面与后端联合基线</h3>
+<p>桌面 Vitest 全量为 <code>2401 passed, 2 skipped</code>（208 个测试文件），TypeScript 类型检查与 esbuild 构建均通过。结合后端 <code>5044 passed, 0 failed</code> 和安全套件 <code>478 passed, 2 failed</code>，当前跨层功能路径已有可重复的绿色基线；安全剩余两项仍是预编译运行时清单。</p>
 <h3>模型拾取器中的永久 Default</h3>
 <p>新安装模板自带 <code>default</code> profile，内容为 <code>your-model-name</code>/<code>api.example.com</code>。用户新增真实模型并设为默认后，该模板仍以 <code>name: Default</code> 留在模型选择器里，显示为缺少 Key 的模型，容易被误认为可用的默认模型。修复把占位 profile 与真实模型分开：设置页保留它供首次配置和 owner copy-on-write，但展示名归一为“默认模型（未配置）”；owner 已有可用真实模型时，对话模型选择器过滤该占位项，真实模型通过“设为默认”切换 <code>active/default</code>。直接编辑过的 default 卡片展示实际 <code>model</code>，不再保留 Default 名称。定向 20 项通过。</p>
 <h3>观测如何归因</h3>
