@@ -785,6 +785,9 @@ class CrewApp:
         self._notify_owner_fn: Callable[..., Coroutine[Any, Any, None]] | None = None
         # 会话过期定时器
         self._expiry_task: asyncio.Task | None = None
+        # Optional background warm-up so the first prompt does not pay the
+        # skill directory scan. It never gates readiness or admission.
+        self._skills_warm_task: asyncio.Task | None = None
         self.dispatcher = SessionDispatcher(
             self.handle,
             self.session_store,
@@ -2537,6 +2540,21 @@ class CrewApp:
         if self.config.session_idle_timeout > 0:
             self._expiry_task = asyncio.create_task(self._session_expiry_loop())
             log.info("会话过期定时器已启动: idle_timeout=%d 分钟", self.config.session_idle_timeout)
+        if self._skills_warm_task is None or self._skills_warm_task.done():
+            self._skills_warm_task = asyncio.create_task(
+                self._warm_skills_index(), name="skills-warmup",
+            )
+
+    async def _warm_skills_index(self) -> None:
+        """Populate the process skill index off the first prompt's critical path."""
+        try:
+            from crew.agent.skills.index import skill_index
+
+            await skill_index().aget()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - warm-up is best-effort
+            log.debug("技能索引预热失败", exc_info=True)
 
     def _consumer_tasks_snapshot(self) -> set[asyncio.Task]:
         """Snapshot tasks that may still hold the current App-owned Provider."""
@@ -2737,6 +2755,15 @@ class CrewApp:
             except asyncio.CancelledError:
                 pass
             self._expiry_task = None
+        if self._skills_warm_task is not None:
+            self._skills_warm_task.cancel()
+            try:
+                await self._skills_warm_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - warm-up is best-effort
+                log.debug("技能索引预热收尾异常", exc_info=True)
+            self._skills_warm_task = None
         await self.dispatcher.shutdown()
         await self._deactivate_managed_features(timeout=provider_timeout)
         await asyncio.gather(
