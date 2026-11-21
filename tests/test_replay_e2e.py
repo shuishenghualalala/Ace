@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -16,6 +20,27 @@ from crew.state.credentials import store_key
 from tests.e2e.replay_server import ReplayServer, recorded_responses
 
 FIXTURES = Path(__file__).parent / "e2e" / "fixtures" / "replay"
+HTTP_MCP_FIXTURE = Path(__file__).parent / "e2e" / "fixtures" / "http_echo_mcp.py"
+
+
+def _start_http_mcp() -> tuple[subprocess.Popen, str]:
+    pytest.importorskip("mcp")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    process = subprocess.Popen(
+        [sys.executable, str(HTTP_MCP_FIXTURE), str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(100):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return process, f"http://127.0.0.1:{port}/mcp"
+        except OSError:
+            time.sleep(0.05)
+    process.terminate()
+    raise AssertionError("HTTP MCP fixture did not start")
 
 
 async def _run_assembled(
@@ -26,6 +51,7 @@ async def _run_assembled(
     monkeypatch,
     *,
     cron: bool = False,
+    mcp_url: str = "",
 ):
     monkeypatch.setenv("CREW_HOME", str(tmp_path / "crew-home"))
     monkeypatch.setenv("ACE_REPLAY_API_KEY", "replay-key")
@@ -56,6 +82,7 @@ async def _run_assembled(
         active_model_id="replay",
         title_auto=False,
         cron_enabled=cron,
+        mcp_servers={"echo": {"url": mcp_url, "transport": "http"}} if mcp_url else {},
         plugins_enabled=[],
     )
     config.activate_model("replay")
@@ -64,6 +91,12 @@ async def _run_assembled(
     try:
         await app.startup(start_cron=cron)
         try:
+            if mcp_url:
+                for _ in range(100):
+                    rows = app.mcp_manager.status() if app.mcp_manager is not None else []
+                    if rows and all(row.get("connected") for row in rows):
+                        break
+                    await asyncio.sleep(0.05)
             workspace_id = app.workspace_store.create(
                 "Replay", root_path=str(workspace), owner_account_id="local",
             )["id"]
@@ -78,6 +111,8 @@ async def _run_assembled(
                 mode="agent",
                 workspace_id=workspace_id,
             )
+            if mcp_url:
+                envelope.params["_allow_mcp_install"] = True
             chunks = [chunk async for chunk in app.handle(envelope)]
             jobs = app.cron_store.list(owner_account_id="local") if cron else []
         finally:
@@ -150,6 +185,36 @@ async def test_assembled_app_replays_a_recorded_cron_create(tmp_path, monkeypatc
     assert len(jobs) == 1
     assert jobs[0]["name"] == "replay-cron"
     assert jobs[0]["query"] == "reply with cron-ok"
+    assert server.remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_assembled_app_replays_mcp_status(tmp_path, monkeypatch):
+    process, url = _start_http_mcp()
+    try:
+        chunks, _, server, _ = await _run_assembled(
+            FIXTURES / "mcp_status.jsonl",
+            {},
+            "Check the echo MCP server and reply with its state.",
+            tmp_path,
+            monkeypatch,
+            mcp_url=url,
+        )
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    assert [chunk for chunk in chunks if chunk.kind == "error"] == []
+    assert "mcp_status" in _tools(chunks)
+    assert _final(chunks).strip() == "connected"
+    assert any(
+        "echo" in json.dumps(chunk.body, ensure_ascii=False)
+        for chunk in chunks
+        if chunk.kind == "tool"
+    )
     assert server.remaining == 0
 
 

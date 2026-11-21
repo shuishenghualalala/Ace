@@ -1,0 +1,2 @@
+{"text": "", "tool_calls": [{"id": "call_replay_status", "name": "mcp_status", "arguments": {"name": "echo"}}], "finish_reason": "tool_calls", "reasoning": ""}
+{"text": "connected", "tool_calls": [], "finish_reason": "stop", "reasoning": ""}
