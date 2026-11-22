@@ -2227,6 +2227,9 @@ export function openInspectorToTab(
   }
   if (activeTab === 'browser' && tab !== 'browser') releaseUserBrowserControl();
   retireCustomView();
+  const wasFilesOpen = inspectorOpen && activeTab === 'files';
+  const previousScopedPaths = scopedFilePaths;
+  const previousScopedChanges = scopedFileChanges;
   inspectorOpen = true;
   activeTab = tab;
   disableInspectorSurfaceAutoWidth();
@@ -2236,12 +2239,13 @@ export function openInspectorToTab(
   document.body.classList.toggle('browser-workbench-open', tab === 'browser');
   if (tab !== 'browser') document.body.classList.remove('browser-workbench-maximized');
   let fileScrollTarget = '';
+  let preserveFilesBody = false;
   if (tab === 'files') {
     computeFileChanges();
-    scopedFilePaths = options?.filePaths?.length
+    const nextScopedPaths = options?.filePaths?.length
       ? Array.from(new Set(options.filePaths.filter((path) => typeof path === 'string' && path.trim()).map((path) => path.trim())))
       : null;
-    scopedFileChanges = options?.fileChanges?.length
+    const nextScopedChanges = options?.fileChanges?.length
       ? options.fileChanges.filter((file) => file?.path).map((file) => ({
         path: file.path,
         name: file.name || file.path.split(/[\\/]/).pop() || file.path,
@@ -2251,9 +2255,17 @@ export function openInspectorToTab(
         diff: file.diff || [],
       }))
       : null;
+    const sameScope = wasFilesOpen
+      && JSON.stringify(previousScopedPaths) === JSON.stringify(nextScopedPaths)
+      && JSON.stringify(previousScopedChanges) === JSON.stringify(nextScopedChanges);
+    scopedFilePaths = nextScopedPaths;
+    scopedFileChanges = nextScopedChanges;
     const files = currentFileChanges();
     const wanted = options?.expandFilePath?.trim() || '';
     fileScrollTarget = wanted;
+    const cardStillMounted = Boolean(wanted && document.getElementById('chat-inspector-body')
+      ?.querySelector(`[data-file-path="${CSS.escape(wanted)}"]`));
+    preserveFilesBody = Boolean(sameScope && wanted && expandedFiles.has(wanted) && cardStillMounted);
     if (wanted) {
       ensureFileExpanded(wanted);
     } else if (expandedFiles.size === 0) {
@@ -2271,12 +2283,14 @@ export function openInspectorToTab(
   if (activeTab === 'collaboration' && state.activeSessionId) {
     startTeamCollaborationPolling(state.activeSessionId);
   }
-  renderBody();
-  if (activeTab === 'files' && expandedFiles.size > 0) {
-    ensureInspectorWidthForFileDiff();
-    for (const path of expandedFiles) {
-      void hydrateFileDiffIfNeeded(path);
-      void hydrateFileContentIfNeeded(path);
+  if (!preserveFilesBody) {
+    renderBody();
+    if (activeTab === 'files' && expandedFiles.size > 0) {
+      ensureInspectorWidthForFileDiff();
+      for (const path of expandedFiles) {
+        void hydrateFileDiffIfNeeded(path);
+        void hydrateFileContentIfNeeded(path);
+      }
     }
   }
   if (activeTab === 'files' && fileScrollTarget) scrollFileCardIntoView(fileScrollTarget);

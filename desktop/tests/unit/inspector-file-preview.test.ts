@@ -197,6 +197,26 @@ describe('Inspector HTML 文件预览', () => {
     }
   });
 
+  it('重复打开同一文件面板保留已挂载的文件卡', () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const options = {
+      expandFilePath: '/tmp/demo/index.html',
+      filePaths: ['/tmp/demo/index.html'],
+    };
+    try {
+      openInspectorToTab('files', options);
+      const card = document.querySelector('.inspector-file[data-file-path="/tmp/demo/index.html"]');
+      expect(card).toBeTruthy();
+      openInspectorToTab('files', options);
+      expect(document.querySelector('.inspector-file[data-file-path="/tmp/demo/index.html"]')).toBe(card);
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it('历史消息只带文件路径时也能内嵌展开文件卡，并主动读取 PPT 预览内容', async () => {
     patchBook('sess-html', {
       fileChanges: [{
