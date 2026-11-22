@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from crew.agent.runtime import SingleAgent
-from crew.app import AgentManager, build_app
+from crew.app import AgentManager, CrewApp, build_app
 from crew.core.envelope import Envelope
 from crew.core.mocks import FakeProvider, InMemorySessionStore, NullMemory
 from crew.plugins.manager import PluginManager
@@ -256,6 +256,28 @@ async def test_startup_core_marks_failed_phase_and_preserves_exception(tmp_path,
     assert completed["app.startup.process_recovery"].error_type == "RuntimeError"
     assert completed["app.startup_core"].status == "failed"
     assert "app.startup.task_runtime" not in completed
+
+
+@pytest.mark.asyncio
+async def test_subagent_and_external_features_share_an_ordered_bootstrap(tmp_path, monkeypatch):
+    groups = []
+    original = CrewApp._install_builtin_features
+
+    def observe(self, *definitions):
+        groups.append(tuple(definition.feature_id for definition in definitions))
+        return original(self, *definitions)
+
+    monkeypatch.setattr(CrewApp, "_install_builtin_features", observe)
+    cfg = Config(
+        db_path=str(tmp_path / "crew.db"),
+        memory_db_path=str(tmp_path / "memory.db"),
+        crew_home=str(tmp_path / ".crew"),
+    )
+    app = build_app(config=cfg, enable_team=False)
+    try:
+        assert ("product.subagent", "product.external-agents") in groups
+    finally:
+        await app.shutdown()
 
 
 @pytest.mark.asyncio

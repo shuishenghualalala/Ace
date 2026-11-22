@@ -4445,7 +4445,6 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         idle_timeout=cfg.tasks_subagent_inactivity_timeout_seconds,
         max_runtime=cfg.tasks_subagent_execution_timeout_seconds,
     )
-    app._install_builtin_feature(subagent_feature.definition)
 
     # External runtimes optionally consume the Subagent service. Activating it
     # after Subagent makes that service available without a reverse dependency.
@@ -4469,7 +4468,7 @@ def build_app(config: Config | None = None, *, enable_team: bool = True) -> Crew
         interaction_bridge_getter=lambda: app.interaction_bridge,
         own_provider=True,
     )
-    app._install_builtin_feature(external_feature.definition)
+    app._install_builtin_features(subagent_feature.definition, external_feature.definition)
     app.declare_managed_feature(external_feature.definition)
 
     from crew.features.hooks import hook_registry
