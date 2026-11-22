@@ -342,16 +342,33 @@ $nodeCacheExe = Join-Path $nodeCacheDir "node.exe"
 
 if (-not (Test-Path $nodeCacheExe)) {
     Write-Host "正在下载 Node.js v$BundledNodeVersion portable..." -ForegroundColor Yellow
-    $nodeZipUrl  = "https://nodejs.org/dist/v$BundledNodeVersion/node-v$BundledNodeVersion-win-x64.zip"
+    $nodeArchive = "node-v$BundledNodeVersion-win-x64.zip"
+    $nodeZipUrls = @(
+        "https://npmmirror.com/mirrors/node/v$BundledNodeVersion/$nodeArchive",
+        "https://nodejs.org/dist/v$BundledNodeVersion/$nodeArchive"
+    )
     $nodeZipPath = Join-Path $ProjectRoot "dist\node-portable.zip"
-    Invoke-WebRequest -Uri $nodeZipUrl -OutFile $nodeZipPath -UseBasicParsing
-
     $tempExtract = Join-Path $ProjectRoot "dist\_node_extract"
-    if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
-    Expand-Archive -Path $nodeZipPath -DestinationPath $tempExtract -Force
+    $nodeDownloaded = $false
+    foreach ($u in $nodeZipUrls) {
+        try {
+            Invoke-WebRequest -Uri $u -OutFile $nodeZipPath -UseBasicParsing -TimeoutSec 60
+            if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
+            Expand-Archive -Path $nodeZipPath -DestinationPath $tempExtract -Force
+            $innerDir = Get-ChildItem -Path $tempExtract -Directory | Select-Object -First 1
+            if ($null -eq $innerDir -or -not (Test-Path (Join-Path $innerDir.FullName "node.exe"))) {
+                throw "Node.js 归档缺少 node.exe"
+            }
+            $nodeDownloaded = $true
+            break
+        } catch {
+            Write-Host "  下载或解包失败，尝试下一个源: $u ($($_.Exception.Message))" -ForegroundColor Yellow
+        }
+        Remove-Item -LiteralPath $nodeZipPath -Force -ErrorAction SilentlyContinue
+        if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
+    }
+    if (-not $nodeDownloaded) { throw "Node.js 所有下载源均失败（网络错误或归档不完整）" }
     Remove-Item $nodeZipPath -Force
-
-    $innerDir = Get-ChildItem -Path $tempExtract -Directory | Select-Object -First 1
     Move-Item -Path $innerDir.FullName -Destination $nodeCacheDir -Force
     Remove-Item $tempExtract -Recurse -Force
 

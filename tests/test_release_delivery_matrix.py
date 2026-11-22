@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,49 @@ def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Pa
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert script.index("Test-TarGzArchive $pyTar $tarExe") < script.index("& $tarExe -xzf")
+
+
+def test_windows_node_download_recovers_from_invalid_zip(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        pytest.skip("PowerShell is required")
+
+    script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
+    download_loop = "    $nodeDownloaded = $false" + script.split("    $nodeDownloaded = $false", 1)[1].split(
+        "    Move-Item -Path $innerDir.FullName", 1
+    )[0]
+    harness = tmp_path / "download-node.ps1"
+    harness.write_text(
+        "param([string]$Valid, [string]$Invalid)\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Invoke-WebRequest([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$TimeoutSec) {\n"
+        "    Copy-Item -LiteralPath $Uri -Destination $OutFile -Force\n"
+        "}\n"
+        "$nodeZipPath = Join-Path $PSScriptRoot 'download.zip'\n"
+        "$tempExtract = Join-Path $PSScriptRoot 'extract'\n"
+        "$nodeZipUrls = @($Invalid, $Valid)\n"
+        + download_loop
+        + "if (-not (Test-Path (Join-Path $innerDir.FullName 'node.exe'))) { throw 'valid retry not extracted' }\n",
+        encoding="utf-8-sig",
+    )
+    valid = tmp_path / "node.zip"
+    with zipfile.ZipFile(valid, "w") as archive:
+        archive.writestr("node-v20.18.3-win-x64/node.exe", b"node fixture")
+    invalid = tmp_path / "truncated.zip"
+    invalid.write_bytes(valid.read_bytes()[: valid.stat().st_size // 2])
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness), str(valid), str(invalid)],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (tmp_path / "download.zip").exists()
+    assert (tmp_path / "extract/node-v20.18.3-win-x64/node.exe").read_bytes() == b"node fixture"
+    assert "https://npmmirror.com/mirrors/node/" in script
+    assert "Invoke-WebRequest -Uri $u -OutFile $nodeZipPath -UseBasicParsing -TimeoutSec 60" in script
 
 
 def test_windows_runtime_copy_supports_deep_paths(tmp_path: Path) -> None:
