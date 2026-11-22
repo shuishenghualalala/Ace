@@ -80,8 +80,9 @@ desktop/playwright-browsers/
 *.tsbuildinfo
 # AX 快照探针的构建产物（源码是 scripts/ax-probe.ts，用 ax-probe.build.mjs 生成）
 desktop/scripts/ax-probe.mjs
-# Playwright 契约测试的构建产物（源码是 scripts/pw-contract.ts）
+# Playwright 契约测试的构建产物（源码是对应的 scripts/pw-*.ts）
 desktop/scripts/pw-contract.mjs
+desktop/scripts/pw-storage-restart-contract.mjs
 .eslintcache
 .npm/
 

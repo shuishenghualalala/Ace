@@ -24,6 +24,7 @@
     "test:visual": "playwright test --config=tests/visual/playwright.config.ts",
     "test:visual:update": "playwright test --config=tests/visual/playwright.config.ts --update-snapshots",
     "test:pw-contract": "node scripts/pw-contract.build.mjs && electron scripts/pw-contract.mjs",
+    "test:pw-storage-restart": "node scripts/pw-contract.build.mjs && electron scripts/pw-storage-restart-contract.mjs",
     "refactor:audit-leaks": "node scripts/audit-css-leaks.mjs",
     "refactor:extract-tokens": "node scripts/extract-theme-tokens.mjs",
     "refactor:audit-font-sizes": "node scripts/audit-font-sizes.mjs",

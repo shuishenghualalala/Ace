@@ -1,5 +1,5 @@
 /**
- * 把 scripts/pw-contract.ts 打包成 electron 可直接执行的 scripts/pw-contract.mjs。
+ * 把 Playwright 契约源码打包成 Electron 可直接执行的脚本。
  *
  * 与 ax-probe.build.mjs 同理：契约测试是开发/升级期的验证工具，不该进产物。
  * playwright-core 与 electron 一样保持外部化——由宿主的 node_modules 提供。
@@ -12,8 +12,12 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 await esbuild.build({
-  entryPoints: [path.join(here, 'pw-contract.ts')],
-  outfile: path.join(here, 'pw-contract.mjs'),
+  entryPoints: [
+    path.join(here, 'pw-contract.ts'),
+    path.join(here, 'pw-storage-restart-contract.ts'),
+  ],
+  outdir: here,
+  outExtension: { '.js': '.mjs' },
   bundle: true,
   platform: 'node',
   format: 'esm',
