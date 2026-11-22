@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.gateway.auth import REMOTE_AUTH_COOKIE, account_from_request, create_remote_session_token
+from crew.providers.http_client import create_async_client
 
 _PLACEHOLDER_HOSTS = {"xxxxx", "xxxxx.example"}
 _EMAIL_RE = re.compile(
@@ -77,7 +78,7 @@ async def _post_json(config: Any, path: str, body: dict[str, Any]) -> tuple[int,
         return 503, {"ok": False, "error": "远程认证服务尚未配置"}
     timeout = max(1.0, min(60.0, float(getattr(config, "auth_timeout_seconds", 10.0))))
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with create_async_client(timeout=timeout, follow_redirects=False) as client:
             response = await client.post(_endpoint(base_url, path), json=body)
     except httpx.TimeoutException:
         return 504, {"ok": False, "error": "认证服务请求超时"}
