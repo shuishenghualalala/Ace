@@ -762,6 +762,12 @@
 <p><strong>验收</strong> CLI 新增 add 手动连接与 update 保留用例：add 不调用 add_server、配置保留 false；update 继承 false、remove/register 调用且 reload 未调用；Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts</code> 的 CLI 参数入口。</p>
 </article>
+<article id="web-mcp-auto-connect-e2e">
+<h3>Web MCP 手动连接的端到端验收</h3>
+<p>使用生产 Web 构建、隔离 Gateway 与真实本地 MCP HTTP 服务：新增服务时取消「启动时自动连接」，保存后卡片显示未连接且没有工具；点击「重连」后变为已连接并出现 <code>ping</code> 工具，删除后回到空态。全程浏览器无 pageerror，Gateway 正常退出。</p>
+<p><strong>证据</strong> <code>mcp-hub-real-ed8efef620/web-mcp-manual-saved.png</code>、<code>web-mcp-manual-connected.png</code>。该结果证明 Web 入口与 Gateway/manager 的真实链路，不覆盖真实重启后的启动扫描。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/mcp_management.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
