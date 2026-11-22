@@ -521,6 +521,7 @@ function fillMcpForm(server?: McpServerRow): void {
 }
 
 function closeMcpServerModal(): void {
+  probeEpoch += 1;
   const overlay = $('#mcp-server-overlay') as HTMLElement | null;
   if (overlay) overlay.hidden = true;
 }
@@ -530,6 +531,7 @@ export async function openMcpServerModal(server?: McpServerRow): Promise<void> {
   const overlay = $('#mcp-server-overlay') as HTMLElement | null;
   if (!overlay) return;
   fillMcpForm(server);
+  probeEpoch += 1;
   const title = document.getElementById('mcp-server-title');
   if (title) title.textContent = server ? `编辑：${server.name}` : '新增 MCP 服务';
   const deleteBtn = document.getElementById('mcp-server-delete') as HTMLButtonElement | null;
@@ -545,6 +547,7 @@ export async function openMcpServerModal(server?: McpServerRow): Promise<void> {
 }
 
 let formBound = false;
+let probeEpoch = 0;
 function bindMcpFormOnce(): void {
   if (formBound) return;
   formBound = true;
@@ -557,11 +560,20 @@ function bindMcpFormOnce(): void {
       result.textContent = '';
     }
   };
+  const resetProbeControl = (): void => {
+    clearProbeResult();
+    const button = document.getElementById('mcp-server-probe') as HTMLButtonElement | null;
+    if (button) {
+      button.disabled = false;
+      button.textContent = '测试连接';
+    }
+  };
   document.querySelectorAll<HTMLInputElement>('input[name="mcp-transport"]').forEach((input) => {
     input.addEventListener('change', () => {
       if (input.checked) {
+        probeEpoch += 1;
         setTransportFields(input.value as McpTransport);
-        clearProbeResult();
+        resetProbeControl();
       }
     });
   });
@@ -619,6 +631,7 @@ function bindMcpFormOnce(): void {
         return;
       }
       const label = button.textContent ?? '测试连接';
+      const epoch = ++probeEpoch;
       button.disabled = true;
       button.textContent = '测试中…';
       if (probeResult) {
@@ -632,6 +645,7 @@ function bindMcpFormOnce(): void {
           url: payload.url,
           ...(payload.headers ? { headers: payload.headers } : {}),
         });
+        if (probeEpoch !== epoch) return;
         if (probeResult) {
           if (result.ok) {
             const preview = result.tools.slice(0, 8).join(', ');
@@ -643,10 +657,13 @@ function bindMcpFormOnce(): void {
           }
         }
       } catch (error) {
+        if (probeEpoch !== epoch) return;
         if (probeResult) probeResult.textContent = `连接失败：${(error as Error).message}`;
       } finally {
-        button.disabled = false;
-        button.textContent = label;
+        if (probeEpoch === epoch) {
+          button.disabled = false;
+          button.textContent = label;
+        }
       }
     })();
   });

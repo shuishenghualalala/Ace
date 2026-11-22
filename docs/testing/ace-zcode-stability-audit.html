@@ -624,6 +624,12 @@
 <p><strong>验收</strong> McpHub 新增迟到结果用例：探测未返回时切到 stdio，再让 Promise 成功，界面不出现「连接成功」；组件 4 项、TypeScript 通过。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="desktop-mcp-probe-stale">
+<h3>Desktop MCP 探测的迟到结果隔离</h3>
+<p>Desktop 在切换传输类型时只清空显示，之前在途的探测仍可能返回并覆盖新表单；按钮也可能保持「测试中」。现在打开/关闭弹层、切换传输与发起探测都会递增 epoch，只有当前 epoch 的响应才写入结果并恢复按钮；切换传输会重置探测按钮与结果。迟到请求仍会在后台完成，但不污染界面。</p>
+<p><strong>验收</strong> Desktop 探测组件测试 2 项通过，新增延迟 Promise 在切换到 stdio 后返回时结果保持隐藏、按钮恢复；TypeScript 通过。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/mcp-probe.test.ts</code>、<code>docs/frontend/desktop-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

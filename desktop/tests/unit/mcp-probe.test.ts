@@ -43,7 +43,36 @@ function setupForm(): void {
     </div>`;
 }
 
+it('ignores a late probe result after switching transport', async () => {
+  vi.resetModules();
+  let resolveProbe!: (value: unknown) => void;
+  apiMock.probeMcpServer.mockReturnValue(new Promise((resolve) => { resolveProbe = resolve; }));
+  const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
+  bindMcpPane();
+  await openMcpServerModal();
+
+  const http = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="http"]')!;
+  http.checked = true;
+  http.dispatchEvent(new Event('change', { bubbles: true }));
+  (document.getElementById('mcp-url') as HTMLInputElement).value = 'https://mcp.example.com/mcp';
+  (document.getElementById('mcp-server-probe') as HTMLButtonElement).click();
+
+  const stdio = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="stdio"]')!;
+  stdio.checked = true;
+  stdio.dispatchEvent(new Event('change', { bubbles: true }));
+  resolveProbe({ ok: true, tools: ['ping'], tool_count: 1, elapsed_ms: 5, error: null });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const result = document.getElementById('mcp-probe-result')!;
+  expect(result.hidden).toBe(true);
+  expect(result.textContent).toBe('');
+  const button = document.getElementById('mcp-server-probe') as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  expect(button.textContent).toBe('测试连接');
+});
+
 it('probes an HTTP endpoint from the MCP settings form without saving', async () => {
+  vi.resetModules();
   const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
   bindMcpPane();
   await openMcpServerModal();
