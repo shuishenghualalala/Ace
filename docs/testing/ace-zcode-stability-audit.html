@@ -588,6 +588,12 @@
 <p><strong>验收</strong> Gateway 新增两项通过：更新 <code>token=***</code> 后配置与 config.yaml 保留原 token、采用新 mode；探测 <code>token=***&amp;mode=2</code> 捕获到原 token。Ruff 通过。未连接需要鉴权的真实服务。</p>
 <p class="evidence">Ace <code>crew/state/config.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-connect-refresh">
+<h3>Web MCP 保存后的连接状态刷新</h3>
+<p>新增或编辑 MCP 服务后，Web 只重新读取一次列表；worker 通常还在后台连接，卡片会停在「未连接」，用户只能手动刷新。现在新增、编辑和「重连」成功后都会在 1.5 秒再读取一次状态，定时器在组件卸载时清除，避免离开页面后继续请求。配置仍以保存响应为准，连接/工具以 worker 为准。</p>
+<p><strong>验收</strong> McpHub 3 项组件测试、TypeScript 与生产构建通过。Windows Chrome + 隔离 Gateway + 真实本地 MCP HTTP 服务：添加服务，测试连接成功，保存后卡片自动变为「已连接」并显示 <code>ping</code> 工具，删除后回到空态；Gateway 状态清空。截图 <code>mcp-hub-real-2a2f6b8a22/web-mcp-real-connected.png</code>。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, type McpServerRow, type McpTransport } from "../api";
 
 type TransportChoice = "stdio" | "http" | "sse";
@@ -84,6 +84,7 @@ export default function McpHub() {
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
   const [probeMessage, setProbeMessage] = useState("");
+  const refreshTimer = useRef<number | null>(null);
 
   const load = async (): Promise<void> => {
     setLoading(true);
@@ -98,7 +99,18 @@ export default function McpHub() {
     }
   };
 
+  const refreshSoon = (): void => {
+    if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => {
+      refreshTimer.current = null;
+      void load();
+    }, 1500);
+  };
+
   useEffect(() => { void load(); }, []);
+  useEffect(() => () => {
+    if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current);
+  }, []);
 
   const openAdd = (): void => {
     setEditing("");
@@ -137,6 +149,7 @@ export default function McpHub() {
       }
       setModalOpen(false);
       await load();
+      refreshSoon();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存 MCP 服务失败");
     } finally {
@@ -184,6 +197,7 @@ export default function McpHub() {
     try {
       await api.reloadMcpServer(server.name);
       await load();
+      refreshSoon();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "重连 MCP 服务失败");
     }
