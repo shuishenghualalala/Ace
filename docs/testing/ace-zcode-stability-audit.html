@@ -660,6 +660,12 @@
 <p><strong>验收</strong> Gateway 新增配置待切换用例：保存新 URL 后状态返回 <code>config_pending=true</code> 且配置为新 URL；McpHub 5 项、Desktop 状态 8 项、TypeScript 与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-refresh-retry">
+<h3>Web MCP 保存后的静默二次刷新</h3>
+<p>单次 1.5 秒刷新仍可能在较慢连接完成前结束，卡片停在「未连接」；普通刷新还会把列表切回加载态造成闪烁。现在新增/编辑/重连后分别在 1.5 秒与 4.5 秒做静默刷新：不设置 loading、不清空现有卡片，只更新状态与错误；组件卸载时清除两个定时器。配置仍以持久化值为准，连接与工具仍来自 worker。</p>
+<p><strong>验收</strong> McpHub 5 项、TypeScript 与生产构建通过。真实 MCP HTTP 服务 E2E 仍验证保存后自动显示已连接与工具。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

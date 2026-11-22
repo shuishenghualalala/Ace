@@ -85,12 +85,12 @@ export default function McpHub() {
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
   const [probeMessage, setProbeMessage] = useState("");
-  const refreshTimer = useRef<number | null>(null);
+  const refreshTimers = useRef<number[]>([]);
   const probeEpoch = useRef(0);
   const probeAbort = useRef<AbortController | null>(null);
 
-  const load = async (): Promise<void> => {
-    setLoading(true);
+  const load = async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     try {
       const result = await api.mcpServers();
       setServers(result.servers ?? []);
@@ -98,16 +98,15 @@ export default function McpHub() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "无法加载 MCP 服务");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   const refreshSoon = (): void => {
-    if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current);
-    refreshTimer.current = window.setTimeout(() => {
-      refreshTimer.current = null;
-      void load();
-    }, 1500);
+    for (const timer of refreshTimers.current) window.clearTimeout(timer);
+    refreshTimers.current = [1500, 4500].map((delay) => window.setTimeout(() => {
+      void load(true);
+    }, delay));
   };
 
   const abortProbe = (): void => {
@@ -117,7 +116,7 @@ export default function McpHub() {
 
   useEffect(() => { void load(); }, []);
   useEffect(() => () => {
-    if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current);
+    for (const timer of refreshTimers.current) window.clearTimeout(timer);
     abortProbe();
   }, []);
 
