@@ -140,6 +140,7 @@ def create_mcp_servers_router(crew) -> APIRouter:
             "ok": bool(result.get("ok")),
             "tools": tools,
             "tool_count": int(result.get("tool_count") or len(tools)),
+            "elapsed_ms": int(result.get("elapsed_ms") or 0),
             "error": redact_sensitive_text(str(error)) if error else None,
         })
 

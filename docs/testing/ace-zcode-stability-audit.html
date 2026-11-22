@@ -534,6 +534,12 @@
 <p><strong>验收</strong> Desktop 市场源组件测试通过，新增 Esc 关闭断言；TypeScript 通过。焦点恢复在 happy-dom 中无法稳定断言，未作为测试项，仅由实现路径保证。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/skills-page.ts</code>、<code>desktop/tests/unit/skills-market-source.test.ts</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="mcp-probe-latency">
+<h3>MCP 探测耗时诊断</h3>
+<p>探测结果原先只有工具列表，无法判断连接慢还是服务端列工具慢。探测 worker 现在在连接与首次 list_tools 前后计时，返回 <code>elapsed_ms</code>；Gateway、CLI 和 Desktop 在成功路径显示耗时，失败响应仍带工具计数与耗时字段但 CLI/Desktop 只显示错误。耗时包含连接和工具发现，不含后续工具调用或关闭。</p>
+<p><strong>验收</strong> 探测定向 7 项通过；Gateway MCP API、CLI 与 Desktop 组件测试通过，TypeScript、Ruff 通过。未连接公开网络。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/cli/integration.py</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from contextlib import AsyncExitStack
 from contextvars import Context, copy_context
 from dataclasses import dataclass, replace
@@ -1129,7 +1130,11 @@ async def probe_remote_server(cfg: dict[str, Any], *, timeout: float = 5.0) -> d
     command, so that path stays behind the normal save-and-connect approval.
     """
     if cfg.get("command") or not cfg.get("url"):
-        return {"ok": False, "tools": [], "tool_count": 0, "error": "只支持探测 HTTP/SSE 端点"}
+        return {
+            "ok": False, "tools": [], "tool_count": 0, "elapsed_ms": 0,
+            "error": "只支持探测 HTTP/SSE 端点",
+        }
+    started = time.monotonic()
     probe_cfg = dict(cfg)
     probe_cfg["reconnect"] = {"enabled": False}
     probe_cfg["fail_on_startup_error"] = True
@@ -1147,6 +1152,7 @@ async def probe_remote_server(cfg: dict[str, Any], *, timeout: float = 5.0) -> d
             "ok": bool(accepted and error is None),
             "tools": tools[:MCP_PROBE_MAX_TOOL_NAMES],
             "tool_count": len(tools),
+            "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
             "error": str(error) if error is not None else None,
         }
     finally:

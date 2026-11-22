@@ -122,7 +122,7 @@ crew skill list --store --json</code></pre>
   <h3 id="mcp-probe">3.3 MCP HTTP/SSE 端点探测</h3>
   <pre><code>crew mcp servers probe --url https://mcp.example.com/mcp --transport http
 crew mcp servers probe --url https://mcp.example.com/mcp --headers '{"Authorization":"Bearer …"}' --json</code></pre>
-  <p><code>probe</code> 在保存前连接 HTTP/SSE 端点并列出工具，不写入 <code>config.yaml</code>、不注册工具、不启动常驻重连。地址必须通过与新增相同的校验；stdio 预检会执行宿主命令，因此不支持，仍需保存后连接。成功返回工具数量与名称（最多回报 50 个名称，数量单独给出），失败以非零退出码结束并输出脱敏错误。加 <code>--json</code> 时成功结果同时以结构化 JSON 输出。</p>
+  <p><code>probe</code> 在保存前连接 HTTP/SSE 端点并列出工具，不写入 <code>config.yaml</code>、不注册工具、不启动常驻重连。地址必须通过与新增相同的校验；stdio 预检会执行宿主命令，因此不支持，仍需保存后连接。成功返回工具数量、名称和耗时（最多回报 50 个名称，数量单独给出），失败以非零退出码结束并输出脱敏错误。加 <code>--json</code> 时成功结果同时以结构化 JSON 输出。</p>
 
   <h2>4. 安全命令</h2>
   <p>安全命令直接调用 <code>crew.security_service</code> / <code>security_rules</code> / <code>security_audit</code>，等价于本机宿主身份，不需要桌面端 proof。安全写操作全部是显式子命令，不提供隐式一键放行开关。</p>
