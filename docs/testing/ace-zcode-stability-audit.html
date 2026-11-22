@@ -823,10 +823,10 @@
 <p><strong>结论</strong> 该结果不能作为干净树发布证明；MCP/CLI 各自定向与组合套件仍为通过状态。</p>
 </article>
 <article id="test-no-proxy-normalization">
-<h3>测试环境的 IPv6 NO_PROXY 归一化</h3>
-<p>共享环境把 <code>NO_PROXY</code> 设为包含 <code>[::1]</code>；httpx 在构造客户端时把方括号 IPv6 当作非法端口，导致配置类 Gateway 测试在 fixture 阶段报 <code>Invalid port: ':1]'</code>。新增 session 级 autouse fixture，只在测试进程内把 <code>[::1]</code> 归一为 <code>::1</code>，保留 loopback 直连语义，不改产品代码或用户环境。</p>
-<p><strong>验收</strong> 配置 CRUD API 全量 32 项通过，其中此前 setup 失败的 3 项恢复；修复仅作用于 pytest 进程。</p>
-<p class="evidence">Ace <code>tests/conftest.py</code>、<code>tests/gateway/test_config_crud_api.py</code>。httpx 环境代理解析路径。</p>
+<h3>IPv6 NO_PROXY 归一化移到产品边界</h3>
+<p>共享环境把 <code>NO_PROXY</code> 设为包含 <code>[::1]</code>；httpx 在构造客户端时把方括号 IPv6 当作非法端口。最初用 pytest session fixture 规避，随后 Provider 的 <code>create_async_client</code> 统一归一化 <code>[::1]</code>/<code>[::]</code>，测试 fixture 已移除，避免测试掩盖真实产品行为。</p>
+<p><strong>验收</strong> 移除 fixture 后配置 CRUD API 全量 32 项通过，其中此前 setup 失败的 3 项由产品边界恢复；归一化仍保留 loopback 直连语义。</p>
+<p class="evidence">Ace <code>crew/providers/http_client.py</code>、<code>tests/test_provider_http_client.py</code>、<code>tests/gateway/test_config_crud_api.py</code>。httpx 环境代理解析路径。</p>
 </article>
 <article id="provider-proxy-error">
 <h3>Provider 启动时的代理环境错误</h3>
