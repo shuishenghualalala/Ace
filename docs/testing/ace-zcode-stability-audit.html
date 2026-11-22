@@ -728,8 +728,8 @@
 </article>
 <article id="mcp-payload-validation">
 <h3>MCP 配置的 args 与 header 校验</h3>
-<p>stdio 的 <code>args</code> 原先直接 <code>list()</code>，对象或嵌套值会写入配置并在启动时产生难定位错误；HTTP headers 值也未拒绝 CR/LF。现在 args 必须是字符串数组，headers 值不得包含换行，错误在保存/探测前以 400 返回；合法配置行为不变。</p>
-<p><strong>验收</strong> 新增非字符串 args 与含换行 header 用例均 400；定向用例与 Ruff 通过。</p>
+<p>stdio 的 <code>args</code> 原先直接 <code>list()</code>，对象或嵌套值会写入配置并在启动时产生难定位错误；HTTP headers 名与值也未按 HTTP 规则校验。现在 args 必须是字符串数组，headers 名必须是合法 HTTP token、值不得包含 CR/LF，错误在保存/探测前以 400 返回；合法配置行为不变。</p>
+<p><strong>验收</strong> 新增非字符串 args、含换行 header 与非法 header 名用例均 400；定向用例与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
 <article id="external-marketplace-sources">
