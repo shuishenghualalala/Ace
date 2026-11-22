@@ -96,6 +96,7 @@ def _register_mcp(subparsers) -> None:
 
     probe = servers_cmds.add_parser("probe", help="探测 HTTP/SSE MCP 端点（不保存）")
     probe.add_argument("--url", required=True)
+    probe.add_argument("--name", default="", help="已保存服务名；用其配置补全 *** 占位符")
     probe.add_argument("--transport", choices=("http", "sse"), default="http")
     probe.add_argument("--headers", default="", help="headers JSON 对象")
     probe.add_argument("--json", dest="json_payload", help="完整 payload JSON（可选）")
@@ -199,6 +200,23 @@ async def _mcp_servers_probe(args: Any, ctx: CliContext) -> CliResult:
     cfg, err = _validate_server_payload(payload)
     if err is not None:
         raise CliError(err)
+    name = str(getattr(args, "name", "") or "").strip()
+    if name:
+        from crew.state.config import merge_mcp_url_secrets
+
+        stored = (getattr(ctx.app.config, "mcp_servers", {}) or {}).get(name)
+        if isinstance(stored, dict):
+            for field in ("env", "headers"):
+                current = cfg.get(field)
+                previous = stored.get(field)
+                if isinstance(current, dict) and isinstance(previous, dict):
+                    cfg[field] = {
+                        **current,
+                        **{key: previous[key] for key, value in current.items()
+                           if value == "***" and key in previous},
+                    }
+            if isinstance(cfg.get("url"), str) and isinstance(stored.get("url"), str):
+                cfg["url"] = merge_mcp_url_secrets(cfg["url"], stored["url"])
     if cfg.get("command") or not cfg.get("url"):
         raise CliError("probe 只支持 HTTP/SSE 端点；stdio 请保存后连接")
     result = await probe_remote_server(cfg)

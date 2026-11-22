@@ -1035,6 +1035,36 @@ def test_mcp_probe_failure_exits_nonzero(capsys, cli_home, monkeypatch):
     assert code == 1
 
 
+def test_mcp_probe_name_merges_saved_secrets(monkeypatch):
+    import crew.cli.integration as integration
+
+    captured: dict = {}
+
+    async def fake_probe(cfg):
+        captured.update(cfg)
+        return {"ok": True, "tools": [], "tool_count": 0, "elapsed_ms": 1, "error": None}
+
+    monkeypatch.setattr("crew.tools.mcp_client.probe_remote_server", fake_probe)
+    ctx = SimpleNamespace(app=SimpleNamespace(config=SimpleNamespace(mcp_servers={
+        "remote": {
+            "url": "http://127.0.0.1:9/mcp?token=stored&mode=1",
+            "transport": "http",
+            "headers": {"Authorization": "Bearer stored"},
+        },
+    })))
+    args = SimpleNamespace(
+        name="remote",
+        url="http://127.0.0.1:9/mcp?token=***&mode=2",
+        transport="http",
+        headers='{"Authorization":"***"}',
+        json_payload=None,
+    )
+    result = asyncio.run(integration._mcp_servers_probe(args, ctx))
+    assert result.data["ok"] is True
+    assert captured["headers"] == {"Authorization": "Bearer stored"}
+    assert captured["url"] == "http://127.0.0.1:9/mcp?token=stored&mode=2"
+
+
 def test_skill_source_commands_register_list_and_remove(capsys, cli_home, tmp_path):
     market = tmp_path / "team-market"
     skill_dir = market / "market-doc"
