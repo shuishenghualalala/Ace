@@ -17,6 +17,7 @@ import re
 import shutil
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -260,10 +261,10 @@ def _parse_manifest(payload: object) -> list[dict]:
     return skills
 
 
-def _materialize(url: str, skills: list[dict]) -> Path:
+def _materialize(url: str, skills: list[dict], *, token: str | None = None) -> Path:
     parent = _cache_parent()
     parent.mkdir(parents=True, exist_ok=True)
-    token = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    token = token or hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     cache_dir = parent / token
     staging = parent / f".{token}-{os.getpid()}"
     shutil.rmtree(staging, ignore_errors=True)
@@ -302,6 +303,69 @@ def _add_url_source(url: str, label: str) -> dict:
             shutil.rmtree(cache_dir, ignore_errors=True)
             raise
         return entry
+
+
+def refresh_skill_source(raw_path: str) -> dict:
+    text = str(raw_path or "").strip()
+    if not text:
+        raise SkillSourceError("source_empty", "市场源不能为空")
+    with _lock:
+        items = _read_registry()
+        entry = _match_source(items, text)
+        if entry is None:
+            raise SkillSourceError("source_not_found", "未找到该市场源登记")
+        if entry.get("kind") != "url":
+            raise SkillSourceError("source_not_url", "只有 HTTPS 清单源支持刷新")
+        url = str(entry["url"])
+        label = str(entry.get("label") or "")
+        old_cache = str(entry.get("cache_dir") or "")
+    normalized = _validate_remote_url(url)
+    skills = _fetch_manifest(normalized)
+    new_cache = _materialize(
+        normalized, skills, token=hashlib.sha256(f"{normalized}:{time.time_ns()}".encode()).hexdigest()[:16],
+    )
+    try:
+        with _lock:
+            current = _read_registry()
+            target = next(
+                (item for item in current
+                 if item.get("kind") == "url" and item.get("url", "").lower() == url.lower()),
+                None,
+            )
+            if target is None:
+                raise SkillSourceError("source_not_found", "未找到该市场源登记")
+            target["cache_dir"] = str(new_cache)
+            target["refreshed_at"] = _now()
+            _write_registry(current)
+    except Exception:
+        shutil.rmtree(new_cache, ignore_errors=True)
+        raise
+    if old_cache and old_cache != str(new_cache):
+        shutil.rmtree(old_cache, ignore_errors=True)
+    return _public({
+        "kind": "url", "url": url, "cache_dir": str(new_cache),
+        "label": label, "added_at": str(entry.get("added_at") or ""),
+        "refreshed_at": _now(),
+    })
+
+
+def _match_source(items: list[dict], text: str) -> dict | None:
+    is_url = text.lower().startswith(("http://", "https://"))
+    if is_url:
+        key = text.lower()
+        return next(
+            (item for item in items
+             if item.get("kind") == "url" and item.get("url", "").lower() == key),
+            None,
+        )
+    path = Path(text).expanduser()
+    key = os.path.normcase(str(path.resolve())) if path.is_absolute() else os.path.normcase(text)
+    for item in items:
+        if item.get("kind") == "dir" and os.path.normcase(item.get("path", "")) == key:
+            return item
+        if os.path.normcase(item.get("label", "")) == key:
+            return item
+    return None
 
 
 def add_skill_source(raw_path: str, *, label: str = "") -> dict:

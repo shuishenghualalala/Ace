@@ -19,6 +19,7 @@ from crew.agent.skills import (
     list_optional_skills,
     list_skill_sources,
     list_skills,
+    refresh_skill_source,
     remove_skill_source,
     uninstall_skill,
 )
@@ -266,6 +267,21 @@ def create_misc_router(crew) -> APIRouter:
         if not removed:
             return JSONResponse({"ok": False, "error": "未找到该市场目录登记"}, status_code=404)
         return JSONResponse({"ok": True})
+
+    @router.post("/api/skills/sources/refresh")
+    async def skill_source_refresh(request: Request, payload: dict) -> JSONResponse:
+        try:
+            require_admin(account_from_request(request), crew.config)
+        except AuthenticationError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+        target = str(payload.get("url") or payload.get("path") or "")
+        try:
+            entry = await asyncio.to_thread(refresh_skill_source, target)
+        except SkillSourceError as exc:
+            return JSONResponse(
+                {"ok": False, "code": exc.code, "error": str(exc)}, status_code=400,
+            )
+        return JSONResponse({"ok": True, "source": entry})
 
     @router.post("/api/skills/import")
     async def skill_import(request: Request, payload: dict) -> JSONResponse:

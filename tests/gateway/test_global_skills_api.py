@@ -166,6 +166,16 @@ def test_skill_source_and_import_routes_forward_admin_operations(monkeypatch, tm
     )
     assert imported_response.status_code == 200
     assert imported_response.json() == {"ok": True, "slug": "prepared-copy"}
+
+    monkeypatch.setattr(
+        misc, "refresh_skill_source",
+        lambda target: {"kind": "url", "url": target, "label": "Remote"},
+    )
+    refreshed = client.post(
+        "/api/skills/sources/refresh", json={"url": "https://skills.example.com/manifest.json"},
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["source"]["label"] == "Remote"
     assert added == [("C:/market", "Team")]
     assert removed == ["C:/market", "missing"]
     assert imported == [(str(skill_dir), "prepared-copy", "desktop-api-import", False)]
@@ -189,5 +199,6 @@ def test_skill_source_mutations_reject_non_admin(monkeypatch):
         client.post("/api/skills/sources", json={"path": "C:/market"}),
         client.delete("/api/skills/sources", params={"path": "C:/market"}),
         client.post("/api/skills/import", json={"path": "C:/market"}),
+        client.post("/api/skills/sources/refresh", json={"url": "https://skills.example.com/m.json"}),
     ):
         assert response.status_code == 403

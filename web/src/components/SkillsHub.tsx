@@ -237,6 +237,19 @@ export default function SkillsHub() {
     }
   };
 
+  const handleRefreshSource = async (url: string) => {
+    setSourceBusy(true);
+    setSourceError("");
+    try {
+      await api.refreshSkillSource(url);
+      await Promise.all([loadSources(), load()]);
+    } catch (error) {
+      setSourceError(error instanceof Error ? error.message : "无法刷新市场源");
+    } finally {
+      setSourceBusy(false);
+    }
+  };
+
   const handleImportSkill = async (event: FormEvent) => {
     event.preventDefault();
     const path = importPath.trim();
@@ -406,6 +419,16 @@ export default function SkillsHub() {
                   <li key={target} className="hub__market-item">
                     <span className="hub__market-label">{source.label}</span>
                     <code className="hub__market-path">{target}</code>
+                    {source.url && (
+                      <button
+                        type="button"
+                        className="hub-btn hub-btn--ghost"
+                        disabled={sourceBusy}
+                        onClick={() => void handleRefreshSource(target)}
+                      >
+                        刷新
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="hub-btn hub-btn--ghost"

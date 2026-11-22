@@ -175,6 +175,53 @@ def test_url_market_source_lists_and_installs_inline_skill(isolated_skill_env, m
     assert skills.list_skill_sources() == []
 
 
+def test_refresh_url_source_replaces_cached_content(isolated_skill_env, monkeypatch):
+    import crew.agent.skills.sources as source_module
+
+    url = "https://skills.example.com/manifest.json"
+    contents = ["first body", "second body"]
+    monkeypatch.setattr(source_module, "_validate_remote_url", lambda value: value)
+    monkeypatch.setattr(source_module, "_fetch_manifest", lambda value: [{
+        "slug": "remote-doc", "name": "Remote", "description": "d",
+        "content": f"---\nname: remote-doc\n---\n{contents[0]}\n",
+    }])
+    skills.add_skill_source(url)
+    first = next(item for item in skills.list_local_skills() if item["slug"] == "remote-doc")
+    assert "first body" in Path(first["skill_dir"], "SKILL.md").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(source_module, "_fetch_manifest", lambda value: [{
+        "slug": "remote-doc", "name": "Remote", "description": "d",
+        "content": f"---\nname: remote-doc\n---\n{contents[1]}\n",
+    }])
+    refreshed = skills.refresh_skill_source(url)
+    assert refreshed["kind"] == "url" and "cache_dir" not in refreshed
+    second = next(item for item in skills.list_local_skills() if item["slug"] == "remote-doc")
+    assert "second body" in Path(second["skill_dir"], "SKILL.md").read_text(encoding="utf-8")
+    assert first["skill_dir"] != second["skill_dir"]
+
+
+def test_refresh_url_source_failure_keeps_previous_cache(isolated_skill_env, monkeypatch):
+    import crew.agent.skills.sources as source_module
+
+    url = "https://skills.example.com/manifest.json"
+    monkeypatch.setattr(source_module, "_validate_remote_url", lambda value: value)
+    monkeypatch.setattr(source_module, "_fetch_manifest", lambda value: [{
+        "slug": "remote-doc", "name": "Remote", "description": "d", "content": "stable body",
+    }])
+    skills.add_skill_source(url)
+    before = next(item for item in skills.list_local_skills() if item["slug"] == "remote-doc")
+
+    def fail(_value):
+        raise source_module.SkillSourceError("source_fetch_failed", "offline")
+
+    monkeypatch.setattr(source_module, "_fetch_manifest", fail)
+    with pytest.raises(skills.SkillSourceError, match="offline"):
+        skills.refresh_skill_source(url)
+    after = next(item for item in skills.list_local_skills() if item["slug"] == "remote-doc")
+    assert after["skill_dir"] == before["skill_dir"]
+    assert Path(after["skill_dir"], "SKILL.md").is_file()
+
+
 def test_url_market_source_rejects_insecure_and_private_hosts(isolated_skill_env):
     import crew.agent.skills.sources as source_module
 

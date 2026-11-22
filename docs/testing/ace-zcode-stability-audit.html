@@ -438,6 +438,12 @@
 <p><strong>验收</strong> 市场源定向 15 项通过：目录与 URL 登记、去重、无效/缺失/重叠目录、遗留 v1 登记读取、URL 缓存清单列出与复制安装、HTTP/私有主机/坏清单/超长内容拒绝、<code>_fetch_manifest</code> 的成功解析；技能组合与 CLI 回归通过，Ruff 通过。Windows 隔离 CLI 的本地目录与单目录导入端到端仍通过。远程 HTTPS 实际下载未在公开网络执行，抓取层由受控 Client 夹具覆盖；DNS 校验与后续连接之间仍存在理论上的重绑定窗口，未支持 Git/插件市场。</p>
 <p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/agent/skills/manage.py</code>、<code>tests/test_skill_sources.py</code>、<code>web/src/components/SkillsHub.tsx</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="remote-skill-market-refresh">
+<h3>HTTPS 技能清单的显式刷新</h3>
+<p>远程清单首次登记后缓存不会自动更新。新增 <code>crew skill source refresh</code>、<code>POST /api/skills/sources/refresh</code> 和 Web 远程源旁的「刷新」按钮：重新校验 URL、下载并解析清单，写入新的缓存目录后再原子更新登记；成功后删除旧缓存，下载或校验失败则保留旧缓存和旧登记。刷新不改变源的标签和首次登记时间，只更新缓存路径与刷新时间。仍不执行技能内容，只有 URL 源可刷新，本地目录源返回明确错误。</p>
+<p><strong>验收</strong> 市场源定向 17 项通过，新增刷新替换缓存、刷新失败保留旧缓存两例；Gateway 技能接口 7 项通过，覆盖刷新转发与管理员拒绝；SkillsHub 组件 4 项通过，覆盖远程源刷新按钮；Web 全量 327 项、TypeScript 与 Ruff 通过。未对公开 HTTPS 站点执行真实刷新，网络层仍由受控 Client 夹具覆盖。</p>
+<p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/cli/knowledge.py</code>、<code>crew/gateway/routers/misc.py</code>、<code>web/src/components/SkillsHub.tsx</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

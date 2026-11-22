@@ -523,6 +523,10 @@ export const api = {
     }),
   removeSkillSource: (path: string) =>
     getJSON<{ ok: boolean }>(`/api/skills/sources?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  refreshSkillSource: (url: string) =>
+    getJSON<{ ok: boolean; source: SkillMarketSource }>("/api/skills/sources/refresh", {
+      method: "POST", ...jsonBody({ url }),
+    }),
   importSkillDirectory: (path: string, slug = "") =>
     getJSON<{ ok: boolean; slug: string }>("/api/skills/import", { method: "POST", ...jsonBody({ path, slug }) }),
   scenarios: (count = 4) => getJSON<Scenario[]>(`/api/scenarios?count=${count}`),

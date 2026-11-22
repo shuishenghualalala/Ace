@@ -10,6 +10,7 @@ const apiMock = vi.hoisted(() => ({
   skillSources: vi.fn(),
   addSkillSource: vi.fn(),
   removeSkillSource: vi.fn(),
+  refreshSkillSource: vi.fn(),
   importSkillDirectory: vi.fn(),
   installSkill: vi.fn(),
   uninstallSkill: vi.fn(),
@@ -27,6 +28,10 @@ beforeEach(() => {
   apiMock.skillSources.mockResolvedValue({ sources: [] });
   apiMock.addSkillSource.mockResolvedValue({ ok: true, source: { path: "D:\\team-skills", label: "team-skills" } });
   apiMock.removeSkillSource.mockResolvedValue({ ok: true });
+  apiMock.refreshSkillSource.mockResolvedValue({
+    ok: true,
+    source: { kind: "url", url: "https://skills.example.com/manifest.json", label: "Remote" },
+  });
   apiMock.importSkillDirectory.mockResolvedValue({ ok: true, slug: "prepared-skill" });
   host = document.createElement("div");
   document.body.append(host);
@@ -73,6 +78,16 @@ it("registers and removes a local skill market source", async () => {
   const remove = [...host.querySelectorAll("button")].find((button) => button.textContent === "移除");
   await act(async () => remove?.click());
   await vi.waitFor(() => expect(apiMock.removeSkillSource).toHaveBeenCalledWith(market.path));
+});
+
+it("refreshes a remote HTTPS source", async () => {
+  const remote = { kind: "url" as const, url: "https://skills.example.com/manifest.json", label: "Remote" };
+  apiMock.skillSources.mockResolvedValue({ sources: [remote] });
+  await render();
+  const refresh = [...host.querySelectorAll("button")].find((button) => button.textContent === "刷新");
+  await act(async () => refresh?.click());
+  await vi.waitFor(() => expect(apiMock.refreshSkillSource).toHaveBeenCalledWith(remote.url));
+  expect(host.textContent).toContain("Remote");
 });
 
 it("imports a prepared skill directory", async () => {

@@ -655,9 +655,12 @@ def _register_skill(subparsers) -> None:
     source_add.add_argument("path", help="包含 SKILL.md 子目录的绝对路径，或 version:1 的 HTTPS JSON 清单")
     source_add.add_argument("--label", default="", help="展示名称，缺省取目录名")
     source_add.set_defaults(handler=_skill_source_add)
-    source_remove = source_cmds.add_parser("remove", help="移除市场目录登记")
-    source_remove.add_argument("path", help="登记时的绝对路径或展示名称")
+    source_remove = source_cmds.add_parser("remove", help="移除市场源登记")
+    source_remove.add_argument("path", help="登记时的绝对路径、URL 或展示名称")
     source_remove.set_defaults(handler=_skill_source_remove)
+    source_refresh = source_cmds.add_parser("refresh", help="重新下载 HTTPS 市场清单")
+    source_refresh.add_argument("path", help="登记时的 URL 或展示名称")
+    source_refresh.set_defaults(handler=_skill_source_refresh)
     source.set_defaults(handler=_skill_source_list)
 
     evolution = cmds.add_parser("evolution", help="查看/修改 Skill 自进化配置")
@@ -766,6 +769,19 @@ def _skill_source_remove(args: Any, ctx: CliContext) -> CliResult:
     if not removed:
         raise CliError("未找到该市场源登记")
     return CliResult(data={"ok": True, "path": args.path}, text=f"已移除市场源 {args.path}")
+
+
+def _skill_source_refresh(args: Any, ctx: CliContext) -> CliResult:
+    from crew.agent.skills import refresh_skill_source
+
+    try:
+        entry = refresh_skill_source(args.path)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    return CliResult(
+        data=entry,
+        text=f"已刷新市场源 {entry['label']}  {entry.get('url') or ''}",
+    )
 
 
 def _skill_evolution(args: Any, ctx: CliContext) -> CliResult:

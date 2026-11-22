@@ -195,6 +195,7 @@ from .sources import (  # noqa: E402
     SkillSourceError,
     add_skill_source,
     list_skill_sources,
+    refresh_skill_source,
     remove_skill_source,
 )
 
@@ -330,5 +331,6 @@ __all__ = (
     "validate_generated_skill",
     "SkillSourceError",
     "add_skill_source",
+    "refresh_skill_source",
     "remove_skill_source",
 )
