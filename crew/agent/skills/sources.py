@@ -443,18 +443,30 @@ def remove_skill_source(raw_path: str) -> bool:
         key = os.path.normcase(str(path.resolve())) if path.is_absolute() else os.path.normcase(text)
     with _lock:
         items = _read_registry()
-        removed = []
-        kept = []
-        for item in items:
-            matches = (
-                item.get("url", "").lower() == key if is_url
-                else item.get("kind") == "dir" and os.path.normcase(item.get("path", "")) == key
-            )
-            if not matches and os.path.normcase(item.get("label", "")) == key:
-                matches = True
-            (removed if matches else kept).append(item)
+        if is_url:
+            exact = [
+                item for item in items
+                if item.get("kind") == "url" and item.get("url", "").lower() == key
+            ]
+        else:
+            exact = [
+                item for item in items
+                if item.get("kind") == "dir" and os.path.normcase(item.get("path", "")) == key
+            ]
+        if exact:
+            removed = exact
+        else:
+            label_matches = [
+                item for item in items if os.path.normcase(item.get("label", "")) == key
+            ]
+            if len(label_matches) > 1:
+                raise SkillSourceError(
+                    "source_ambiguous", "多个市场源同名，请用路径或 URL 移除",
+                )
+            removed = label_matches
         if not removed:
             return False
+        kept = [item for item in items if item not in removed]
         _write_registry(kept)
     for item in removed:
         cache_dir = str(item.get("cache_dir") or "").strip()

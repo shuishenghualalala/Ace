@@ -298,6 +298,21 @@ def test_https_manifest_fetch_decodes_bounded_json(monkeypatch):
     assert parsed[0]["slug"] == "remote"
 
 
+def test_remove_by_ambiguous_label_is_rejected(isolated_skill_env):
+    first = isolated_skill_env.tmp / "first-market"
+    second = isolated_skill_env.tmp / "second-market"
+    first.mkdir()
+    second.mkdir()
+    skills.add_skill_source(str(first), label="Team")
+    skills.add_skill_source(str(second), label="Team")
+    with pytest.raises(skills.SkillSourceError) as exc:
+        skills.remove_skill_source("Team")
+    assert exc.value.code == "source_ambiguous"
+    assert len(skills.list_skill_sources()) == 2
+    assert skills.remove_skill_source(str(first)) is True
+    assert len(skills.list_skill_sources()) == 1
+
+
 def test_url_cache_outside_crew_home_is_not_scanned_or_deleted(isolated_skill_env):
     outside = isolated_skill_env.tmp / "outside"
     outside.mkdir()
