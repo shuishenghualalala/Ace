@@ -37,6 +37,10 @@ _VALID_TRANSPORTS = {"stdio", "http", "sse"}
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MAX_HEADERS = 128
 _MAX_HEADER_VALUE_CHARS = 8192
+_MAX_ARGS = 128
+_MAX_ARG_CHARS = 8192
+_MAX_ENV = 128
+_MAX_ENV_VALUE_CHARS = 8192
 _STATUS_MAX_TOOLS = 50
 _STATUS_MAX_ERROR_CHARS = 500
 
@@ -53,6 +57,10 @@ def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | N
         raw_args = payload.get("args") or []
         if not isinstance(raw_args, list) or any(not isinstance(item, str) for item in raw_args):
             return None, "args 必须是字符串数组"
+        if len(raw_args) > _MAX_ARGS:
+            return None, f"args 数量不能超过 {_MAX_ARGS}"
+        if any(len(item) > _MAX_ARG_CHARS for item in raw_args):
+            return None, f"单个 arg 不能超过 {_MAX_ARG_CHARS} 字符"
         cfg["args"] = list(raw_args)
         # transport 仅作记录，stdio 时忽略
     elif url:
@@ -88,7 +96,14 @@ def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | N
     if env is not None:
         if not isinstance(env, dict):
             return None, "env 必须是对象"
-        cfg["env"] = {str(k): str(v) for k, v in env.items()}
+        normalized_env = {str(k): str(v) for k, v in env.items()}
+        if any(not key or "=" in key or "\x00" in key for key in normalized_env):
+            return None, "env 键不能为空，且不能包含 = 或 NUL"
+        if len(normalized_env) > _MAX_ENV:
+            return None, f"env 数量不能超过 {_MAX_ENV}"
+        if any(len(value) > _MAX_ENV_VALUE_CHARS for value in normalized_env.values()):
+            return None, f"env 值不能超过 {_MAX_ENV_VALUE_CHARS} 字符"
+        cfg["env"] = normalized_env
     return cfg, None
 
 

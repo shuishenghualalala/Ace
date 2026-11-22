@@ -565,6 +565,38 @@ async def test_create_rejects_long_header_value(api):
     assert "8192" in response.json()["error"]
 
 
+async def test_create_rejects_invalid_env_key(api):
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "bad-env",
+            "transport": "stdio",
+            "command": "echo",
+            "env": {"BAD=KEY": "value"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 400
+    assert "env" in response.json()["error"]
+
+
+async def test_create_rejects_too_long_stdio_arg(api):
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "long-arg",
+            "transport": "stdio",
+            "command": "echo",
+            "args": ["a" * 8193],
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 400
+    assert "8192" in response.json()["error"]
+
+
 async def test_probe_rejects_non_admin(api, monkeypatch):
     from crew.gateway.auth import AuthenticationError
     import crew.gateway.routers.mcp_servers as router
