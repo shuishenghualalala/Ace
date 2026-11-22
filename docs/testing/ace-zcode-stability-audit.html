@@ -1378,6 +1378,7 @@
 <p class="evidence">Ace <code>crew/app.py</code>、<code>crew/state/logging.py</code>、<code>tests/test_provider_lifecycle.py</code>。ZCode <code>packages/desktop/src/main/rendererActionTraceBroker.ts:137</code>、<code>packages/desktop/src/main/index.ts:1217</code>。</p>
 <h3>Windows 打包前置验证</h3>
 <p>当前 HEAD 的隔离快照在本机 Windows PowerShell 5.1 中首先因无 BOM UTF-8 脚本的误读而无法解析。<code>pack_exe.ps1</code> 现显式携带 UTF-8 BOM，实际 <code>Parser.ParseFile</code> 通过；发行矩阵新增对应字节级回归并通过。完成编码修正后的标准构建已成功编译原生安全运行时、校验随包组件并生成 Electron <code>win-unpacked</code>，但随后的 Python 归档在下载后损坏，tar 报告截断并退出，尚未得到可验收的完整 staging 或安装器。</p>
+<p><strong>归档下载恢复</strong> Windows 脚本现在解包前用系统 bsdtar 完整列出 gzip 归档，下载异常或归档损坏都删除本次文件并继续下一源，全部失败时同时声明网络错误和归档不完整两种可能。真实 PowerShell 回归先喂入截断归档再喂入有效归档，验证清理、切换和最终文件内容；发行矩阵 16 项及 Ruff 通过。标准构建随后完成 Python 下载、解压、依赖安装与关键依赖自检。ZCode <code>scripts/prebuilt-binary-download.mjs:130</code> 还在解包前验证固定 SHA-256；Ace 本次只补齐已复现的传输完整性恢复，不能把 gzip 可读性视为来源认证。</p>
 <h3>桌面全量复核（2026-11-22）</h3>
 <p>在当前共享工作树运行完整桌面 Vitest：211 个测试文件全部通过，共 2417 项通过、2 项跳过，耗时 95.55 秒。该结果覆盖本轮截图与既有桌面交互，但工作树同时包含另一进程的未提交改动，因此它是当前组合状态的回归证据，不是某个单独提交的隔离全量结果。</p>
 <h3>观测如何归因</h3>

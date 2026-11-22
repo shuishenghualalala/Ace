@@ -187,6 +187,16 @@ New-Item -ItemType Directory -Path $runtimesCache -Force | Out-Null
 $pythonCacheDir = Join-Path $runtimesCache "python"
 $pythonCacheExe = Join-Path $pythonCacheDir "python.exe"
 
+# 必须显式用系统 bsdtar：PATH 中 Git Bash 的 GNU tar 会把 D:\ 盘符当远程主机名解析
+$tarExe = Join-Path $env:SystemRoot "System32\tar.exe"
+if (-not (Test-Path $tarExe)) { $tarExe = "tar.exe" }
+
+function Test-TarGzArchive([string]$Path, [string]$TarExe) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    & $TarExe -tzf $Path | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
 if (-not (Test-Path $pythonCacheExe)) {
     Write-Host "正在下载 Python $BundledPythonVersion standalone..." -ForegroundColor Yellow
     $pyArchive = "cpython-$BundledPythonVersion+$BundledPythonRelease-x86_64-pc-windows-msvc-install_only.tar.gz"
@@ -201,19 +211,20 @@ if (-not (Test-Path $pythonCacheExe)) {
     foreach ($u in $pyUrls) {
         try {
             Invoke-WebRequest -Uri $u -OutFile $pyTar -UseBasicParsing -TimeoutSec 300
-            $pyDownloaded = $true
-            break
+            if (Test-TarGzArchive $pyTar $tarExe) {
+                $pyDownloaded = $true
+                break
+            }
+            Write-Host "  归档不完整，尝试下一个源: $u" -ForegroundColor Yellow
         } catch {
             Write-Host "  下载失败，尝试下一个源: $u ($($_.Exception.Message))" -ForegroundColor Yellow
         }
+        Remove-Item -LiteralPath $pyTar -Force -ErrorAction SilentlyContinue
     }
-    if (-not $pyDownloaded) { throw "Python standalone 所有下载源均失败" }
+    if (-not $pyDownloaded) { throw "Python standalone 所有下载源均失败（网络错误或归档不完整）" }
     $tempExtract = Join-Path $ProjectRoot "dist\_python_extract"
     if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
     # install_only 归档内层为 python/ 目录，解出后整体移动到缓存目录。
-    # 必须显式用系统 bsdtar：PATH 中 Git Bash 的 GNU tar 会把 D:\ 盘符当远程主机名解析
-    $tarExe = Join-Path $env:SystemRoot "System32\tar.exe"
-    if (-not (Test-Path $tarExe)) { $tarExe = "tar.exe" }
     & $tarExe -xzf $pyTar -C (Join-Path $ProjectRoot "dist")
     if ($LASTEXITCODE -ne 0) { throw "Python 归档解压失败 (exit $LASTEXITCODE)" }
     Remove-Item $pyTar -Force

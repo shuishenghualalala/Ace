@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import tarfile
 import tomllib
 from pathlib import Path
+
+import pytest
 
 from crew.agent import skills
 from crew.agent.skills import core as skills_core
@@ -65,6 +70,67 @@ def test_warm_packaging_checks_member_wheels_before_staging() -> None:
 def test_windows_pack_script_declares_utf8_for_windows_powershell() -> None:
     script = (ROOT / "deb-package" / "pack_exe.ps1").read_bytes()
     assert script.startswith(b"\xef\xbb\xbf")
+
+
+def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    windows_tar = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "tar.exe"
+    tar = str(windows_tar) if windows_tar.is_file() else shutil.which("tar")
+    if not powershell or not tar:
+        pytest.skip("PowerShell and tar are required")
+
+    script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
+    function = (
+        "function Test-TarGzArchive"
+        + script.split("function Test-TarGzArchive", 1)[1].split("\n}\n", 1)[0]
+    )
+    download_loop = "    $pyDownloaded = $false" + script.split("    $pyDownloaded = $false", 1)[1].split(
+        "    $tempExtract =", 1
+    )[0]
+    harness = tmp_path / "verify-archive.ps1"
+    harness.write_text(
+        "param([string]$Valid, [string]$Invalid, [string]$TarExe)\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Invoke-WebRequest([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$TimeoutSec) {\n"
+        "    Copy-Item -LiteralPath $Uri -Destination $OutFile -Force\n"
+        "}\n"
+        + function
+        + "\n}\n"
+        + "if (-not (Test-TarGzArchive $Valid $TarExe)) { throw 'valid archive rejected' }\n"
+        + "if (Test-TarGzArchive $Invalid $TarExe) { throw 'truncated archive accepted' }\n"
+        + "if (Test-TarGzArchive \"$Invalid.missing\" $TarExe) { throw 'missing archive accepted' }\n"
+        + "$pyTar = Join-Path $PSScriptRoot 'download.tar.gz'\n"
+        + "$pyUrls = @($Invalid, $Valid)\n"
+        + download_loop
+        + "if ((Get-FileHash $pyTar).Hash -ne (Get-FileHash $Valid).Hash) { throw 'valid retry not retained' }\n",
+        encoding="utf-8-sig",
+    )
+    payload = tmp_path / "python.exe"
+    payload.write_bytes(b"fixture")
+    valid = tmp_path / "python.tar.gz"
+    with tarfile.open(valid, "w:gz") as archive:
+        archive.add(payload, arcname="python/python.exe")
+    invalid = tmp_path / "truncated.tar.gz"
+    invalid.write_bytes(valid.read_bytes()[: valid.stat().st_size // 2])
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(harness),
+            str(valid),
+            str(invalid),
+            tar,
+        ],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert script.index("Test-TarGzArchive $pyTar $tarExe") < script.index("& $tarExe -xzf")
 
 
 def test_optional_catalog_development_path_is_repository_root() -> None:
