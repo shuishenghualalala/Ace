@@ -60,6 +60,7 @@ DESKTOP_PROCESS_FILES = {
     "desktop/scripts/check-security.mjs",
     "desktop/scripts/resolve-playwright-candidates.mjs",
     "desktop/scripts/benchmark-session-history-electron.mjs",
+    "desktop/scripts/pw-storage-restart-contract.ts",
     "desktop/src/main/gateway-process-retirement.ts",
     "desktop/src/main/gateway-startup-log.ts",
     "desktop/src/main/index.ts",
