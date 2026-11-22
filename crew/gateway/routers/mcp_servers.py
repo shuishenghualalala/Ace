@@ -1,8 +1,9 @@
 """通用 MCP Server 管理 API：增删改查 + 状态 + 单 server 重连。
 
 供桌面端「MCP 服务」管理面板调用。MCP server 配置在 config.yaml 的 mcp_servers 段是
-全局共享、无 owner 维度；本地桌面端为单用户场景，故本路由对**所有登录用户**开放
-（登录校验由 gateway require_gateway_login 中间件保证，未登录返回 401）。
+全局共享、无 owner 维度；列表对登录用户开放，新增/编辑/删除/重连/探测需要管理员，
+避免远程非管理员借 MCP 配置在本机启动命令或访问内网端点。
+（登录校验由 gateway require_gateway_login 中间件保证，未登录返回 401。）
 
 密钥处理：env 里的敏感值（key 匹配 KEY/SECRET/TOKEN/PASSWORD）随 yaml 明文持久化，
 GET 响应时脱敏为 ***。
@@ -16,9 +17,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncio
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
 from crew.tools.mcp_management import SERVER_NAME_RE as _NAME_RE
 from crew.tools.mcp_management import add_mcp_server, validate_server_payload as _validate_server_payload
 from crew.tools.mcp_client import probe_remote_server
@@ -28,6 +30,14 @@ from crew.state.config import merge_mcp_url_secrets
 _SECRET_KEY_RE = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)$", re.IGNORECASE)
 _SENSITIVE_NAME_RE = re.compile(r"(AUTH|COOKIE|KEY|SECRET|TOKEN|PASSWORD)", re.IGNORECASE)
 _STATUS_MAX_TOOLS = 50
+
+
+def _admin_denied(request: Request, config: Any) -> JSONResponse | None:
+    try:
+        require_admin(account_from_request(request), config)
+    except AuthenticationError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+    return None
 
 
 def _redact_env(env: Any) -> dict[str, Any]:
@@ -127,7 +137,10 @@ def create_mcp_servers_router(crew) -> APIRouter:
         return JSONResponse({"ok": True, "servers": _servers_view()})
 
     @router.post("/api/mcp/servers/probe")
-    async def probe_server(payload: dict[str, Any] | None = None) -> JSONResponse:
+    async def probe_server(request: Request, payload: dict[str, Any] | None = None) -> JSONResponse:
+        denied = _admin_denied(request, crew.config)
+        if denied is not None:
+            return denied
         raw = payload or {}
         cfg, err = _validate_server_payload(raw)
         if err is not None:
@@ -173,7 +186,10 @@ def create_mcp_servers_router(crew) -> APIRouter:
         })
 
     @router.post("/api/mcp/servers")
-    async def create_server(payload: dict[str, Any] | None = None) -> JSONResponse:
+    async def create_server(request: Request, payload: dict[str, Any] | None = None) -> JSONResponse:
+        denied = _admin_denied(request, crew.config)
+        if denied is not None:
+            return denied
         payload = payload or {}
         name = str(payload.get("name") or "").strip()
         if not name or not _NAME_RE.match(name):
@@ -196,7 +212,10 @@ def create_mcp_servers_router(crew) -> APIRouter:
         return JSONResponse({"ok": True, "servers": _servers_view()}, status_code=201)
 
     @router.put("/api/mcp/servers/{name}")
-    async def update_server(name: str, payload: dict[str, Any] | None = None) -> JSONResponse:
+    async def update_server(request: Request, name: str, payload: dict[str, Any] | None = None) -> JSONResponse:
+        denied = _admin_denied(request, crew.config)
+        if denied is not None:
+            return denied
         if name not in (crew.config.mcp_servers or {}):
             return JSONResponse({"ok": False, "error": f"MCP server 不存在: {name}"}, status_code=404)
         payload = payload or {}
@@ -221,7 +240,10 @@ def create_mcp_servers_router(crew) -> APIRouter:
         return JSONResponse({"ok": True, "servers": _servers_view()})
 
     @router.delete("/api/mcp/servers/{name}")
-    async def delete_server(name: str) -> JSONResponse:
+    async def delete_server(request: Request, name: str) -> JSONResponse:
+        denied = _admin_denied(request, crew.config)
+        if denied is not None:
+            return denied
         if name not in (crew.config.mcp_servers or {}):
             return JSONResponse({"ok": False, "error": f"MCP server 不存在: {name}"}, status_code=404)
 
@@ -250,7 +272,10 @@ def create_mcp_servers_router(crew) -> APIRouter:
         return JSONResponse({"ok": True, "servers": _servers_view()})
 
     @router.post("/api/mcp/servers/{name}/reload")
-    async def reload_server(name: str) -> JSONResponse:
+    async def reload_server(request: Request, name: str) -> JSONResponse:
+        denied = _admin_denied(request, crew.config)
+        if denied is not None:
+            return denied
         if name not in (crew.config.mcp_servers or {}):
             return JSONResponse({"ok": False, "error": f"MCP server 不存在: {name}"}, status_code=404)
         await _ensure_mgr_started()

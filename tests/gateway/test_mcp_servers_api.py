@@ -490,6 +490,24 @@ async def test_list_redacts_status_errors(api, monkeypatch):
     assert "header-secret" not in error
 
 
+async def test_probe_rejects_non_admin(api, monkeypatch):
+    from crew.gateway.auth import AuthenticationError
+    import crew.gateway.routers.mcp_servers as router
+
+    def deny(*_args, **_kwargs):
+        raise AuthenticationError("需要管理员权限")
+
+    monkeypatch.setattr(router, "require_admin", deny)
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers/probe",
+        json={"transport": "http", "url": "https://example.com/mcp"},
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 403
+    assert response.json()["ok"] is False
+
+
 async def test_list_marks_config_pending_while_worker_reconnects(api, monkeypatch):
     client, crew, _ = api
     assert crew.mcp_manager is not None

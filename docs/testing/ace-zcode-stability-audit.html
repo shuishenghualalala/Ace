@@ -672,6 +672,12 @@
 <p><strong>验收</strong> 新增位置参数与 stdin 超限用例通过；CLI 提示相关回归与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:61</code> 的 <code>-p, --prompt</code> 入口。</p>
 </article>
+<article id="mcp-admin-guard">
+<h3>MCP 写操作与探测的管理员准入</h3>
+<p>MCP 列表只要求登录，但新增/编辑/删除/重连/探测原先也只要求登录；远程非管理员可写入本机命令配置或借探测访问内网端点。现在这五类写操作统一调用 <code>require_admin</code>，非管理员返回 403，本地账号仍视为管理员；列表保持登录可读，配置与错误继续脱敏。</p>
+<p><strong>验收</strong> MCP API 全量 31 项通过；新增非管理员探测 403 用例，本地账号全流程不受影响。Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/gateway/auth.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
