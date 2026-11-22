@@ -106,6 +106,13 @@ it("imports a prepared skill directory", async () => {
   expect(host.textContent).toContain("尚未登记市场目录");
 });
 
+it("shows an error when market sources cannot be loaded", async () => {
+  apiMock.skillSources.mockRejectedValue(new Error("市场源接口不可用"));
+  await render();
+  await vi.waitFor(() => expect(host.querySelector('[role="alert"]')?.textContent).toContain("市场源接口不可用"));
+  expect(host.textContent).toContain("尚未登记市场目录");
+});
+
 it("shows the Gateway error when a source is refused", async () => {
   apiMock.addSkillSource.mockRejectedValue(new Error("该市场源已登记"));
   await render();

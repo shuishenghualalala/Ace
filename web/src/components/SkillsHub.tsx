@@ -215,8 +215,14 @@ export default function SkillsHub() {
 
   const load = () => api.skillStore().then(setStore).catch(() => setStore({ installed: [], optional: [] }));
   const loadSources = () => api.skillSources()
-    .then((result) => setSources(result.sources))
-    .catch(() => setSources([]));
+    .then((result) => {
+      setSources(result.sources);
+      setSourceError("");
+    })
+    .catch((error: Error) => {
+      setSources([]);
+      setSourceError(error.message || "无法加载市场源");
+    });
 
   useEffect(() => { void load(); void loadSources(); }, []);
 

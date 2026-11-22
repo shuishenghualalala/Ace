@@ -498,6 +498,12 @@
 <p><strong>验收</strong> 新增 60 工具替身用例通过：响应返回 50 个名称、<code>tool_count=60</code>；Gateway 探测响应、CLI 结构化输出和桌面文案均使用该计数；相关 MCP API、CLI 与 Desktop 定向测试及 TypeScript/Ruff 通过。未连接公开网络。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/cli/integration.py</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/test_mcp.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-market-source-load-error">
+<h3>Web 市场源列表的加载失败反馈</h3>
+<p>Web 技能页加载来源列表失败时，旧实现把所有异常折叠成 <code>sources=[]</code>，界面显示「尚未登记市场目录」，用户无法区分「没有来源」和「接口失败」。现在失败会保留空列表但同时在表单下方显示 Gateway/网络错误，成功重载才清除错误；新增、移除、刷新后的列表重载也走同一路径。</p>
+<p><strong>验收</strong> SkillsHub 组件 5 项通过，新增来源接口拒绝时显示错误文本且不冒充空状态的用例；Web TypeScript 检查通过。未启动真实 Gateway 失败注入。</p>
+<p class="evidence">Ace <code>web/src/components/SkillsHub.tsx</code>、<code>web/src/components/SkillsHub.test.tsx</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
