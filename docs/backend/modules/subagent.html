@@ -212,6 +212,7 @@ product.subagent Generation
   <table>
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
+      <tr><td><code>crew/agent/subagent/__init__.py</code></td><td>公共兼容入口。按名称首次访问时经 <code>__getattr__</code> 解析实际实现并缓存对象；仅导入轻量 service 契约不会连带加载 feature、runtime 与 tools，既有 <code>__all__</code> 和对象身份保持不变。</td></tr>
       <tr><td><code>crew/agent/subagent/service.py</code></td><td>稳定值对象、错误、Provider/Service 协议与注册表。</td></tr>
       <tr><td><code>crew/agent/subagent/runtime.py</code></td><td>唯一预检/发布边界、运行跟踪、批量隔离与关闭。</td></tr>
       <tr><td><code>crew/agent/subagent/feature.py</code></td><td>以 Feature service 发布 SubagentService，供可选插件消费。</td></tr>
