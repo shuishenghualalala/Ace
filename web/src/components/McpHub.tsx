@@ -261,6 +261,7 @@ export default function McpHub() {
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
+          <button className="hub-btn" type="button" onClick={() => void load(true)} disabled={loading}>刷新</button>
           <button className="hub-btn hub-btn--primary" type="button" onClick={openAdd}>添加服务</button>
         </div>
       </div>

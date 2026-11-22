@@ -101,6 +101,14 @@ it("edits an MCP server without echoing masked secrets", async () => {
   }));
 });
 
+it("refreshes the MCP server list on demand", async () => {
+  await render();
+  expect(apiMock.mcpServers).toHaveBeenCalledTimes(1);
+  const refresh = [...host.querySelectorAll("button")].find((button) => button.textContent === "刷新");
+  await act(async () => refresh?.click());
+  await vi.waitFor(() => expect(apiMock.mcpServers).toHaveBeenCalledTimes(2));
+});
+
 it("filters MCP servers by name and tool", async () => {
   apiMock.mcpServers.mockResolvedValue({
     ok: true,
