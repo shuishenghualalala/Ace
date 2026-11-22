@@ -787,3 +787,19 @@ async def test_stopping_dispatched_call_cancels_only_its_sdk_request(monkeypatch
         assert await asyncio.wait_for(followup, 1) == "second"
     finally:
         await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_manager_skips_auto_connect_false_at_startup(monkeypatch):
+    manager = MCPClientManager({
+        "manual": {"command": "definitely-not-a-real-binary", "auto_connect": False},
+    })
+
+    async def fail_start(_worker):
+        raise AssertionError("disabled server must not start")
+
+    monkeypatch.setattr(manager, "_adopt_worker", fail_start)
+    await manager._start_blocking(Registry())
+    assert manager._workers == []
+    assert manager._config["manual"]["auto_connect"] is False
+    await manager.aclose()
