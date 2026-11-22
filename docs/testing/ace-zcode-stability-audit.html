@@ -776,8 +776,8 @@
 </article>
 <article id="mcp-chat-install-auto-connect">
 <h3>对话安装 MCP 时的延迟连接</h3>
-<p><code>mcp_install</code>/<code>mcp_update</code> 的 schema 原先不暴露 <code>auto_connect</code>，对话安装只能立即连接。现在两者接受可选布尔值；false 时仍走同一次权限确认、保存与 <code>saved_not_connected</code> 状态，但不启动连接，之后可从管理页或 <code>mcp_reload</code> 手动启动。未提供时沿用默认自动连接；更新时由后端保留旧值。</p>
-<p><strong>验收</strong> 对话安装用例：带 <code>auto_connect=false</code> 完成一次审批后保存成功、connected=false、未调用连接 fixture，配置保留 false；定向用例与 Ruff 通过。</p>
+<p><code>mcp_install</code>/<code>mcp_update</code> 的 schema 原先不暴露 <code>auto_connect</code>，对话安装只能立即连接。现在两者接受可选布尔值；false 时仍走同一次权限确认、保存与 <code>saved_not_connected</code> 状态，但不启动连接，之后可从管理页或 <code>mcp_reload</code> 手动启动。更新为 false 会停 worker、注销工具并保留配置，返回 <code>reloaded=false</code> 与提示；未提供时沿用默认自动连接，更新时由后端保留旧值。</p>
+<p><strong>验收</strong> 对话安装/更新用例：带 <code>auto_connect=false</code> 完成一次审批后保存成功、connected=false、未新增连接、工具已注销、配置保留 false；定向用例与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_install_chat.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
 <article id="external-marketplace-sources">

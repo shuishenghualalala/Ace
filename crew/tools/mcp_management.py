@@ -649,9 +649,14 @@ def register_mcp_tools(app: Any) -> None:
 
         manager = getattr(app, "mcp_manager", None)
         reloaded = False
+        manual = config.get("auto_connect") is False
         if manager is not None:
             try:
-                reloaded = bool(await manager.reload_one(name, config))
+                if manual:
+                    await manager.remove_server(name)
+                    manager.register_pending(name, config)
+                else:
+                    reloaded = bool(await manager.reload_one(name, config))
             except Exception:  # noqa: BLE001 - the configuration is already durable
                 log.exception("更新后重连 MCP server 失败 name=%s", name)
         payload: dict[str, Any] = {
@@ -660,7 +665,9 @@ def register_mcp_tools(app: Any) -> None:
             "reloaded": reloaded,
             "server": _current_server_status(app, name, config),
         }
-        if not reloaded:
+        if manual:
+            payload["warning"] = "配置已更新；auto_connect=false，未连接。可使用 mcp_reload 手动启动。"
+        elif not reloaded:
             payload["warning"] = (
                 "配置已更新，但运行实例重连未完成；可使用 mcp_reload 重试。"
                 if manager is not None

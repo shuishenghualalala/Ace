@@ -342,6 +342,43 @@ async def test_gateway_admin_updates_installed_server_after_one_approval(gateway
         assert f"{ARGS['name']}__echo" in gateway.crew.registry.names()
 
 
+async def test_gateway_update_can_save_without_auto_connect(gateway):
+    session_id = "mcp-update-manual"
+    async with open_ws(gateway.app) as (send, receive):
+        await begin_install(gateway, send, "manual-seed", session_id=session_id)
+        card, frames = await read_until(
+            receive, lambda row: is_permission_card(row) or row.get("is_final"),
+        )
+        assert is_permission_card(card), frames
+        await reply_permission(send, session_id, "manual-seed", card)
+        await read_until(receive, lambda row: row.get("is_final") is True)
+        assert f"{ARGS['name']}__echo" in gateway.crew.registry.names()
+        connections = len(gateway.io)
+
+        query = "fixture requests manual chat MCP update"
+        update_args = {**ARGS, "auto_connect": False}
+        gateway.provider.script[query] = ToolCall("manual-update", "mcp_update", update_args)
+        await send({
+            "session_id": session_id, "request_id": "manual-update", "query": query,
+            "mode": "agent", "workspace_id": "default", "plan_active": False,
+        })
+        card, frames = await read_until(
+            receive, lambda row: is_permission_card(row) or row.get("is_final"),
+        )
+        assert is_permission_card(card), frames
+        await reply_permission(send, session_id, "manual-update", card)
+        await read_until(receive, lambda row: row.get("is_final") is True)
+
+    payload = payload_for(gateway, "manual-update")
+    assert payload["changed"] is True
+    assert payload["reloaded"] is False
+    assert payload["server"]["connected"] is False
+    assert "auto_connect=false" in payload["warning"]
+    assert config_servers(gateway)[ARGS["name"]]["auto_connect"] is False
+    assert len(gateway.io) == connections
+    assert f"{ARGS['name']}__echo" not in gateway.crew.registry.names()
+
+
 async def test_gateway_plan_never_exposes_install_or_writes_on_guessed_call(gateway):
     assert TOOL in gateway.crew.registry.names()
     original = gateway.config_file.read_bytes()
