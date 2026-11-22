@@ -980,6 +980,40 @@ def test_readonly_content_commands(capsys, cli_home):
         assert json_out(out) is not None, argv
 
 
+def test_mcp_probe_reports_tools_without_saving(capsys, cli_home, monkeypatch):
+    import crew.tools.mcp_client as mcp_client
+
+    seen: dict = {}
+
+    async def fake_probe(cfg):
+        seen.update(cfg)
+        return {"ok": True, "tools": ["ping", "echo"], "error": None}
+
+    monkeypatch.setattr(mcp_client, "probe_remote_server", fake_probe)
+    code, out = run_cli(
+        capsys, "mcp", "servers", "probe", "--url", "https://mcp.example.com/mcp",
+        "--transport", "http", "--headers", '{"X-Test":"1"}', "--json",
+    )
+    assert code == 0
+    data = json_out(out)
+    assert data == {"ok": True, "tools": ["ping", "echo"], "error": None}
+    assert seen["url"] == "https://mcp.example.com/mcp"
+    assert seen["headers"] == {"X-Test": "1"}
+
+
+def test_mcp_probe_failure_exits_nonzero(capsys, cli_home, monkeypatch):
+    import crew.tools.mcp_client as mcp_client
+
+    async def fake_probe(cfg):
+        return {"ok": False, "tools": [], "error": "connection refused"}
+
+    monkeypatch.setattr(mcp_client, "probe_remote_server", fake_probe)
+    code, _out = run_cli(
+        capsys, "mcp", "servers", "probe", "--url", "https://mcp.example.com/mcp",
+    )
+    assert code == 1
+
+
 def test_skill_source_commands_register_list_and_remove(capsys, cli_home, tmp_path):
     market = tmp_path / "team-market"
     skill_dir = market / "market-doc"

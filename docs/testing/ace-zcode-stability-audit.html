@@ -456,6 +456,12 @@
 <p><strong>验收</strong> 真实 MCP HTTP 服务夹具经 ASGI 传输完成探测，返回 <code>http_echo</code> 工具且不污染主客户端；Gateway MCP API 全量 23 项通过，新增探测转发且不落盘、stdio 拒绝两例。Desktop MCP 设置弹层新增「测试连接」按钮：读取当前 HTTP/SSE 表单调用同一接口，就地显示工具数量与名称或错误，不触发保存；stdio 显示明确提示。新增组件测试与 Desktop TypeScript 检查通过。Ruff 通过。该能力只覆盖 HTTP/SSE；远端工具的实际调用权限仍由正常审批控制。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/test_mcp.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-probe-cli">
+<h3>CLI 的 MCP HTTP/SSE 端点探测</h3>
+<p>桌面和 Gateway 已有探测入口后，CLI 增加 <code>crew mcp servers probe</code>：接受 URL、传输协议、JSON headers 或完整 payload，复用同一套地址校验与一次性探测 worker，不保存配置、不注册工具。成功输出工具数量与名称，失败以非零退出码结束并脱敏错误；stdio 明确拒绝。这样无桌面环境也能在保存前验证端点。</p>
+<p><strong>验收</strong> CLI 新增 2 项通过：成功转发 URL/headers 并输出结构化工具列表、失败返回退出码 1；Ruff 通过。探测 worker 的真实 MCP HTTP 服务验证沿用 Gateway/桌面切片的 ASGI 夹具；本轮未额外启动公开网络端点。</p>
+<p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>crew/tools/mcp_client.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

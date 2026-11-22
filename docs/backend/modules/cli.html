@@ -84,7 +84,7 @@
       <tr><td><code>scenario</code></td><td>场景推荐、介绍话术与加载语。</td></tr>
       <tr><td><code>wiki</code></td><td>知识库、页面、搜索、数据源、上传、入库、编译、图谱、问答、摘要、lint、Agent 会话；能力不可用或 draining 时统一返回“Wiki 未启用”。</td></tr>
       <tr><td><code>skill</code></td><td>技能列表/安装/卸载/自进化配置；登记与移除本地技能市场目录。</td></tr>
-      <tr><td><code>mcp</code></td><td>serve / interaction-proxy、服务器配置增删改查与热重载、CUA Driver 安装管理。</td></tr>
+      <tr><td><code>mcp</code></td><td>serve / interaction-proxy、服务器配置增删改查与热重载、HTTP/SSE 端点探测、CUA Driver 安装管理。</td></tr>
       <tr><td><code>plugin</code></td><td>插件状态与 per-owner 启用/禁用（含浏览器能力代次切换）。</td></tr>
       <tr><td><code>channel</code></td><td>渠道列表、配置查看/保存、连接/断开/重连、账号删除、微信扫码登录。</td></tr>
       <tr><td><code>runtime</code></td><td>外部 Runtime 扫描/注册/删除，外部 Agent/Team 增删查。</td></tr>
@@ -115,6 +115,11 @@ crew skill list --store --json</code></pre>
   <p>远程市场源只接受 <code>https://</code> 清单，拒绝账号密码、重定向、本机/私有地址和无法解析的主机。清单格式为 <code>{"version":1,"skills":[{"slug","name","description","content"}]}</code>，最多 50 个技能，单技能正文最多 64 KiB，清单最多 256 KiB，下载超时 5 秒。清单中的 <code>content</code> 按 SKILL.md 缓存到 <code>CREW_HOME/skill_market_cache/</code> 后与本地源同样列出和复制安装；移除 URL 源会清理该缓存。<code>crew skill source refresh</code> 重新下载清单并替换缓存，抓取失败时保留旧缓存和旧登记。HTTP 地址、Git 仓库源和插件市场清单仍不支持。</p>
   <p><code>crew skill import</code> 接受一个已准备好的技能目录，核对 <code>SKILL.md</code> 存在后走同一套路径 containment、审计和原子发布，复制到用户技能目录；<code>--slug</code> 缺省取目录名。它跳过面向生成技能的正文长度/描述完整性编辑检查，但不会跳过文件安全校验，也不执行技能内容。目标已存在或缺少 <code>SKILL.md</code> 时失败退出。</p>
   <p>同一能力通过 <code>GET /api/skills/sources</code>、<code>POST /api/skills/sources</code>、<code>DELETE /api/skills/sources?path=…</code> 和 <code>POST /api/skills/import</code> 暴露，供桌面或 Web 界面后续接入。变更接口要求管理员，本机 owner 视为管理员；注册与导入在工作线程执行，不阻塞 Gateway 事件循环。目录错误返回 <code>400</code> 和稳定的 <code>code</code>（如 <code>source_exists</code>、<code>source_overlaps_skills</code>）。</p>
+
+  <h3 id="mcp-probe">3.3 MCP HTTP/SSE 端点探测</h3>
+  <pre><code>crew mcp servers probe --url https://mcp.example.com/mcp --transport http
+crew mcp servers probe --url https://mcp.example.com/mcp --headers '{"Authorization":"Bearer …"}' --json</code></pre>
+  <p><code>probe</code> 在保存前连接 HTTP/SSE 端点并列出工具，不写入 <code>config.yaml</code>、不注册工具、不启动常驻重连。地址必须通过与新增相同的校验；stdio 预检会执行宿主命令，因此不支持，仍需保存后连接。成功返回工具数量与名称，失败以非零退出码结束并输出脱敏错误。加 <code>--json</code> 时成功结果同时以结构化 JSON 输出。</p>
 
   <h2>4. 安全命令</h2>
   <p>安全命令直接调用 <code>crew.security_service</code> / <code>security_rules</code> / <code>security_audit</code>，等价于本机宿主身份，不需要桌面端 proof。安全写操作全部是显式子命令，不提供隐式一键放行开关。</p>
