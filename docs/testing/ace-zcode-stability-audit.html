@@ -798,6 +798,18 @@
 <p><strong>验收</strong> 新增状态错误含 <code>?token=</code> 的列表用例，输出不含 token；定向用例、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts</code> 的 CLI 参数入口。</p>
 </article>
+<article id="cli-mcp-list-tool-cap">
+<h3>CLI MCP 列表的工具栏上限</h3>
+<p><code>crew mcp servers list --json</code> 原先原样输出 manager 行全部工具名，异常服务可让一次列表输出无界增长。现在与 Gateway 状态一致：每服务最多 50 个工具名，另给 <code>tool_count</code> 真实数量；连接状态、脱敏错误与配置不变。</p>
+<p><strong>验收</strong> 60 工具状态用例输出 50 个名称、<code>tool_count=60</code>；定向用例、Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts</code> 的 CLI 参数入口。</p>
+</article>
+<article id="mcp-update-stop-warning">
+<h3>MCP 停旧 worker 失败时的保存结果</h3>
+<p>把服务更新为 <code>auto_connect=false</code> 时，配置已落盘但停旧 worker 可能失败。Gateway 原先返回 500，用户会误以为配置未保存。现在仍返回 200，配置保持新值，并带一条显示边界脱敏的 <code>warning</code>；状态接口的 <code>config_pending</code> 会暴露 worker 尚未切换。CLI/对话更新仍按各自结果格式报告。</p>
+<p><strong>验收</strong> 停 worker 抛错用例：响应 200、配置仍为 false、warning 存在且 URL token 不可见；Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
