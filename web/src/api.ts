@@ -284,6 +284,7 @@ export interface McpServerRow {
   name: string;
   transport: McpTransport;
   connected: boolean;
+  config_pending?: boolean;
   error: string;
   tools: string[];
   tool_count?: number;

@@ -89,12 +89,14 @@ function ensureMcpIntegrationView(): SettingsIntegrationView | null {
 
 export function mcpStatusText(s: McpServerRow): string {
   if (s.error) return `失败：${s.error}`;
+  if (s.config_pending) return '重连中';
   if (s.connected) return '已连接';
   return '未连接';
 }
 
 export function mcpStatusChipClass(s: McpServerRow): string {
   if (s.error) return 'is-error';
+  if (s.config_pending) return 'is-configured';
   if (s.connected) return 'is-online';
   return 'is-configured';
 }

@@ -112,6 +112,7 @@ def create_mcp_servers_router(crew) -> APIRouter:
                 "name": row["name"],
                 "transport": config.get("transport") or row["transport"],
                 "connected": row["connected"],
+                "config_pending": row.get("config") != config,
                 "error": redact_sensitive_display_text(str(row.get("error") or "")),
                 "tools": tools[:_STATUS_MAX_TOOLS],
                 "tool_count": len(tools),

@@ -490,6 +490,26 @@ async def test_list_redacts_status_errors(api, monkeypatch):
     assert "header-secret" not in error
 
 
+async def test_list_marks_config_pending_while_worker_reconnects(api, monkeypatch):
+    client, crew, _ = api
+    assert crew.mcp_manager is not None
+    crew.config.mcp_servers = {
+        "pending": {"url": "http://127.0.0.1:9/new", "transport": "http"},
+    }
+    monkeypatch.setattr(crew.mcp_manager, "status", lambda: [{
+        "name": "pending",
+        "transport": "http",
+        "connected": True,
+        "error": "",
+        "tools": [],
+        "config": {"url": "http://127.0.0.1:9/old", "transport": "http"},
+    }])
+    response = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
+    server = next(item for item in response.json()["servers"] if item["name"] == "pending")
+    assert server["config_pending"] is True
+    assert server["config"]["url"] == "http://127.0.0.1:9/new"
+
+
 async def test_secret_env_redacted_in_get(api):
     client, _, _ = api
     resp = await client.post(

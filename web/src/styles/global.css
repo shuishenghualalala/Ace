@@ -6081,6 +6081,7 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text-3); font-size: 11px;
 }
 .mcp-chip.is-online { color: #2e7d32; border-color: #2e7d32; }
+.mcp-chip.is-pending { color: #9a6700; border-color: #9a6700; }
 .mcp-chip.is-error { color: #c62828; border-color: #c62828; }
 .mcp-overlay {
   position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
