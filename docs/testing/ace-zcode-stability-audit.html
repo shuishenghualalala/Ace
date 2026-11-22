@@ -401,6 +401,12 @@
 <p><strong>验收</strong> 续接定向 5 项通过：最近会话优先且置顶旧会话不被选中、空会话跳过、无历史报错、跨工作空间不可选、参数冲突，以及 <code>run --continue</code> 复用同一会话。CLI 主测试文件 39 项通过、1 项跳过。Windows 独立 CLI 进程使用隔离的 <code>CREW_HOME</code> 与临时配置库，先写入两条历史，再执行 <code>crew run --continue</code>；退出码 0，模型回显追加到原会话，SQLite 仍只有一个会话和四条消息。空库执行同一命令退出码 1，并给出无历史提示，未创建会话。</p>
 <p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:49</code>、<code>apps/kimi-code/src/cli/options.ts:104–113</code>。</p>
 </article>
+<article id="skill-local-market-source">
+<h3>本地技能市场目录的登记与复制安装</h3>
+<p>ZCode 的插件市场来源可指向 GitHub、Git、HTTPS 清单或本地 JSON/目录，市场清单与直接连接的 MCP 服务分开管理。Ace 原有技能商店只有随包可选源和固定的 <code>~/.agents/skills</code>，不能登记自定义市场。现在增加本地目录源：<code>crew skill source add/list/remove</code> 把绝对目录登记到 <code>CREW_HOME/skill_market_sources.json</code>，不改写 <code>config.yaml</code>；目录列表与固定本地源合并展示，带市场标签和来源路径，同名时固定源优先。安装市场技能时复制整套目录到用户技能目录，源目录之后的变化不会自动同步；卸载只删除副本。目录必须存在、不能与用户技能目录或固定本地源重叠，最多 16 个。Ace 不执行技能中的代码，也不接受远程 URL 源。</p>
+<p><strong>验收</strong> 新增市场源定向 10 项通过：登记持久化与去重、无效/缺失/重叠目录拒绝、列表来源与同名优先级、复制安装与源独立、卸载保留源、移除后不再列出。技能与本地安装组合 139 项通过、8 项跳过；CLI 主测试 40 项通过、1 项跳过。Windows 独立 CLI 进程使用隔离 <code>CREW_HOME</code>：登记临时目录后商店 JSON 出现带 <code>market_label=Team</code> 和真实路径的条目；<code>crew skill install</code> 在用户目录生成非软链副本；移除源后条目消失而副本与源文件仍在。该能力只登记本地目录，远程市场 URL 和源管理界面仍未实现。</p>
+<p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/agent/skills/manage.py</code>、<code>crew/cli/knowledge.py</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

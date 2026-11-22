@@ -642,6 +642,19 @@ def _register_skill(subparsers) -> None:
     uninstall.add_argument("--slug", required=True)
     uninstall.set_defaults(handler=_skill_uninstall)
 
+    source = cmds.add_parser("source", help="管理本地技能市场目录")
+    source_cmds = source.add_subparsers(dest="skill_source_cmd")
+    source_list = source_cmds.add_parser("list", help="列出已登记的市场目录")
+    source_list.set_defaults(handler=_skill_source_list)
+    source_add = source_cmds.add_parser("add", help="登记一个本地市场目录")
+    source_add.add_argument("path", help="包含一个或多个 SKILL.md 子目录的绝对路径")
+    source_add.add_argument("--label", default="", help="展示名称，缺省取目录名")
+    source_add.set_defaults(handler=_skill_source_add)
+    source_remove = source_cmds.add_parser("remove", help="移除市场目录登记")
+    source_remove.add_argument("path", help="登记时的绝对路径或展示名称")
+    source_remove.set_defaults(handler=_skill_source_remove)
+    source.set_defaults(handler=_skill_source_list)
+
     evolution = cmds.add_parser("evolution", help="查看/修改 Skill 自进化配置")
     evolution.add_argument("--auto-trigger", type=lambda v: v.lower() in ("1", "true", "yes", "on"))
     evolution.add_argument(
@@ -692,6 +705,39 @@ def _skill_uninstall(args: Any, ctx: CliContext) -> CliResult:
     if not ok:
         raise CliError("技能不存在或为内置（不可卸载）")
     return CliResult(data={"ok": True, "slug": args.slug}, text=f"已卸载技能 {args.slug}")
+
+
+def _skill_source_list(args: Any, ctx: CliContext) -> CliResult:
+    from crew.agent.skills import list_skill_sources
+
+    sources = list_skill_sources()
+    text = "\n".join(f"{item['label']}  {item['path']}" for item in sources)
+    return CliResult(data=sources, text=text or "(未登记市场目录)")
+
+
+def _skill_source_add(args: Any, ctx: CliContext) -> CliResult:
+    from crew.agent.skills import add_skill_source
+
+    try:
+        entry = add_skill_source(args.path, label=args.label or "")
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    return CliResult(
+        data=entry,
+        text=f"已登记市场目录 {entry['label']}  {entry['path']}",
+    )
+
+
+def _skill_source_remove(args: Any, ctx: CliContext) -> CliResult:
+    from crew.agent.skills import remove_skill_source
+
+    try:
+        removed = remove_skill_source(args.path)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    if not removed:
+        raise CliError("未找到该市场目录登记")
+    return CliResult(data={"ok": True, "path": args.path}, text=f"已移除市场目录 {args.path}")
 
 
 def _skill_evolution(args: Any, ctx: CliContext) -> CliResult:

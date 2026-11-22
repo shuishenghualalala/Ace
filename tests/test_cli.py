@@ -977,3 +977,21 @@ def test_readonly_content_commands(capsys, cli_home):
         code, out = run_cli(capsys, *argv, "--json")
         assert code == 0, argv
         assert json_out(out) is not None, argv
+
+
+def test_skill_source_commands_register_list_and_remove(capsys, cli_home, tmp_path):
+    market = tmp_path / "team-market"
+    skill_dir = market / "market-doc"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: market-doc\ndescription: team\n---\nbody\n", encoding="utf-8",
+    )
+
+    code, out = run_cli(capsys, "skill", "source", "add", str(market), "--label", "Team")
+    assert code == 0 and "已登记市场目录" in out
+    code, out = run_cli(capsys, "skill", "source", "list")
+    assert code == 0 and "Team" in out and str(market.resolve()) in out
+    code, out = run_cli(capsys, "skill", "source", "remove", str(market))
+    assert code == 0 and "已移除市场目录" in out
+    code, out = run_cli(capsys, "skill", "source", "list")
+    assert code == 0 and "未登记市场目录" in out

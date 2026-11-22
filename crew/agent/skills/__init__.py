@@ -191,6 +191,12 @@ from .manage import (  # noqa: E402
     update_skill_markdown,
     validate_generated_skill,
 )
+from .sources import (  # noqa: E402
+    SkillSourceError,
+    add_skill_source,
+    list_skill_sources,
+    remove_skill_source,
+)
 
 
 __all__ = (
@@ -302,6 +308,7 @@ __all__ = (
     "install_skill_from_dir",
     "list_local_skills",
     "list_optional_skills",
+    "list_skill_sources",
     "list_skills",
     "patched",
     "read_skill_text",
@@ -321,4 +328,7 @@ __all__ = (
     "uninstall_skill",
     "update_skill_markdown",
     "validate_generated_skill",
+    "SkillSourceError",
+    "add_skill_source",
+    "remove_skill_source",
 )

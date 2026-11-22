@@ -53,6 +53,7 @@ from .core import (
 )
 from .index import _invalidate_cache, get_skills, scan_skills
 from .scanner import _iter_skill_files
+from .sources import list_skill_sources
 
 # 安装事实是宿主级全局状态。同步装卸只持有短锁；异步 repair 在生成内容阶段不持锁，
 # 发布前用树指纹检测并发修改，避免长时间阻塞事件循环。
@@ -579,23 +580,35 @@ def list_optional_skills() -> list[dict]:
 
 
 def list_local_skills() -> list[dict]:
-    """列出 ~/.agents/skills 中尚未激活的本地 skills。
+    """列出本地与自定义市场目录中尚未激活的 skills。
 
-    本地 skill 是跨 agent 共享的可安装源（如 ``npx skills add`` 安装的飞书 skills）。
-    已安装（在用户目录或内置目录中同名）的 skill 不再出现在列表里。返回 item 的
-    source 为 "local"；安装时以软链发布到用户目录（见 install_skill）。
+    固定本地源是跨 agent 共享的 ~/.agents/skills（安装时软链）。用户登记
+    的市场目录排在它之后，安装时复制整套目录；已安装同名 skill 均不再出现。
+    返回 item 的 source 为 "local"，自定义源另带 market_source / market_label。
     """
     installed_slugs = set(get_skills().keys())
     result: list[dict] = []
-
-    local_root = _patched("get_local_skills_dir")()
-    for skill_md in _iter_skill_files(local_root):
-        info = _parse_listing_skill(skill_md, local_root)
-        if info is None:
+    seen_slugs: set[str] = set()
+    roots: list[tuple[Path, dict | None]] = [(_patched("get_local_skills_dir")(), None)]
+    for source in list_skill_sources():
+        roots.append((Path(source["path"]), source))
+    for root, source in roots:
+        try:
+            safe_root = root.expanduser().resolve()
+        except OSError:
             continue
-        if f"/{info['slug']}" in installed_slugs:
-            continue
-        result.append({**info, "source": "local"})
+        for skill_md in _iter_skill_files(safe_root):
+            info = _parse_listing_skill(skill_md, safe_root)
+            if info is None:
+                continue
+            if f"/{info['slug']}" in installed_slugs or info["slug"] in seen_slugs:
+                continue
+            seen_slugs.add(info["slug"])
+            item = {**info, "source": "local"}
+            if source is not None:
+                item["market_source"] = str(safe_root)
+                item["market_label"] = str(source.get("label") or safe_root.name)
+            result.append(item)
 
     return result
 
@@ -644,6 +657,7 @@ def install_skill(
             return False
 
         src = Path(info["skill_dir"])
+        market_root = Path(info["market_source"]) if info.get("market_source") else None
         user_dir = _patched("get_user_skills_dir")()
         user_dir.mkdir(parents=True, exist_ok=True)
         dst = user_dir / src.name
@@ -651,7 +665,11 @@ def install_skill(
 
         published_identity: tuple[int, int] | None = None
         try:
-            if is_local_source:
+            if market_root is not None:
+                published_identity = _install_skill_tree(
+                    src, dst, source_root=market_root, target_root=user_dir
+                )
+            elif is_local_source:
                 published_identity = _install_local_skill_link(src, dst, target_root=user_dir)
             else:
                 published_identity = _install_skill_tree(

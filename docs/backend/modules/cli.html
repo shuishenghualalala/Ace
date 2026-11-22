@@ -83,7 +83,7 @@
       <tr><td><code>kanban</code></td><td>Dynamic Kanban 看板状态/暂停/恢复。</td></tr>
       <tr><td><code>scenario</code></td><td>场景推荐、介绍话术与加载语。</td></tr>
       <tr><td><code>wiki</code></td><td>知识库、页面、搜索、数据源、上传、入库、编译、图谱、问答、摘要、lint、Agent 会话；能力不可用或 draining 时统一返回“Wiki 未启用”。</td></tr>
-      <tr><td><code>skill</code></td><td>技能列表/安装/卸载/自进化配置。</td></tr>
+      <tr><td><code>skill</code></td><td>技能列表/安装/卸载/自进化配置；登记与移除本地技能市场目录。</td></tr>
       <tr><td><code>mcp</code></td><td>serve / interaction-proxy、服务器配置增删改查与热重载、CUA Driver 安装管理。</td></tr>
       <tr><td><code>plugin</code></td><td>插件状态与 per-owner 启用/禁用（含浏览器能力代次切换）。</td></tr>
       <tr><td><code>channel</code></td><td>渠道列表、配置查看/保存、连接/断开/重连、账号删除、微信扫码登录。</td></tr>
@@ -103,6 +103,13 @@ crew chat --continue
 crew run --continue "继续这次工作"</code></pre>
   <p><code>crew chat</code> 启动与执行 <code>/new</code> 后显示当前会话 ID。显式续接在开启输入前查询当前账号的公开会话目录，并核对所选工作空间。不存在、属于其他账号、内部会话或工作空间不符时直接退出，不创建替代会话。续接用原 ID 读取历史和会话配置；终端不重印旧消息，可用 <code>crew session show</code> 查看。未传 ID 时沿用新建流程。</p>
   <p><code>-c</code>/<code>--continue</code> 在相同账号和工作空间中按最近更新时间选取第一份有消息的会话；置顶不改变最近判定，只创建未使用的空会话会被跳过。没有可续接内容时以退出码 1 结束且不创建新会话。<code>--continue</code> 不能与 <code>--session-id</code> 同时使用。非交互 <code>crew run --continue</code> 使用同一解析规则，把新问题追加到该会话，不生成第二个会话。</p>
+
+  <h3 id="skill-market-sources">3.2 本地技能市场目录</h3>
+  <pre><code>crew skill source add &lt;绝对目录&gt; --label 团队技能
+crew skill source list
+crew skill source remove &lt;绝对目录&gt;
+crew skill list --store --json</code></pre>
+  <p>市场目录登记在 <code>CREW_HOME/skill_market_sources.json</code>，不影响 <code>config.yaml</code>。目录必须是已存在的绝对路径，不能与用户技能目录或固定的本地技能目录重叠；最多登记 16 个。目录内的技能与固定本地源一起出现在技能商店，带 <code>market_source</code> 和 <code>market_label</code>，同名时固定本地源优先。安装市场目录中的技能会复制整套目录到用户技能目录，之后源目录变化不自动同步；卸载只删除副本，不触碰源目录。移除市场目录只影响后续列表，已安装副本保留。Ace 不从这里执行为技能中的任何代码，也不接受远程 URL 市场源。</p>
 
   <h2>4. 安全命令</h2>
   <p>安全命令直接调用 <code>crew.security_service</code> / <code>security_rules</code> / <code>security_audit</code>，等价于本机宿主身份，不需要桌面端 proof。安全写操作全部是显式子命令，不提供隐式一键放行开关。</p>
