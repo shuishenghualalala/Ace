@@ -8,6 +8,7 @@
 
 import { backendApi, type DynamicKanbanStatus, type Task } from '../backend-client';
 import { taskStatusLabel } from '../../shared/task-status';
+import { filePreviewKind, isBinaryPreviewKind, isTextPreviewKind } from '../file-preview';
 import { $, escapeHtml, isDynamicKanbanSession, notify, saveToStorage, state } from '../state';
 import { clearRuntimeStyle, setRuntimeStyle, setRuntimeToken } from '../components/runtime-style';
 import type { ChatMessage, WorkflowProgressPayload } from '../chat-render';
@@ -368,7 +369,16 @@ export function activateKanbanInspectorTab(): void {
       event.preventDefault();
       event.stopPropagation();
       const targetPath = button.dataset.kanbanOpenPath;
-      if (targetPath) void openKanbanPath(targetPath);
+      if (targetPath) void openKanbanPath(targetPath, 'file');
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-kanban-open-folder]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const targetPath = button.dataset.kanbanOpenFolder;
+      if (targetPath) void openKanbanPath(targetPath, 'folder');
     });
   });
 
@@ -395,24 +405,36 @@ function renderFilePathActions(rawPath: string, codeClass: string): string {
     ? `
       <span class="kanban-board__path-actions">
         <button type="button" class="kanban-board__path-btn" data-kanban-open-path="${escaped}" title="打开文件">打开</button>
-        ${folderPath ? `<button type="button" class="kanban-board__path-btn" data-kanban-open-path="${escapeHtml(folderPath)}" title="打开所属文件夹">文件夹</button>` : ''}
+        ${folderPath ? `<button type="button" class="kanban-board__path-btn" data-kanban-open-folder="${escapeHtml(folderPath)}" title="打开所属文件夹">文件夹</button>` : ''}
       </span>
     `
     : '';
   return `<span class="kanban-board__path"><code class="${codeClass}" title="${escaped}">${escaped}</code>${actions}</span>`;
 }
 
-async function openKanbanPath(targetPath: string): Promise<void> {
-  if (!window.Crew?.openPath) {
-    notify('当前环境不支持打开文件');
-    return;
-  }
+async function openKanbanPath(targetPath: string, intent: 'file' | 'folder'): Promise<void> {
+  const sessionId = state.activeSessionId;
   try {
+    if (intent === 'file') {
+      const kind = filePreviewKind(targetPath);
+      if (isTextPreviewKind(kind) || isBinaryPreviewKind(kind)) {
+        const { openInspectorToTab } = await import('./inspector');
+        if (state.activeSessionId !== sessionId) return;
+        openInspectorToTab('files', { expandFilePath: targetPath, filePaths: [targetPath] });
+        return;
+      }
+    }
+    if (!window.Crew?.openPath) {
+      notify('当前环境不支持打开文件');
+      return;
+    }
     const workspaceRoot = resolveKanbanWorkspaceRootPath();
     const result = await window.Crew.openPath(targetPath, workspaceRoot);
     if (result) notify(`打开失败：${result}`);
   } catch (err) {
-    notify(`打开失败：${err instanceof Error ? err.message : String(err)}`);
+    if (state.activeSessionId === sessionId) {
+      notify(`打开失败：${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
 

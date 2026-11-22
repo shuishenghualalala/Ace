@@ -192,6 +192,7 @@
     <li>成员说明复用 Web 的职责摘要规则：优先提取 Markdown「职责」区块，过滤工作原则、协作关系、输出格式和工作安排，只保留一条简短业务职责。Desktop 内置 Leader 按桌面产品身份显示为 <code>MobileWork</code>，头像复用 <code>crew-ui-symbols.svg#avatar-headphones</code> Q 版耳机机器人；这是相对 Web「Crew 内置智能体」的有意桌面端差异。</li>
     <li>看板每 2 秒读取当前 Session 的 task 与 runtime 快照；只在「协作」Tab 激活时轮询，离开 Tab、切换非 Team Session 或关闭 Inspector 后立即停止，避免后台冗余请求。</li>
     <li>既有 Kanban / Files / Context / Plan / Browser Tab 保持原实现；协作样式全部收敛在 <code>.team-collaboration-board</code> 作用域，避免影响 Desktop 其他页面。</li>
+    <li>任务看板的本地产物「打开」与协作看板使用同一预览判定：Markdown、HTML、SVG、PDF、图片和 Office 文件在当前会话的「文件」Tab 中打开并只展开该文件；面板异步加载后再次核对会话，切走即丢弃。文件夹和没有应用内预览的格式仍沿系统打开，不增加浏览器标签或 IPC 读取范围。</li>
   </ul>
   <p>Inspector 显示浏览器时会保留页面容器。文件、任务与计划更新仍可刷新通知和数量；用户切换面板、会话或关闭右栏时，按原有生命周期卸载页面。</p>
   <h3>3.10 Team Session 成员消息</h3>

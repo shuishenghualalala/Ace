@@ -55,7 +55,7 @@ describe('buildKanbanInspectorHtml', () => {
     const html = buildKanbanInspectorHtml();
 
     expect(html).toContain('data-kanban-open-path="C:\\Users\\demo\\.Crew\\plans\\demo.pptx"');
-    expect(html).toContain('data-kanban-open-path="C:\\Users\\demo\\.Crew\\plans"');
+    expect(html).toContain('data-kanban-open-folder="C:\\Users\\demo\\.Crew\\plans"');
   });
 });
 
