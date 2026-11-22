@@ -426,6 +426,12 @@
 <p><strong>验收</strong> SkillsHub 新增 2 项组件测试通过：提交路径触发注册并在重载后显示条目、移除调用删除接口；拒绝时显示 Gateway 错误且保留列表状态。Web 全量 326 项通过，TypeScript 与生产构建通过。Windows Chrome 加载生产 Web 与隔离 Gateway：从真实技能页展开市场目录，添加临时目录后显示标签和路径，移除后回到空态；Gateway 侧核对登记列表最终为空，截图保存。该 E2E 使用本地临时目录，未访问远程市场。</p>
 <p class="evidence">Ace <code>web/src/components/SkillsHub.tsx</code>、<code>web/src/api.ts</code>、<code>web/src/components/SkillsHub.test.tsx</code>、<code>crew/gateway/routers/misc.py</code>。截图 <code>skill-source-ui-69d17a4167/web-skill-source-added.png</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="web-skill-direct-import">
+<h3>Web 技能页直接导入已准备好的技能目录</h3>
+<p>市场目录页面再增加「导入技能」表单：输入包含 <code>SKILL.md</code> 的绝对目录，调用 <code>POST /api/skills/import</code> 直接复制到用户技能目录，无需先登记来源；成功清空输入并刷新已安装列表，失败在表单下方显示 Gateway 错误。导入仍受管理员约束，复制走既有路径 containment、审计与原子发布，跳过仅面向生成技能的编辑质量校验，不执行技能内容。该入口只接受本地目录，不接受远程 URL。</p>
+<p><strong>验收</strong> SkillsHub 组件共 3 项通过，新增导入路径调用与表单清空断言；Web 全量 327 项通过，TypeScript 与生产构建通过。Windows Chrome + 生产 Web + 隔离 Gateway：先添加并移除临时市场目录，再通过同一页面导入准备好的技能目录；Gateway <code>GET /api/skills</code> 出现 <code>prepared-skill</code>，用户技能目录副本包含 <code>SKILL.md</code>，源目录保留。截图 <code>skill-source-ui-9164ac6f44/web-skill-source-removed.png</code> 记录导入后的页面。</p>
+<p class="evidence">Ace <code>web/src/components/SkillsHub.tsx</code>、<code>web/src/api.ts</code>、<code>web/src/components/SkillsHub.test.tsx</code>、<code>crew/gateway/routers/misc.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

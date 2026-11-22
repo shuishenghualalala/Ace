@@ -10,6 +10,7 @@ const apiMock = vi.hoisted(() => ({
   skillSources: vi.fn(),
   addSkillSource: vi.fn(),
   removeSkillSource: vi.fn(),
+  importSkillDirectory: vi.fn(),
   installSkill: vi.fn(),
   uninstallSkill: vi.fn(),
 }));
@@ -26,6 +27,7 @@ beforeEach(() => {
   apiMock.skillSources.mockResolvedValue({ sources: [] });
   apiMock.addSkillSource.mockResolvedValue({ ok: true, source: { path: "D:\\team-skills", label: "team-skills" } });
   apiMock.removeSkillSource.mockResolvedValue({ ok: true });
+  apiMock.importSkillDirectory.mockResolvedValue({ ok: true, slug: "prepared-skill" });
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -71,6 +73,22 @@ it("registers and removes a local skill market source", async () => {
   const remove = [...host.querySelectorAll("button")].find((button) => button.textContent === "移除");
   await act(async () => remove?.click());
   await vi.waitFor(() => expect(apiMock.removeSkillSource).toHaveBeenCalledWith(market.path));
+});
+
+it("imports a prepared skill directory", async () => {
+  await render();
+  const input = host.querySelector<HTMLInputElement>('input[aria-label="技能目录路径"]');
+  expect(input).not.toBeNull();
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, "D:\\prepared-skill");
+    input?.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    input?.closest("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  await vi.waitFor(() => expect(apiMock.importSkillDirectory).toHaveBeenCalledWith("D:\\prepared-skill"));
+  expect(host.textContent).toContain("尚未登记市场目录");
 });
 
 it("shows the Gateway error when a source is refused", async () => {

@@ -521,6 +521,8 @@ export const api = {
     }),
   removeSkillSource: (path: string) =>
     getJSON<{ ok: boolean }>(`/api/skills/sources?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  importSkillDirectory: (path: string, slug = "") =>
+    getJSON<{ ok: boolean; slug: string }>("/api/skills/import", { method: "POST", ...jsonBody({ path, slug }) }),
   scenarios: (count = 4) => getJSON<Scenario[]>(`/api/scenarios?count=${count}`),
   scenarioIntroLines: (count = 8) => getJSON<CrewIntroLine[]>(`/api/scenarios/intro-lines?count=${count}`),
   scenarioLoadingStatuses: (count = 8) => getJSON<CrewLoadingStatus[]>(`/api/scenarios/loading-status?count=${count}`),

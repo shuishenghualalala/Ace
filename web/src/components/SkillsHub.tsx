@@ -209,6 +209,9 @@ export default function SkillsHub() {
   const [sourcePath, setSourcePath] = useState("");
   const [sourceBusy, setSourceBusy] = useState(false);
   const [sourceError, setSourceError] = useState("");
+  const [importPath, setImportPath] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState("");
 
   const load = () => api.skillStore().then(setStore).catch(() => setStore({ installed: [], optional: [] }));
   const loadSources = () => api.skillSources()
@@ -231,6 +234,23 @@ export default function SkillsHub() {
       setSourceError(error instanceof Error ? error.message : "无法添加市场目录");
     } finally {
       setSourceBusy(false);
+    }
+  };
+
+  const handleImportSkill = async (event: FormEvent) => {
+    event.preventDefault();
+    const path = importPath.trim();
+    if (!path || importBusy) return;
+    setImportBusy(true);
+    setImportError("");
+    try {
+      await api.importSkillDirectory(path);
+      setImportPath("");
+      await load();
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "无法导入技能目录");
+    } finally {
+      setImportBusy(false);
     }
   };
 
@@ -396,6 +416,24 @@ export default function SkillsHub() {
               ))}
             </ul>
           )}
+          <p className="hub__empty">也可以直接导入一个已准备好、包含 SKILL.md 的技能目录。</p>
+          <form className="hub__market-form" onSubmit={handleImportSkill}>
+            <input
+              aria-label="技能目录路径"
+              placeholder="绝对路径，例如 D:\\my-skill"
+              value={importPath}
+              onChange={(event) => setImportPath(event.target.value)}
+              disabled={importBusy}
+            />
+            <button
+              className="hub-btn hub-btn--primary"
+              type="submit"
+              disabled={importBusy || !importPath.trim()}
+            >
+              导入技能
+            </button>
+          </form>
+          {importError && <p className="hub__empty" role="alert">{importError}</p>}
         </details>
       </div>
     </div>
