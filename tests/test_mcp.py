@@ -726,6 +726,7 @@ def test_mcp_status_projection_redacts_configuration_secrets():
             "url": "https://user:pass@mcp.example.com/secret-path?token=abc",
             "transport": "http",
             "enabled": True,
+            "auto_connect": False,
             "env": {"API_KEY": "sk-live-123"},
             "headers": {"Authorization": "Bearer header-secret"},
         },
@@ -736,6 +737,7 @@ def test_mcp_status_projection_redacts_configuration_secrets():
     assert public["connected"] is False
     assert public["state"] == "failed"
     assert public["enabled"] is True
+    assert public["auto_connect"] is False
     assert public["tool_count"] == 2
     assert public["tools"] == ["echo", "lookup"]
     assert "sk-live-123" not in blob

@@ -780,6 +780,12 @@
 <p><strong>验收</strong> 对话安装/更新用例：带 <code>auto_connect=false</code> 完成一次审批后保存成功、connected=false、未新增连接、工具已注销、配置保留 false；定向用例与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_install_chat.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-status-auto-connect">
+<h3>MCP 状态暴露自动连接偏好</h3>
+<p><code>mcp_status</code> 原先只给出连接状态，模型无法区分「启动时就不自动连接」与「启动失败/未启动」。现在公开状态在配置含布尔值时返回 <code>auto_connect</code>，仍不返回 env/headers/完整 URL；管理页与对话诊断使用同一语义。</p>
+<p><strong>验收</strong> 状态投影用例覆盖 auto_connect=false，脱敏断言保持通过；定向用例、Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/test_mcp.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

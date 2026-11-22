@@ -299,6 +299,8 @@ def _public_server_status(row: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(config.get("enabled"), bool):
         result["enabled"] = bool(config["enabled"])
+    if isinstance(config.get("auto_connect"), bool):
+        result["auto_connect"] = bool(config["auto_connect"])
     if error:
         result["error"] = error
     return result
