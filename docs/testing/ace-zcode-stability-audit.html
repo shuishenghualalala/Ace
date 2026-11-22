@@ -822,6 +822,12 @@
 <p>三项失败均在安全/发布域：进程能力源清单未分类、发布源码哈希与平台预构建清单不一致、已提交预构建运行时与源码目标/摘要不一致。失败由另一进程同时修改的 browser/release 文件及其暂存状态引起，不涉及本轮 MCP/CLI 改动；未修改这些文件或重写清单，留待其工作完成。</p>
 <p><strong>结论</strong> 该结果不能作为干净树发布证明；MCP/CLI 各自定向与组合套件仍为通过状态。</p>
 </article>
+<article id="test-no-proxy-normalization">
+<h3>测试环境的 IPv6 NO_PROXY 归一化</h3>
+<p>共享环境把 <code>NO_PROXY</code> 设为包含 <code>[::1]</code>；httpx 在构造客户端时把方括号 IPv6 当作非法端口，导致配置类 Gateway 测试在 fixture 阶段报 <code>Invalid port: ':1]'</code>。新增 session 级 autouse fixture，只在测试进程内把 <code>[::1]</code> 归一为 <code>::1</code>，保留 loopback 直连语义，不改产品代码或用户环境。</p>
+<p><strong>验收</strong> 配置 CRUD API 全量 32 项通过，其中此前 setup 失败的 3 项恢复；修复仅作用于 pytest 进程。</p>
+<p class="evidence">Ace <code>tests/conftest.py</code>、<code>tests/gateway/test_config_crud_api.py</code>。httpx 环境代理解析路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
