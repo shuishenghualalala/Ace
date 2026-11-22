@@ -82,6 +82,15 @@ it("edits an MCP server without echoing masked secrets", async () => {
     setter?.call(url, "https://mcp.example.com/next");
     url.dispatchEvent(new Event("input", { bubbles: true }));
   });
+  const probe = [...host.querySelectorAll("button")].find((button) => button.textContent === "测试连接");
+  await act(async () => probe?.click());
+  await vi.waitFor(() => expect(apiMock.probeMcpServer).toHaveBeenCalledWith({
+    name: "remote",
+    transport: "http",
+    url: "https://mcp.example.com/next",
+    headers: { Authorization: "***" },
+    env: { API_KEY: "***" },
+  }));
   const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存");
   await act(async () => save?.click());
   await vi.waitFor(() => expect(apiMock.updateMcpServer).toHaveBeenCalledWith("remote", {

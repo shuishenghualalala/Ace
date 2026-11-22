@@ -153,6 +153,7 @@ export default function McpHub() {
     setProbeMessage("");
     try {
       const payload = payloadFromForm(form);
+      if (editing) payload.name = editing;
       const result = await api.probeMcpServer(payload);
       if (result.ok) {
         const preview = result.tools.slice(0, 8).join(", ");

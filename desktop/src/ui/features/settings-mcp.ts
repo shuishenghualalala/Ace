@@ -600,6 +600,8 @@ function bindMcpFormOnce(): void {
       const button = probeBtn;
       if (!button) return;
       const payload = readMcpForm();
+      const nameInput = document.getElementById('mcp-name') as HTMLInputElement | null;
+      if (nameInput?.disabled) payload.name = nameInput.value.trim();
       if ((payload.transport !== 'http' && payload.transport !== 'sse') || !payload.url) {
         notify('测试连接只支持 HTTP/SSE URL');
         return;
@@ -613,6 +615,7 @@ function bindMcpFormOnce(): void {
       }
       try {
         const result = await backendApi.probeMcpServer({
+          ...(payload.name ? { name: payload.name } : {}),
           transport: payload.transport,
           url: payload.url,
           ...(payload.headers ? { headers: payload.headers } : {}),

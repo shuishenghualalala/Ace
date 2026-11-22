@@ -576,6 +576,12 @@
 <p><strong>验收</strong> 新增关闭重连的单次失败用例通过：错误文案包含「不重试」且不含「预算」；Ruff 通过。未连接公开网络。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>tests/test_mcp.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-probe-stored-secrets">
+<h3>编辑态探测使用已保存密钥</h3>
+<p>编辑已有 MCP 服务时，表单里的 env/headers 是 GET 返回的 <code>***</code> 占位符。若直接把这些占位符发给探测端点，需要鉴权的服务会必然失败，且真实密钥仍无法使用。现在探测请求可携带服务 <code>name</code>：Gateway 从持久化配置中取同名字段，把 <code>***</code> 替换为原值后再连接；未命中的占位符保持不变。Web 与 Desktop 编辑态都会带名称，表单本身仍不接触明文。</p>
+<p><strong>验收</strong> Gateway 探测新增用例通过：已保存 Authorization 与 X-Trace，探测请求提交 <code>***</code> 和新的 X-Trace，捕获的探测配置使用原 Authorization 与新 X-Trace；Web 编辑态探测组件断言携带服务名与占位符；Desktop TypeScript、Ruff 通过。未连接需要鉴权的真实服务。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

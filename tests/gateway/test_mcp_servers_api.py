@@ -266,6 +266,42 @@ async def test_probe_remote_endpoint_without_persisting(api, monkeypatch):
     assert "stdio" in rejected.json()["error"]
 
 
+async def test_probe_merges_masked_secrets_from_saved_server(api, monkeypatch):
+    client, _, _ = api
+    import crew.gateway.routers.mcp_servers as mcp_router
+
+    created = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "remote-secret",
+            "url": "http://127.0.0.1:9/mcp",
+            "transport": "http",
+            "headers": {"Authorization": "Bearer stored", "X-Trace": "old"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert created.status_code == 201
+    captured = {}
+
+    async def fake_probe(cfg):
+        captured.update(cfg)
+        return {"ok": True, "tools": [], "tool_count": 0, "elapsed_ms": 1, "error": None}
+
+    monkeypatch.setattr(mcp_router, "probe_remote_server", fake_probe)
+    response = await client.post(
+        "/api/mcp/servers/probe",
+        json={
+            "name": "remote-secret",
+            "url": "http://127.0.0.1:9/mcp",
+            "transport": "http",
+            "headers": {"Authorization": "***", "X-Trace": "new"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 200
+    assert captured["headers"] == {"Authorization": "Bearer stored", "X-Trace": "new"}
+
+
 async def test_probe_limits_concurrent_probes(api, monkeypatch):
     client, _, _ = api
     import crew.gateway.routers.mcp_servers as mcp_router

@@ -119,9 +119,22 @@ def create_mcp_servers_router(crew) -> APIRouter:
 
     @router.post("/api/mcp/servers/probe")
     async def probe_server(payload: dict[str, Any] | None = None) -> JSONResponse:
-        cfg, err = _validate_server_payload(payload or {})
+        raw = payload or {}
+        cfg, err = _validate_server_payload(raw)
         if err is not None:
             return JSONResponse({"ok": False, "error": err}, status_code=400)
+        name = str(raw.get("name") or "").strip()
+        stored = (crew.config.mcp_servers or {}).get(name) if name else None
+        if isinstance(stored, dict):
+            for field in ("env", "headers"):
+                current = cfg.get(field)
+                previous = stored.get(field)
+                if isinstance(current, dict) and isinstance(previous, dict):
+                    cfg[field] = {
+                        **current,
+                        **{key: previous[key] for key, value in current.items()
+                           if value == "***" and key in previous},
+                    }
         if cfg.get("command") or not cfg.get("url"):
             return JSONResponse(
                 {"ok": False, "error": "只支持探测 HTTP/SSE 端点；stdio 请保存后连接"},
