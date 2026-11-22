@@ -492,6 +492,12 @@
 <p><strong>验收</strong> 市场源定向 18 项通过，新增越界缓存条目不扫描、不删除且仍可移除的用例；Ruff 通过。未启动真实远程清单。</p>
 <p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/agent/skills/manage.py</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="mcp-probe-tool-cap">
+<h3>MCP 探测工具列表的响应上限</h3>
+<p>恶意或异常 MCP 服务可声明大量工具，若探测把全部名称放进响应，会放大 Gateway、桌面和 CLI 的输出。探测现在最多返回 50 个工具名，同时以 <code>tool_count</code> 给出真实数量；Gateway、Desktop 和 CLI 都用该计数显示，不再用截断数组长度冒充总数。探测仍只连接端点、不注册工具。</p>
+<p><strong>验收</strong> 新增 60 工具替身用例通过：响应返回 50 个名称、<code>tool_count=60</code>；Gateway 探测响应、CLI 结构化输出和桌面文案均使用该计数；相关 MCP API、CLI 与 Desktop 定向测试及 TypeScript/Ruff 通过。未连接公开网络。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/cli/integration.py</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/test_mcp.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

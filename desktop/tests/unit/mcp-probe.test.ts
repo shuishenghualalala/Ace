@@ -16,7 +16,7 @@ vi.mock('../../src/ui/backend-client', () => ({ backendApi: apiMock }));
 
 beforeEach(() => {
   vi.clearAllMocks();
-  apiMock.probeMcpServer.mockResolvedValue({ ok: true, tools: ['ping', 'echo'], error: null });
+  apiMock.probeMcpServer.mockResolvedValue({ ok: true, tools: ['ping', 'echo'], tool_count: 2, error: null });
   setupForm();
 });
 

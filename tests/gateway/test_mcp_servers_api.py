@@ -249,7 +249,7 @@ async def test_probe_remote_endpoint_without_persisting(api, monkeypatch):
         headers=LOCAL_HEADERS,
     )
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "tools": ["ping"], "error": None}
+    assert resp.json() == {"ok": True, "tools": ["ping"], "tool_count": 1, "error": None}
     assert calls == [{
         "url": "http://127.0.0.1:9/mcp",
         "transport": "http",

@@ -996,7 +996,7 @@ def test_mcp_probe_reports_tools_without_saving(capsys, cli_home, monkeypatch):
     )
     assert code == 0
     data = json_out(out)
-    assert data == {"ok": True, "tools": ["ping", "echo"], "error": None}
+    assert data == {"ok": True, "tools": ["ping", "echo"], "tool_count": 2, "error": None}
     assert seen["url"] == "https://mcp.example.com/mcp"
     assert seen["headers"] == {"X-Test": "1"}
 

@@ -125,7 +125,7 @@ export const toolsApi = {
       method: 'POST',
     }),
   probeMcpServer: (payload: McpServerPayload) =>
-    getJSON<{ ok: boolean; tools: string[]; error: string | null }>('/api/mcp/servers/probe', {
+    getJSON<{ ok: boolean; tools: string[]; tool_count: number; error: string | null }>('/api/mcp/servers/probe', {
       method: 'POST',
       ...jsonBody(payload),
     }),

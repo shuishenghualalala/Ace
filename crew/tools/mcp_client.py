@@ -58,6 +58,7 @@ MCP_QUEUE_CAPACITY = 32
 MCP_CONCURRENT_READS_PER_SERVER = 2
 MCP_CALL_TIMEOUT_SECONDS = 60.0
 MCP_STARTUP_TIMEOUT_SECONDS = 30.0
+MCP_PROBE_MAX_TOOL_NAMES = 50
 MCP_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 _PROGRESS_INTERVAL_SECONDS = 0.25
@@ -1128,7 +1129,7 @@ async def probe_remote_server(cfg: dict[str, Any], *, timeout: float = 5.0) -> d
     command, so that path stays behind the normal save-and-connect approval.
     """
     if cfg.get("command") or not cfg.get("url"):
-        return {"ok": False, "tools": [], "error": "只支持探测 HTTP/SSE 端点"}
+        return {"ok": False, "tools": [], "tool_count": 0, "error": "只支持探测 HTTP/SSE 端点"}
     probe_cfg = dict(cfg)
     probe_cfg["reconnect"] = {"enabled": False}
     probe_cfg["fail_on_startup_error"] = True
@@ -1144,7 +1145,8 @@ async def probe_remote_server(cfg: dict[str, Any], *, timeout: float = 5.0) -> d
         ]
         return {
             "ok": bool(accepted and error is None),
-            "tools": tools,
+            "tools": tools[:MCP_PROBE_MAX_TOOL_NAMES],
+            "tool_count": len(tools),
             "error": str(error) if error is not None else None,
         }
     finally:

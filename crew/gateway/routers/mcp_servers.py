@@ -135,9 +135,11 @@ def create_mcp_servers_router(crew) -> APIRouter:
         finally:
             probe_slots.release()
         error = result.get("error")
+        tools = list(result.get("tools") or [])
         return JSONResponse({
             "ok": bool(result.get("ok")),
-            "tools": list(result.get("tools") or []),
+            "tools": tools,
+            "tool_count": int(result.get("tool_count") or len(tools)),
             "error": redact_sensitive_text(str(error)) if error else None,
         })
 

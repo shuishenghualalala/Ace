@@ -203,13 +203,14 @@ async def _mcp_servers_probe(args: Any, ctx: CliContext) -> CliResult:
         raise CliError("probe 只支持 HTTP/SSE 端点；stdio 请保存后连接")
     result = await probe_remote_server(cfg)
     tools = [str(item) for item in result.get("tools") or []]
+    count = int(result.get("tool_count") or len(tools))
     if not result.get("ok"):
         error = redact_sensitive_text(str(result.get("error") or "未知错误"))
         raise CliError(f"连接失败：{error}", exit_code=1)
     suffix = f"：{', '.join(tools)}" if tools else ""
     return CliResult(
-        data={"ok": True, "tools": tools, "error": None},
-        text=f"连接成功，发现 {len(tools)} 个工具{suffix}",
+        data={"ok": True, "tools": tools, "tool_count": count, "error": None},
+        text=f"连接成功，发现 {count} 个工具{suffix}",
     )
 
 

@@ -622,7 +622,8 @@ function bindMcpFormOnce(): void {
         if (probeResult) {
           if (result.ok) {
             const preview = result.tools.slice(0, 8).join(', ');
-            probeResult.textContent = `连接成功，发现 ${result.tools.length} 个工具${preview ? `：${preview}` : ''}`;
+            const count = result.tool_count ?? result.tools.length;
+            probeResult.textContent = `连接成功，发现 ${count} 个工具${preview ? `：${preview}` : ''}`;
           } else {
             probeResult.textContent = `连接失败：${result.error || '未知错误'}`;
           }

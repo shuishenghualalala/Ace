@@ -237,7 +237,7 @@
       <tr><td>终端防护</td><td><code>terminal_guard</code>：危险 / 硬线命令检测</td><td>已落地</td></tr>
       <tr><td>MCP 客户端</td><td><code>mcp_client</code>：连接外部 MCP server，把其 tools 注册进 Registry</td><td>已落地</td></tr>
       <tr><td>MCP 配置校验与脱敏</td><td>HTTP/SSE 地址必须是绝对 <code>http(s)</code> URL，不能内嵌账号密码；<code>headers</code> 必须是字符串对象。GET 状态接口脱敏 env 敏感键、<code>Authorization</code>/<code>Cookie</code> 等 headers 以及 URL 查询中的 token/key，落盘仍保留原值。</td><td>已落地</td></tr>
-      <tr><td>MCP 端点探测</td><td><code>POST /api/mcp/servers/probe</code> 只连接 HTTP/SSE 端点并列出工具，不持久化；stdio 必须保存后连接，避免预检执行宿主命令。同时最多 2 个探测，繁忙返回 429 <code>mcp_probe_busy</code>；探测错误经统一脱敏。</td><td>已落地</td></tr>
+      <tr><td>MCP 端点探测</td><td><code>POST /api/mcp/servers/probe</code> 只连接 HTTP/SSE 端点并列出工具，不持久化；stdio 必须保存后连接，避免预检执行宿主命令。同时最多 2 个探测，繁忙返回 429 <code>mcp_probe_busy</code>；响应最多回报 50 个工具名并另给 <code>tool_count</code>；探测错误经统一脱敏。</td><td>已落地</td></tr>
       <tr><td>托管二进制</td><td><code>managed_tools</code>：rg（ripgrep）自动下载 / 校验 / 安装</td><td>已落地</td></tr>
       <tr><td>文件读取上限</td><td><code>file_utils</code>：统一整读上限，读前 metadata 预检 + 双保险复查</td><td>已落地</td></tr>
     </tbody>

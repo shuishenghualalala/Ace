@@ -230,6 +230,28 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch, tmp_pa
         current_process_launch.reset(launch_token)
 
 
+async def test_probe_caps_reported_tool_names(monkeypatch):
+    import crew.tools.mcp_client as mcp_client
+
+    class FakeWorker:
+        def __init__(self, *_args, **_kwargs):
+            self._tools = [SimpleNamespace(name=f"tool-{index}") for index in range(60)]
+            self._error = None
+
+        async def start(self):
+            return True
+
+        async def stop(self):
+            return None
+
+    monkeypatch.setattr(mcp_client, "_ServerWorker", FakeWorker)
+    result = await mcp_client.probe_remote_server({"url": "http://127.0.0.1/mcp", "transport": "http"})
+    assert result["ok"] is True
+    assert result["tool_count"] == 60
+    assert len(result["tools"]) == 50
+    assert result["tools"][0] == "tool-0"
+
+
 async def test_mcp_client_empty_config_noop():
     reg = Registry()
     mgr = MCPClientManager({})
