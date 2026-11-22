@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from crew.gateway.auth import AccountContext
 from crew.gateway.routers import misc
+from crew.agent.skills import SkillSourceError
 
 
 def test_skill_mutation_routes_forward_authenticated_owner(monkeypatch):
@@ -110,3 +111,83 @@ async def test_catalog_requests_leave_gateway_loop_responsive(monkeypatch, path)
     assert completed_before_release == [True]
     data = response.json()
     assert (data["installed"] if path.endswith("/store") else data) == [{"slug": "scan-fixture"}]
+
+
+def _skill_api_app(monkeypatch, *, is_local: bool = True, admin_accounts: list[str] | None = None):
+    added: list[tuple[str, str]] = []
+    removed: list[str] = []
+    imported: list[tuple[str, str, str, bool]] = []
+
+    monkeypatch.setattr(misc, "list_skill_sources", lambda: [{"path": "C:/market", "label": "Team"}])
+    monkeypatch.setattr(
+        misc, "add_skill_source",
+        lambda path, *, label="": added.append((path, label)) or {"path": path, "label": label},
+    )
+    monkeypatch.setattr(
+        misc, "remove_skill_source",
+        lambda path: removed.append(path) or path != "missing",
+    )
+
+    def fake_import(path, *, slug="", operator_account_id=None, source="", validate=True):  # noqa: ANN001
+        imported.append((str(path), slug, source, validate))
+        return True
+
+    monkeypatch.setattr(misc, "install_skill_from_dir", fake_import)
+    crew = SimpleNamespace(config=SimpleNamespace(gateway_admin_accounts=admin_accounts or []))
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def inject_account(request, call_next):  # noqa: ANN001
+        request.state.account = AccountContext(owner_account_id="A:uid-a", is_local=is_local)
+        return await call_next(request)
+
+    app.include_router(misc.create_misc_router(crew))
+    return TestClient(app), added, removed, imported
+
+
+def test_skill_source_and_import_routes_forward_admin_operations(monkeypatch, tmp_path):
+    client, added, removed, imported = _skill_api_app(monkeypatch)
+    skill_dir = tmp_path / "prepared"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: prepared\n---\nbody\n", encoding="utf-8")
+
+    created = client.post("/api/skills/sources", json={"path": "C:/market", "label": "Team"})
+    assert created.status_code == 201
+    assert created.json()["source"] == {"path": "C:/market", "label": "Team"}
+    listed = client.get("/api/skills/sources")
+    assert listed.status_code == 200 and listed.json()["sources"][0]["label"] == "Team"
+    deleted = client.delete("/api/skills/sources", params={"path": "C:/market"})
+    assert deleted.status_code == 200
+    missing = client.delete("/api/skills/sources", params={"path": "missing"})
+    assert missing.status_code == 404
+
+    imported_response = client.post(
+        "/api/skills/import", json={"path": str(skill_dir), "slug": "prepared-copy"},
+    )
+    assert imported_response.status_code == 200
+    assert imported_response.json() == {"ok": True, "slug": "prepared-copy"}
+    assert added == [("C:/market", "Team")]
+    assert removed == ["C:/market", "missing"]
+    assert imported == [(str(skill_dir), "prepared-copy", "desktop-api-import", False)]
+
+
+def test_skill_source_error_is_a_validation_response(monkeypatch):
+    client, _added, _removed, _imported = _skill_api_app(monkeypatch)
+
+    def reject(path, *, label=""):  # noqa: ANN001
+        raise SkillSourceError("source_exists", "该市场源已登记")
+
+    monkeypatch.setattr(misc, "add_skill_source", reject)
+    response = client.post("/api/skills/sources", json={"path": "C:/market"})
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "code": "source_exists", "error": "该市场源已登记"}
+
+
+def test_skill_source_mutations_reject_non_admin(monkeypatch):
+    client, _added, _removed, _imported = _skill_api_app(monkeypatch, is_local=False)
+    for response in (
+        client.post("/api/skills/sources", json={"path": "C:/market"}),
+        client.delete("/api/skills/sources", params={"path": "C:/market"}),
+        client.post("/api/skills/import", json={"path": "C:/market"}),
+    ):
+        assert response.status_code == 403

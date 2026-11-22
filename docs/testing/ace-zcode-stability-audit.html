@@ -413,6 +413,12 @@
 <p><strong>验收</strong> CLI 定向新增导入成功与缺失目录两例通过。Windows 独立 CLI 进程使用隔离 <code>CREW_HOME</code> 与 Python 写入的准备目录：<code>crew skill import</code> 退出 0，<code>crew skill list --json</code> 出现 <code>prepared-skill</code>，用户技能目录中的副本包含 <code>SKILL.md</code>，源目录保持不变。</p>
 <p class="evidence">Ace <code>crew/cli/knowledge.py</code>、<code>crew/agent/skills/manage.py</code>、<code>tests/test_cli.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="skill-source-api">
+<h3>技能市场源与单技能导入的 Gateway 接口</h3>
+<p>本地市场目录和单目录导入首先由 CLI 提供。为让桌面或 Web 界面后续直接接入，Gateway 增加 <code>GET/POST /api/skills/sources</code>、<code>DELETE /api/skills/sources?path=…</code> 与 <code>POST /api/skills/import</code>。<code>GET</code> 返回已登记目录；变更接口要求管理员，本机 owner 视为管理员，其他账号返回 403。注册与导入放到工作线程执行，避免目录扫描或复制阻塞 Gateway 事件循环；目录校验错误以 400 和稳定 <code>code</code> 返回，删除不存在的登记返回 404。接口不执行技能内容，导入仍走路径 containment、审计和原子发布。</p>
+<p><strong>验收</strong> Gateway 技能接口 7 项通过：管理员请求正确转发路径、标签与操作者；市场源列表；删除成功与 404；导入转发 <code>validate=False</code> 和来源；已登记错误映射为 400/code；三个变更接口对非管理员均返回 403。相关技能、CLI 与 Ruff 回归通过。该切片只提供 HTTP 入口，桌面/Web 的源管理界面尚未接入。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/misc.py</code>、<code>tests/gateway/test_global_skills_api.py</code>、<code>crew/agent/skills/sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

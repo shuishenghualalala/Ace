@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from crew.features.runtime import FeatureLeaseUnavailableError
 from crew.agent.skills import (
+    SkillSourceError,
+    add_skill_source,
     install_skill,
+    install_skill_from_dir,
     list_local_skills,
     list_optional_skills,
+    list_skill_sources,
     list_skills,
+    remove_skill_source,
     uninstall_skill,
 )
 from crew.gateway.auth import AuthenticationError, account_from_request, require_admin
@@ -227,6 +233,66 @@ def create_misc_router(crew) -> APIRouter:
         if not ok:
             return JSONResponse({"ok": False, "error": "skill 不存在或已安装"}, status_code=400)
         return JSONResponse({"ok": True})
+
+    @router.get("/api/skills/sources")
+    def skill_sources() -> JSONResponse:
+        return JSONResponse({"sources": list_skill_sources()})
+
+    @router.post("/api/skills/sources")
+    async def skill_source_add(request: Request, payload: dict) -> JSONResponse:
+        try:
+            require_admin(account_from_request(request), crew.config)
+        except AuthenticationError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+        try:
+            entry = await asyncio.to_thread(
+                add_skill_source,
+                str(payload.get("path") or ""),
+                label=str(payload.get("label") or ""),
+            )
+        except SkillSourceError as exc:
+            return JSONResponse(
+                {"ok": False, "code": exc.code, "error": str(exc)}, status_code=400,
+            )
+        return JSONResponse({"ok": True, "source": entry}, status_code=201)
+
+    @router.delete("/api/skills/sources")
+    async def skill_source_remove(request: Request, path: str = "") -> JSONResponse:
+        try:
+            require_admin(account_from_request(request), crew.config)
+        except AuthenticationError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+        removed = await asyncio.to_thread(remove_skill_source, path)
+        if not removed:
+            return JSONResponse({"ok": False, "error": "未找到该市场目录登记"}, status_code=404)
+        return JSONResponse({"ok": True})
+
+    @router.post("/api/skills/import")
+    async def skill_import(request: Request, payload: dict) -> JSONResponse:
+        owner = account_from_request(request).owner_account_id
+        try:
+            require_admin(account_from_request(request), crew.config)
+        except AuthenticationError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=403)
+        source_dir = Path(str(payload.get("path") or "")).expanduser()
+        if not source_dir.is_dir() or not (source_dir / "SKILL.md").is_file():
+            return JSONResponse(
+                {"ok": False, "error": "导入目录不存在或缺少 SKILL.md"}, status_code=400,
+            )
+        slug = str(payload.get("slug") or "").strip()
+        ok = await asyncio.to_thread(
+            install_skill_from_dir,
+            source_dir,
+            slug=slug,
+            operator_account_id=owner,
+            source="desktop-api-import",
+            validate=False,
+        )
+        if not ok:
+            return JSONResponse(
+                {"ok": False, "error": "技能未通过发布校验或目标已存在"}, status_code=400,
+            )
+        return JSONResponse({"ok": True, "slug": slug or source_dir.name})
 
     @router.delete("/api/skills/{slug}")
     async def skill_uninstall(slug: str, request: Request) -> JSONResponse:
