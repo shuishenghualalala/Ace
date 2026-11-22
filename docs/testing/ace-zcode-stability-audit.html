@@ -666,6 +666,12 @@
 <p><strong>验收</strong> McpHub 5 项、TypeScript 与生产构建通过。真实 MCP HTTP 服务 E2E 仍验证保存后自动显示已连接与工具。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="cli-run-prompt-limit">
+<h3>CLI 一次性对话的提示长度上限</h3>
+<p>位置参数、<code>--prompt</code> 与非 TTY stdin 都可能接收超大输入；旧实现无上限并同步整读。现在超过 1,000,000 字符直接以退出码 1 拒绝，stdin 最多读取上限加一个字符用于判定。正常提示、续接与结构化输出路径不变。</p>
+<p><strong>验收</strong> 新增位置参数与 stdin 超限用例通过；CLI 提示相关回归与 Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:61</code> 的 <code>-p, --prompt</code> 入口。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

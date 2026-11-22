@@ -999,6 +999,21 @@ def test_readonly_content_commands(capsys, cli_home):
         assert json_out(out) is not None, argv
 
 
+def test_run_rejects_prompts_over_the_character_limit(capsys, cli_home, monkeypatch):
+    import crew.cli.chat as chat
+
+    monkeypatch.setattr(chat, "_MAX_RUN_PROMPT_CHARS", 4)
+    code, _out = run_cli(capsys, "run", "12345")
+    assert code == 1
+
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("123456"))
+    code, _out = run_cli(capsys, "run")
+    assert code == 1
+
+
 def test_mcp_probe_reports_tools_without_saving(capsys, cli_home, monkeypatch):
     import crew.tools.mcp_client as mcp_client
 

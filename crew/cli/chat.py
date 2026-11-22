@@ -18,6 +18,7 @@ from crew.cli.security import CliApprovalRequired, consume_conversation_turn
 from crew.core.envelope import Envelope, ResponseChunk
 
 console = Console()
+_MAX_RUN_PROMPT_CHARS = 1_000_000
 
 BANNER = """[bold cyan]Crew[/bold cyan] 多智能体调用平台 · CLI
 输入消息开始对话；/help 查看命令，/quit 退出。
@@ -314,12 +315,16 @@ async def _run(args: Any, ctx: CliContext) -> CliResult:
     option = str(getattr(args, "prompt_option", "") or "").strip()
     if positional and option:
         raise CliError("位置参数与 --prompt 只能提供一个")
+    if len(positional) > _MAX_RUN_PROMPT_CHARS or len(option) > _MAX_RUN_PROMPT_CHARS:
+        raise CliError(f"prompt 超过上限 {_MAX_RUN_PROMPT_CHARS} 字符")
     prompt = option or positional
     if not prompt and not sys.stdin.isatty():
         try:
-            prompt = sys.stdin.read().strip()
+            prompt = sys.stdin.read(_MAX_RUN_PROMPT_CHARS + 1).strip()
         except (OSError, ValueError):
             prompt = ""
+    if len(prompt) > _MAX_RUN_PROMPT_CHARS:
+        raise CliError(f"prompt 超过上限 {_MAX_RUN_PROMPT_CHARS} 字符")
     if not prompt:
         raise CliError("prompt 不能为空；可通过位置参数、--prompt 或 stdin 提供")
     output_format = args.output_format or ("json" if ctx.json_output else "text")
