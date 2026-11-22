@@ -2468,50 +2468,55 @@ class CrewApp:
 
     async def startup_core(self) -> None:
         """Open runtime task admission after owner storage and writer recovery."""
-        try:
-            # 不传 kanban_db_path（有意缺省）：通用 backfill 会把
-            # kanban_workflows 的 legacy_ambiguous 歧义行（owner=''）改写/清除，
-            # 破坏 store 隔离留给人工认领的语义；接入需先补全 kanban 专用
-            # 认领逻辑（见 _migration.KANBAN_DB_TABLES 注释）。
-            # 不传 external/team 路径（有意缺省）：两域 6 表均不在
-            # OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带；
-            # 显式登记仅供未来域专用认领工具消费。
-            # 不传 sites_db_path（有意缺省）：sites 域 10 表同样不在
-            # OWNER_TABLE_LABELS，语义同 external/team（见 _migration 注释）。
-            # channels_db_path 照 cron/work 语义传入：routes 表在 OWNER_TABLE_
-            # LABELS 内随库扫描；bindings 表不在清单内不参与扫描。
-            counts, backfilled = await asyncio.to_thread(
-                inspect_and_backfill_legacy_owners,
-                legacy_owner_scan_targets(
-                    self.config.db_path,
-                    self.config.cron_db_path,
-                    self.config.work_db_path,
-                    tasks_db_path=self.config.tasks_db_path,
-                    notifications_db_path=self.config.notifications_db_path,
-                    channels_db_path=self.config.channels_db_path,
-                ),
-                wal_enabled=self.config.sqlite_wal,
-            )
-            if backfilled:
-                log.info("已自动回填 %d 条 legacy cron owner", backfilled)
-            for table, count in counts.items():
-                if count:
-                    log.warning(
-                        "存在 %d 条未归属%s，请运行 python -m crew.cli migrate claim-legacy --account <owner-id>",
-                        count,
-                        OWNER_TABLE_LABELS.get(table, table),
+        with span("app.startup_core", source="app_startup", operation="startup_core"):
+            try:
+                # 不传 kanban_db_path（有意缺省）：通用 backfill 会把
+                # kanban_workflows 的 legacy_ambiguous 歧义行（owner=''）改写/清除，
+                # 破坏 store 隔离留给人工认领的语义；接入需先补全 kanban 专用
+                # 认领逻辑（见 _migration.KANBAN_DB_TABLES 注释）。
+                # 不传 external/team 路径（有意缺省）：两域 6 表均不在
+                # OWNER_TABLE_LABELS，owner 归一由各自 store 构造时自带；
+                # 显式登记仅供未来域专用认领工具消费。
+                # 不传 sites_db_path（有意缺省）：sites 域 10 表同样不在
+                # OWNER_TABLE_LABELS，语义同 external/team（见 _migration 注释）。
+                # channels_db_path 照 cron/work 语义传入：routes 表在 OWNER_TABLE_
+                # LABELS 内随库扫描；bindings 表不在清单内不参与扫描。
+                with span("app.startup.legacy_owner_recovery"):
+                    counts, backfilled = await asyncio.to_thread(
+                        inspect_and_backfill_legacy_owners,
+                        legacy_owner_scan_targets(
+                            self.config.db_path,
+                            self.config.cron_db_path,
+                            self.config.work_db_path,
+                            tasks_db_path=self.config.tasks_db_path,
+                            notifications_db_path=self.config.notifications_db_path,
+                            channels_db_path=self.config.channels_db_path,
+                        ),
+                        wal_enabled=self.config.sqlite_wal,
                     )
-        except Exception:  # noqa: BLE001
-            log.exception("legacy owner 检查失败")
-        from crew.tools.process_registry import process_registry
+                if backfilled:
+                    log.info("已自动回填 %d 条 legacy cron owner", backfilled)
+                for table, count in counts.items():
+                    if count:
+                        log.warning(
+                            "存在 %d 条未归属%s，请运行 python -m crew.cli migrate claim-legacy --account <owner-id>",
+                            count,
+                            OWNER_TABLE_LABELS.get(table, table),
+                        )
+            except Exception:  # noqa: BLE001
+                log.exception("legacy owner 检查失败")
+            from crew.tools.process_registry import process_registry
 
-        recover_tools = getattr(self.session_store, "recover_interrupted_tool_checkpoints", None)
-        if callable(recover_tools):
-            await asyncio.to_thread(recover_tools)
-        recovered_processes = await process_registry.recover_from_checkpoint_async()
-        if recovered_processes:
-            log.info("崩溃恢复：认领 %d 个后台进程", recovered_processes)
-        await self.tasks.start()
+            recover_tools = getattr(self.session_store, "recover_interrupted_tool_checkpoints", None)
+            if callable(recover_tools):
+                with span("app.startup.tool_checkpoint_recovery"):
+                    await asyncio.to_thread(recover_tools)
+            with span("app.startup.process_recovery"):
+                recovered_processes = await process_registry.recover_from_checkpoint_async()
+            if recovered_processes:
+                log.info("崩溃恢复：认领 %d 个后台进程", recovered_processes)
+            with span("app.startup.task_runtime"):
+                await self.tasks.start()
 
     async def startup_services(self, *, start_cron: bool = True) -> None:
         """Start optional capabilities independently of core request admission."""

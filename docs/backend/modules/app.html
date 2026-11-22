@@ -139,6 +139,7 @@ async for chunk in app.handle(envelope):
 
   <h2>本次更新：应用生命周期观测（2026-09-23）</h2>
   <p><code>CrewApp</code> 在启动阶段装配独立 TraceStore、recorder 和日志 Handler，在关闭阶段先停止生产、排空 writer，再关闭数据库；不可用时退回 Noop sink。每个真实交互在 root span 建立后记录 <code>user.submitted</code>，避免 renderer 先于服务端 trace 写入而丢失事实。</p>
+  <p><code>startup_core</code> 使用 <code>app.startup_core</code> 父 span，依次记录 legacy owner 检查、工具检查点恢复、后台进程恢复和任务运行时启动四个子 span。它们共享启动 trace，结束记录携带成功/失败状态及单调时钟耗时；只增加诊断，不改变原有启动顺序、恢复或异常处理。</p>
   <p>从桌面发起的请求可用 <code>request_id</code> 将网关首帧与 Renderer 的接收、接纳、正文 DOM 挂载及绘制机会四个时间点关联。桌面端仅在开启流式诊断时记录这些数据。查看<a href="../../frontend/stream-performance-diagnostics.html">流式性能诊断</a>了解事件字段及边界。</p>
   <p>provider、工具、Wiki、Compact、MCP、外部 agent 和出站边界复用同一上下文，旧 <code>llm_trace</code>/<code>debug-log</code> 继续可用。</p>
 

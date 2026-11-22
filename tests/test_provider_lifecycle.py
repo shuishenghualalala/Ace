@@ -190,6 +190,75 @@ async def test_app_shutdown_closes_agent_owned_before_global_provider_and_is_ide
 
 
 @pytest.mark.asyncio
+async def test_startup_core_emits_ordered_phase_spans(tmp_path):
+    from crew.core.observability import bind_sink
+
+    cfg = Config(
+        db_path=str(tmp_path / "crew.db"),
+        memory_db_path=str(tmp_path / "memory.db"),
+        crew_home=str(tmp_path / ".crew"),
+    )
+    app = build_app(config=cfg, enable_team=False)
+    records = []
+
+    class Sink:
+        def accept(self, record) -> None:
+            records.append(record)
+
+    try:
+        with bind_sink(Sink()):
+            await app.startup_core()
+    finally:
+        await app.shutdown()
+
+    completed = [record for record in records if record.record_type == "span.end"]
+    assert [record.name for record in completed] == [
+        "app.startup.legacy_owner_recovery",
+        "app.startup.tool_checkpoint_recovery",
+        "app.startup.process_recovery",
+        "app.startup.task_runtime",
+        "app.startup_core",
+    ]
+    assert all(record.status == "succeeded" for record in completed)
+    assert all(record.duration_ms is not None and record.duration_ms >= 0 for record in completed)
+    assert len({record.context.trace_id for record in completed}) == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_core_marks_failed_phase_and_preserves_exception(tmp_path, monkeypatch):
+    from crew.core.observability import bind_sink
+    from crew.tools.process_registry import process_registry
+
+    cfg = Config(
+        db_path=str(tmp_path / "crew.db"),
+        memory_db_path=str(tmp_path / "memory.db"),
+        crew_home=str(tmp_path / ".crew"),
+    )
+    app = build_app(config=cfg, enable_team=False)
+    records = []
+
+    class Sink:
+        def accept(self, record) -> None:
+            records.append(record)
+
+    async def fail_recovery():
+        raise RuntimeError("recovery fixture")
+
+    monkeypatch.setattr(process_registry, "recover_from_checkpoint_async", fail_recovery)
+    try:
+        with bind_sink(Sink()), pytest.raises(RuntimeError, match="recovery fixture"):
+            await app.startup_core()
+    finally:
+        await app.shutdown()
+
+    completed = {record.name: record for record in records if record.record_type == "span.end"}
+    assert completed["app.startup.process_recovery"].status == "failed"
+    assert completed["app.startup.process_recovery"].error_type == "RuntimeError"
+    assert completed["app.startup_core"].status == "failed"
+    assert "app.startup.task_runtime" not in completed
+
+
+@pytest.mark.asyncio
 async def test_last_app_shutdown_releases_log_files(tmp_path):
     import crew.state.logging as trace_log
 
