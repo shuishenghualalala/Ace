@@ -11,6 +11,15 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _normalize_no_proxy_for_httpx():
+    """Keep bracketed IPv6 loopback out of NO_PROXY; httpx parses it as a bad port."""
+    for key in ("NO_PROXY", "no_proxy"):
+        value = os.environ.get(key)
+        if value and "[::1]" in value:
+            os.environ[key] = value.replace("[::1]", "::1")
+
+
 @pytest.fixture
 def external_write_dir(tmp_path: Path):
     """Allocate a real test directory outside the sandbox's default writable roots."""
