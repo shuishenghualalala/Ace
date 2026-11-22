@@ -486,6 +486,12 @@
 <p><strong>验收</strong> 市场源定向 17 项通过，新增敏感查询参数拒绝断言；Ruff 通过。未对公开网络清单做真实下载。</p>
 <p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>tests/test_skill_sources.py</code>、<code>web/src/components/SkillsHub.tsx</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="market-cache-containment">
+<h3>市场源缓存路径的边界校验</h3>
+<p>远程清单的缓存路径来自登记文件。若该文件被损坏或手工改写为 <code>CREW_HOME</code> 之外的目录，列表扫描和移除操作可能读取或删除任意位置。现在读取登记时只接受位于 <code>CREW_HOME/skill_market_cache/</code> 内的缓存路径；越界条目的 <code>cache_dir</code> 视为空，不会扫描其技能，移除时也不会删除该目录。条目仍出现在来源列表中，可被移除或用正常刷新重建缓存。</p>
+<p><strong>验收</strong> 市场源定向 18 项通过，新增越界缓存条目不扫描、不删除且仍可移除的用例；Ruff 通过。未启动真实远程清单。</p>
+<p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/agent/skills/manage.py</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

@@ -83,6 +83,13 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _cache_inside(value: str | Path) -> bool:
+    try:
+        return _inside(Path(value).expanduser().resolve(), _cache_parent().resolve())
+    except OSError:
+        return False
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -114,10 +121,11 @@ def _read_registry() -> list[dict]:
         url = str(item.get("url") or "").strip()
         if item.get("kind") == "url" or url:
             cache_dir = str(item.get("cache_dir") or "").strip()
-            if not url or not cache_dir:
+            if not url:
                 continue
             result.append({
-                "kind": "url", "url": url, "cache_dir": cache_dir,
+                "kind": "url", "url": url,
+                "cache_dir": cache_dir if cache_dir and _cache_inside(cache_dir) else "",
                 "label": label or (urlsplit(url).hostname or url), "added_at": added_at,
             })
             continue
@@ -432,6 +440,6 @@ def remove_skill_source(raw_path: str) -> bool:
         _write_registry(kept)
     for item in removed:
         cache_dir = str(item.get("cache_dir") or "").strip()
-        if cache_dir:
+        if cache_dir and _cache_inside(cache_dir):
             shutil.rmtree(cache_dir, ignore_errors=True)
     return True

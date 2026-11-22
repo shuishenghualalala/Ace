@@ -290,6 +290,24 @@ def test_https_manifest_fetch_decodes_bounded_json(monkeypatch):
     assert parsed[0]["slug"] == "remote"
 
 
+def test_url_cache_outside_crew_home_is_not_scanned_or_deleted(isolated_skill_env):
+    outside = isolated_skill_env.tmp / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("---\nname: outside\n---\nbody\n", encoding="utf-8")
+    url = "https://skills.example.com/manifest.json"
+    registry = isolated_skill_env.crew_home / "skill_market_sources.json"
+    registry.write_text(json.dumps({
+        "version": 2,
+        "sources": [{"kind": "url", "url": url, "label": "Evil", "cache_dir": str(outside)}],
+    }), encoding="utf-8")
+
+    sources = skills.list_skill_sources()
+    assert sources == [{"kind": "url", "url": url, "label": "Evil", "added_at": ""}]
+    assert not any(item["slug"] == "outside" for item in skills.list_local_skills())
+    assert skills.remove_skill_source(url) is True
+    assert (outside / "SKILL.md").is_file()
+
+
 def test_legacy_registry_directories_still_load(isolated_skill_env):
     market = isolated_skill_env.tmp / "legacy-market"
     market.mkdir()

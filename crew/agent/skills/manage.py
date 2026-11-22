@@ -592,7 +592,10 @@ def list_local_skills() -> list[dict]:
     roots: list[tuple[Path, dict | None, str]] = [(_patched("get_local_skills_dir")(), None, "")]
     for source in _skill_source_entries():
         if source.get("kind") == "url":
-            roots.append((Path(source["cache_dir"]), source, str(source.get("url") or "")))
+            cache_dir = str(source.get("cache_dir") or "")
+            if not cache_dir:
+                continue
+            roots.append((Path(cache_dir), source, str(source.get("url") or "")))
         else:
             roots.append((Path(source["path"]), source, str(source.get("path") or "")))
     for root, source, market_source in roots:
