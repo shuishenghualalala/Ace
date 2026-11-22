@@ -648,6 +648,12 @@
 <p><strong>验收</strong> 新增状态错误脱敏用例：错误含 URL token、<code>sk-</code> key 与 Authorization，响应中三者均不可见；定向用例与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/redact.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-search">
+<h3>Web MCP 服务搜索</h3>
+<p>MCP 服务多时，Web 页只能整页滚动。新增按名称、传输、URL、command 与工具名的即时过滤；无匹配时给出独立空态，不误报「暂无服务」。搜索只作用于已加载列表，不触发后端请求，也不改变保存/删除目标。</p>
+<p><strong>验收</strong> McpHub 新增过滤用例：两个服务按工具名过滤后只保留命中项；组件 5 项、TypeScript 与生产构建通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>web/src/styles/global.css</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

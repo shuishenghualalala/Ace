@@ -6066,6 +6066,7 @@ button { font-family: inherit; cursor: pointer; }
 .mcp-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;
 }
+.mcp-page .hub__header-right { gap: 8px; }
 .mcp-card {
   display: flex; flex-direction: column; gap: 6px; padding: 14px;
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg-soft);

@@ -76,6 +76,7 @@ function payloadFromForm(form: FormState): Record<string, unknown> {
 
 export default function McpHub() {
   const [servers, setServers] = useState<McpServerRow[]>([]);
+  const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -229,6 +230,18 @@ export default function McpHub() {
     }
   };
 
+  const filteredServers = servers.filter((server) => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return true;
+    return [
+      server.name,
+      server.transport,
+      server.config.url ?? "",
+      server.config.command ?? "",
+      ...server.tools,
+    ].join(" ").toLowerCase().includes(needle);
+  });
+
   return (
     <div className="hub mcp-page">
       <div className="hub__header">
@@ -241,6 +254,14 @@ export default function McpHub() {
           <p className="hub__subtitle">管理 HTTP/SSE 与本地 stdio 服务，连接状态保存在当前 Gateway。</p>
         </div>
         <div className="hub__header-right">
+          <div className="hub__search">
+            <input
+              aria-label="搜索 MCP 服务"
+              placeholder="搜索 MCP 服务"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
           <button className="hub-btn hub-btn--primary" type="button" onClick={openAdd}>添加服务</button>
         </div>
       </div>
@@ -251,9 +272,11 @@ export default function McpHub() {
           <p className="hub__empty">正在加载 MCP 服务…</p>
         ) : servers.length === 0 ? (
           <p className="hub__empty">暂无 MCP 服务，点击「添加服务」开始配置。</p>
+        ) : filteredServers.length === 0 ? (
+          <p className="hub__empty">没有匹配的 MCP 服务</p>
         ) : (
           <div className="mcp-grid">
-            {servers.map((server) => (
+            {filteredServers.map((server) => (
               <article key={server.name} className="mcp-card">
                 <header className="mcp-card__head">
                   <strong>{server.name}</strong>

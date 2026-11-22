@@ -101,6 +101,33 @@ it("edits an MCP server without echoing masked secrets", async () => {
   }));
 });
 
+it("filters MCP servers by name and tool", async () => {
+  apiMock.mcpServers.mockResolvedValue({
+    ok: true,
+    servers: [
+      {
+        name: "remote", transport: "http", connected: true, error: "", tools: ["ping"],
+        config: { url: "https://mcp.example.com/mcp", transport: "http" },
+      },
+      {
+        name: "local", transport: "stdio", connected: false, error: "", tools: ["echo"],
+        config: { command: "echo", transport: "stdio" },
+      },
+    ],
+  });
+  await render();
+  expect(host.textContent).toContain("remote");
+  expect(host.textContent).toContain("local");
+  const search = host.querySelector<HTMLInputElement>('input[aria-label="搜索 MCP 服务"]')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(search, "ping");
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(host.textContent).toContain("remote");
+  expect(host.textContent).not.toContain("local");
+});
+
 it("clears the probe result when switching to stdio", async () => {
   await render();
   const add = [...host.querySelectorAll("button")].find((button) => button.textContent === "添加服务");
