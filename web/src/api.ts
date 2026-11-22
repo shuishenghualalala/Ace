@@ -269,6 +269,34 @@ export interface SkillMarketSource {
   skill_count?: number;
 }
 
+export type McpTransport = "stdio" | "http" | "sse" | "unknown";
+
+export interface McpServerConfig {
+  command?: string;
+  args?: string[];
+  url?: string;
+  transport?: McpTransport;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+}
+
+export interface McpServerRow {
+  name: string;
+  transport: McpTransport;
+  connected: boolean;
+  error: string;
+  tools: string[];
+  config: McpServerConfig;
+}
+
+export interface McpProbeResult {
+  ok: boolean;
+  tools: string[];
+  tool_count: number;
+  elapsed_ms: number;
+  error: string | null;
+}
+
 export const api = {
   config: () => getJSON<AppConfig>("/api/config"),
   switchModel: (modelId: string) =>
@@ -531,6 +559,25 @@ export const api = {
     }),
   importSkillDirectory: (path: string, slug = "") =>
     getJSON<{ ok: boolean; slug: string }>("/api/skills/import", { method: "POST", ...jsonBody({ path, slug }) }),
+  mcpServers: () => getJSON<{ ok: boolean; servers: McpServerRow[] }>("/api/mcp/servers"),
+  createMcpServer: (payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; servers: McpServerRow[] }>("/api/mcp/servers", {
+      method: "POST", ...jsonBody(payload),
+    }),
+  updateMcpServer: (name: string, payload: Record<string, unknown>) =>
+    getJSON<{ ok: boolean; servers: McpServerRow[] }>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+      method: "PUT", ...jsonBody(payload),
+    }),
+  deleteMcpServer: (name: string) =>
+    getJSON<{ ok: boolean; servers: McpServerRow[] }>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  reloadMcpServer: (name: string) =>
+    getJSON<{ ok: boolean; servers: McpServerRow[] }>(`/api/mcp/servers/${encodeURIComponent(name)}/reload`, {
+      method: "POST",
+    }),
+  probeMcpServer: (payload: Record<string, unknown>) =>
+    getJSON<McpProbeResult>("/api/mcp/servers/probe", { method: "POST", ...jsonBody(payload) }),
   scenarios: (count = 4) => getJSON<Scenario[]>(`/api/scenarios?count=${count}`),
   scenarioIntroLines: (count = 8) => getJSON<CrewIntroLine[]>(`/api/scenarios/intro-lines?count=${count}`),
   scenarioLoadingStatuses: (count = 8) => getJSON<CrewLoadingStatus[]>(`/api/scenarios/loading-status?count=${count}`),

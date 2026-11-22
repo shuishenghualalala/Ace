@@ -6063,6 +6063,43 @@ button { font-family: inherit; cursor: pointer; }
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; color: var(--text-3); font-size: 12px;
 }
+.mcp-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px;
+}
+.mcp-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 14px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-soft);
+}
+.mcp-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mcp-card__meta, .mcp-card__status, .mcp-card__tools {
+  margin: 0; color: var(--text-3); font-size: 12px; overflow-wrap: anywhere;
+}
+.mcp-card__actions { display: flex; gap: 6px; margin-top: 4px; }
+.mcp-chip {
+  padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px;
+  color: var(--text-3); font-size: 11px;
+}
+.mcp-chip.is-online { color: #2e7d32; border-color: #2e7d32; }
+.mcp-chip.is-error { color: #c62828; border-color: #c62828; }
+.mcp-overlay {
+  position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(0, 0, 0, .32);
+}
+.mcp-modal {
+  display: flex; flex-direction: column; gap: 10px; width: min(520px, 100%);
+  max-height: 86vh; overflow: auto; padding: 18px;
+  border: 1px solid var(--border); border-radius: 14px; background: var(--bg);
+}
+.mcp-modal__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mcp-modal__head h2 { margin: 0; font-size: 17px; }
+.mcp-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); }
+.mcp-field input, .mcp-field select, .mcp-field textarea {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-soft); color: var(--text); font: inherit; outline: none;
+}
+.mcp-field textarea { resize: vertical; }
+.mcp-probe { margin: 0; color: var(--text-2); font-size: 12px; }
+.mcp-modal__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .hub__search-sprite {
   position: relative;
   width: 17px;

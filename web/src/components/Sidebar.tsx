@@ -6,7 +6,7 @@ import { externalAgentInitial, externalAgentTone } from "./ExternalAgentAvatar";
 import { registerWikiNavigation } from "../lib/wiki-navigation";
 import { UiFeatureRegistry } from "../lib/ui-feature-registry";
 
-export type SidebarView = "chat" | "agents" | "skills" | "wiki";
+export type SidebarView = "chat" | "agents" | "skills" | "mcp" | "wiki";
 type SidebarNavigationId = Exclude<SidebarView, "chat">;
 interface SidebarFeatureAvailability {
   externalAgentsEnabled: boolean;
@@ -25,6 +25,16 @@ function registerCoreNavigation(
       </svg>
     ),
     order: 10,
+  });
+  registry.register({
+    id: "mcp",
+    label: "MCP",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 2v6M15 2v6M7 8h10v3a5 5 0 0 1-10 0V8zM12 16v6" />
+      </svg>
+    ),
+    order: 15,
   });
   registry.register({
     id: "agents",

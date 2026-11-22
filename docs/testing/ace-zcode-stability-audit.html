@@ -558,6 +558,12 @@
 <p><strong>验收</strong> 停止阻塞 worker 用例通过：探测在 1 秒内返回，且 fake worker 的 <code>force_abort</code> 被调用；Ruff 通过。未连接公开网络。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>tests/test_mcp.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-hub">
+<h3>Web 侧栏的 MCP 服务页</h3>
+<p>Desktop 已有 MCP 管理，Web 缺少同一入口。新增独立侧栏页「MCP」：读取 <code>GET /api/mcp/servers</code>，展示传输、连接状态、工具、错误；支持新增 stdio/HTTP/SSE 服务、重连和删除。新增弹层可在保存前调用探测接口验证 HTTP/SSE 端点并显示工具数量与耗时；stdio 明确提示不支持预检。Web 暂不提供编辑，避免把 GET 脱敏后的 <code>***</code> 写回配置；编辑仍走 Desktop 或 API。</p>
+<p><strong>验收</strong> McpHub 组件测试通过：列表状态、添加弹层、HTTP 探测请求与保存 payload；Web 全量 45 个文件、330 项通过，TypeScript 与生产构建通过。Windows Chrome + 生产 Web + 隔离 Gateway：从侧栏进入 MCP，添加 <code>http://127.0.0.1:1/mcp</code>，探测显示失败，保存后卡片出现，删除后回到空态；Gateway 与 config.yaml 均无残留。截图 <code>mcp-hub-ui-3655abaca8/web-mcp-added.png</code>。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/api.ts</code>、<code>web/src/components/Sidebar.tsx</code>、<code>web/src/App.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

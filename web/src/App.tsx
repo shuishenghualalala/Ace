@@ -4,6 +4,7 @@ import TopBar from "./components/TopBar";
 import ChatPanel from "./components/ChatPanel";
 import type { Props as ChatPanelProps } from "./components/ChatPanel";
 import SkillsHub from "./components/SkillsHub";
+import McpHub from "./components/McpHub";
 import {
   createWikiFeatureStore,
   installWikiPageContribution,
@@ -704,6 +705,8 @@ export default function App() {
         )}
         {view === "skills" ? (
           <SkillsHub />
+        ) : view === "mcp" ? (
+          <McpHub />
         ) : agentsPage ? (
           agentsPage
         ) : wikiPage ? (
