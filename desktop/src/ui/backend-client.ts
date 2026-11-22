@@ -107,6 +107,7 @@ export type {
   OptionalSkill,
   EvolutionConfig,
   SkillStore,
+  SkillMarketSource,
   CompleteItem,
 } from './api/feature-system';
 

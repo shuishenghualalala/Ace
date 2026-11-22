@@ -330,6 +330,14 @@ export interface EvolutionConfig {
   visible: boolean;
 }
 
+export interface SkillMarketSource {
+  kind?: 'dir' | 'url';
+  path?: string;
+  url?: string;
+  label: string;
+  added_at?: string;
+}
+
 export interface SkillStore {
   installed: Skill[];
   optional: OptionalSkill[];
@@ -540,6 +548,24 @@ export const systemApi = {
     getJSON<{ ok: boolean }>(`/api/skills/${encodeURIComponent(slug)}/install`, { method: 'POST' }),
   uninstallSkill: (slug: string) =>
     getJSON<{ ok: boolean }>(`/api/skills/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+  skillSources: () => getJSON<{ sources: SkillMarketSource[] }>('/api/skills/sources'),
+  addSkillSource: (path: string, label = '') =>
+    getJSON<{ ok: boolean; source: SkillMarketSource }>('/api/skills/sources', {
+      method: 'POST',
+      ...jsonBody({ path, label }),
+    }),
+  removeSkillSource: (path: string) =>
+    getJSON<{ ok: boolean }>(`/api/skills/sources?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+  refreshSkillSource: (url: string) =>
+    getJSON<{ ok: boolean; source: SkillMarketSource }>('/api/skills/sources/refresh', {
+      method: 'POST',
+      ...jsonBody({ url }),
+    }),
+  importSkillDirectory: (path: string) =>
+    getJSON<{ ok: boolean; slug: string }>('/api/skills/import', {
+      method: 'POST',
+      ...jsonBody({ path }),
+    }),
   /** 从 base64 zip 安装远程技能（Skill Hub）。网关本地解压落盘，不触外网。 */
   installFromZip: (slug: string, content: string, version?: string, hubId?: string) => {
     const body: { slug: string; content: string; version?: string; hub_id?: string } = { slug, content };

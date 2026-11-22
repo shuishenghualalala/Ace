@@ -7,7 +7,7 @@
  * - 技能卡详情弹窗，支持安装/卸载
  */
 
-import { backendApi, type OptionalSkill, type PluginItem, type Skill, type SkillStore } from '../backend-client';
+import { backendApi, type OptionalSkill, type PluginItem, type Skill, type SkillMarketSource, type SkillStore } from '../backend-client';
 import { $, notify } from '../state';
 import { showConfirmDialog } from '../ui-feedback';
 import {
@@ -403,6 +403,231 @@ function syncEvolutionToggle(): void {
   actions.prepend(row);
 }
 
+let marketSourcesOverlay: HTMLElement | null = null;
+
+function closeMarketSources(): void {
+  marketSourcesOverlay?.remove();
+  marketSourcesOverlay = null;
+}
+
+function marketSourceTarget(source: SkillMarketSource): string {
+  return source.url ?? source.path ?? '';
+}
+
+function marketHint(text: string): HTMLElement {
+  const hint = document.createElement('p');
+  hint.className = 'channel-connect-hint';
+  hint.textContent = text;
+  return hint;
+}
+
+async function openMarketSources(): Promise<void> {
+  if (marketSourcesOverlay) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'channel-connect-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'channel-connect-modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  const header = document.createElement('header');
+  header.className = 'channel-connect-header';
+  const title = document.createElement('h3');
+  title.className = 'channel-connect-title';
+  title.textContent = '技能市场源';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'channel-connect-close';
+  close.textContent = '×';
+  close.setAttribute('aria-label', '关闭');
+  close.addEventListener('click', closeMarketSources);
+  header.append(title, close);
+
+  const body = document.createElement('div');
+  body.className = 'channel-connect-body';
+  const description = document.createElement('p');
+  description.className = 'channel-connect-desc';
+  description.textContent = '登记本机目录或 HTTPS 清单后，其中的技能会出现在可安装列表；变更需要管理员权限。';
+  const list = document.createElement('div');
+  const status = marketHint('');
+  status.hidden = true;
+
+  const addForm = document.createElement('form');
+  addForm.className = 'channel-connect-form';
+  const addField = document.createElement('div');
+  addField.className = 'channel-connect-field';
+  const addLabel = document.createElement('label');
+  addLabel.className = 'channel-connect-label';
+  addLabel.textContent = '市场源地址';
+  const addInput = document.createElement('input');
+  addInput.className = 'channel-connect-input';
+  addInput.placeholder = '绝对目录或 HTTPS 清单 URL';
+  addInput.setAttribute('aria-label', '市场源地址');
+  const addButton = document.createElement('button');
+  addButton.type = 'submit';
+  addButton.className = 'channel-connect-btn';
+  addButton.textContent = '添加市场源';
+  addField.append(addLabel, addInput, addButton);
+  addForm.append(addField);
+
+  const importForm = document.createElement('form');
+  importForm.className = 'channel-connect-form';
+  const importField = document.createElement('div');
+  importField.className = 'channel-connect-field';
+  const importLabel = document.createElement('label');
+  importLabel.className = 'channel-connect-label';
+  importLabel.textContent = '导入单个技能目录';
+  const importInput = document.createElement('input');
+  importInput.className = 'channel-connect-input';
+  importInput.placeholder = '包含 SKILL.md 的绝对路径';
+  importInput.setAttribute('aria-label', '技能目录路径');
+  const importButton = document.createElement('button');
+  importButton.type = 'submit';
+  importButton.className = 'channel-connect-btn';
+  importButton.textContent = '导入技能';
+  importField.append(importLabel, importInput, importButton);
+  importForm.append(importField);
+
+  const actions = document.createElement('div');
+  actions.className = 'channel-connect-actions model-connect-actions';
+  const done = document.createElement('button');
+  done.type = 'button';
+  done.className = 'channel-connect-btn';
+  done.textContent = '关闭';
+  done.addEventListener('click', closeMarketSources);
+  actions.append(done);
+  body.append(description, list, addForm, importForm, status, actions);
+  modal.append(header, body);
+  overlay.append(modal);
+  document.body.append(overlay);
+  marketSourcesOverlay = overlay;
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) closeMarketSources();
+  });
+  addInput.focus();
+
+  const setStatus = (text: string): void => {
+    status.hidden = !text;
+    status.textContent = text;
+  };
+
+  const refresh = async (): Promise<void> => {
+    list.replaceChildren(marketHint('正在加载市场源…'));
+    try {
+      const result = await backendApi.skillSources();
+      list.replaceChildren();
+      if (!result.sources.length) {
+        list.append(marketHint('尚未登记市场源'));
+        return;
+      }
+      for (const source of result.sources) {
+        const row = document.createElement('div');
+        row.className = 'channel-connect-field';
+        const label = document.createElement('strong');
+        label.textContent = source.label;
+        const target = document.createElement('code');
+        target.textContent = marketSourceTarget(source);
+        target.style.wordBreak = 'break-all';
+        const rowActions = document.createElement('div');
+        rowActions.className = 'channel-connect-actions';
+        if (source.url) {
+          const refreshButton = document.createElement('button');
+          refreshButton.type = 'button';
+          refreshButton.className = 'channel-connect-btn';
+          refreshButton.textContent = '刷新';
+          refreshButton.addEventListener('click', () => {
+            refreshButton.disabled = true;
+            setStatus('正在下载清单…');
+            void backendApi.refreshSkillSource(source.url!).then(
+              async () => { await refresh(); await loadStore(); setStatus('清单已刷新'); },
+              (error: Error) => setStatus(`刷新失败：${error.message}`),
+            ).finally(() => { refreshButton.disabled = false; });
+          });
+          rowActions.append(refreshButton);
+        }
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'channel-connect-btn channel-connect-btn--danger';
+        removeButton.textContent = '移除';
+        removeButton.addEventListener('click', () => {
+          const targetText = marketSourceTarget(source);
+          void showConfirmDialog({
+            title: `移除市场源 ${source.label}`,
+            message: '只取消登记，已安装技能不会被删除。',
+            confirmText: '移除',
+            cancelText: '取消',
+          }).then(async (confirmed) => {
+            if (!confirmed) return;
+            removeButton.disabled = true;
+            try {
+              await backendApi.removeSkillSource(targetText);
+              await refresh();
+              await loadStore();
+              setStatus('市场源已移除');
+            } catch (error) {
+              setStatus(`移除失败：${(error as Error).message}`);
+            } finally {
+              removeButton.disabled = false;
+            }
+          });
+        });
+        rowActions.append(removeButton);
+        row.append(label, target, rowActions);
+        list.append(row);
+      }
+    } catch (error) {
+      list.replaceChildren(marketHint(`无法加载市场源：${(error as Error).message}`));
+    }
+  };
+
+  addForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const value = addInput.value.trim();
+    if (!value) return;
+    addButton.disabled = true;
+    setStatus('正在登记市场源…');
+    void backendApi.addSkillSource(value).then(
+      async () => {
+        addInput.value = '';
+        await refresh();
+        await loadStore();
+        setStatus('市场源已登记');
+      },
+      (error: Error) => setStatus(`登记失败：${error.message}`),
+    ).finally(() => { addButton.disabled = false; });
+  });
+
+  importForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const value = importInput.value.trim();
+    if (!value) return;
+    importButton.disabled = true;
+    setStatus('正在导入技能…');
+    void backendApi.importSkillDirectory(value).then(
+      async () => {
+        importInput.value = '';
+        await loadStore();
+        setStatus('技能已导入');
+      },
+      (error: Error) => setStatus(`导入失败：${error.message}`),
+    ).finally(() => { importButton.disabled = false; });
+  });
+
+  void refresh();
+}
+
+function syncMarketSourceButton(): void {
+  const actions = capabilityHubView?.element.querySelector<HTMLElement>('.mw-hub-actions');
+  if (!actions) return;
+  actions.querySelector('[data-market-source-control]')?.remove();
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'mw-button mw-button--secondary mw-button--small';
+  button.dataset.marketSourceControl = '';
+  button.textContent = '市场源';
+  button.addEventListener('click', () => void openMarketSources());
+  actions.append(button);
+}
+
 function renderShell(): void {
   const root = $('#skills-page-root');
   if (!root) return;
@@ -437,6 +662,7 @@ function renderShell(): void {
     capabilityHubView.update(capabilityState());
   }
   syncEvolutionToggle();
+  syncMarketSourceButton();
 }
 
 async function toggleEvolution(value: boolean): Promise<void> {
@@ -640,6 +866,7 @@ function disposeSkillsPage(): void {
     window.clearTimeout(localSearchTimer);
     localSearchTimer = null;
   }
+  closeMarketSources();
   capabilityHubView?.dispose();
   capabilityHubView = null;
 }
