@@ -1050,6 +1050,32 @@ def test_mcp_probe_failure_exits_nonzero(capsys, cli_home, monkeypatch):
     assert code == 1
 
 
+def test_mcp_list_renders_human_status():
+    import crew.cli.integration as integration
+
+    manager = SimpleNamespace(status=lambda: [
+        {
+            "name": "remote", "transport": "http", "connected": True, "error": "",
+            "tools": ["ping"], "config": {"url": "https://mcp.example.com/mcp", "transport": "http"},
+        },
+        {
+            "name": "manual", "transport": "stdio", "connected": False, "error": "",
+            "tools": [], "config": {"command": "echo", "transport": "stdio", "auto_connect": False},
+        },
+    ])
+    app = SimpleNamespace(
+        mcp_manager=manager,
+        config=SimpleNamespace(mcp_servers={
+            "remote": {"url": "https://mcp.example.com/mcp", "transport": "http"},
+            "manual": {"command": "echo", "transport": "stdio", "auto_connect": False},
+        }),
+    )
+    result = integration._mcp_servers_list(None, SimpleNamespace(app=app))
+    assert "remote" in result.text and "已连接" in result.text
+    assert "manual" in result.text and "手动" in result.text
+    assert result.data["servers"][0]["name"] == "remote"
+
+
 def test_mcp_list_redacts_status_errors():
     import crew.cli.integration as integration
 

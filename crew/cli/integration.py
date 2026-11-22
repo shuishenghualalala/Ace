@@ -195,7 +195,23 @@ async def _ensure_mcp_started(app: Any) -> None:
 
 
 def _mcp_servers_list(args: Any, ctx: CliContext) -> CliResult:
-    return CliResult(data={"ok": True, "servers": _mcp_servers_view(ctx.app)}, text="")
+    servers = _mcp_servers_view(ctx.app)
+    if not servers:
+        return CliResult(data={"ok": True, "servers": []}, text="没有配置 MCP server")
+    lines: list[str] = []
+    for server in servers:
+        if server.get("config_pending"):
+            status = "重连中"
+        elif server.get("connected"):
+            status = "已连接"
+        elif (server.get("config") or {}).get("auto_connect") is False:
+            status = "手动"
+        else:
+            status = "未连接"
+        lines.append(
+            f"{server['name']}\t{server['transport']}\t{status}\t{server.get('tool_count', 0)} tools"
+        )
+    return CliResult(data={"ok": True, "servers": servers}, text="\n".join(lines))
 
 
 async def _mcp_servers_probe(args: Any, ctx: CliContext) -> CliResult:
