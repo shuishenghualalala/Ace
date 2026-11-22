@@ -25,7 +25,7 @@ from crew.agent.capabilities import (
     capability_profile_ids,
     merge_disabled_skills,
 )
-from crew.agent.compact import ContextCompactor, SummaryStore
+from crew.agent.compact.store import SummaryStore
 from crew.agent.executor import create_executor
 from crew.agent.external.feature import (
     AdapterRuntimeProvider,
@@ -1718,6 +1718,8 @@ class CrewApp:
         else:
             cw = getattr(provider, "context_window", None) or context_window_override or cfg.context_window or 128000
             token_budget = int(cfg.compaction_token_budget_ratio * cw)
+        from crew.agent.compact.pipeline import ContextCompactor
+
         compactor = ContextCompactor(
             provider,
             enabled=cfg.compaction_enabled,

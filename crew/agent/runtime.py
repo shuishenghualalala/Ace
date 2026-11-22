@@ -17,7 +17,7 @@ import base64
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from crew.core.envelope import Envelope, ResponseChunk, TurnOutcome
 from crew.core.runctx import (
@@ -46,7 +46,8 @@ from crew.core.interfaces import (
 )
 from crew.core.types import Message, tool_arguments_for_history
 from crew.agent.auxiliary import generate_session_title
-from crew.agent.compact import ContextCompactor
+if TYPE_CHECKING:
+    from crew.agent.compact import ContextCompactor
 from crew.agent.executor import AgentExecutor, BuiltinExecutor, ExecutionContext
 from crew.tools.file_utils import MAX_READ_FILE_BYTES, read_verified_bytes
 from crew.tools.policy import ToolDisclosureMode
