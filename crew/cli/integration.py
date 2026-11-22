@@ -187,7 +187,7 @@ def _mcp_servers_list(args: Any, ctx: CliContext) -> CliResult:
 
 async def _mcp_servers_probe(args: Any, ctx: CliContext) -> CliResult:
     from crew.tools.mcp_client import probe_remote_server
-    from crew.tools.redact import redact_sensitive_text
+    from crew.tools.redact import redact_sensitive_display_text
 
     payload = parse_json(getattr(args, "json_payload", None), name="MCP 配置")
     payload["url"] = args.url
@@ -226,7 +226,7 @@ async def _mcp_servers_probe(args: Any, ctx: CliContext) -> CliResult:
     count = int(result.get("tool_count") or len(tools))
     elapsed = int(result.get("elapsed_ms") or 0)
     if not result.get("ok"):
-        error = redact_sensitive_text(str(result.get("error") or "未知错误"))
+        error = redact_sensitive_display_text(str(result.get("error") or "未知错误"))
         raise CliError(f"连接失败：{error}", exit_code=1)
     suffix = f"：{', '.join(tools)}" if tools else ""
     return CliResult(

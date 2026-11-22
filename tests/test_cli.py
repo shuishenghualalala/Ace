@@ -1082,6 +1082,30 @@ def test_mcp_probe_unknown_saved_name_is_rejected(monkeypatch):
         asyncio.run(integration._mcp_servers_probe(args, ctx))
 
 
+def test_mcp_probe_error_redacts_url_token(monkeypatch):
+    import crew.cli.integration as integration
+    from crew.cli.app import CliError
+
+    async def fake_probe(_cfg):
+        return {
+            "ok": False,
+            "tools": [],
+            "tool_count": 0,
+            "elapsed_ms": 1,
+            "error": "failed https://mcp.example.com/mcp?token=abc123",
+        }
+
+    monkeypatch.setattr("crew.tools.mcp_client.probe_remote_server", fake_probe)
+    ctx = SimpleNamespace(app=SimpleNamespace(config=SimpleNamespace(mcp_servers={})))
+    args = SimpleNamespace(
+        name="", url="https://mcp.example.com/mcp", transport="http",
+        headers="", json_payload=None,
+    )
+    with pytest.raises(CliError) as captured:
+        asyncio.run(integration._mcp_servers_probe(args, ctx))
+    assert "token=abc123" not in str(captured.value)
+
+
 def test_skill_source_commands_register_list_and_remove(capsys, cli_home, tmp_path):
     market = tmp_path / "team-market"
     skill_dir = market / "market-doc"
