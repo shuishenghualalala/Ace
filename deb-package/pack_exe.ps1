@@ -130,18 +130,7 @@ if (Test-Path $localesDir) {
 # -----------------------------------------------------------------------------
 # 2. 组装 staging：crew-desktop + crew-gateway 源码树
 # -----------------------------------------------------------------------------
-$stage = Join-Path $ProjectRoot "dist\windows-staging"
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-New-Item -ItemType Directory -Path $stage | Out-Null
-
-Write-Host "正在组装文件到 $stage..." -ForegroundColor Yellow
-Copy-Item -Path "desktop\release\win-unpacked" -Destination (Join-Path $stage "crew-desktop") -Recurse
-
-$stageGw = Join-Path $stage "crew-gateway"
-New-Item -ItemType Directory -Path $stageGw | Out-Null
-
-# gateway 源码树：robocopy 镜像复制，排除缓存与编译产物
-# （robocopy 退出码 0-7 均为成功，仅 >=8 为失败）
+# robocopy 退出码 0-7 均为成功，仅 >=8 为失败。
 function Invoke-RoboCopy([string]$Src, [string]$Dst, [string[]]$ExcludeDirs, [string[]]$ExcludeFiles) {
     $args = @($Src, $Dst, "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
     if ($ExcludeDirs) { $args += @("/XD") + $ExcludeDirs }
@@ -149,6 +138,28 @@ function Invoke-RoboCopy([string]$Src, [string]$Dst, [string[]]$ExcludeDirs, [st
     & robocopy @args | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "robocopy 失败: $Src -> $Dst (exit $LASTEXITCODE)" }
 }
+
+function Remove-RoboCopyTree([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $emptyDir = Join-Path ([IO.Path]::GetTempPath()) ("ace-empty-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $emptyDir | Out-Null
+    try {
+        Invoke-RoboCopy $emptyDir $Path @() @()
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    } finally {
+        Remove-Item -LiteralPath $emptyDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$stage = Join-Path $ProjectRoot "dist\windows-staging"
+Remove-RoboCopyTree $stage
+New-Item -ItemType Directory -Path $stage | Out-Null
+
+Write-Host "正在组装文件到 $stage..." -ForegroundColor Yellow
+Copy-Item -Path "desktop\release\win-unpacked" -Destination (Join-Path $stage "crew-desktop") -Recurse
+
+$stageGw = Join-Path $stage "crew-gateway"
+New-Item -ItemType Directory -Path $stageGw | Out-Null
 
 Invoke-RoboCopy (Join-Path $ProjectRoot "crew") (Join-Path $stageGw "crew") `
     @("__pycache__", ".pytest_cache") @("*.pyc", "*.pyo")
@@ -301,8 +312,8 @@ Get-ChildItem -Path $pythonCacheDir -Directory -Recurse -Filter "__pycache__" -E
 
 # 复制到 staging
 $pythonRtDir = Join-Path $runtimesDir "python"
-if (Test-Path $pythonRtDir) { Remove-Item $pythonRtDir -Recurse -Force }
-Copy-Item -Path $pythonCacheDir -Destination $pythonRtDir -Recurse -Force
+Remove-RoboCopyTree $pythonRtDir
+Invoke-RoboCopy $pythonCacheDir $pythonRtDir @() @()
 
 # 删除不必要的大型依赖（如果存在）。
 # 注意：numpy/pandas 绝不能进这个删除列表——办公技能批（reportlab/pandas 等）与
@@ -313,13 +324,13 @@ $heavyDeps = @("sympy", "onnxruntime", "scipy")
 foreach ($dep in $heavyDeps) {
     $depPath = Join-Path $pythonRtDir "Lib\site-packages\$dep"
     if (Test-Path $depPath) {
-        Remove-Item $depPath -Recurse -Force
+        Remove-RoboCopyTree $depPath
         Write-Host "  已删除不必要的依赖: $dep" -ForegroundColor Gray
     }
     # 删除 dist-info
     $distInfo = Get-ChildItem -Path (Join-Path $pythonRtDir "Lib\site-packages") -Directory -Filter "$dep*" -ErrorAction SilentlyContinue
-    if ($distInfo) {
-        $distInfo | Remove-Item -Recurse -Force
+    foreach ($packageInfo in $distInfo) {
+        Remove-RoboCopyTree $packageInfo.FullName
     }
 }
 
@@ -360,8 +371,8 @@ if (-not (Test-Path $nodeCacheExe)) {
     Write-Host "✓ Node.js portable 缓存已存在，跳过下载" -ForegroundColor Green
 }
 $nodeRtDir = Join-Path $runtimesDir "node"
-if (Test-Path $nodeRtDir) { Remove-Item $nodeRtDir -Recurse -Force }
-Copy-Item -Path $nodeCacheDir -Destination $nodeRtDir -Recurse -Force
+Remove-RoboCopyTree $nodeRtDir
+Invoke-RoboCopy $nodeCacheDir $nodeRtDir @() @()
 Write-Host "✓ Node.js 运行时已复制到 staging" -ForegroundColor Green
 
 # -----------------------------------------------------------------------------

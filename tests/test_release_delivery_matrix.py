@@ -62,7 +62,7 @@ def test_member_wheel_cache_compares_packaged_sources_and_removes_stale_assets(t
 
 
 def test_warm_packaging_checks_member_wheels_before_staging() -> None:
-    for name, cache_copy in (("pack_exe.ps1", "Copy-Item -Path $pythonCacheDir"), ("pack_mac.sh", 'cp -R "$PY_CACHE"')):
+    for name, cache_copy in (("pack_exe.ps1", "Invoke-RoboCopy $pythonCacheDir $pythonRtDir"), ("pack_mac.sh", 'cp -R "$PY_CACHE"')):
         script = (ROOT / "deb-package" / name).read_text(encoding="utf-8")
         assert script.index("sync_workspace_wheels.py") < script.index(cache_copy)
 
@@ -131,6 +131,64 @@ def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Pa
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert script.index("Test-TarGzArchive $pyTar $tarExe") < script.index("& $tarExe -xzf")
+
+
+def test_windows_runtime_copy_supports_deep_paths(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell or not shutil.which("robocopy"):
+        pytest.skip("PowerShell and robocopy are required")
+
+    script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
+    functions = "function Invoke-RoboCopy" + script.split("function Invoke-RoboCopy", 1)[1].split(
+        "\n$stage =", 1
+    )[0]
+    harness = tmp_path / "copy-runtime.ps1"
+    harness.write_text(
+        "param([string]$Source, [string]$Destination, [switch]$Remove)\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        + functions
+        + "\nif ($Remove) {\n"
+        "    Remove-RoboCopyTree $Destination\n"
+        "    if (Test-Path -LiteralPath $Destination) { throw 'runtime tree survived removal' }\n"
+        "    exit 0\n"
+        "}\n"
+        "Invoke-RoboCopy $Source $Destination @() @()\n",
+        encoding="utf-8-sig",
+    )
+    relative = Path("Lib/site-packages/onnxruntime/tools") / Path(*["segment"] * 18) / "RuntimeOptimizationRecordContainerEntry.py"
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source_file = source / relative
+    extended_source_file = Path("\\\\?\\" + str(source_file)) if os.name == "nt" else source_file
+    extended_source_file.parent.mkdir(parents=True)
+    extended_source_file.write_bytes(b"runtime fixture")
+    destination_file = destination / relative
+    assert len(str(source_file)) > 260
+    assert len(str(destination_file)) > 260
+
+    command = [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness), str(source), str(destination)]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    extended_destination_file = Path("\\\\?\\" + str(destination_file)) if os.name == "nt" else destination_file
+    assert extended_destination_file.read_bytes() == b"runtime fixture"
+    removal = subprocess.run(
+        [*command, "-Remove"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert removal.returncode == 0, removal.stdout + removal.stderr
+    assert not destination.exists()
+    assert "Invoke-RoboCopy $pythonCacheDir $pythonRtDir @() @()" in script
+    assert "Invoke-RoboCopy $nodeCacheDir $nodeRtDir @() @()" in script
+    assert "Remove-RoboCopyTree $depPath" in script
 
 
 def test_optional_catalog_development_path_is_repository_root() -> None:
