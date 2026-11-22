@@ -49,6 +49,7 @@ it('registers a market source from the skills page', async () => {
 
   const control = document.querySelector<HTMLButtonElement>('[data-market-source-control]');
   expect(control).not.toBeNull();
+  control!.focus();
   control!.click();
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).not.toBeNull());
 
@@ -68,4 +69,7 @@ it('registers a market source from the skills page', async () => {
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')?.textContent).toContain('team-skills'));
   expect(document.querySelector('[role="dialog"]')?.textContent).toContain('1 个技能');
   expect(apiMock.skillStore).toHaveBeenCalledTimes(2);
+
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
 });

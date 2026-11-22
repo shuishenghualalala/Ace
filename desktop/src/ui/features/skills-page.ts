@@ -404,10 +404,13 @@ function syncEvolutionToggle(): void {
 }
 
 let marketSourcesOverlay: HTMLElement | null = null;
+let marketSourcesReturnFocus: HTMLElement | null = null;
 
 function closeMarketSources(): void {
   marketSourcesOverlay?.remove();
   marketSourcesOverlay = null;
+  if (marketSourcesReturnFocus?.isConnected) marketSourcesReturnFocus.focus();
+  marketSourcesReturnFocus = null;
 }
 
 function marketSourceTarget(source: SkillMarketSource): string {
@@ -423,6 +426,9 @@ function marketHint(text: string): HTMLElement {
 
 async function openMarketSources(): Promise<void> {
   if (marketSourcesOverlay) return;
+  marketSourcesReturnFocus = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
   const overlay = document.createElement('div');
   overlay.className = 'channel-connect-overlay';
   const modal = document.createElement('div');
@@ -502,6 +508,12 @@ async function openMarketSources(): Promise<void> {
   marketSourcesOverlay = overlay;
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay) closeMarketSources();
+  });
+  overlay.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeMarketSources();
+    }
   });
   addInput.focus();
 

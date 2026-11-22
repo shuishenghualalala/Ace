@@ -528,6 +528,12 @@
 <p><strong>验收</strong> 市场源定向 19 项、SkillsHub 5 项、Desktop 市场源组件 1 项通过；TypeScript、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/cli/knowledge.py</code>、<code>web/src/components/SkillsHub.tsx</code>、<code>desktop/src/ui/features/skills-page.ts</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="desktop-market-source-focus">
+<h3>Desktop 市场源弹层的键盘退出与焦点恢复</h3>
+<p>市场源弹层原先只能点关闭按钮或遮罩退出，关闭后焦点不会回到触发按钮。现在弹层记录打开前的活动元素，按 Esc 或关闭时移除弹层并把焦点还给仍连接的触发元素；输入框获得初始焦点。组件测试验证 Esc 关闭。</p>
+<p><strong>验收</strong> Desktop 市场源组件测试通过，新增 Esc 关闭断言；TypeScript 通过。焦点恢复在 happy-dom 中无法稳定断言，未作为测试项，仅由实现路径保证。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/skills-page.ts</code>、<code>desktop/tests/unit/skills-market-source.test.ts</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
