@@ -1375,6 +1375,8 @@
 <p>首轮测量还发现正常关停后 Windows 无法删除 <code>home/logs/llm.jsonl</code>。<code>CrewApp.shutdown</code> 现于最后一个 App 的既有共享资源边界在线程内调用 <code>shutdown_llm_trace</code>，排空并关闭 listener 与文件；其他 App 存活时不关闭共享 trace。新增回归覆盖文件删除及双 App 隔离，Provider 与日志组合 23 项通过，Ruff 通过。原样重跑三轮后，临时目录均正常回收，未再出现文件占用。ZCode 在 <code>rendererActionTraceBroker.ts</code> 和桌面 <code>index.ts</code> 的退出屏障中排空并关闭对应 trace exporter；Ace 本次复用已有日志关闭入口，不新增第二条关闭协议。</p>
 <p><strong>函数级剖析</strong> 另用独立新配置对 <code>build_app</code> 做 cProfile：关闭剖析前墙钟为 2.458 秒，函数累计归因包括兼容事件循环 <code>run_async_compat</code> 593 毫秒、Blueprint 模块导入 579 毫秒、28 次 SQLite 连接合计 462 毫秒，其中 25 次 WAL 检查/切换合计 259 毫秒。它们分别落入已有 F10、Sites 按需装配和 Work 准备实验的覆盖范围；那些实验未得到稳定的首答收益，本轮不重复改代码。剖析有测量开销，数值只用于热点归因，不与未剖析样本直接比较。</p>
 <p class="evidence">Ace <code>crew/app.py</code>、<code>crew/state/logging.py</code>、<code>tests/test_provider_lifecycle.py</code>。ZCode <code>packages/desktop/src/main/rendererActionTraceBroker.ts:137</code>、<code>packages/desktop/src/main/index.ts:1217</code>。</p>
+<h3>桌面全量复核（2026-11-22）</h3>
+<p>在当前共享工作树运行完整桌面 Vitest：211 个测试文件全部通过，共 2417 项通过、2 项跳过，耗时 95.55 秒。该结果覆盖本轮截图与既有桌面交互，但工作树同时包含另一进程的未提交改动，因此它是当前组合状态的回归证据，不是某个单独提交的隔离全量结果。</p>
 <h3>观测如何归因</h3>
 <p>沿用 <a href="../frontend/stream-performance-diagnostics.html">首 token 诊断</a> 和 <a href="observability-tracing.html">已有 tracing</a>。以 <code>request_id</code> 串起 Desktop 接收、网关受理、provider 首事件、首正文、持久化和首绘，以 <code>gateway_instance_id</code>、进程代次、退出原因串起启动与回收。恢复路径记录模式、游标距离、缺口、队列字节与同步耗时。按平台、通道、事件类别等有限维度报 P50/P95/P99，实例和请求 ID 留在结构化事件。采样只记行为类别、计时和大小。审计基线的 <code>first-visible-text</code> 出现在回合门控前，<code>first-dom-patch</code> 也可能早于正文挂载。<a href="#first-text-timing">F8</a> 已分别记录收到正文、接纳正文、确认挂载和下一绘制时机。用故障测试验证每个阶段都能找到，便于判断慢在模型、路由、重放、磁盘或绘制。</p>
 </section>
