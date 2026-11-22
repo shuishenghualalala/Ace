@@ -29,10 +29,10 @@
    `richMetadata:true`；普通 ref 只保存 Playwright aria-ref Locator。诊断契约可以显式
    开启 rich metadata，但其 fingerprint、`elementSecurity`、`securityDigest` 不得成为
    默认动作的前置条件。
-6. **第二后端已经实现，尚未接入生产会话选择。** `ManagedChromiumEngine` 可以直接
-   启动与 1.62.0 配套的官方 Chromium，并暴露完整 public
-   Browser/BrowserContext/Page；现有 Browser RPC 与面板仍固定使用 Electron 拓扑，
-   不能声称生产已经自动切到 managed Chromium。
+6. **第二后端仍是未实施的设计项。** 当前源码没有 `ManagedChromiumEngine`
+   或等价的托管 Chromium 实现；Browser RPC 与面板固定使用 Electron 拓扑。
+   若未来需要无桌面会话或完整 BrowserContextOptions，必须先实现并独立验收该后端，
+   不能把本文中的设计名称当成已有能力。
 
 ---
 
@@ -178,10 +178,10 @@ Electron BrowserHost
             ├─ playwright-snapshot/actions/run-code/network/console
             └─ playwright-compat.ts（唯一 Playwright 版本边界）
 
-ManagedChromiumEngine（已实现、可独立验证）
-  playwright-core chromium.launch()
+Managed Chromium（未实施的设计分支）
+  需要新增 playwright-core chromium.launch() 与生命周期适配
   → public Browser → full BrowserContextOptions → public Page
-  → 尚未接 BrowserHost / Browser RPC / panel
+  → 当前没有 BrowserHost / Browser RPC / panel 实现
 ```
 
 per-owner 隔离由拓扑实现：一个 owner 对应一个 transport 和一个 Playwright Browser，
@@ -280,9 +280,9 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
   结构化返回的 B 项提升为 typed RPC（cookies/storageState、route 生命周期、PDF、
   tracing/video、locator verification/generation），并为 D3 明确实现或明确拒绝，不再
   用模糊 fallback。
-- **P1：补齐官方 Browser/Context 拓扑。** 把已实现的 managed Chromium 通过会话创建
-  协议显式接入，服务多 context 和完整 BrowserContextOptions，不把 Electron Session
-  冒充另一个 BrowserContext。
+- **P1：补齐官方 Browser/Context 拓扑。** 若产品需要多 context 和完整
+  BrowserContextOptions，先实现并验证 managed Chromium，再通过会话创建协议显式接入；
+  不把 Electron Session 冒充另一个 BrowserContext。
 
 不建议为追求“78 个名字相同”复制 upstream tool handler。Crew 应复用 public API，并
 只为产品需要的 typed surface 写薄适配。
@@ -303,11 +303,11 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
    - 从 `lib/coreBundle` 结构化提取官方 InjectedScript source。
 4. `check:playwright-boundary` 校验 manifest/lock/node_modules 版本一致、compat
    结构、esbuild external 与真实契约覆盖。
-5. managed Chromium 的 Chromium、headless shell、FFmpeg 按 OS/CPU staging，marker
-   同时锁 core 版本、平台和架构；缺任一 artifact 即失败。
-6. 升级 PR 必须跑 typecheck、unit、真实 hidden Electron contract、managed Chromium
-   contract。CI 还会在 macOS/Linux/Windows 上测试 pinned 版本，并定时用 exact
-   candidate 测 latest/next。
+5. 若未来引入 managed Chromium，其 Chromium、headless shell、FFmpeg 需要按 OS/CPU
+   staging，marker 同时锁 core 版本、平台和架构；缺任一 artifact 即失败。
+6. 当前升级 PR 必须跑 typecheck、unit 与真实 hidden Electron contract。加入 managed
+   后端后还必须运行其独立 contract。CI 还会在 macOS/Linux/Windows 上测试 pinned
+   版本，并定时用 exact candidate 测 latest/next。
 
 这套策略不承诺私有布局永远不变；它保证变化时在升级流水线显式失败，而不是上线后
 静默退化到 Crew 启发式。
@@ -326,10 +326,10 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
 
 ## 10. 已知边界
 
-- managed Chromium 已经能启动、staging、打包并运行独立契约，但尚未接入生产
-  BrowserHost/Browser RPC；这项状态必须如实保留。
+- 当前没有 managed Chromium 的启动、staging、打包或独立契约实现；旧文档对此的
+  完成描述已删除。无桌面浏览器能力需要作为新后端单独设计、实现和验收。
 - Electron 后端是一个 owner 对应一个合成 persistent context，不支持 public
-  `browser.newContext()`；需要多 context 时应选 managed，而不是扩张 transport 伪装。
+  `browser.newContext()`；需要多 context 时只能等待独立后端，不能扩张 transport 伪装。
 - B 类能力大多只有 run-code 可达，不等于都有稳定 typed UX 或 71 项契约中的独立覆盖。
 - external drop 只能保真浏览器在 trusted drop 回调中同步暴露的
   `DataTransfer.types/items/getData()` 与 File wrapper。只通过异步
