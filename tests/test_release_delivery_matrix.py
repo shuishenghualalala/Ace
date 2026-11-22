@@ -74,6 +74,25 @@ def test_windows_pack_script_declares_utf8_for_windows_powershell() -> None:
     assert script.startswith(b"\xef\xbb\xbf")
 
 
+def test_windows_pip_mirror_preserves_explicit_configuration(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        pytest.skip("PowerShell is required")
+    script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
+    assignment = "if (-not $env:PIP_INDEX_URL)" + script.split("if (-not $env:PIP_INDEX_URL)", 1)[1].split("\n", 1)[0]
+    harness = tmp_path / "pip-index.ps1"
+    harness.write_text(assignment + "\nWrite-Output $env:PIP_INDEX_URL\n", encoding="utf-8-sig")
+    default_env = dict(os.environ)
+    default_env.pop("PIP_INDEX_URL", None)
+    default = subprocess.run([powershell, "-NoProfile", "-File", str(harness)], env=default_env, capture_output=True, encoding="utf-8", check=False)
+    assert default.returncode == 0
+    assert default.stdout.strip() == "https://pypi.tuna.tsinghua.edu.cn/simple"
+    custom_env = dict(os.environ, PIP_INDEX_URL="https://pypi.example.test/simple")
+    custom = subprocess.run([powershell, "-NoProfile", "-File", str(harness)], env=custom_env, capture_output=True, encoding="utf-8", check=False)
+    assert custom.returncode == 0
+    assert custom.stdout.strip() == "https://pypi.example.test/simple"
+
+
 def test_windows_runtime_archives_pin_sha256() -> None:
     script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
     assert '$BundledPythonSha256 = "368474c69f476e7de4adaf50b61d9fcf6ec8b4db88cc43c5f71c860b3cd29c69"' in script
