@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -330,6 +331,60 @@ def test_interactive_windows_installer_prepares_sandbox_before_launch() -> None:
     assert main.index("process.argv.includes('--crew-provision-windows-sandbox')") < main.index(
         "app.requestSingleInstanceLock()"
     )
+
+
+def test_mac_runtime_archives_pin_sha256_by_architecture() -> None:
+    source = (ROOT / "deb-package" / "pack_mac.sh").read_text(encoding="utf-8")
+    arm64 = source.split("arm64 | aarch64)", 1)[1].split("x64 | x86_64 | amd64)", 1)[0]
+    x64 = source.split("x64 | x86_64 | amd64)", 1)[1].split("*)", 1)[0]
+    assert 'PYTHON_SHA256="7af7058f7c268b4d87ed7e08c2c7844ef8460863b3e679db3afdce8bb1eedfae"' in arm64
+    assert 'NODE_SHA256="1f15b7ed18a580af31cf32bc126572292d820f547bf55bf9cdce08041a24e1d9"' in arm64
+    assert 'PYTHON_SHA256="9afd734f63a23783cf0257bef25c9231ffc80e7747486dc54cf72f325213fd15"' in x64
+    assert 'NODE_SHA256="ba668f64df9239843fefcef095ee539f5ac5aa1b0fc15a71f1ecca16abedec7a"' in x64
+
+
+def test_mac_runtime_checksum_gate_rejects_mismatch(tmp_path: Path, posix_bash: str) -> None:
+    source = (ROOT / "deb-package" / "pack_mac.sh").read_text(encoding="utf-8")
+    function = "verify_sha256() {" + source.split("verify_sha256() {", 1)[1].split("\n}\n", 1)[0]
+    harness = tmp_path / "verify-runtime.sh"
+    harness.write_text(
+        "set -euo pipefail\n"
+        "if ! command -v shasum >/dev/null; then\n"
+        "    shasum() {\n"
+        "        [ \"$1\" = '-a' ] && [ \"$2\" = '256' ] || return 2\n"
+        "        shift 2\n"
+        "        sha256sum \"$@\"\n"
+        "    }\n"
+        "fi\n"
+        + function
+        + "\n}\nverify_sha256 \"$1\" \"$2\" \"runtime fixture\"\n",
+        encoding="utf-8",
+    )
+    valid = tmp_path / "valid archive"
+    valid.write_bytes(b"fixture")
+    expected = hashlib.sha256(valid.read_bytes()).hexdigest()
+    accepted = subprocess.run(
+        [posix_bash, str(harness), valid.as_posix(), expected],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+
+    invalid = tmp_path / "invalid archive"
+    invalid.write_bytes(b"unexpected")
+    rejected = subprocess.run(
+        [posix_bash, str(harness), invalid.as_posix(), expected],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "SHA-256" in rejected.stderr
+    assert source.index('verify_sha256 "$PY_TAR"') < source.index('tar -xzf "$PY_TAR"')
+    assert source.index('verify_sha256 "$NODE_TAR"') < source.index('tar -xzf "$NODE_TAR"')
 
 
 def test_mac_pack_script_logs_app_path_with_nounset(posix_bash: str) -> None:

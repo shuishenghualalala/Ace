@@ -36,13 +36,17 @@ case "$ARCH" in
         ARCH="arm64"
         ELECTRON_ARCH="--arm64"
         PYTHON_ARCH="aarch64-apple-darwin"
+        PYTHON_SHA256="7af7058f7c268b4d87ed7e08c2c7844ef8460863b3e679db3afdce8bb1eedfae"
         NODE_ARCH="darwin-arm64"
+        NODE_SHA256="1f15b7ed18a580af31cf32bc126572292d820f547bf55bf9cdce08041a24e1d9"
         ;;
     x64 | x86_64 | amd64)
         ARCH="x64"
         ELECTRON_ARCH="--x64"
         PYTHON_ARCH="x86_64-apple-darwin"
+        PYTHON_SHA256="9afd734f63a23783cf0257bef25c9231ffc80e7747486dc54cf72f325213fd15"
         NODE_ARCH="darwin-x64"
+        NODE_SHA256="ba668f64df9239843fefcef095ee539f5ac5aa1b0fc15a71f1ecca16abedec7a"
         ;;
     *)
         echo "❌ 不支持的架构: ${ARCH}（仅支持 arm64/x64）" >&2
@@ -98,6 +102,16 @@ copy_tree() {
     shift 2
     mkdir -p "$dst"
     (cd "$src" && tar "$@" -cf - .) | (cd "$dst" && tar -xf -)
+}
+
+verify_sha256() {
+    local path="$1" expected="$2" label="$3" actual
+    actual="$(shasum -a 256 "$path")"
+    actual="${actual%% *}"
+    if [ "$actual" != "$expected" ]; then
+        echo "❌ ${label} SHA-256 不匹配" >&2
+        return 1
+    fi
 }
 
 # ----- 1) Electron 桌面端构建（mac dir target，含原生安全运行组件） -----
@@ -192,6 +206,7 @@ if [ ! -x "$PY_CACHE_BIN" ]; then
     PY_URL="https://github.com/indygreg/python-build-standalone/releases/download/${BUNDLED_PYTHON_RELEASE}/cpython-${BUNDLED_PYTHON_VERSION}+${BUNDLED_PYTHON_RELEASE}-${PYTHON_ARCH}-install_only.tar.gz"
     PY_TAR="$ROOT_DIR/dist/python-standalone.tar.gz"
     curl "${CURL_OPTS[@]}" "$PY_URL" -o "$PY_TAR"
+    verify_sha256 "$PY_TAR" "$PYTHON_SHA256" "Python standalone"
     # install_only 归档内层为 python/ 目录，解出后整体移动到缓存目录
     rm -rf "$ROOT_DIR/dist/_python_extract"
     mkdir -p "$ROOT_DIR/dist/_python_extract"
@@ -275,6 +290,7 @@ if [ ! -x "$NODE_CACHE_BIN" ]; then
     curl "${CURL_OPTS[@]}" \
         "https://npmmirror.com/mirrors/node/v${BUNDLED_NODE_VERSION}/node-v${BUNDLED_NODE_VERSION}-${NODE_ARCH}.tar.gz" \
         -o "$NODE_TAR"
+    verify_sha256 "$NODE_TAR" "$NODE_SHA256" "Node.js portable"
     rm -rf "$NODE_CACHE"
     mkdir -p "$NODE_CACHE"
     tar -xzf "$NODE_TAR" -C "$NODE_CACHE" --strip-components=1
