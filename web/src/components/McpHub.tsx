@@ -86,6 +86,7 @@ export default function McpHub() {
   const [probeMessage, setProbeMessage] = useState("");
   const refreshTimer = useRef<number | null>(null);
   const probeEpoch = useRef(0);
+  const probeAbort = useRef<AbortController | null>(null);
 
   const load = async (): Promise<void> => {
     setLoading(true);
@@ -108,13 +109,20 @@ export default function McpHub() {
     }, 1500);
   };
 
+  const abortProbe = (): void => {
+    probeAbort.current?.abort();
+    probeAbort.current = null;
+  };
+
   useEffect(() => { void load(); }, []);
   useEffect(() => () => {
     if (refreshTimer.current != null) window.clearTimeout(refreshTimer.current);
+    abortProbe();
   }, []);
 
   const openAdd = (): void => {
     probeEpoch.current += 1;
+    abortProbe();
     setEditing("");
     setForm(EMPTY_FORM);
     setProbeMessage("");
@@ -124,6 +132,7 @@ export default function McpHub() {
 
   const openEdit = (server: McpServerRow): void => {
     probeEpoch.current += 1;
+    abortProbe();
     setEditing(server.name);
     setForm(formFromServer(server));
     setProbeMessage("");
@@ -134,6 +143,7 @@ export default function McpHub() {
   const closeModal = (): void => {
     if (saving) return;
     probeEpoch.current += 1;
+    abortProbe();
     setProbing(false);
     setModalOpen(false);
     setProbeMessage("");
@@ -170,12 +180,15 @@ export default function McpHub() {
       return;
     }
     const epoch = ++probeEpoch.current;
+    abortProbe();
+    const controller = new AbortController();
+    probeAbort.current = controller;
     setProbing(true);
     setProbeMessage("");
     try {
       const payload = payloadFromForm(form);
       if (editing) payload.name = editing;
-      const result = await api.probeMcpServer(payload);
+      const result = await api.probeMcpServer(payload, controller.signal);
       if (probeEpoch.current !== epoch) return;
       if (result.ok) {
         const preview = result.tools.slice(0, 8).join(", ");
@@ -186,10 +199,13 @@ export default function McpHub() {
         setProbeMessage(`连接失败：${result.error || "未知错误"}`);
       }
     } catch (cause) {
-      if (probeEpoch.current !== epoch) return;
+      if (probeEpoch.current !== epoch || controller.signal.aborted) return;
       setProbeMessage(`连接失败：${cause instanceof Error ? cause.message : "未知错误"}`);
     } finally {
-      if (probeEpoch.current === epoch) setProbing(false);
+      if (probeEpoch.current === epoch) {
+        setProbing(false);
+        if (probeAbort.current === controller) probeAbort.current = null;
+      }
     }
   };
 
@@ -283,6 +299,7 @@ export default function McpHub() {
               <select value={form.transport} aria-label="传输类型"
                 onChange={(event) => {
                   probeEpoch.current += 1;
+                  abortProbe();
                   setForm({ ...form, transport: event.target.value as TransportChoice });
                   setProbeMessage("");
                   setProbing(false);

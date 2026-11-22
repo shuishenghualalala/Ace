@@ -90,7 +90,7 @@ it("edits an MCP server without echoing masked secrets", async () => {
     url: "https://mcp.example.com/next",
     headers: { Authorization: "***" },
     env: { API_KEY: "***" },
-  }));
+  }, expect.anything()));
   const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存");
   await act(async () => save?.click());
   await vi.waitFor(() => expect(apiMock.updateMcpServer).toHaveBeenCalledWith("remote", {
@@ -131,7 +131,11 @@ it("clears the probe result when switching to stdio", async () => {
 
 it("ignores a late probe result after the transport changes", async () => {
   let resolveProbe!: (value: unknown) => void;
-  apiMock.probeMcpServer.mockReturnValue(new Promise((resolve) => { resolveProbe = resolve; }));
+  let probeSignal: AbortSignal | undefined;
+  apiMock.probeMcpServer.mockImplementation((_payload: unknown, signal?: AbortSignal) => {
+    probeSignal = signal;
+    return new Promise((resolve) => { resolveProbe = resolve; });
+  });
   await render();
   const add = [...host.querySelectorAll("button")].find((button) => button.textContent === "添加服务");
   await act(async () => add?.click());
@@ -154,6 +158,7 @@ it("ignores a late probe result after the transport changes", async () => {
     setter?.call(transport, "stdio");
     transport.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  expect(probeSignal?.aborted).toBe(true);
   await act(async () => {
     resolveProbe({ ok: true, tools: ["ping"], tool_count: 1, elapsed_ms: 5, error: null });
   });
@@ -194,7 +199,7 @@ it("lists MCP servers and probes an HTTP endpoint before saving", async () => {
   expect(apiMock.probeMcpServer).toHaveBeenCalledWith({
     transport: "http",
     url: "https://mcp.example.com/new",
-  });
+  }, expect.anything());
   await vi.waitFor(() => expect(host.textContent).toContain("连接成功（12 ms）"));
 
   const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存");

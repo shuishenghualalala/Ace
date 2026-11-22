@@ -577,8 +577,10 @@ export const api = {
     getJSON<{ ok: boolean; servers: McpServerRow[] }>(`/api/mcp/servers/${encodeURIComponent(name)}/reload`, {
       method: "POST",
     }),
-  probeMcpServer: (payload: Record<string, unknown>) =>
-    getJSON<McpProbeResult>("/api/mcp/servers/probe", { method: "POST", ...jsonBody(payload) }),
+  probeMcpServer: (payload: Record<string, unknown>, signal?: AbortSignal) =>
+    getJSON<McpProbeResult>("/api/mcp/servers/probe", {
+      method: "POST", ...jsonBody(payload), ...(signal ? { signal } : {}),
+    }),
   scenarios: (count = 4) => getJSON<Scenario[]>(`/api/scenarios?count=${count}`),
   scenarioIntroLines: (count = 8) => getJSON<CrewIntroLine[]>(`/api/scenarios/intro-lines?count=${count}`),
   scenarioLoadingStatuses: (count = 8) => getJSON<CrewLoadingStatus[]>(`/api/scenarios/loading-status?count=${count}`),

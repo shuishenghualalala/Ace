@@ -630,6 +630,12 @@
 <p><strong>验收</strong> Desktop 探测组件测试 2 项通过，新增延迟 Promise 在切换到 stdio 后返回时结果保持隐藏、按钮恢复；TypeScript 通过。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/mcp-probe.test.ts</code>、<code>docs/frontend/desktop-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-web-probe-abort">
+<h3>Web MCP 探测请求的实际取消</h3>
+<p>此前的 epoch 只阻止迟到结果显示，请求仍会占住服务端探测槽位直到超时。现在 Web 每次探测创建 <code>AbortController</code>；切换传输、重新打开/关闭弹层或组件卸载都会 abort 请求。请求被取消时前端忽略异常，服务端协程取消后经 <code>finally</code> 释放探测槽位并尝试取消 worker。到达的迟到结果仍受 epoch 保护。</p>
+<p><strong>验收</strong> McpHub 4 项通过，迟到结果用例同时断言切换传输后传入的 signal 已 aborted；TypeScript 通过。</p>
+<p class="evidence">Ace <code>web/src/api.ts</code>、<code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
