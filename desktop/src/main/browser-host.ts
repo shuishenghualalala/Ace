@@ -4995,7 +4995,7 @@ export class BrowserHost extends EventEmitter {
   }
 
   /** Capture the current painted frame without Playwright's font wait. */
-  private async captureScreenshotWithoutFontWait(
+  private async captureScreenshotFrame(
     tab: BrowserTab,
     parsed: ReturnType<typeof parseScreenshotArgs>,
     page: unknown,
@@ -5040,10 +5040,10 @@ export class BrowserHost extends EventEmitter {
         }
       }
     }
-    if (element) {
+    if (!parsed.fullPage) {
       const nativeImage = await tab.view.webContents.capturePage({
-        x: Math.round(element.x),
-        y: Math.round(element.y),
+        x: Math.round(element?.x ?? 0),
+        y: Math.round(element?.y ?? 0),
         width: cssWidth,
         height: cssHeight,
       });
@@ -5052,7 +5052,7 @@ export class BrowserHost extends EventEmitter {
         : nativeImage;
       const image = parsed.type === 'jpeg' ? scaled.toJPEG(90) : scaled.toPNG();
       if (!image.length) {
-        throw new BrowserHostError('浏览器未返回元素截图数据', { code: 'invalid_screenshot' });
+        throw new BrowserHostError('浏览器未返回截图数据', { code: 'invalid_screenshot' });
       }
       return image;
     }
@@ -5127,32 +5127,24 @@ export class BrowserHost extends EventEmitter {
       ...(parsed.type === 'jpeg' ? { quality: 90 } : {}),
     } as const;
     const image = await (async () => {
-      const fontsSettled = await this.screenshotFontsSettled(page);
-      if (!fontsSettled) {
-        if (parsed.ref) {
-          const record = this.ref(tab, parsed.ref);
-          const locator = record.playwrightRef
-            ? locatorFromRef(page, record.playwrightRef)
-            : page.locator(record.selector);
-          await locator.scrollIntoViewIfNeeded();
-          const box = await locator.boundingBox();
-          if (!box) {
-            throw new BrowserHostError('目标元素当前不可见，截图未生成', { code: 'invalid_screenshot' });
-          }
-          return this.captureScreenshotWithoutFontWait(tab, parsed, page, box);
-        }
-        return this.captureScreenshotWithoutFontWait(tab, parsed, page);
-      }
       if (parsed.ref) {
         const record = this.ref(tab, parsed.ref);
         const locator = record.playwrightRef
           ? locatorFromRef(page, record.playwrightRef)
           : page.locator(record.selector);
-        return locator.screenshot(commonOptions);
+        await locator.scrollIntoViewIfNeeded();
+        const box = await locator.boundingBox();
+        if (!box) {
+          throw new BrowserHostError('目标元素当前不可见，截图未生成', { code: 'invalid_screenshot' });
+        }
+        return this.captureScreenshotFrame(tab, parsed, page, box);
       }
+      if (!parsed.fullPage) return this.captureScreenshotFrame(tab, parsed, page);
+      const fontsSettled = await this.screenshotFontsSettled(page);
+      if (!fontsSettled) return this.captureScreenshotFrame(tab, parsed, page);
       return page.screenshot({
         ...commonOptions,
-        fullPage: parsed.fullPage,
+        fullPage: true,
       });
     })();
     if (await this.currentPageIdentity(tab) !== pageIdentity) {

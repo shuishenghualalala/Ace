@@ -464,7 +464,11 @@ vi.mock('electron', async () => {
       const image = {
         getSize: () => ({ width: 1024, height: 720 }),
         toDataURL: () => 'data:image/png;base64,AA==',
-        toPNG: () => Buffer.from('png'),
+        toPNG: () => {
+          const png = Buffer.alloc(25);
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
+          return png;
+        },
         toJPEG: () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
         resize: () => image,
       };
@@ -4611,13 +4615,14 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
-  it('exports page and strict-ref screenshots through public Playwright options', async () => {
+  it('exports page and strict-ref screenshots with the requested formats', async () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
     await snapshot(host);
     const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
     await mkdir(outputDir, { recursive: true });
     const jpeg = path.join(outputDir, 'element.jpeg');
+    const capture = vi.spyOn(electron.views[0].webContents, 'capturePage');
     const elementResult: any = await host.handleRpc({
       runtime_key: RUNTIME_KEY,
       method: 'execute',
@@ -4638,18 +4643,8 @@ describe('BrowserHost', () => {
       type: 'jpeg',
       bytes: 4,
     });
-    const locatorScreenshot = playwright.calls.find(
-      (call) => call.method === 'locatorScreenshot' && call.ref === 'e1',
-    );
-    expect(locatorScreenshot?.args[0]).toMatchObject({
-      type: 'jpeg',
-      scale: 'device',
-      quality: 90,
-    });
-    expect(Number((locatorScreenshot?.args[0] as { timeout?: number })?.timeout))
-      .toBeGreaterThanOrEqual(14_900);
-    expect(Number((locatorScreenshot?.args[0] as { timeout?: number })?.timeout))
-      .toBeLessThanOrEqual(15_000);
+    expect(capture).toHaveBeenCalledWith({ x: 10, y: 20, width: 100, height: 40 });
+    expect(playwright.calls.some((call) => call.method === 'locatorScreenshot')).toBe(false);
 
     const png = path.join(outputDir, 'full.png');
     await host.handleRpc({
@@ -4881,11 +4876,7 @@ describe('BrowserHost', () => {
       (item: any) => item.method === 'Runtime.callFunctionOn'
         && String(item.params?.functionDeclaration).includes('prototype?.blur'),
     );
-    const captureIndex = playwright.calls.findIndex(
-      (item) => item.method === 'pageScreenshot',
-    );
     expect(blurIndex).toBe(-1);
-    expect(captureIndex).toBeGreaterThanOrEqual(0);
     expect(commands).toContainEqual({ method: 'Overlay.hideHighlight', params: undefined });
     expect(commands.some((item: any) => item.method === 'Page.captureScreenshot')).toBe(false);
     await host.dispose();
@@ -4966,7 +4957,7 @@ describe('BrowserHost', () => {
       },
     });
     expect(result.data).toMatchObject({ settled: true, focus_released: false });
-    expect(playwright.calls.some((item) => item.method === 'pageScreenshot')).toBe(true);
+    expect(playwright.calls.some((item) => item.method === 'pageScreenshot')).toBe(false);
     expect(electron.views[0].webContents.debugger.commands.some(
       (item: any) => item.method === 'Page.captureScreenshot',
     )).toBe(false);

@@ -2858,6 +2858,35 @@ app.whenReady().then(async () => {
         }) as { data?: Record<string, unknown> };
         return response.data ?? {};
       };
+      const ordinarySnapshot = await execute('snapshot', ['--compact']);
+      const ordinaryRef = /button "Parity target" \[ref=(@e\d+)\]/.exec(
+        String(ordinarySnapshot.snapshot ?? ''),
+      )?.[1];
+      if (!ordinaryRef) throw new Error('普通截图快照缺少目标 ref');
+      const ordinaryViewport = path.join(artifacts, 'ordinary-viewport.png');
+      await contractDeadline(
+        execute('screenshot', ['--type', 'png', '--scale', 'css', ordinaryViewport]),
+        10_000,
+        'ordinary viewport screenshot',
+      );
+      const ordinaryViewportSize = nativeImage.createFromBuffer(
+        await readFile(ordinaryViewport),
+      ).getSize();
+      if (ordinaryViewportSize.width <= 0 || ordinaryViewportSize.height <= 0) {
+        throw new Error('普通视口截图尺寸无效');
+      }
+      const ordinaryElement = path.join(artifacts, 'ordinary-element.png');
+      await contractDeadline(
+        execute('screenshot', ['--ref', ordinaryRef, '--type', 'png', ordinaryElement]),
+        10_000,
+        'ordinary element screenshot',
+      );
+      const ordinaryElementSize = nativeImage.createFromBuffer(
+        await readFile(ordinaryElement),
+      ).getSize();
+      if (ordinaryElementSize.width <= 0 || ordinaryElementSize.height <= 0) {
+        throw new Error('普通元素截图尺寸无效');
+      }
       await execute('eval', [`() => {
         const style = document.createElement('style');
         style.textContent = '@font-face{font-family:PendingFont;'
@@ -2910,7 +2939,8 @@ app.whenReady().then(async () => {
       ) {
         throw new Error(`挂起字体 device JPEG 无效: ${JSON.stringify(deviceSize)}`);
       }
-      return `pending fonts；CSS PNG ${width}x${height}；`
+      return `ordinary viewport ${ordinaryViewportSize.width}x${ordinaryViewportSize.height} + element；`
+        + `pending fonts；CSS PNG ${width}x${height}；`
         + `device JPEG ${deviceSize.width}x${deviceSize.height}；${Date.now() - startedAt}ms`;
     } finally {
       for (const response of pendingFontResponses) response.end();
