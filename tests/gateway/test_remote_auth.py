@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from types import SimpleNamespace
 
 from crew.app import build_app
 from crew.gateway.app import create_app
@@ -57,6 +58,23 @@ def email_api(tmp_path, monkeypatch):
         platform_registry._entries.clear()
         for entry in old_entries:
             platform_registry.register(entry)
+
+
+@pytest.mark.asyncio
+async def test_post_json_reports_proxy_configuration_failure(monkeypatch):
+    from crew.gateway.routers import remote_auth
+
+    def fail(**_kwargs):
+        raise RuntimeError("HTTP 客户端初始化失败：请检查 NO_PROXY")
+
+    monkeypatch.setattr(remote_auth, "create_async_client", fail)
+    status, payload = await remote_auth._post_json(
+        SimpleNamespace(auth_base_url="https://auth.example", auth_timeout_seconds=1),
+        "/login",
+        {},
+    )
+    assert status == 503
+    assert "NO_PROXY" in payload["error"]
 
 
 @pytest.mark.asyncio

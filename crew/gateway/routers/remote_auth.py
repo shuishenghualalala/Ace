@@ -84,6 +84,8 @@ async def _post_json(config: Any, path: str, body: dict[str, Any]) -> tuple[int,
         return 504, {"ok": False, "error": "认证服务请求超时"}
     except httpx.TransportError:
         return 502, {"ok": False, "error": "无法连接认证服务"}
+    except RuntimeError as exc:
+        return 503, {"ok": False, "error": str(exc)}
     try:
         payload = response.json()
     except ValueError:
