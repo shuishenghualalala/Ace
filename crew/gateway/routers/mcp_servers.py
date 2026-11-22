@@ -1,8 +1,8 @@
 """通用 MCP Server 管理 API：增删改查 + 状态 + 单 server 重连。
 
 供桌面端「MCP 服务」管理面板调用。MCP server 配置在 config.yaml 的 mcp_servers 段是
-全局共享、无 owner 维度；列表对登录用户开放，新增/编辑/删除/重连/探测需要管理员，
-避免远程非管理员借 MCP 配置在本机启动命令或访问内网端点。
+全局共享、无 owner 维度；列表与写操作均要求管理员，避免远程非管理员枚举本机命令、
+读取脱敏配置或借 MCP 配置在本机启动命令、访问内网端点。
 （登录校验由 gateway require_gateway_login 中间件保证，未登录返回 401。）
 
 密钥处理：env 里的敏感值（key 匹配 KEY/SECRET/TOKEN/PASSWORD）随 yaml 明文持久化，
@@ -133,7 +133,10 @@ def create_mcp_servers_router(crew) -> APIRouter:
         return result
 
     @router.get("/api/mcp/servers")
-    async def list_servers() -> JSONResponse:
+    async def list_servers(request: Request) -> JSONResponse:
+        denied = _admin_denied(request, crew.config)
+        if denied is not None:
+            return denied
         return JSONResponse({"ok": True, "servers": _servers_view()})
 
     @router.post("/api/mcp/servers/probe")

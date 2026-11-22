@@ -674,8 +674,8 @@
 </article>
 <article id="mcp-admin-guard">
 <h3>MCP 写操作与探测的管理员准入</h3>
-<p>MCP 列表只要求登录，但新增/编辑/删除/重连/探测原先也只要求登录；远程非管理员可写入本机命令配置或借探测访问内网端点。现在这五类写操作统一调用 <code>require_admin</code>，非管理员返回 403，本地账号仍视为管理员；列表保持登录可读，配置与错误继续脱敏。</p>
-<p><strong>验收</strong> MCP API 全量 31 项通过；新增非管理员探测 403 用例，本地账号全流程不受影响。Ruff 通过。</p>
+<p>MCP 列表与写操作原先只要求登录；远程非管理员可枚举本机命令、读取脱敏配置，或写入命令配置并借探测访问内网端点。现在列表、新增、编辑、删除、重连和探测统一调用 <code>require_admin</code>，非管理员返回 403，本地账号仍视为管理员；配置与错误继续脱敏。</p>
+<p><strong>验收</strong> MCP API 全量 32 项通过；新增非管理员列表/探测 403 用例，本地账号全流程不受影响。Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/gateway/auth.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
 <article id="external-marketplace-sources">

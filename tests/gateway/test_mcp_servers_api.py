@@ -499,6 +499,8 @@ async def test_probe_rejects_non_admin(api, monkeypatch):
 
     monkeypatch.setattr(router, "require_admin", deny)
     client, _crew, _ = api
+    listed = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
+    assert listed.status_code == 403
     response = await client.post(
         "/api/mcp/servers/probe",
         json={"transport": "http", "url": "https://example.com/mcp"},
