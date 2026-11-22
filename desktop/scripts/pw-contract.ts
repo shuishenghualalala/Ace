@@ -3035,6 +3035,115 @@ app.whenReady().then(async () => {
     }
   });
 
+  await check('BrowserHost 带 ref 的异步 eval 硬截止契约', async () => {
+    const ownerDigest = createHash('sha256').update('pw-contract-ref-eval-timeout').digest('hex');
+    const runtimeKey = `crew_${ownerDigest.slice(0, 12)}`;
+    const sessionHash = ownerDigest.slice(0, 32);
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-ref-eval-'));
+    const profile = path.join(
+      tempRoot,
+      'accounts',
+      `acct_${ownerDigest.slice(0, 16)}`,
+      'browser',
+      'profile',
+    );
+    await mkdir(profile, { recursive: true });
+    const panelWindow = new BrowserWindow({
+      show: false,
+      width: 1100,
+      height: 800,
+      webPreferences: { sandbox: true },
+    });
+    const host = new BrowserHost(() => panelWindow);
+    const execute = async (
+      targetId: string,
+      args: string[],
+      timeoutMs = 15_000,
+    ): Promise<Record<string, unknown>> => {
+      const response = await host.handleRpc({
+        runtime_key: runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: profile,
+          proxy_url: policyProxyURL,
+          target_id: targetId,
+          command: 'eval',
+          args,
+          command_timeout_ms: timeoutMs,
+        },
+      }) as { data?: Record<string, unknown> };
+      return response.data ?? {};
+    };
+    try {
+      const created = await host.handleRpc({
+        runtime_key: runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: profile,
+          proxy_url: policyProxyURL,
+          command: 'tab',
+          args: [
+            'new', '--label', `s${sessionHash}-1`,
+            new URL('/host-output-parity', topOriginURL).href,
+          ],
+          mutating: true,
+          command_timeout_ms: 15_000,
+        },
+      }) as { data?: { targetId?: string } };
+      const targetId = String(created.data?.targetId ?? '');
+      if (!targetId) throw new Error('ref eval 契约未创建 tab');
+      const snapshot = await host.handleRpc({
+        runtime_key: runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: profile,
+          proxy_url: policyProxyURL,
+          target_id: targetId,
+          command: 'snapshot',
+          args: ['--compact'],
+          command_timeout_ms: 15_000,
+        },
+      }) as { data?: { snapshot?: string } };
+      const ref = /button "Parity target" \[ref=(@e\d+)\]/.exec(
+        String(snapshot.data?.snapshot ?? ''),
+      )?.[1];
+      if (!ref) throw new Error('ref eval 契约缺少按钮 ref');
+      const pending = execute(targetId, [
+        'async (element) => { globalThis.__crewRefEvalStarted = element.id; await new Promise(() => undefined); }',
+        ref,
+      ], 250);
+      void pending.catch(() => undefined);
+      let timeoutCode = '';
+      try {
+        await contractDeadline(pending, 2_000, 'pending ref eval');
+      } catch (error) {
+        timeoutCode = String((error as { code?: unknown })?.code ?? '');
+      }
+      if (timeoutCode !== 'command_timeout') {
+        throw new Error(`带 ref 的异步 eval 未按命令截止返回: ${timeoutCode || 'none'}`);
+      }
+      const recovered = await contractDeadline(
+        execute(targetId, ['() => globalThis.__crewRefEvalStarted']),
+        5_000,
+        'eval after ref timeout',
+      );
+      if (recovered.serialized !== '"parity-target"') {
+        throw new Error(`ref eval 超时后页面未恢复: ${String(recovered.serialized)}`);
+      }
+      return '250ms pending ref eval=command_timeout；subsequent eval + dispose';
+    } finally {
+      try {
+        await contractDeadline(host.dispose(), 5_000, 'ref-eval host dispose');
+      } finally {
+        if (!panelWindow.isDestroyed()) panelWindow.destroy();
+        await contractDeadline(cleanupContractRoot(tempRoot), 5_000, 'ref-eval profile cleanup')
+          .catch((error) => {
+            console.log(`Deferred ref-eval profile cleanup: ${String(error)}`);
+          });
+      }
+    }
+  });
+
   await check('BrowserHost 账号站点存储共享与隔离契约', async () => {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-site-storage-'));
     const panelWindow = new BrowserWindow({

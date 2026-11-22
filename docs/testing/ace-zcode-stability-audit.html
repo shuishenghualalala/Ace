@@ -947,6 +947,12 @@
 <p><strong>验收</strong> Windows 原生 Electron、实际 Python BrowserManager 和独立 WebSocket 双标签。A 等约 1.2 秒时，B 的快照从 1,281.2 降到 75.4 毫秒；A 同时等计时和文本时从 1,258.9 降到 46.0 毫秒。A 纯等其专属延迟文本时，B 在 246.9 毫秒取得自己的页面。两个标签和同目标观察均返回各自应有的正文。接管、切页后切回、在途取消与错标签均验证；一例 Gateway 未收到原生关闭事件时约 2.03 秒发现目标消失。兼容旧行的定向正负例均通过，Electron 正常退出。六组回归 424 项通过、2 项跳过，Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/browser/manager.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts:240</code>、<code>page-command.ts:286</code>。</p>
 </article>
+<article id="browser-ref-eval-timeout">
+<h3>带元素引用的异步求值需要同等命令截止</h3>
+<p>Ace 普通 <code>page.evaluate</code> 已由 <code>withDeadline</code> 限制命令时间，但带 ref 的分支只向 <code>locator.evaluate</code> 传入选项，异步页面 Promise 可越过该截止时间。ZCode <code>playwright-command.ts:28-58</code> 使用独立 CDP 会话调用 <code>Runtime.evaluate</code>，在 <code>awaitPromise</code> 时传入固定预算并确保会话 detach。Ace 现将 ref 与普通页面对象产生的求值 Promise 放入同一个硬截止，仍由 <code>withActionCompletion</code> 包裹实际派发；超时返回 <code>command_timeout</code>、<code>uncertain=true</code> 和 <code>phase=dispatching</code>，并释放账号队列。该边界不声称取消已注入页面的 JavaScript，迟到副作用仍属不确定结果。</p>
+<p><strong>验收</strong> 真实 Electron 43.1 基线中，带按钮 ref 的异步 eval 设置 250ms 命令预算后，2 秒外层截止仍未等到返回。统一截止后契约 1/1 通过：同命令返回预期错误，随后普通 eval 读回已开始的元素 ID，Host 正常 dispose。BrowserHost 新增同路径回归并验证下一命令可执行，共 92 项通过；TypeScript、桌面构建和生产/单测定向 ESLint 通过。Windows 临时 profile 清理仍按既有 5 秒边界延迟收尾；其它平台原生行为未在本机运行。</p>
+<p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code>、<code>desktop/tests/unit/browser-host.test.ts</code>、<code>desktop/scripts/pw-contract.ts</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/playwright-command.ts:28-58</code>、<code>request.ts:7-14</code>。</p>
+</article>
 <article id="browser-session-storage-scope">
 <h3>浏览器会话隔离与站点存储范围</h3>
 <p>Ace 的 Gateway <code>BrowserManager</code> 按 Crew 会话维护标签和页面引用，<code>_sync_topology</code> 只接纳目标身份与预期 <code>sessionHash</code> 匹配的标签；同账号操作由 owner 队列串行化。Desktop <code>BrowserHost.ensureOwner</code> 则以账号 Profile 调用 <code>electronSession.fromPath(profile)</code>，其 owner 下的各个 <code>WebContentsView</code> 都使用同一个 Electron <code>Session</code>。这保证不同会话不能互用标签、目标或引用，但它们位于同一站点存储分区；由共享 Session 可推知，同源 Cookie、localStorage 与 IndexedDB 可以跨该账号的 Crew 会话复用。</p>

@@ -713,7 +713,10 @@ vi.mock('../../src/main/browser/playwright-engine', () => {
         return `- ${targetRole} "${targetName}"`;
       },
       // captureSnapshot 用它算指纹；默认给每个 ref 一份稳定材料。
-      evaluate: async (pageFunction: unknown): Promise<unknown> => {
+      evaluate: async (pageFunction: unknown, pageExpression?: unknown): Promise<unknown> => {
+        if (pageExpression === 'async (element) => new Promise(() => undefined)') {
+          return new Promise(() => undefined);
+        }
         if (String(pageFunction).includes('DataTransfer')) {
           record('dropEmpty', ref);
           return undefined;
@@ -4903,6 +4906,44 @@ describe('BrowserHost', () => {
       (tab: any) => tab.targetId === second.data.targetId,
     )).toBe(false);
     await host.dispose();
+  });
+
+  it('bounds a pending ref evaluation and releases the owner queue', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    await snapshot(host);
+    try {
+      await expect(host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          command: 'eval',
+          args: ['async (element) => new Promise(() => undefined)', '@e1'],
+          proxy_url: PROXY_URL,
+          target_id: currentTargetId,
+          command_timeout_ms: 50,
+        },
+      })).rejects.toMatchObject({
+        code: 'command_timeout',
+        uncertain: true,
+        phase: 'dispatching',
+      });
+      const recovered: any = await host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          command: 'eval',
+          args: ['() => 42'],
+          proxy_url: PROXY_URL,
+          target_id: currentTargetId,
+        },
+      });
+      expect(recovered.data.value).toBe(42);
+    } finally {
+      await host.dispose();
+    }
   });
 
   it('settles a user export without adding post-fill focus provenance work', async () => {

@@ -5422,9 +5422,9 @@ export class BrowserHost extends EventEmitter {
     );
     tab.visualEpoch = null;
     try {
-      const evaluated = await pwActions.withActionCompletion(ctx, async () => (
-        nativeRef
-          ? await (() => {
+      const evaluated = await pwActions.withActionCompletion(ctx, async () => {
+        const evaluation = nativeRef
+          ? (() => {
               const record = this.ref(tab, nativeRef);
               const locator = record.playwrightRef
                 ? locatorFromRef(ctx.page, record.playwrightRef)
@@ -5440,21 +5440,22 @@ export class BrowserHost extends EventEmitter {
                 { timeout: remainingCommandTimeoutMs(commandDeadlineAt) },
               );
             })()
-          : await withDeadline(
-              ctx.page.evaluate(async (pageExpression) => {
-                const value = globalThis.eval(`(${pageExpression})`);
-                const isFunction = typeof value === 'function';
-                const result = await (isFunction ? value() : value);
-                return { result, isFunction, isUndefined: result === undefined };
-              }, expression),
-              remainingCommandTimeoutMs(commandDeadlineAt),
-              () => new BrowserHostError('page.evaluate 超过命令截止时间', {
-                code: 'command_timeout',
-                uncertain: true,
-                phase: 'dispatching',
-              }),
-            )
-      ));
+          : ctx.page.evaluate(async (pageExpression) => {
+              const value = globalThis.eval(`(${pageExpression})`);
+              const isFunction = typeof value === 'function';
+              const result = await (isFunction ? value() : value);
+              return { result, isFunction, isUndefined: result === undefined };
+            }, expression);
+        return withDeadline(
+          evaluation,
+          remainingCommandTimeoutMs(commandDeadlineAt),
+          () => new BrowserHostError('page.evaluate 超过命令截止时间', {
+            code: 'command_timeout',
+            uncertain: true,
+            phase: 'dispatching',
+          }),
+        );
+      });
       const result = asOptionalRecord(evaluated);
       const serialized = result.isUndefined === true
         ? 'undefined'
