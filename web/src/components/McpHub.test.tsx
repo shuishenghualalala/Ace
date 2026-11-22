@@ -90,6 +90,7 @@ it("edits an MCP server without echoing masked secrets", async () => {
     url: "https://mcp.example.com/next",
     headers: { Authorization: "***" },
     env: { API_KEY: "***" },
+    auto_connect: true,
   }, expect.anything()));
   const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存");
   await act(async () => save?.click());
@@ -98,6 +99,7 @@ it("edits an MCP server without echoing masked secrets", async () => {
     url: "https://mcp.example.com/next",
     headers: { Authorization: "***" },
     env: { API_KEY: "***" },
+    auto_connect: true,
   }));
 });
 
@@ -268,9 +270,12 @@ it("lists MCP servers and probes an HTTP endpoint before saving", async () => {
   expect(apiMock.probeMcpServer).toHaveBeenCalledWith({
     transport: "http",
     url: "https://mcp.example.com/new",
+    auto_connect: true,
   }, expect.anything());
   await vi.waitFor(() => expect(host.textContent).toContain("连接成功（12 ms）"));
 
+  const autoConnect = host.querySelector<HTMLInputElement>('input[aria-label="启动时自动连接"]')!;
+  await act(async () => autoConnect.click());
   const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存");
   await act(async () => save?.click());
   await vi.waitFor(() => expect(apiMock.createMcpServer).toHaveBeenCalled());
@@ -278,5 +283,6 @@ it("lists MCP servers and probes an HTTP endpoint before saving", async () => {
     transport: "http",
     url: "https://mcp.example.com/new",
     name: "probe-target",
+    auto_connect: false,
   });
 });

@@ -11,6 +11,7 @@ interface FormState {
   url: string;
   headers: string;
   env: string;
+  autoConnect: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -21,6 +22,7 @@ const EMPTY_FORM: FormState = {
   url: "",
   headers: "",
   env: "",
+  autoConnect: true,
 };
 
 const TRANSPORT_LABELS: Record<McpTransport, string> = {
@@ -56,11 +58,15 @@ function formFromServer(server: McpServerRow): FormState {
     env: Object.entries(server.config.env ?? {})
       .map(([key, value]) => `${key}=${value}`)
       .join("\n"),
+    autoConnect: server.config.auto_connect !== false,
   };
 }
 
 function payloadFromForm(form: FormState): Record<string, unknown> {
-  const payload: Record<string, unknown> = { transport: form.transport };
+  const payload: Record<string, unknown> = {
+    transport: form.transport,
+    auto_connect: form.autoConnect,
+  };
   if (form.transport === "stdio") {
     payload.command = form.command.trim();
     payload.args = form.args.split(",").map((item) => item.trim()).filter(Boolean);
@@ -375,6 +381,14 @@ export default function McpHub() {
                 <option value="sse">SSE</option>
               </select>
             </label>
+            <label className="mcp-field">
+              <span>启动时自动连接</span>
+              <input type="checkbox" aria-label="启动时自动连接" checked={form.autoConnect}
+                onChange={(event) => setForm({ ...form, autoConnect: event.target.checked })} />
+            </label>
+            {!form.autoConnect && (
+              <p className="mcp-probe">保存后不会自动连接；可在列表中点「重连」手动启动。</p>
+            )}
             {form.transport === "stdio" && (
               <p className="mcp-probe">保存后会尝试启动该命令并连接；测试连接不会执行命令。</p>
             )}

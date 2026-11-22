@@ -490,6 +490,34 @@ async def test_list_redacts_status_errors(api, monkeypatch):
     assert "header-secret" not in error
 
 
+async def test_create_manual_server_does_not_start_connection(api, monkeypatch):
+    client, crew, _ = api
+    assert crew.mcp_manager is not None
+    started: list[str] = []
+
+    async def fake_add(name, _config):
+        started.append(name)
+        return True
+
+    monkeypatch.setattr(crew.mcp_manager, "add_server", fake_add)
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "manual-only",
+            "transport": "stdio",
+            "command": "definitely-not-a-real-binary",
+            "auto_connect": False,
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 201
+    assert started == []
+    listed = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
+    server = next(item for item in listed.json()["servers"] if item["name"] == "manual-only")
+    assert server["connected"] is False
+    assert server["config"]["auto_connect"] is False
+
+
 async def test_create_rejects_non_string_stdio_args(api):
     client, _crew, _ = api
     response = await client.post(

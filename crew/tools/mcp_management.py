@@ -104,6 +104,11 @@ def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | N
         if any(len(value) > _MAX_ENV_VALUE_CHARS for value in normalized_env.values()):
             return None, f"env 值不能超过 {_MAX_ENV_VALUE_CHARS} 字符"
         cfg["env"] = normalized_env
+    auto_connect = payload.get("auto_connect")
+    if auto_connect is not None:
+        if not isinstance(auto_connect, bool):
+            return None, "auto_connect 必须是布尔值"
+        cfg["auto_connect"] = auto_connect
     return cfg, None
 
 
@@ -112,6 +117,9 @@ async def add_mcp_server(app: Any, name: str, config: dict[str, Any]) -> asyncio
     app.config.add_mcp_server(name, config)
     manager = app.mcp_manager
     if manager is None:
+        return None
+    if config.get("auto_connect") is False:
+        manager.register_pending(name, config)
         return None
     try:
         if manager._registry is None:

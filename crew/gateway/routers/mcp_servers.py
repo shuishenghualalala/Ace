@@ -235,10 +235,15 @@ def create_mcp_servers_router(crew) -> APIRouter:
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": f"持久化失败: {exc}"}, status_code=500)
 
-        # 增量重连单 server（后台进行，不阻塞响应，理由同 create）
+        # 增量重连单 server（后台进行，不阻塞响应，理由同 create）。
+        # auto_connect=false 表示只保存配置、不自动连接；手动「重连」仍可启动。
         await _ensure_mgr_started()
         if crew.mcp_manager is not None:
-            asyncio.create_task(crew.mcp_manager.reload_one(name, cfg))
+            if cfg.get("auto_connect") is False:
+                await crew.mcp_manager.remove_server(name)
+                crew.mcp_manager.register_pending(name, cfg)
+            else:
+                asyncio.create_task(crew.mcp_manager.reload_one(name, cfg))
 
         return JSONResponse({"ok": True, "servers": _servers_view()})
 

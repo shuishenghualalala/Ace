@@ -278,6 +278,7 @@ export interface McpServerConfig {
   transport?: McpTransport;
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  auto_connect?: boolean;
 }
 
 export interface McpServerRow {

@@ -6099,6 +6099,7 @@ button { font-family: inherit; cursor: pointer; }
   width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg-soft); color: var(--text); font: inherit; outline: none;
 }
+.mcp-field input[type="checkbox"] { width: auto; align-self: flex-start; }
 .mcp-field textarea { resize: vertical; }
 .mcp-probe { margin: 0; color: var(--text-2); font-size: 12px; }
 .mcp-modal__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }

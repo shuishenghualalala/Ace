@@ -738,6 +738,12 @@
 <p><strong>验收</strong> 新增非法 env 键与超长 arg 用例均 400；定向用例、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-auto-connect">
+<h3>MCP 保存后不自动连接的开关</h3>
+<p>新增/编辑服务原先总是立即启动连接，用户无法先保存配置再择机启动。现在 payload 支持 <code>auto_connect</code>：false 时只持久化并登记为未连接，不创建 stdio 进程或 HTTP 连接；启动扫描也跳过该服务，列表仍显示配置，点「重连」可手动启动。编辑为 false 会停止现有 worker、保留配置。Web 表单提供「启动时自动连接」复选框。</p>
+<p><strong>验收</strong> Gateway 新增手动服务用例：保存后 <code>add_server</code> 未调用、状态 connected=false、配置保留 auto_connect=false；McpHub 9 项、TypeScript 通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/mcp_client.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
