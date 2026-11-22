@@ -92,6 +92,34 @@ it("edits an MCP server without echoing masked secrets", async () => {
   }));
 });
 
+it("clears the probe result when switching to stdio", async () => {
+  await render();
+  const add = [...host.querySelectorAll("button")].find((button) => button.textContent === "添加服务");
+  await act(async () => add?.click());
+  const transport = host.querySelector<HTMLSelectElement>('select[aria-label="传输类型"]')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    setter?.call(transport, "http");
+    transport.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const url = host.querySelector<HTMLInputElement>('input[aria-label="MCP URL"]')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(url, "https://mcp.example.com/new");
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const probe = [...host.querySelectorAll("button")].find((button) => button.textContent === "测试连接");
+  await act(async () => probe?.click());
+  await vi.waitFor(() => expect(host.textContent).toContain("连接成功"));
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    setter?.call(transport, "stdio");
+    transport.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(host.textContent).not.toContain("连接成功");
+  expect(host.textContent).toContain("测试连接不会执行命令");
+});
+
 it("lists MCP servers and probes an HTTP endpoint before saving", async () => {
   await render();
   expect(host.textContent).toContain("remote");

@@ -254,12 +254,18 @@ export default function McpHub() {
             <label className="mcp-field">
               <span>传输类型</span>
               <select value={form.transport} aria-label="传输类型"
-                onChange={(event) => setForm({ ...form, transport: event.target.value as TransportChoice })}>
+                onChange={(event) => {
+                  setForm({ ...form, transport: event.target.value as TransportChoice });
+                  setProbeMessage("");
+                }}>
                 <option value="stdio">本地 stdio</option>
                 <option value="http">HTTP</option>
                 <option value="sse">SSE</option>
               </select>
             </label>
+            {form.transport === "stdio" && (
+              <p className="mcp-probe">保存后会尝试启动该命令并连接；测试连接不会执行命令。</p>
+            )}
             {form.transport === "stdio" ? (
               <>
                 <label className="mcp-field">
