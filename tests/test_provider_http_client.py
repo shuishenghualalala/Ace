@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 import httpx
 import pytest
 
@@ -15,3 +18,12 @@ def test_proxy_parse_failure_names_the_environment_variables(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", fail)
     with pytest.raises(RuntimeError, match="NO_PROXY"):
         create_async_client(timeout=1)
+
+
+def test_bracketed_ipv6_loopback_is_normalized(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1]")
+    client = create_async_client(timeout=1)
+    try:
+        assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,::1"
+    finally:
+        asyncio.run(client.aclose())
