@@ -231,6 +231,9 @@ def test_url_market_source_rejects_insecure_and_private_hosts(isolated_skill_env
     with pytest.raises(skills.SkillSourceError) as exc:
         source_module._validate_remote_url("https://127.0.0.1/manifest.json")
     assert exc.value.code == "source_private_host"
+    with pytest.raises(skills.SkillSourceError) as exc:
+        source_module._validate_remote_url("https://skills.example.com/manifest.json?token=abc")
+    assert exc.value.code == "source_credentials"
 
 
 def test_market_manifest_validation_rules():

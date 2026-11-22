@@ -480,6 +480,12 @@
 <p><strong>验收</strong> Gateway MCP API 新增并发用例通过：两个阻塞探测占满槽位后第三个返回 429/code，释放后前两个均成功；全量 MCP API 24 项与真实 HTTP 探测夹具通过，Ruff 通过。未连接公开网络。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="remote-source-credentials">
+<h3>远程技能清单 URL 的凭据拒绝</h3>
+<p>市场源列表会把 URL 返回给 Web/Desktop 并显示，若允许 <code>?token=…</code> 或内嵌账号密码，密钥会进入界面、日志和截图。HTTPS 清单地址现在在登记与刷新时统一拒绝 userinfo 和 <code>token</code>/<code>key</code>/<code>secret</code>/<code>password</code>/<code>auth</code>/<code>signature</code> 类查询参数，错误码 <code>source_credentials</code>；公开清单仍可使用普通查询参数。已存在的旧条目不会被静默改写，刷新会失败并保留旧缓存，用户可移除后重新登记。</p>
+<p><strong>验收</strong> 市场源定向 17 项通过，新增敏感查询参数拒绝断言；Ruff 通过。未对公开网络清单做真实下载。</p>
+<p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>tests/test_skill_sources.py</code>、<code>web/src/components/SkillsHub.tsx</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

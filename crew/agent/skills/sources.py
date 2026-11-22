@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from crew.state.home import get_crew_home
 from crew.state.logging import get_logger
@@ -35,6 +35,7 @@ _MAX_MANIFEST_BYTES = 256 * 1024
 _MAX_SKILLS = 50
 _MAX_SKILL_CONTENT = 64 * 1024
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_SENSITIVE_QUERY_RE = re.compile(r"(token|key|secret|password|auth|signature|sig)", re.IGNORECASE)
 _REGISTRY_NAME = "skill_market_sources.json"
 _CACHE_DIR = "skill_market_cache"
 _lock = threading.Lock()
@@ -169,6 +170,12 @@ def _validate_remote_url(raw: str) -> str:
         raise SkillSourceError("source_insecure", "远程市场源必须使用 HTTPS")
     if parsed.username or parsed.password:
         raise SkillSourceError("source_credentials", "市场源 URL 不能包含账号或密码")
+    for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if _SENSITIVE_QUERY_RE.search(key):
+            raise SkillSourceError(
+                "source_credentials",
+                "市场源 URL 不能包含 token/key/secret 等敏感查询参数",
+            )
     host = (parsed.hostname or "").strip().lower()
     if not host:
         raise SkillSourceError("source_invalid_url", "市场源 URL 缺少主机名")
