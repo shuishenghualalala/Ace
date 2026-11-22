@@ -129,6 +129,37 @@ it("clears the probe result when switching to stdio", async () => {
   expect(host.textContent).toContain("测试连接不会执行命令");
 });
 
+it("ignores a late probe result after the transport changes", async () => {
+  let resolveProbe!: (value: unknown) => void;
+  apiMock.probeMcpServer.mockReturnValue(new Promise((resolve) => { resolveProbe = resolve; }));
+  await render();
+  const add = [...host.querySelectorAll("button")].find((button) => button.textContent === "添加服务");
+  await act(async () => add?.click());
+  const transport = host.querySelector<HTMLSelectElement>('select[aria-label="传输类型"]')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    setter?.call(transport, "http");
+    transport.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const url = host.querySelector<HTMLInputElement>('input[aria-label="MCP URL"]')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(url, "https://mcp.example.com/new");
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const probe = [...host.querySelectorAll("button")].find((button) => button.textContent === "测试连接");
+  await act(async () => probe?.click());
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    setter?.call(transport, "stdio");
+    transport.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => {
+    resolveProbe({ ok: true, tools: ["ping"], tool_count: 1, elapsed_ms: 5, error: null });
+  });
+  expect(host.textContent).not.toContain("连接成功");
+});
+
 it("lists MCP servers and probes an HTTP endpoint before saving", async () => {
   await render();
   expect(host.textContent).toContain("remote");

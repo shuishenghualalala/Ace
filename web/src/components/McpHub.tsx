@@ -85,6 +85,7 @@ export default function McpHub() {
   const [probing, setProbing] = useState(false);
   const [probeMessage, setProbeMessage] = useState("");
   const refreshTimer = useRef<number | null>(null);
+  const probeEpoch = useRef(0);
 
   const load = async (): Promise<void> => {
     setLoading(true);
@@ -113,21 +114,27 @@ export default function McpHub() {
   }, []);
 
   const openAdd = (): void => {
+    probeEpoch.current += 1;
     setEditing("");
     setForm(EMPTY_FORM);
     setProbeMessage("");
+    setProbing(false);
     setModalOpen(true);
   };
 
   const openEdit = (server: McpServerRow): void => {
+    probeEpoch.current += 1;
     setEditing(server.name);
     setForm(formFromServer(server));
     setProbeMessage("");
+    setProbing(false);
     setModalOpen(true);
   };
 
   const closeModal = (): void => {
     if (saving) return;
+    probeEpoch.current += 1;
+    setProbing(false);
     setModalOpen(false);
     setProbeMessage("");
   };
@@ -162,12 +169,14 @@ export default function McpHub() {
       setProbeMessage("测试连接只支持 HTTP/SSE URL");
       return;
     }
+    const epoch = ++probeEpoch.current;
     setProbing(true);
     setProbeMessage("");
     try {
       const payload = payloadFromForm(form);
       if (editing) payload.name = editing;
       const result = await api.probeMcpServer(payload);
+      if (probeEpoch.current !== epoch) return;
       if (result.ok) {
         const preview = result.tools.slice(0, 8).join(", ");
         setProbeMessage(
@@ -177,9 +186,10 @@ export default function McpHub() {
         setProbeMessage(`连接失败：${result.error || "未知错误"}`);
       }
     } catch (cause) {
+      if (probeEpoch.current !== epoch) return;
       setProbeMessage(`连接失败：${cause instanceof Error ? cause.message : "未知错误"}`);
     } finally {
-      setProbing(false);
+      if (probeEpoch.current === epoch) setProbing(false);
     }
   };
 
@@ -272,8 +282,10 @@ export default function McpHub() {
               <span>传输类型</span>
               <select value={form.transport} aria-label="传输类型"
                 onChange={(event) => {
+                  probeEpoch.current += 1;
                   setForm({ ...form, transport: event.target.value as TransportChoice });
                   setProbeMessage("");
+                  setProbing(false);
                 }}>
                 <option value="stdio">本地 stdio</option>
                 <option value="http">HTTP</option>

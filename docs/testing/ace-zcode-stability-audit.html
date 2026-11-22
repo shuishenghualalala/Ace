@@ -618,6 +618,12 @@
 <p><strong>真实服务验收</strong> Windows Chrome + 生产 Web + 隔离 Gateway + 本地 MCP HTTP 服务：添加服务、测试连接成功、保存后自动显示「已连接」与 <code>ping</code> 工具、删除后回到空态。截图 <code>mcp-hub-real-2a2f6b8a22/web-mcp-real-connected.png</code>。该结果包含另一进程的未提交改动，不是干净提交上的发布证明。</p>
 <p class="evidence">Ace <code>tests/gateway/test_mcp_servers_api.py</code>、<code>web</code> Vitest、<code>tests/test_cli.py</code>、<code>desktop</code> MCP 组件测试。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-web-probe-stale">
+<h3>Web MCP 探测的迟到结果隔离</h3>
+<p>切换传输类型或关闭/重开弹层时，之前的 HTTP/SSE 探测可能仍在途；旧实现会在返回后把结果显示在新表单上。现在每次打开、关闭、切换传输或发起探测都递增本地 epoch，响应只在 epoch 未变时写入结果并解除测试中状态；切换传输会主动清除测试中状态。探测仍不会被远端取消，但迟到响应不再污染当前界面。</p>
+<p><strong>验收</strong> McpHub 新增迟到结果用例：探测未返回时切到 stdio，再让 Promise 成功，界面不出现「连接成功」；组件 4 项、TypeScript 通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
