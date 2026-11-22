@@ -152,6 +152,139 @@ def test_chat_resume_rejects_unavailable_target(
         reopened.close()
 
 
+def test_chat_continue_resumes_latest_session_in_workspace(capsys, cli_home, tmp_path, monkeypatch):
+    import time
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from crew.core.mocks import FakeProvider
+    from crew.core.types import ChatResponse, Message
+    from crew.state.config import Config
+    from crew.state.session_store import SQLiteSessionStore
+
+    cfg = Config(db_path=str(tmp_path / "cli-continue.db"), cron_enabled=False, title_auto=False)
+    provider = FakeProvider(script=[ChatResponse(text="最近会话续接成功", finish_reason="stop")])
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: cfg)
+    monkeypatch.setattr("crew.app.build_provider", lambda _cfg: provider)
+    owner = "cli-test"
+    store = SQLiteSessionStore(cfg.db_path)
+    try:
+        store.save("continue-old", [Message.user("Old request"), Message.assistant("Old marker")],
+                   owner_account_id=owner)
+        time.sleep(0.02)
+        store.save("continue-latest", [Message.user("Latest request"), Message.assistant("Latest marker")],
+                   owner_account_id=owner)
+        store.set_pinned("continue-old", True, owner_account_id=owner)
+        assert store.list_sessions(owner_account_id=owner)[0]["session_id"] == "continue-old"
+    finally:
+        store.close()
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        pipe.send_text("Continue this task\n/quit\n")
+        code, output = run_cli(capsys, "chat", "--owner", owner, "--continue")
+
+    assert code == 0
+    assert "continue-latest" in output and "最近会话续接成功" in output
+    assert len(provider.calls) == 1
+    assert [m.content for m in provider.calls[0] if m.role == "assistant"] == ["Latest marker"]
+    reopened = SQLiteSessionStore(cfg.db_path)
+    try:
+        assert [m.content for m in reopened.load("continue-latest", owner_account_id=owner)][-2:] == [
+            "Continue this task", "最近会话续接成功",
+        ]
+        assert [m.content for m in reopened.load("continue-old", owner_account_id=owner)] == [
+            "Old request", "Old marker",
+        ]
+    finally:
+        reopened.close()
+
+
+def test_chat_continue_requires_saved_content(capsys, cli_home, tmp_path, monkeypatch):
+    from crew.core.mocks import FakeProvider
+    from crew.state.config import Config
+    from crew.state.session_store import SQLiteSessionStore
+
+    cfg = Config(db_path=str(tmp_path / "cli-empty.db"), cron_enabled=False, title_auto=False)
+    provider = FakeProvider()
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: cfg)
+    monkeypatch.setattr("crew.app.build_provider", lambda _cfg: provider)
+    owner = "cli-test"
+    store = SQLiteSessionStore(cfg.db_path)
+    try:
+        store.ensure_session("only-empty", workspace_id="default", owner_account_id=owner)
+    finally:
+        store.close()
+
+    code = main(["chat", "--owner", owner, "--continue"])
+    assert code == 1
+    assert "还没有可续接的会话" in capsys.readouterr().err
+    assert provider.calls == []
+
+
+def test_chat_continue_is_scoped_to_the_selected_workspace(capsys, cli_home, tmp_path, monkeypatch):
+    from crew.core.mocks import FakeProvider
+    from crew.core.types import Message
+    from crew.state.config import Config
+    from crew.state.session_store import SQLiteSessionStore
+
+    cfg = Config(db_path=str(tmp_path / "cli-continue-scope.db"), cron_enabled=False, title_auto=False)
+    provider = FakeProvider()
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: cfg)
+    monkeypatch.setattr("crew.app.build_provider", lambda _cfg: provider)
+    owner = "cli-test"
+    store = SQLiteSessionStore(cfg.db_path)
+    try:
+        store.save("other-workspace", [Message.user("Elsewhere"), Message.assistant("Other marker")],
+                   workspace_id="stored-workspace", owner_account_id=owner)
+    finally:
+        store.close()
+
+    code = main(["chat", "--owner", owner, "--workspace-id", "default", "--continue"])
+    assert code == 1
+    assert "还没有可续接的会话" in capsys.readouterr().err
+    assert provider.calls == []
+
+
+def test_chat_continue_and_session_id_are_mutually_exclusive(capsys, cli_home):
+    code = main(["chat", "--owner", "cli-test", "--continue", "--session-id", "saved"])
+    assert code == 1
+    assert "--continue 与 --session-id 不能同时使用" in capsys.readouterr().err
+
+
+def test_run_continue_appends_to_the_latest_session(capsys, cli_home, tmp_path, monkeypatch):
+    from crew.core.mocks import FakeProvider
+    from crew.core.types import ChatResponse, Message
+    from crew.state.config import Config
+    from crew.state.session_store import SQLiteSessionStore
+
+    cfg = Config(db_path=str(tmp_path / "cli-run-continue.db"), cron_enabled=False, title_auto=False)
+    provider = FakeProvider(script=[ChatResponse(text="一次性续接成功", finish_reason="stop")])
+    monkeypatch.setattr("crew.cli.app.load_config", lambda _path: cfg)
+    monkeypatch.setattr("crew.app.build_provider", lambda _cfg: provider)
+    owner = "cli-test"
+    store = SQLiteSessionStore(cfg.db_path)
+    try:
+        store.save("run-latest", [Message.user("Before"), Message.assistant("Saved marker")],
+                   owner_account_id=owner)
+    finally:
+        store.close()
+
+    code, output = run_cli(capsys, "run", "--owner", owner, "--continue", "Follow-up")
+    assert code == 0
+    assert "一次性续接成功" in output
+    assert [m.content for m in provider.calls[0] if m.role == "assistant"] == ["Saved marker"]
+    reopened = SQLiteSessionStore(cfg.db_path)
+    try:
+        assert [row["session_id"] for row in reopened.list_sessions(owner_account_id=owner)] == ["run-latest"]
+        assert [m.content for m in reopened.load("run-latest", owner_account_id=owner)] == [
+            "Before", "Saved marker", "Follow-up", "一次性续接成功",
+        ]
+    finally:
+        reopened.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["once", "reject", None], ids=["approve-once", "reject", "eof"])
 async def test_chat_plan_file_approval_preserves_selected_workspace(

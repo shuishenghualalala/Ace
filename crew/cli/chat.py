@@ -37,11 +37,19 @@ HELP = """[bold]命令[/bold]
 def register(subparsers, handlers: dict[str, Any]) -> None:
     chat = subparsers.add_parser("chat", help="启动交互式对话")
     chat.add_argument("--session-id", metavar="ID", help="续接当前账号与工作空间中的已有会话")
+    chat.add_argument(
+        "-c", "--continue", dest="continue_last", action="store_true",
+        help="续接当前账号与工作空间中最近一次有内容的会话",
+    )
     chat.set_defaults(handler=_chat)
     run = subparsers.add_parser("run", help="一次性非交互对话")
     run.add_argument("prompt", help="要发送的消息")
     run.add_argument("--mode", choices=("agent", "team", "dynamic_kanban"), default="agent")
     run.add_argument("--session-id", default="", help="复用已有会话，缺省新建")
+    run.add_argument(
+        "-c", "--continue", dest="continue_last", action="store_true",
+        help="向当前账号与工作空间中最近一次有内容的会话续发一条消息",
+    )
     run.add_argument(
         "--output-format",
         choices=("text", "json", "stream-json"),
@@ -58,12 +66,32 @@ def register(subparsers, handlers: dict[str, Any]) -> None:
     run.set_defaults(handler=_run)
 
 
+async def _continue_session_id(app: Any, ctx: CliContext) -> str:
+    """Resolve the most recently updated non-empty session in this owner and workspace."""
+    rows = await asyncio.to_thread(
+        app.session_store.list_sessions,
+        ctx.workspace_id,
+        owner_account_id=ctx.owner,
+    )
+    candidates = [row for row in rows if int(row.get("message_count") or 0) > 0]
+    if not candidates:
+        raise CliError("当前工作空间还没有可续接的会话；请先用 crew chat 或 crew run 开始对话")
+    chosen = max(candidates, key=lambda row: (
+        float(row.get("updated_at") or 0), str(row.get("session_id") or ""),
+    ))
+    return str(chosen["session_id"])
+
+
 async def _chat(args: Any, ctx: CliContext) -> CliResult:
     session_id = args.session_id.strip() if args.session_id is not None else None
     if session_id == "":
         raise CliError("--session-id 不能为空")
+    if args.continue_last and args.session_id is not None:
+        raise CliError("--continue 与 --session-id 不能同时使用")
     async with ctx.running_app() as app:
-        if session_id is not None:
+        if args.continue_last:
+            session_id = await _continue_session_id(app, ctx)
+        elif session_id is not None:
             rows = await asyncio.to_thread(
                 app.session_store.list_sessions,
                 owner_account_id=ctx.owner,
@@ -281,9 +309,14 @@ async def _run(args: Any, ctx: CliContext) -> CliResult:
     if not prompt:
         raise CliError("prompt 不能为空")
     output_format = args.output_format or ("json" if ctx.json_output else "text")
-    session_id = args.session_id.strip() or f"cli_{uuid.uuid4().hex[:8]}"
+    explicit_session = args.session_id.strip() or None
+    if args.continue_last and explicit_session is not None:
+        raise CliError("--continue 与 --session-id 不能同时使用")
+    session_id = explicit_session or f"cli_{uuid.uuid4().hex[:8]}"
 
     async with ctx.running_app() as app:
+        if args.continue_last:
+            session_id = await _continue_session_id(app, ctx)
         ensure = getattr(app.session_store, "ensure_session", None)
         if callable(ensure):
             ensure(

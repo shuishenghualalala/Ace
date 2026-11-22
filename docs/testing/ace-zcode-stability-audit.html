@@ -391,9 +391,15 @@
 </article>
 <article id="cli-session-resume">
 <h3>CLI 交互续接已保存的会话</h3>
-<p>Kimi 的 CLI 提供显式会话 ID 和按当前目录续接最近会话两种入口。显式 ID 路径查询会话索引，不存在或目录不符时报错。Ace 的非交互 <code>run</code> 已能指定会话；交互 <code>chat</code> 现在也可以用 <code>--session-id</code>，在打开输入前核对账号的公开会话目录和所选工作空间，保持原审批流程。启动和 <code>/new</code> 显示当前 ID；未指定时维持新建。自动续接最近会话不在本次变更中。</p>
+<p>Kimi 的 CLI 提供显式会话 ID 和按当前目录续接最近会话两种入口。显式 ID 路径查询会话索引，不存在或目录不符时报错。Ace 的非交互 <code>run</code> 已能指定会话；交互 <code>chat</code> 现在也可以用 <code>--session-id</code>，在打开输入前核对账号的公开会话目录和所选工作空间，保持原审批流程。启动和 <code>/new</code> 显示当前 ID；未指定时维持新建。自动续接最近会话随后单独交付（见下一节）。</p>
 <p><strong>验收</strong> 交互输入通过正式 CLI 分发、模型回合及 SQLite，复验原历史进入模型上下文、答复仍落入原会话；未知、跨账号、工作空间不符及内部会话 ID 均不触发模型或创建会话。Windows 独立 CLI 进程先用 <code>run</code> 写入历史，再用交互管道续接；另外以错误工作空间复验退出码 1。独立重读 SQLite 仍为一个会话、四条消息。续接定向 5 项通过，CLI 主测试文件 34 项通过、1 项跳过，帮助列出新参数。</p>
 <p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:38–49</code>、<code>apps/kimi-code/src/cli/v2/run-v2-print.ts:347–394</code>。</p>
+</article>
+<article id="cli-continue-latest">
+<h3>CLI 续接当前工作空间的最近会话</h3>
+<p>Kimi 的 <code>-c</code>/<code>--continue</code> 续接当前工作目录的上一次会话，并与 <code>--session</code> 互斥。Ace 的 <code>chat</code> 与非交互 <code>run</code> 增加同一入口：在所选账号和工作空间中按最近更新时间选择第一份有消息的会话，置顶不改变该判定，跳过只创建未使用的空会话；没有可续接内容时退出码为 1，不创建替代会话。显式 <code>--session-id</code> 与 <code>--continue</code> 同时出现时直接拒绝。交互入口仍显示原会话 ID 并使用既有审批与输入流程；<code>run</code> 把新问题与回复追加到原会话。</p>
+<p><strong>验收</strong> 续接定向 5 项通过：最近会话优先且置顶旧会话不被选中、空会话跳过、无历史报错、跨工作空间不可选、参数冲突，以及 <code>run --continue</code> 复用同一会话。CLI 主测试文件 39 项通过、1 项跳过。Windows 独立 CLI 进程使用隔离的 <code>CREW_HOME</code> 与临时配置库，先写入两条历史，再执行 <code>crew run --continue</code>；退出码 0，模型回显追加到原会话，SQLite 仍只有一个会话和四条消息。空库执行同一命令退出码 1，并给出无历史提示，未创建会话。</p>
+<p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:49</code>、<code>apps/kimi-code/src/cli/options.ts:104–113</code>。</p>
 </article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
