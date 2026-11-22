@@ -200,7 +200,9 @@ def _mcp_servers_list(args: Any, ctx: CliContext) -> CliResult:
         return CliResult(data={"ok": True, "servers": []}, text="没有配置 MCP server")
     lines: list[str] = []
     for server in servers:
-        if server.get("config_pending"):
+        if server.get("error"):
+            status = "失败"
+        elif server.get("config_pending"):
             status = "重连中"
         elif server.get("connected"):
             status = "已连接"
@@ -208,9 +210,10 @@ def _mcp_servers_list(args: Any, ctx: CliContext) -> CliResult:
             status = "手动"
         else:
             status = "未连接"
-        lines.append(
-            f"{server['name']}\t{server['transport']}\t{status}\t{server.get('tool_count', 0)} tools"
-        )
+        line = f"{server['name']}\t{server['transport']}\t{status}\t{server.get('tool_count', 0)} tools"
+        if server.get("error"):
+            line += f"\t{server['error'][:120]}"
+        lines.append(line)
     return CliResult(data={"ok": True, "servers": servers}, text="\n".join(lines))
 
 

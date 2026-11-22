@@ -1062,17 +1062,23 @@ def test_mcp_list_renders_human_status():
             "name": "manual", "transport": "stdio", "connected": False, "error": "",
             "tools": [], "config": {"command": "echo", "transport": "stdio", "auto_connect": False},
         },
+        {
+            "name": "broken", "transport": "http", "connected": True, "error": "boom",
+            "tools": [], "config": {"url": "https://mcp.example.com/broken", "transport": "http"},
+        },
     ])
     app = SimpleNamespace(
         mcp_manager=manager,
         config=SimpleNamespace(mcp_servers={
             "remote": {"url": "https://mcp.example.com/mcp", "transport": "http"},
             "manual": {"command": "echo", "transport": "stdio", "auto_connect": False},
+            "broken": {"url": "https://mcp.example.com/broken", "transport": "http"},
         }),
     )
     result = integration._mcp_servers_list(None, SimpleNamespace(app=app))
     assert "remote" in result.text and "已连接" in result.text
     assert "manual" in result.text and "手动" in result.text
+    assert "broken" in result.text and "失败" in result.text and "boom" in result.text
     assert result.data["servers"][0]["name"] == "remote"
 
 

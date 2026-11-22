@@ -812,8 +812,8 @@
 </article>
 <article id="cli-mcp-list-text">
 <h3>CLI MCP 列表的人类可读输出</h3>
-<p><code>crew mcp servers list</code> 原先返回空文本，普通模式只打印空行；只有 <code>--json</code> 才能看到状态。现在默认输出每服务的名称、传输、连接状态（已连接/手动/重连中/未连接）与工具数，空列表明确提示；JSON 结构保持不变。</p>
-<p><strong>验收</strong> 两项服务（已连接与 auto_connect=false）用例输出对应状态；空列表提示；定向用例、Ruff 通过。</p>
+<p><code>crew mcp servers list</code> 原先返回空文本，普通模式只打印空行；只有 <code>--json</code> 才能看到状态。现在默认输出每服务的名称、传输、连接状态（失败/重连中/已连接/手动/未连接）、工具数与脱敏错误，空列表明确提示；JSON 结构保持不变。</p>
+<p><strong>验收</strong> 三项服务（已连接、auto_connect=false、已连接但带 error）用例输出对应状态与错误；空列表提示；定向用例、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts</code> 的 CLI 参数入口。</p>
 </article>
 <article id="external-marketplace-sources">
