@@ -102,6 +102,7 @@
       <tr><td><code>browser_use_advanced</code></td><td>经 <code>tool_search</code> 按需披露。从当前页保存截图、将图像提供给视觉模型或读取控制台与网络记录；高级操作仍受执行策略约束。</td></tr>
     </tbody>
   </table>
+  <p>浏览器宿主按账号 Profile 创建持久 Electron <code>Session</code>，同一账号的 Crew 会话复用该 Session，以保留站点登录状态；Crew 会话之间仍分别校验标签、页面引用和控制权。因共享 Session，同源 Cookie、<code>localStorage</code> 与 IndexedDB 可被该账号的不同 Crew 会话复用，不构成聊天级站点存储隔离。</p>
   <p>浏览器插件同时挂载 <code>/browser-use</code> 和 <code>/web-gui-tester</code>。后者指导模型用实际界面交互做黑盒测试，区分结构观察、已查看的截图与不能验证的环节。它不注册额外工具，不改变审批或网络规则；浏览器插件关闭时，两项从后续回合的模型技能索引隐藏。</p>
 
   <p>浏览器等待文本时，<code>text</code> 在任一同文元素可见时满足，<code>text_gone</code> 在可见匹配为空时满足。两个条件沿用命令的剩余截止时间。停止回合时，Gateway 通过原浏览器宿主连接取消该标签页的等待。宿主按账号、连接和原请求 ID 核对，已经执行的等待收尾后释放账号队列。</p>
@@ -216,6 +217,8 @@
     </tbody>
   </table>
 
+  <p>安全运行时返回稳定错误码时，终端结果保留错误码，并在错误文案末尾追加原生返回的最后一行非空诊断（已脱敏并截断）；这样 <code>sandbox_unavailable</code> 不再只显示通用句，调用方能看到诸如状态目录缺失或身份未就绪的具体原因。</p>
+
   <h2>3. 功能拆解</h2>
   <table>
     <thead><tr><th>子功能</th><th>说明</th><th>状态</th></tr></thead>
@@ -224,6 +227,7 @@
       <tr><td>结果生命周期</td><td>工具声明临时过程、资源、持续指令或重要结论；未知/MCP/插件工具默认按重要结果保护</td><td>已落地</td></tr>
       <tr><td>内置工具集</td><td>文件、终端、搜索、浏览器、子 Agent、Team、Wiki、Cron、交互、记忆、技能、Blueprint 等 70+ 工具</td><td>已落地</td></tr>
       <tr><td>执行流水线</td><td><code>validate_arguments</code>（JSON Schema）→ <code>check_permission</code>（allow/deny/ask）→ <code>truncate_or_persist</code>（大结果落盘）</td><td>已落地</td></tr>
+      <tr><td>工具批次调度</td><td><code>ToolRunner.run_batch</code> 按连续并发安全段与副作用独占段执行。普通工具失败作为结果回灌并继续后续段；审批拒绝和安全边界失败会阻断尚未执行的段；中断时为已派发和未派发调用分别结算结果。</td><td>已落地</td></tr>
       <tr><td>渐进式工具披露</td><td><code>tool_search</code>：核心工具常驻，延迟工具按需加载，token 预算控制</td><td>已落地</td></tr>
       <tr><td>安全审批</td><td><code>security_guard</code>：文件/网络/外部运行时授权，需审批时阻塞等待 owner 决策；等待与 interrupt 竞争（interrupt 先到按拒绝结算），默认有界超时（<code>runtime.interaction_timeout_seconds</code>）。</td><td>已落地</td></tr>
       <tr><td>敏感脱敏</td><td><code>redact</code>：日志与工具输出的密钥 / URL / 凭据脱敏</td><td>已落地</td></tr>
