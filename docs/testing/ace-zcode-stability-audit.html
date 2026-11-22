@@ -82,10 +82,11 @@
 <p class="evidence">Ace <code>crew/agent/prompt_builder.py:54</code>、<code>:298</code>，<code>crew/agent/skills/index.py:625</code>，<code>crew/agent/compact/pipeline.py:427</code>，<code>crew/agent/executor/builtin.py:727</code>、<code>:831</code>、<code>:875</code>。ZCode <code>apps/zcode-cli/packages/core/src/context/sections/skills.ts:9</code>、<code>:39</code>。</p>
 </article>
 <article id="prompt-recovery">
-<h3>A4 · P2 · 工具失败后的提示词会引入新的失败</h3>
+<h3>A4 · P2 · 工具失败后的提示词会引入新的失败（已修复）</h3>
 <p>终端重复失败提示给出 <code>pwd &amp;&amp; ls -la</code>，与 PowerShell 5.1 的语法不兼容，还建议调用不存在的 <code>read_file</code> 和 <code>write_file</code>。加载 profile 时，默认工具、安全与输出说明被整体跳过。内置 profile 鼓励主动委派，随后 explicit 模式禁止模型自行委派。ZCode 将共用 Harness 说明与可替换的 style 分开。</p>
-<p><strong>修复</strong> 将权限、工具命名、读取与验证等工程约束作为常驻底层，profile 补充身份、语气和角色范围，委派规则只生成一份。失败消息从工具注册表和 shell resolver 取能力，分别说明参数错误、完整零匹配、部分扫描、超时、版本冲突和权限拒绝的下一步。验收普通、profile、轻量 Agent 的提示词组合，并用三平台 shell fixture 运行恢复建议。</p>
-<p class="evidence">Ace <code>crew/agent/loop/tool_guardrails.py:452</code>，<code>crew/agent/prompt_builder.py:194</code>、<code>:225</code>、<code>:268</code>，<code>config/prompts/profiles/internal.md:12</code>。ZCode <code>apps/zcode-cli/packages/core/src/context/sections/identity.ts:19</code>。</p>
+<p><strong>实现 · <code>795f49e4</code></strong> 权限、工具命名、读取与验证等工程约束作为常驻底层，profile 只补充身份、语气和角色范围，委派规则只生成一份。<code>tool_recovery</code> 按最终模型请求中的工具范围生成恢复建议，终端只读探针与实际 shell resolver 同源；参数错误、完整零匹配、部分扫描、超时、版本冲突和权限拒绝分别给出下一步。canonical 工具结果保持原文，恢复说明只进入模型请求视图。</p>
+<p><strong>本轮复验</strong> 在父提交 <code>bf842f1c</code> 的临时快照运行修复引入的提示词测试，结果为 11 项失败、10 项通过；旧终端建议仍包含 bash 专用探针和不存在的工具名。当前工作树的提示词与恢复专项 54 项通过，真实内置执行器、Agent 循环及工具管线 230 项通过。Windows PowerShell 5.1.26100.9818 实际执行 <code>(Get-Location).Path; Get-ChildItem -Force</code> 通过，Git Bash 实际执行 POSIX 探针通过。macOS 与 Linux 本轮未启动原生宿主；二者共用 bash 分支，仍需在对应发行环境复验。</p>
+<p class="evidence">Ace <code>crew/agent/loop/tool_recovery.py:43</code>、<code>:99</code>、<code>:135</code>，<code>crew/agent/prompt_builder.py:193</code>、<code>:278</code>，<code>config/prompts/profiles/internal.md</code>；测试 <code>tests/test_tool_recovery.py</code>、<code>tests/test_prompt_builder.py</code>、<code>tests/test_agent.py</code>。ZCode <code>apps/zcode-cli/packages/core/src/context/sections/identity.ts:21</code>、<code>workflow-actor.ts:48</code>。</p>
 </article>
 <article id="search">
 <h3>A5 · P1 · 目录扫描超时可以表现为“没有匹配”</h3>

@@ -68,6 +68,7 @@
   <p><code>verify</code> 只在目标启用且最近一轮已结束时受理。它读取当前会话最多 24 条已保存的消息，过滤后给该会话生效的模型一次独立、无工具的验收调用，正文证据最多 10,000 字符，模型调用预算 25 秒。同一网关一次处理一个验收。默认 <code>POST</code> 等待并返回持久验收结果；带 <code>Prefer: respond-async</code> 时，SQLite 预留成功后先返回 202 及 <code>Preference-Applied: respond-async</code>，包括本次验收标识和新版本。验收期间只允许暂停变更目标；可以 GET 查询状态，不追加聊天消息。</p>
   <p>只有明确的正向判定，通过实际引文校验（须引用本轮助手输出），并在提交时仍匹配账号租约、目标版本、原会话与证据修订，才能将目标标记完成。证据不足、输出不可解析、模型试图调用工具、超时或证据变化均不完成目标。仍可手动标记完成。模型只核对传入的已保存证据，不验证文件、网络或其他外部实际状态。Web 和桌面面板通过同一验收入口显示持久结果与自动推进状态。</p>
   <p>内置主 Agent 按当前账号运行时目录的 <code>AGENTS.md</code>、工作区设置中的提示词、最近的一份项目规则的顺序组装动态提示词。项目规则从实际工作目录向上找，限于当前 Git checkout（包括 linked worktree），无 Git 时只查工作目录。同一目录依次查找 <code>AGENTS.md</code>、<code>.crew.md</code>、<code>CREW.md</code>。账号托管工作区的搜索止于账号目录。文件有变更时下一轮重新加载，每份规则最多载入 100 KiB，截断时在提示词中标记。</p>
+  <p>角色 profile 与运行时角色说明只补充身份、职责和表达方式；工具、安全、输出核验及有效委派模式由共用底层追加，主 Agent 与轻量子 Agent 不因替换角色而丢失这些约束。工具结果进入模型请求前，<code>tool_recovery</code> 按最终披露的工具范围与结构化结果补充恢复建议；canonical 历史保留原始结果。终端诊断命令由当前 shell resolver 决定，权限拒绝和安全边界故障不提供换工具绕行的建议。</p>
 
   <h2>2. 功能拆解</h2>
   <table>
@@ -106,6 +107,7 @@
       <tr><td><code>crew/agent/compact/microcompact.py</code></td><td>按工具结果生命周期执行选择性微压缩。</td></tr>
       <tr><td><code>crew/agent/compact/post_compact.py</code></td><td>完整压缩后恢复 Skill 指令、资源和重要结果。</td></tr>
       <tr><td><code>crew/agent/loop/tool_guardrails.py</code></td><td>重复失败与只读工具无进展检测。</td></tr>
+      <tr><td><code>crew/agent/loop/tool_recovery.py</code></td><td>把结构化工具结局投影为模型侧恢复建议，按最终工具范围和 shell 能力约束下一步。</td></tr>
       <tr><td><code>crew/agent/skills.py</code></td><td>Skill 扫描、索引、激活和提示构建。</td></tr>
       <tr><td><code>crew/agent/subagent/definition.py</code></td><td>文件预设定义及其到中立 Feature contribution 的适配。</td></tr>
       <tr><td><code>crew/agent/subagent/tools.py</code></td><td>动态预设目录、前后台子 Agent 执行与完整周期 Generation Lease。</td></tr>
@@ -179,6 +181,7 @@ deadline: runtime.turn_deadline_seconds         # 默认 0=不限
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-22</td><td>补齐角色 profile 共用约束及模型侧工具恢复投影说明。</td><td><code>crew/agent/prompt_builder.py</code>、<code>crew/agent/loop/tool_recovery.py</code> 的技术文档。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-08-31</td><td>普通 Agent 历史回放身份隔离</td><td>Gateway 会话历史投影只对 executor=team 的会话聚合子历史；Team 子会话必须含 member_id。</td></tr>
       <tr><td>2026-09-01</td><td>上下文微压缩由时间窗口改为工具结果生命周期；完整压缩后恢复指令、资源和重要结论。</td><td><code>crew/agent/compact</code>、工具循环上下文稳定性。</td></tr>
