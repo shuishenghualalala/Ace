@@ -627,6 +627,31 @@ async def test_update_to_manual_stops_the_worker(api, monkeypatch):
     assert reloaded == []
 
 
+async def test_update_manual_reports_saved_when_stopping_worker_fails(api, monkeypatch):
+    client, crew, _ = api
+    assert crew.mcp_manager is not None
+    crew.config.add_mcp_server("swap", {"command": "echo", "transport": "stdio", "auto_connect": False})
+    registered: list[str] = []
+
+    async def failing_remove(_name):
+        raise RuntimeError("stop failed")
+
+    def fake_register(name, _cfg):
+        registered.append(name)
+
+    monkeypatch.setattr(crew.mcp_manager, "remove_server", failing_remove)
+    monkeypatch.setattr(crew.mcp_manager, "register_pending", fake_register)
+    response = await client.put(
+        "/api/mcp/servers/swap",
+        json={"transport": "stdio", "command": "echo"},
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json()["warning"]
+    assert crew.config.mcp_servers["swap"]["auto_connect"] is False
+    assert registered == []
+
+
 async def test_create_rejects_invalid_env_key(api):
     client, _crew, _ = api
     response = await client.post(

@@ -239,15 +239,22 @@ def create_mcp_servers_router(crew) -> APIRouter:
 
         # 增量重连单 server（后台进行，不阻塞响应，理由同 create）。
         # auto_connect=false 表示只保存配置、不自动连接；手动「重连」仍可启动。
+        warning = ""
         await _ensure_mgr_started()
         if crew.mcp_manager is not None:
             if cfg.get("auto_connect") is False:
-                await crew.mcp_manager.remove_server(name)
-                crew.mcp_manager.register_pending(name, cfg)
+                try:
+                    await crew.mcp_manager.remove_server(name)
+                    crew.mcp_manager.register_pending(name, cfg)
+                except Exception as exc:  # noqa: BLE001 - configuration is already durable
+                    warning = f"配置已保存，但停止旧连接失败：{exc}"
             else:
                 asyncio.create_task(crew.mcp_manager.reload_one(name, cfg))
 
-        return JSONResponse({"ok": True, "servers": _servers_view()})
+        payload: dict[str, Any] = {"ok": True, "servers": _servers_view()}
+        if warning:
+            payload["warning"] = warning
+        return JSONResponse(payload)
 
     @router.delete("/api/mcp/servers/{name}")
     async def delete_server(request: Request, name: str) -> JSONResponse:
