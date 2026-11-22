@@ -806,8 +806,8 @@
 </article>
 <article id="mcp-update-stop-warning">
 <h3>MCP 停旧 worker 失败时的保存结果</h3>
-<p>把服务更新为 <code>auto_connect=false</code> 时，配置已落盘但停旧 worker 可能失败。Gateway 原先返回 500，用户会误以为配置未保存。现在仍返回 200，配置保持新值，并带一条显示边界脱敏的 <code>warning</code>；状态接口的 <code>config_pending</code> 会暴露 worker 尚未切换。CLI/对话更新仍按各自结果格式报告。</p>
-<p><strong>验收</strong> 停 worker 抛错用例：响应 200、配置仍为 false、warning 存在且 URL token 不可见；Ruff 通过。</p>
+<p>把服务更新为 <code>auto_connect=false</code> 时，配置已落盘但停旧 worker 可能失败。Gateway 原先返回 500，用户会误以为配置未保存。现在仍返回 200，配置保持新值，并带一条显示边界脱敏的 <code>warning</code>；状态接口的 <code>config_pending</code> 会暴露 worker 尚未切换。CLI update 同样返回 <code>warning</code> 与「旧连接停止失败，配置已保存」文本；对话更新继续按自身结果格式报告。</p>
+<p><strong>验收</strong> Gateway/CLI 停 worker 抛错用例：配置仍为 false、warning 存在且 URL token 不可见；Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
 <article id="external-marketplace-sources">

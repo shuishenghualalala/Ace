@@ -295,13 +295,25 @@ async def _mcp_servers_update(args: Any, ctx: CliContext) -> CliResult:
     except Exception as exc:
         raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
+    warning = ""
     if app.mcp_manager is not None:
         if cfg.get("auto_connect") is False:
-            await app.mcp_manager.remove_server(name)
-            app.mcp_manager.register_pending(name, cfg)
+            from crew.tools.redact import redact_sensitive_display_text
+
+            try:
+                await app.mcp_manager.remove_server(name)
+                app.mcp_manager.register_pending(name, cfg)
+            except Exception as exc:
+                warning = redact_sensitive_display_text(f"配置已保存，但停止旧连接失败：{exc}")
         else:
             asyncio.create_task(app.mcp_manager.reload_one(name, cfg))
-    return CliResult(data={"ok": True, "servers": _mcp_servers_view(app)}, text=f"已更新 MCP server {name}")
+    data = {"ok": True, "servers": _mcp_servers_view(app)}
+    if warning:
+        data["warning"] = warning
+    return CliResult(
+        data=data,
+        text=f"已更新 MCP server {name}" + ("（旧连接停止失败，配置已保存）" if warning else ""),
+    )
 
 
 async def _mcp_servers_delete(args: Any, ctx: CliContext) -> CliResult:

@@ -84,7 +84,7 @@
       <tr><td><code>scenario</code></td><td>场景推荐、介绍话术与加载语。</td></tr>
       <tr><td><code>wiki</code></td><td>知识库、页面、搜索、数据源、上传、入库、编译、图谱、问答、摘要、lint、Agent 会话；能力不可用或 draining 时统一返回“Wiki 未启用”。</td></tr>
       <tr><td><code>skill</code></td><td>技能列表/安装/卸载/自进化配置；登记与移除本地技能市场目录。</td></tr>
-      <tr><td><code>mcp</code></td><td>serve / interaction-proxy、服务器配置增删改查与热重载、HTTP/SSE 端点探测、CUA Driver 安装管理；<code>servers add/update</code> 支持 <code>--auto-connect/--no-auto-connect</code>，<code>servers list</code> 的连接错误按显示边界脱敏，工具名最多回报 50 个并另给 <code>tool_count</code>。</td></tr>
+      <tr><td><code>mcp</code></td><td>serve / interaction-proxy、服务器配置增删改查与热重载、HTTP/SSE 端点探测、CUA Driver 安装管理；<code>servers add/update</code> 支持 <code>--auto-connect/--no-auto-connect</code>，update 停旧连接失败仍保留配置并返回 warning；<code>servers list</code> 的连接错误按显示边界脱敏，工具名最多回报 50 个并另给 <code>tool_count</code>。</td></tr>
       <tr><td><code>plugin</code></td><td>插件状态与 per-owner 启用/禁用（含浏览器能力代次切换）。</td></tr>
       <tr><td><code>channel</code></td><td>渠道列表、配置查看/保存、连接/断开/重连、账号删除、微信扫码登录。</td></tr>
       <tr><td><code>runtime</code></td><td>外部 Runtime 扫描/注册/删除，外部 Agent/Team 增删查。</td></tr>

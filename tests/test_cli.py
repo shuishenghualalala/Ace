@@ -1175,6 +1175,44 @@ def test_mcp_update_preserves_no_auto_connect(monkeypatch):
     assert manager.started == []
 
 
+def test_mcp_update_reports_saved_config_when_stop_fails():
+    import crew.cli.integration as integration
+
+    class FakeConfig:
+        def __init__(self):
+            self.mcp_servers = {"swap": {"command": "echo", "transport": "stdio", "auto_connect": False}}
+
+        def update_mcp_server(self, name, cfg):
+            self.mcp_servers[name] = dict(cfg)
+
+    class FakeManager:
+        _registry = object()
+
+        def __init__(self):
+            self.pending = None
+
+        def register_pending(self, name, cfg):
+            self.pending = (name, cfg)
+
+        def status(self):
+            return []
+
+        async def remove_server(self, _name):
+            raise RuntimeError("stop failed https://mcp.example.com/mcp?token=abc123")
+
+    manager = FakeManager()
+    app = SimpleNamespace(config=FakeConfig(), mcp_manager=manager, registry=object())
+    args = SimpleNamespace(
+        name="swap", command="echo", args="", url=None, transport=None,
+        env="", json_payload=None, auto_connect=None,
+    )
+    result = asyncio.run(integration._mcp_servers_update(args, SimpleNamespace(app=app)))
+    assert result.data["ok"] is True
+    assert "token=abc123" not in result.data["warning"]
+    assert app.config.mcp_servers["swap"]["auto_connect"] is False
+    assert "旧连接停止失败" in result.text
+
+
 def test_mcp_probe_name_merges_saved_secrets(monkeypatch):
     import crew.cli.integration as integration
 
