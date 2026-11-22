@@ -209,6 +209,7 @@ export default function SkillsHub() {
   const [sourcePath, setSourcePath] = useState("");
   const [sourceBusy, setSourceBusy] = useState(false);
   const [sourceError, setSourceError] = useState("");
+  const [sourcesLoaded, setSourcesLoaded] = useState(false);
   const [importPath, setImportPath] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState("");
@@ -217,10 +218,12 @@ export default function SkillsHub() {
   const loadSources = () => api.skillSources()
     .then((result) => {
       setSources(result.sources);
+      setSourcesLoaded(true);
       setSourceError("");
     })
     .catch((error: Error) => {
       setSources([]);
+      setSourcesLoaded(false);
       setSourceError(error.message || "无法加载市场源");
     });
 
@@ -416,7 +419,7 @@ export default function SkillsHub() {
           </form>
           {sourceError && <p className="hub__empty" role="alert">{sourceError}</p>}
           {sources.length === 0 ? (
-            <p className="hub__empty">尚未登记市场目录</p>
+            sourceError && !sourcesLoaded ? null : <p className="hub__empty">尚未登记市场目录</p>
           ) : (
             <ul className="hub__market-list">
               {sources.map((source) => {
