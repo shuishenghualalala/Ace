@@ -802,6 +802,14 @@ function ensureFileExpanded(path: string): void {
   if (path) expandedFiles.add(path);
 }
 
+/** Bring the requested file card into the visible part of the board. */
+function scrollFileCardIntoView(path: string): void {
+  if (!path) return;
+  const body = document.getElementById('chat-inspector-body');
+  const row = body?.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(path)}"]`);
+  row?.scrollIntoView?.({ block: 'nearest' });
+}
+
 let customViewOpen = false;
 let disposeCustomView: (() => void) | undefined;
 
@@ -2227,6 +2235,7 @@ export function openInspectorToTab(
   if (tab !== 'browser') openCoreTabs.add(tab);
   document.body.classList.toggle('browser-workbench-open', tab === 'browser');
   if (tab !== 'browser') document.body.classList.remove('browser-workbench-maximized');
+  let fileScrollTarget = '';
   if (tab === 'files') {
     computeFileChanges();
     scopedFilePaths = options?.filePaths?.length
@@ -2244,6 +2253,7 @@ export function openInspectorToTab(
       : null;
     const files = currentFileChanges();
     const wanted = options?.expandFilePath?.trim() || '';
+    fileScrollTarget = wanted;
     if (wanted) {
       ensureFileExpanded(wanted);
     } else if (expandedFiles.size === 0) {
@@ -2269,6 +2279,7 @@ export function openInspectorToTab(
       void hydrateFileContentIfNeeded(path);
     }
   }
+  if (activeTab === 'files' && fileScrollTarget) scrollFileCardIntoView(fileScrollTarget);
   syncInspectorToggleState();
 }
 

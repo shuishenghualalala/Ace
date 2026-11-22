@@ -178,6 +178,25 @@ describe('Inspector HTML 文件预览', () => {
     expect(document.body.textContent).toContain('本次会话改动');
   });
 
+  it('打开文件面板时把请求的文件卡滚入可视区域', () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      openInspectorToTab('files', {
+        expandFilePath: '/tmp/demo/index.html',
+        filePaths: ['/tmp/demo/index.html'],
+      });
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+      expect(scrollIntoView.mock.instances[0]).toBe(
+        document.querySelector('.inspector-file[data-file-path="/tmp/demo/index.html"]'),
+      );
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it('历史消息只带文件路径时也能内嵌展开文件卡，并主动读取 PPT 预览内容', async () => {
     patchBook('sess-html', {
       fileChanges: [{
