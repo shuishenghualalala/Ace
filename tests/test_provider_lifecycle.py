@@ -189,6 +189,65 @@ async def test_app_shutdown_closes_agent_owned_before_global_provider_and_is_ide
 
 
 @pytest.mark.asyncio
+async def test_last_app_shutdown_releases_llm_trace_file(tmp_path):
+    import crew.state.logging as trace_log
+
+    cfg = Config(
+        db_path=str(tmp_path / "crew.db"),
+        memory_db_path=str(tmp_path / "memory.db"),
+        crew_home=str(tmp_path / ".crew"),
+    )
+    app = build_app(config=cfg, enable_team=False)
+    app.cron_service = None
+    app.mcp_manager = None
+    trace_log._setup_llm_trace(str(tmp_path / "logs" / "crew.log"))
+    trace_log.llm_trace("request", {"session_id": "shutdown-fixture"})
+    assert trace_log.flush_llm_trace()
+    trace_file = trace_log.llm_trace_path(str(tmp_path / "logs" / "crew.log"))
+
+    try:
+        await app.shutdown()
+        assert trace_log._LLM_LISTENER is None
+        trace_file.unlink()
+        assert not trace_file.exists()
+    finally:
+        if not app._shutdown_complete:
+            await app.shutdown()
+        trace_log.shutdown_llm_trace()
+
+
+@pytest.mark.asyncio
+async def test_llm_trace_stays_available_until_the_last_app_closes(tmp_path):
+    import crew.state.logging as trace_log
+
+    apps = []
+    try:
+        for name in ("first", "second"):
+            cfg = Config(
+                db_path=str(tmp_path / f"{name}-crew.db"),
+                memory_db_path=str(tmp_path / f"{name}-memory.db"),
+                crew_home=str(tmp_path / name),
+            )
+            app = build_app(config=cfg, enable_team=False)
+            app.cron_service = None
+            app.mcp_manager = None
+            apps.append(app)
+        trace_log._setup_llm_trace(str(tmp_path / "logs" / "crew.log"))
+
+        await apps[0].shutdown()
+        assert trace_log._LLM_LISTENER is not None
+        trace_log.llm_trace("request", {"session_id": "still-active"})
+        assert trace_log.flush_llm_trace()
+        await apps[1].shutdown()
+        assert trace_log._LLM_LISTENER is None
+    finally:
+        for app in apps:
+            if not app._shutdown_complete:
+                await app.shutdown()
+        trace_log.shutdown_llm_trace()
+
+
+@pytest.mark.asyncio
 async def test_app_shutdown_deadline_bounds_cancellation_resistant_provider_retirement(tmp_path):
     class HangingProvider(FakeProvider):
         def __init__(self) -> None:

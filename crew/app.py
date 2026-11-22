@@ -111,7 +111,7 @@ from crew.state.config import (
 )
 from crew.state.credentials import delete_stored_key, store_key
 from crew.state.home import ensure_crew_home, get_crew_home, resolve_crew_home_path
-from crew.state.logging import get_logger, setup_logging
+from crew.state.logging import get_logger, setup_logging, shutdown_llm_trace
 from crew.state.session_store import SQLiteSessionStore
 from crew.state.observability import ObservationLogHandler, ObservationPolicy, ObservationRecorder
 from crew.state.trace_store import TraceStore
@@ -2742,6 +2742,7 @@ class CrewApp:
                 _LIVE_APPS.remove(self)
             if not _LIVE_APPS:
                 await asyncio.to_thread(skill_index().stop_watcher)
+                await asyncio.to_thread(shutdown_llm_trace)
             self._shutdown_complete = True
 
     async def _shutdown_resources(self, *, provider_timeout: float) -> None:
