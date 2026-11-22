@@ -37,9 +37,26 @@ function parseLines(raw: string, separator: string): Record<string, string> {
     if (index <= 0) continue;
     const key = line.slice(0, index).trim();
     const value = line.slice(index + 1).trim();
-    if (key && value !== "***") result[key] = value;
+    if (key) result[key] = value;
   }
   return result;
+}
+
+function formFromServer(server: McpServerRow): FormState {
+  const transport = server.config.transport;
+  return {
+    name: server.name,
+    transport: transport === "http" || transport === "sse" ? transport : "stdio",
+    command: server.config.command ?? "",
+    args: (server.config.args ?? []).join(", "),
+    url: server.config.url ?? "",
+    headers: Object.entries(server.config.headers ?? {})
+      .map(([key, value]) => `${key}: ${value}`)
+      .join("\n"),
+    env: Object.entries(server.config.env ?? {})
+      .map(([key, value]) => `${key}=${value}`)
+      .join("\n"),
+  };
 }
 
 function payloadFromForm(form: FormState): Record<string, unknown> {
@@ -62,6 +79,7 @@ export default function McpHub() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [editing, setEditing] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
@@ -83,7 +101,15 @@ export default function McpHub() {
   useEffect(() => { void load(); }, []);
 
   const openAdd = (): void => {
+    setEditing("");
     setForm(EMPTY_FORM);
+    setProbeMessage("");
+    setModalOpen(true);
+  };
+
+  const openEdit = (server: McpServerRow): void => {
+    setEditing(server.name);
+    setForm(formFromServer(server));
     setProbeMessage("");
     setModalOpen(true);
   };
@@ -104,7 +130,11 @@ export default function McpHub() {
     setError("");
     try {
       const payload = payloadFromForm(form);
-      await api.createMcpServer({ ...payload, name: form.name.trim() });
+      if (editing) {
+        await api.updateMcpServer(editing, payload);
+      } else {
+        await api.createMcpServer({ ...payload, name: form.name.trim() });
+      }
       setModalOpen(false);
       await load();
     } catch (cause) {
@@ -199,6 +229,7 @@ export default function McpHub() {
                   {server.tools.length ? `工具：${server.tools.slice(0, 8).join(", ")}` : "未发现工具"}
                 </p>
                 <div className="mcp-card__actions">
+                  <button className="hub-btn" type="button" onClick={() => openEdit(server)}>编辑</button>
                   <button className="hub-btn" type="button" onClick={() => void reload(server)}>重连</button>
                   <button className="hub-btn hub-btn--ghost" type="button" onClick={() => void remove(server)}>删除</button>
                 </div>
@@ -212,12 +243,12 @@ export default function McpHub() {
         <div className="mcp-overlay" onClick={(event) => { if (event.target === event.currentTarget) closeModal(); }}>
           <form className="mcp-modal" role="dialog" aria-modal="true" onSubmit={(event) => void save(event)}>
             <header className="mcp-modal__head">
-              <h2>新增 MCP 服务</h2>
+              <h2>{editing ? `编辑：${editing}` : "新增 MCP 服务"}</h2>
               <button className="hub-btn hub-btn--ghost" type="button" onClick={closeModal} aria-label="关闭">关闭</button>
             </header>
             <label className="mcp-field">
               <span>服务名称</span>
-              <input value={form.name} required aria-label="服务名称"
+              <input value={form.name} required aria-label="服务名称" disabled={Boolean(editing)}
                 onChange={(event) => setForm({ ...form, name: event.target.value })} />
             </label>
             <label className="mcp-field">

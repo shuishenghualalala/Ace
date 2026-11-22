@@ -97,17 +97,21 @@ def create_mcp_servers_router(crew) -> APIRouter:
         mgr = crew.mcp_manager
         if mgr is None:
             return []
-        return [
-            {
+        configured = crew.config.mcp_servers if isinstance(crew.config.mcp_servers, dict) else {}
+        result = []
+        for row in mgr.status():
+            config = configured.get(row["name"], row["config"])
+            result.append({
                 "name": row["name"],
-                "transport": row["transport"],
+                "transport": config.get("transport") or row["transport"],
                 "connected": row["connected"],
                 "error": row["error"],
                 "tools": row["tools"],
-                "config": _redact_config(row["config"]),
-            }
-            for row in mgr.status()
-        ]
+                # The persisted config is the source of truth immediately after an
+                # update; the worker may still be reconnecting with the previous one.
+                "config": _redact_config(config),
+            })
+        return result
 
     @router.get("/api/mcp/servers")
     async def list_servers() -> JSONResponse:

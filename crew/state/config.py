@@ -1091,7 +1091,22 @@ class Config:
         key = str(name)
         if key not in servers:
             raise KeyError(f"MCP server 不存在: {key}")
-        return self._commit_mcp_servers({**servers, key: dict(server_cfg)})
+
+        def merge_masked(old: Any, new: Any) -> Any:
+            if not isinstance(old, dict) or not isinstance(new, dict):
+                return new
+            merged = dict(new)
+            for key_name, value in new.items():
+                if value == "***" and key_name in old:
+                    merged[key_name] = old[key_name]
+            return merged
+
+        current = dict(servers[key])
+        updated = dict(server_cfg)
+        for section in ("env", "headers"):
+            if section in updated:
+                updated[section] = merge_masked(current.get(section), updated[section])
+        return self._commit_mcp_servers({**servers, key: updated})
 
     def delete_mcp_server(self, name: str) -> Path:
         """删除 MCP server：候选值 → 持久化 → 发布。

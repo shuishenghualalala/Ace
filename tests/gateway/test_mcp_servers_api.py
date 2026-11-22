@@ -342,6 +342,36 @@ async def test_secret_headers_and_url_query_redacted_in_get(api):
     await client.delete("/api/mcp/servers/remote-secret", headers=LOCAL_HEADERS)
 
 
+async def test_update_masked_secret_preserves_original(api):
+    client, crew, config_yaml = api
+    created = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "secret-update",
+            "command": sys.executable,
+            "args": [_ECHO],
+            "env": {"API_KEY": "sk-original", "VISIBLE": "old"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert created.status_code == 201
+    updated = await client.put(
+        "/api/mcp/servers/secret-update",
+        json={
+            "command": sys.executable,
+            "args": [_ECHO],
+            "env": {"API_KEY": "***", "VISIBLE": "new"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert updated.status_code == 200
+    assert crew.config.mcp_servers["secret-update"]["env"] == {
+        "API_KEY": "sk-original", "VISIBLE": "new",
+    }
+    persisted = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    assert persisted["mcp_servers"]["secret-update"]["env"]["API_KEY"] == "sk-original"
+
+
 async def test_secret_env_redacted_in_get(api):
     client, _, _ = api
     resp = await client.post(

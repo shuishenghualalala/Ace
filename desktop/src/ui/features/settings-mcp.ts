@@ -501,11 +501,9 @@ function fillMcpForm(server?: McpServerRow): void {
     set('mcp-command', server.config.command ?? '');
     set('mcp-args', (server.config.args ?? []).join(', '));
     set('mcp-url', server.config.url ?? '');
-    // env：脱敏值（***）不回填，提示留空保留
+    // env：保留脱敏占位符，后端更新时按 *** 保留原密钥
     const env = server.config.env ?? {};
-    const envLines = Object.entries(env)
-      .filter(([, v]) => v !== '***')
-      .map(([k, v]) => `${k}=${v}`);
+    const envLines = Object.entries(env).map(([k, v]) => `${k}=${v}`);
     set('mcp-env', envLines.join('\n'));
     const headers = server.config.headers ?? {};
     set('mcp-headers', Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join('\n'));

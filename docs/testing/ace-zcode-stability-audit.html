@@ -564,6 +564,12 @@
 <p><strong>验收</strong> McpHub 组件测试通过：列表状态、添加弹层、HTTP 探测请求与保存 payload；Web 全量 45 个文件、330 项通过，TypeScript 与生产构建通过。Windows Chrome + 生产 Web + 隔离 Gateway：从侧栏进入 MCP，添加 <code>http://127.0.0.1:1/mcp</code>，探测显示失败，保存后卡片出现，删除后回到空态；Gateway 与 config.yaml 均无残留。截图 <code>mcp-hub-ui-3655abaca8/web-mcp-added.png</code>。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/api.ts</code>、<code>web/src/components/Sidebar.tsx</code>、<code>web/src/App.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-edit-secret-merge">
+<h3>MCP 编辑的脱敏占位符合并与配置真值</h3>
+<p>MCP GET 响应会把 secret env/header 脱敏为 <code>***</code>。旧编辑流程把占位符当作真实值或直接省略，前者会把密钥写成 <code>***</code>，后者会删除密钥；更新接口返回的状态还可能来自仍在用旧配置重连的 worker。现在 <code>Config.update_mcp_server</code> 对 env/headers 中值为 <code>***</code> 的键保留原值；Desktop 与 Web 编辑表单原样带回占位符；状态接口以持久化配置作为配置真值，worker 的连接/工具状态仍单独呈现。Web 同时恢复编辑入口。</p>
+<p><strong>验收</strong> Gateway MCP API 25 项通过，新增 <code>***</code> 更新保留原密钥并落盘验证；Web 全量 45 个文件、331 项通过；Windows Chrome + 隔离 Gateway 实际编辑 URL 后卡片立即显示新地址并删除成功；Desktop TypeScript 通过。未连接真实 MCP 服务。</p>
+<p class="evidence">Ace <code>crew/state/config.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

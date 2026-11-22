@@ -54,6 +54,44 @@ async function render(): Promise<void> {
   await act(async () => { await Promise.resolve(); });
 }
 
+it("edits an MCP server without echoing masked secrets", async () => {
+  apiMock.mcpServers.mockResolvedValue({
+    ok: true,
+    servers: [{
+      name: "remote",
+      transport: "http",
+      connected: true,
+      error: "",
+      tools: ["ping"],
+      config: {
+        url: "https://mcp.example.com/mcp",
+        transport: "http",
+        headers: { Authorization: "***" },
+        env: { API_KEY: "***" },
+      },
+    }],
+  });
+  await render();
+  const edit = [...host.querySelectorAll("button")].find((button) => button.textContent === "编辑");
+  await act(async () => edit?.click());
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="服务名称"]')?.disabled).toBe(true);
+  expect(host.textContent).toContain("Authorization: ***");
+  const url = host.querySelector<HTMLInputElement>('input[aria-label="MCP URL"]')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(url, "https://mcp.example.com/next");
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存");
+  await act(async () => save?.click());
+  await vi.waitFor(() => expect(apiMock.updateMcpServer).toHaveBeenCalledWith("remote", {
+    transport: "http",
+    url: "https://mcp.example.com/next",
+    headers: { Authorization: "***" },
+    env: { API_KEY: "***" },
+  }));
+});
+
 it("lists MCP servers and probes an HTTP endpoint before saving", async () => {
   await render();
   expect(host.textContent).toContain("remote");
