@@ -314,7 +314,7 @@ export default function McpHub() {
         {loading ? (
           <p className="hub__empty">正在加载 MCP 服务…</p>
         ) : servers.length === 0 ? (
-          <p className="hub__empty">暂无 MCP 服务，点击「添加服务」开始配置。</p>
+          error ? null : <p className="hub__empty">暂无 MCP 服务，点击「添加服务」开始配置。</p>
         ) : filteredServers.length === 0 ? (
           <p className="hub__empty">没有匹配的 MCP 服务</p>
         ) : (

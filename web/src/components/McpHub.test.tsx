@@ -101,6 +101,13 @@ it("edits an MCP server without echoing masked secrets", async () => {
   }));
 });
 
+it("shows a load error without claiming the MCP list is empty", async () => {
+  apiMock.mcpServers.mockRejectedValue(new Error("需要管理员权限"));
+  await render();
+  expect(host.textContent).toContain("需要管理员权限");
+  expect(host.textContent).not.toContain("暂无 MCP 服务");
+});
+
 it("closes the MCP form with Escape", async () => {
   await render();
   const add = [...host.querySelectorAll("button")].find((button) => button.textContent === "添加服务");

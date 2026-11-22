@@ -708,6 +708,12 @@
 <p><strong>验收</strong> Desktop 探测组件测试 3 项通过，Esc 用例断言打开聚焦名称输入、关闭后回到触发按钮；TypeScript 通过。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/mcp-probe.test.ts</code>、<code>docs/frontend/desktop-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-load-error-state">
+<h3>Web MCP 加载失败不再伪装成空列表</h3>
+<p>MCP 列表请求失败（例如非管理员 403、Gateway 未就绪）时，旧页面同时显示错误和「暂无 MCP 服务」，用户会误以为配置被清空。现在错误信息保留，空态只在请求成功且确实零服务时出现；已有列表不会被错误清空。</p>
+<p><strong>验收</strong> McpHub 新增加载失败用例：显示「需要管理员权限」且不出现「暂无 MCP 服务」；组件 8 项、TypeScript 通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
