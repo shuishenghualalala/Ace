@@ -540,6 +540,12 @@
 <p><strong>验收</strong> 探测定向 7 项通过；Gateway MCP API、CLI 与 Desktop 组件测试通过，TypeScript、Ruff 通过。未连接公开网络。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/cli/integration.py</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-probe-stop-bound">
+<h3>MCP 探测关闭阶段的时间上限</h3>
+<p>探测失败或成功后都要关闭一次性 worker；远端传输关闭可能卡住，原实现会无限等待，超过探测超时后 API 仍不返回。现在关闭阶段最多等 2 秒，超时只记警告并继续返回探测结果，API 并发槽位照常释放。该上限只覆盖关闭，不改变连接与工具发现的 5 秒预算。</p>
+<p><strong>验收</strong> 新增停止阻塞 worker 用例通过：探测在 1 秒内返回成功，关闭超时未拖住调用；相关探测定向与 Ruff 通过。未连接公开网络。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>tests/test_mcp.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

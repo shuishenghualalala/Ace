@@ -60,6 +60,7 @@ MCP_CONCURRENT_READS_PER_SERVER = 2
 MCP_CALL_TIMEOUT_SECONDS = 60.0
 MCP_STARTUP_TIMEOUT_SECONDS = 30.0
 MCP_PROBE_MAX_TOOL_NAMES = 50
+MCP_PROBE_STOP_TIMEOUT_SECONDS = 2.0
 MCP_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 _PROGRESS_INTERVAL_SECONDS = 0.25
@@ -1156,7 +1157,10 @@ async def probe_remote_server(cfg: dict[str, Any], *, timeout: float = 5.0) -> d
             "error": str(error) if error is not None else None,
         }
     finally:
-        await worker.stop()
+        try:
+            await asyncio.wait_for(worker.stop(), timeout=MCP_PROBE_STOP_TIMEOUT_SECONDS)
+        except Exception:
+            log.warning("MCP 探测连接关闭超时或失败")
 
 
 class MCPClientManager:

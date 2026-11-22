@@ -252,6 +252,28 @@ async def test_probe_caps_reported_tool_names(monkeypatch):
     assert result["tools"][0] == "tool-0"
 
 
+async def test_probe_stop_is_bounded(monkeypatch):
+    import crew.tools.mcp_client as mcp_client
+
+    class HangingStopWorker:
+        def __init__(self, *_args, **_kwargs):
+            self._tools = []
+            self._error = None
+
+        async def start(self):
+            return True
+
+        async def stop(self):
+            await asyncio.sleep(10)
+
+    monkeypatch.setattr(mcp_client, "_ServerWorker", HangingStopWorker)
+    monkeypatch.setattr(mcp_client, "MCP_PROBE_STOP_TIMEOUT_SECONDS", 0.05)
+    started = asyncio.get_running_loop().time()
+    result = await mcp_client.probe_remote_server({"url": "http://127.0.0.1/mcp", "transport": "http"})
+    assert result["ok"] is True
+    assert asyncio.get_running_loop().time() - started < 1
+
+
 async def test_mcp_client_empty_config_noop():
     reg = Registry()
     mgr = MCPClientManager({})
