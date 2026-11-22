@@ -101,6 +101,19 @@ it("edits an MCP server without echoing masked secrets", async () => {
   }));
 });
 
+it("shows failure before connected when a server reports both", async () => {
+  apiMock.mcpServers.mockResolvedValue({
+    ok: true,
+    servers: [{
+      name: "flaky", transport: "http", connected: true, error: "reconnect failed", tools: ["ping"],
+      config: { url: "https://mcp.example.com/mcp", transport: "http" },
+    }],
+  });
+  await render();
+  expect(host.textContent).toContain("失败");
+  expect(host.textContent).not.toContain("已连接");
+});
+
 it("shows a load error without claiming the MCP list is empty", async () => {
   apiMock.mcpServers.mockRejectedValue(new Error("需要管理员权限"));
   await render();

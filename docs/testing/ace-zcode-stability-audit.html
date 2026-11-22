@@ -714,6 +714,12 @@
 <p><strong>验收</strong> McpHub 新增加载失败用例：显示「需要管理员权限」且不出现「暂无 MCP 服务」；组件 8 项、TypeScript 通过。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-error-priority">
+<h3>Web MCP 状态的错误优先显示</h3>
+<p>连接状态与错误可能同时存在：旧 worker 仍有工具，但重连已失败。卡片样式原先把错误标红，文字却优先显示「已连接」，状态自相矛盾。现在文字也按错误、重连中、已连接、未连接排序，与实际错误一致；工具列表与配置仍照常显示。</p>
+<p><strong>验收</strong> McpHub 新增 connected+error 用例：卡片显示「失败」且不出现「已连接」；组件 9 项、TypeScript 通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

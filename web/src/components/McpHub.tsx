@@ -324,7 +324,7 @@ export default function McpHub() {
                 <header className="mcp-card__head">
                   <strong>{server.name}</strong>
                   <span className={server.error ? "mcp-chip is-error" : server.config_pending ? "mcp-chip is-pending" : server.connected ? "mcp-chip is-online" : "mcp-chip"}>
-                    {server.connected && !server.config_pending ? "已连接" : server.config_pending ? "重连中" : server.error ? "失败" : "未连接"}
+                    {server.error ? "失败" : server.config_pending ? "重连中" : server.connected ? "已连接" : "未连接"}
                   </span>
                 </header>
                 <p className="mcp-card__meta">
