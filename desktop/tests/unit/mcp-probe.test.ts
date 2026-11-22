@@ -67,4 +67,10 @@ it('probes an HTTP endpoint from the MCP settings form without saving', async ()
   expect(result.textContent).toContain('ping, echo');
   expect(apiMock.createMcpServer).not.toHaveBeenCalled();
   expect(apiMock.updateMcpServer).not.toHaveBeenCalled();
+
+  const stdio = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="stdio"]')!;
+  stdio.checked = true;
+  stdio.dispatchEvent(new Event('change', { bubbles: true }));
+  expect(result.hidden).toBe(true);
+  expect(result.textContent).toBe('');
 });

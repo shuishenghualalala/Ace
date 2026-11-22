@@ -550,9 +550,19 @@ function bindMcpFormOnce(): void {
   formBound = true;
 
   // 传输类型切换显隐字段
+  const clearProbeResult = (): void => {
+    const result = document.getElementById('mcp-probe-result');
+    if (result) {
+      result.hidden = true;
+      result.textContent = '';
+    }
+  };
   document.querySelectorAll<HTMLInputElement>('input[name="mcp-transport"]').forEach((input) => {
     input.addEventListener('change', () => {
-      if (input.checked) setTransportFields(input.value as McpTransport);
+      if (input.checked) {
+        setTransportFields(input.value as McpTransport);
+        clearProbeResult();
+      }
     });
   });
 
