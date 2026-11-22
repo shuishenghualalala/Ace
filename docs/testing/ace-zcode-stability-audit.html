@@ -1271,5 +1271,9 @@
 <h3>全量后端复跑（2026-11-22）</h3>
 <p>在共享工作树完成 compact 与 external 懒加载后复跑后端全量（不含 <code>tests/security</code>）：<code>5075 passed, 30 skipped, 20 deselected</code>，0 failed，用时 32 分 48 秒。该结果包含并行会话新增的 session goals 与桌面相关后端用例；安全套件仍单独统计。</p>
 </section>
+<section id="external-lazy-ab">
+<h3>External 懒加载 A/B（2026-11-22）</h3>
+<p>在相同机器、临时配置与干净检出上对照：<code>722f86a7</code> 的 <code>build_app</code> 为 3.683 秒、<code>startup</code> 为 0.627 秒；加入 external 包懒加载后的当前 HEAD 为 2.941 秒、0.501 秒，分别减少约 0.742 和 0.126 秒。<code>crew.app</code> 导入为 2.275 秒。该对照仍不含 Electron、浏览器宿主、发行包进程与首轮响应，不能替代发行包冷启动测量。</p>
+</section>
 </body>
 </html>
