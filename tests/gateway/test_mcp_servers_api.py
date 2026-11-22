@@ -533,6 +533,38 @@ async def test_create_rejects_invalid_header_name(api):
     assert "HTTP token" in response.json()["error"]
 
 
+async def test_create_rejects_too_many_headers(api):
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "many-headers",
+            "transport": "http",
+            "url": "https://example.com/mcp",
+            "headers": {f"X-{index}": "value" for index in range(129)},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 400
+    assert "数量" in response.json()["error"]
+
+
+async def test_create_rejects_long_header_value(api):
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "long-header",
+            "transport": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"X-Long": "a" * 8193},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 400
+    assert "8192" in response.json()["error"]
+
+
 async def test_probe_rejects_non_admin(api, monkeypatch):
     from crew.gateway.auth import AuthenticationError
     import crew.gateway.routers.mcp_servers as router
