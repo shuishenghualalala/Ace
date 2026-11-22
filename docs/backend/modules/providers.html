@@ -61,7 +61,7 @@
       <tr><td><code>anthropic_provider</code></td><td>Anthropic Messages API Provider（httpx 直连）。base_url 覆盖后同样服务走 Anthropic 协议的厂商端点（Kimi For Coding、MiniMax）。</td><td>已落地</td></tr>
       <tr><td><code>vendors（厂商档案）</code></td><td>厂商注册表：<code>VendorProfile</code>（协议 / base_url / api_key_env / 模型目录）+ <code>VendorCompat</code>（思考参数格式、reasoning_effort 支持、回传要求、等级映射）。收录 DeepSeek、ZAI（全球/CN coding 端点）、Moonshot（全球/CN）、Kimi For Coding（Anthropic 协议）、MiniMax（全球/CN，Anthropic 协议）、Qwen Token Plan。</td><td>已落地</td></tr>
       <tr><td><code>ssl_context</code></td><td>进程级共享 SSLContext（cadata 一次性加载），所有 provider 的 httpx/openai 客户端共用，避免 cacert.pem 病态微读拖慢启动。</td><td>已落地</td></tr>
-      <tr><td><code>http_client</code></td><td>统一的 httpx 客户端构造边界（Provider 与远程登录共用）；先把 <code>NO_PROXY</code> 中的 <code>[::1]</code>/<code>[::]</code> 归一为无方括号 IPv6（保留 loopback 直连语义），其余代理环境 <code>InvalidURL</code> 抛出可操作的 <code>RuntimeError</code>，提示检查 <code>NO_PROXY/HTTP_PROXY/HTTPS_PROXY</code> 及 IPv6 方括号。</td><td>已落地</td></tr>
+      <tr><td><code>http_client</code></td><td>统一的 httpx 客户端构造边界（Provider 与远程登录共用）；先把 <code>NO_PROXY</code> 中的 <code>[::1]</code>/<code>[::]</code>（含端口形式）归一为无方括号 loopback IPv6，保留直连语义，其余代理环境 <code>InvalidURL</code> 抛出可操作的 <code>RuntimeError</code>，提示检查 <code>NO_PROXY/HTTP_PROXY/HTTPS_PROXY</code>。</td><td>已落地</td></tr>
       <tr><td><code>classify（异常分类）</code></td><td>两个 provider 共用的异常分类助手：<code>classify_provider_error()</code> 把 SDK/httpx 异常解析为 <code>ErrorClassification(kind/status/retryable/retry_delay/category)</code>；吸收原有两份类名启发式（isinstance + __cause__ 递归 + 消息文本 + 类名/status）；429/503 解析 Retry-After（响应头秒数格式优先，body retry_delay 兜底，解析失败静默回落 None）；过载（503）与欠费从可重试中分离。</td><td>已落地</td></tr>
     </tbody>
   </table>

@@ -831,7 +831,7 @@
 <article id="provider-proxy-error">
 <h3>Provider 启动时的代理环境错误</h3>
 <p>httpx 读取 <code>NO_PROXY</code> 中的方括号 IPv6（如 <code>[::1]</code>）会在构造客户端时报底层 <code>Invalid port: ':1]'</code>，Provider 初始化因此失败且原因难定位。新增 <code>crew.providers.http_client.create_async_client</code>：先把 <code>[::1]</code>/<code>[::]</code> 归一为无方括号 IPv6，保留 loopback 直连语义；其余 <code>InvalidURL</code> 抛出明确提示，要求检查 <code>NO_PROXY/HTTP_PROXY/HTTPS_PROXY</code>。OpenAI、Anthropic Provider 与远程登录路由共用该边界。</p>
-<p><strong>验收</strong> 方括号归一用例断言环境被修正；注入 <code>InvalidURL</code> 用例断言提示包含 <code>NO_PROXY</code>；Provider 生命周期 16 项、客户端边界 2 项、远程登录 12 项通过，Ruff 通过。</p>
+<p><strong>验收</strong> 方括号归一（含端口形式）与 <code>InvalidURL</code> 提示用例通过；Provider 生命周期 16 项、客户端边界 3 项、远程登录 12 项通过，Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/providers/http_client.py</code>、<code>openai_provider.py</code>、<code>anthropic_provider.py</code>、<code>tests/test_provider_http_client.py</code>。</p>
 </article>
 <article id="external-marketplace-sources">

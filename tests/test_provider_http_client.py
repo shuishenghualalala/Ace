@@ -27,3 +27,12 @@ def test_bracketed_ipv6_loopback_is_normalized(monkeypatch):
         assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,::1"
     finally:
         asyncio.run(client.aclose())
+
+
+def test_bracketed_ipv6_entry_with_port_is_normalized_to_loopback(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "[::1]:8080")
+    client = create_async_client(timeout=1)
+    try:
+        assert os.environ["NO_PROXY"] == "::1"
+    finally:
+        asyncio.run(client.aclose())

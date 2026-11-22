@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import httpx
+
+_BRACKETED_LOOPBACK_RE = re.compile(r"\[(::1|::)\](?::\d+)?")
 
 
 def _normalize_no_proxy_environment() -> None:
     """httpx treats bracketed IPv6 loopback as a port; preserve the bypass intent."""
     for key in ("NO_PROXY", "no_proxy"):
         value = os.environ.get(key)
-        if value and ("[::1]" in value or "[::]" in value):
-            os.environ[key] = value.replace("[::1]", "::1").replace("[::]", "::")
+        if value and _BRACKETED_LOOPBACK_RE.search(value):
+            os.environ[key] = _BRACKETED_LOOPBACK_RE.sub(r"\1", value)
 
 
 def create_async_client(**kwargs: Any) -> httpx.AsyncClient:
