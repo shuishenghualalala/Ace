@@ -764,8 +764,8 @@
 </article>
 <article id="web-mcp-auto-connect-e2e">
 <h3>Web MCP 手动连接的端到端验收</h3>
-<p>使用生产 Web 构建、隔离 Gateway 与真实本地 MCP HTTP 服务：新增服务时取消「启动时自动连接」，保存后卡片显示未连接且没有工具；点击「重连」后变为已连接并出现 <code>ping</code> 工具，删除后回到空态。全程浏览器无 pageerror，Gateway 正常退出。</p>
-<p><strong>证据</strong> <code>mcp-hub-real-ed8efef620/web-mcp-manual-saved.png</code>、<code>web-mcp-manual-connected.png</code>。该结果证明 Web 入口与 Gateway/manager 的真实链路，不覆盖真实重启后的启动扫描。</p>
+<p>使用生产 Web 构建、隔离 Gateway 与真实本地 MCP HTTP 服务：新增服务时取消「启动时自动连接」，保存后卡片显示「手动」且没有工具；点击「重连」后变为已连接并出现 <code>ping</code> 工具，删除后回到空态。全程浏览器无 pageerror，Gateway 正常退出。</p>
+<p><strong>证据</strong> <code>mcp-hub-real-b5eff05115/web-mcp-manual-saved.png</code>、<code>web-mcp-manual-connected.png</code>。该结果证明 Web 入口与 Gateway/manager 的真实链路，不覆盖真实重启后的启动扫描。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/mcp_management.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
 <article id="mcp-restart-auto-connect-e2e">
