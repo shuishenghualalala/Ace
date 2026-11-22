@@ -702,6 +702,12 @@
 <p><strong>验收</strong> Desktop 探测组件测试 3 项通过，新增打开后按 Escape 隐藏弹层用例；TypeScript 通过。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/mcp-probe.test.ts</code>、<code>docs/frontend/desktop-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="desktop-mcp-focus">
+<h3>Desktop MCP 弹层的焦点进入、循环与恢复</h3>
+<p>Desktop MCP 弹层打开后焦点留在触发按钮，Tab 可走到遮罩外；关闭后也没有回到入口。现在打开时记录触发元素并聚焦名称输入，Tab/Shift+Tab 在弹层可用控件间循环，关闭后恢复触发元素焦点。Esc 关闭与遮罩点击共用同一恢复逻辑；隐藏状态不响应键盘。</p>
+<p><strong>验收</strong> Desktop 探测组件测试 3 项通过，Esc 用例断言打开聚焦名称输入、关闭后回到触发按钮；TypeScript 通过。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/mcp-probe.test.ts</code>、<code>docs/frontend/desktop-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

@@ -530,12 +530,15 @@ function closeMcpServerModal(): void {
   probeAbort = null;
   const overlay = $('#mcp-server-overlay') as HTMLElement | null;
   if (overlay) overlay.hidden = true;
+  lastMcpFocus?.focus();
+  lastMcpFocus = null;
 }
 
 /** 打开新增/编辑弹层。 */
 export async function openMcpServerModal(server?: McpServerRow): Promise<void> {
   const overlay = $('#mcp-server-overlay') as HTMLElement | null;
   if (!overlay) return;
+  lastMcpFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   fillMcpForm(server);
   probeEpoch += 1;
   probeAbort?.abort();
@@ -552,8 +555,10 @@ export async function openMcpServerModal(server?: McpServerRow): Promise<void> {
   }
   if (probeBtn) probeBtn.disabled = false;
   overlay.hidden = false;
+  (document.getElementById('mcp-name') as HTMLInputElement | null)?.focus();
 }
 
+let lastMcpFocus: HTMLElement | null = null;
 let formBound = false;
 let probeEpoch = 0;
 let probeAbort: AbortController | null = null;
@@ -689,9 +694,25 @@ function bindMcpFormOnce(): void {
   });
   document.addEventListener('keydown', (e) => {
     const overlay = $('#mcp-server-overlay') as HTMLElement | null;
-    if (e.key === 'Escape' && overlay && !overlay.hidden) {
+    if (!overlay || overlay.hidden) return;
+    if (e.key === 'Escape') {
       e.preventDefault();
       closeMcpServerModal();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const focusables = Array.from(overlay.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href]',
+    ));
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
     }
   });
   document.getElementById('mcp-server-delete')?.addEventListener('click', async () => {

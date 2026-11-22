@@ -43,6 +43,23 @@ function setupForm(): void {
     </div>`;
 }
 
+it('closes the MCP form with Escape', async () => {
+  vi.resetModules();
+  const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
+  bindMcpPane();
+  const trigger = document.createElement('button');
+  document.body.appendChild(trigger);
+  trigger.focus();
+  expect(document.activeElement).toBe(trigger);
+  await openMcpServerModal();
+  const overlay = document.getElementById('mcp-server-overlay') as HTMLElement;
+  expect(overlay.hidden).toBe(false);
+  expect(document.activeElement).toBe(document.getElementById('mcp-name'));
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+  expect(overlay.hidden).toBe(true);
+  expect(document.activeElement).toBe(trigger);
+});
+
 it('ignores a late probe result after switching transport', async () => {
   vi.resetModules();
   let resolveProbe!: (value: unknown) => void;
@@ -74,17 +91,6 @@ it('ignores a late probe result after switching transport', async () => {
   const button = document.getElementById('mcp-server-probe') as HTMLButtonElement;
   expect(button.disabled).toBe(false);
   expect(button.textContent).toBe('测试连接');
-});
-
-it('closes the MCP form with Escape', async () => {
-  vi.resetModules();
-  const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
-  bindMcpPane();
-  await openMcpServerModal();
-  const overlay = document.getElementById('mcp-server-overlay') as HTMLElement;
-  expect(overlay.hidden).toBe(false);
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-  expect(overlay.hidden).toBe(true);
 });
 
 it('probes an HTTP endpoint from the MCP settings form without saving', async () => {
