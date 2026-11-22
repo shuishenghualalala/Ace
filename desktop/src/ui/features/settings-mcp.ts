@@ -386,7 +386,9 @@ export async function renderMcpServers(): Promise<void> {
     id: server.name,
     title: server.name,
     description: `${mcpTransportLabel(server.transport)} · ${
-      server.tools.length ? `${server.tools.length} 个工具` : '无工具'
+      (server.tool_count ?? server.tools.length)
+        ? `${server.tool_count ?? server.tools.length} 个工具`
+        : '无工具'
     }`,
     status: server.error ? '失败' : mcpStatusText(server),
     ...(server.error ? { error: server.error } : {}),

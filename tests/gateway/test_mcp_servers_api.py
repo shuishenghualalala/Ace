@@ -437,6 +437,23 @@ async def test_update_masked_url_query_preserves_secret(api):
     assert persisted["mcp_servers"]["url-secret"]["url"].endswith("token=stored&mode=2")
 
 
+async def test_list_caps_reported_tool_names(api, monkeypatch):
+    client, crew, _ = api
+    assert crew.mcp_manager is not None
+    monkeypatch.setattr(crew.mcp_manager, "status", lambda: [{
+        "name": "big",
+        "transport": "http",
+        "connected": True,
+        "error": "",
+        "tools": [f"tool-{index}" for index in range(60)],
+        "config": {"url": "http://127.0.0.1:9/mcp", "transport": "http"},
+    }])
+    response = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
+    server = next(item for item in response.json()["servers"] if item["name"] == "big")
+    assert len(server["tools"]) == 50
+    assert server["tool_count"] == 60
+
+
 async def test_secret_env_redacted_in_get(api):
     client, _, _ = api
     resp = await client.post(

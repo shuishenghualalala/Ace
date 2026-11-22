@@ -600,6 +600,12 @@
 <p><strong>验收</strong> CLI 新增用例通过：保存的 Authorization 与 URL token 被补全，mode 使用新值；CLI 探测定向 3 项与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>crew/state/config.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-status-tool-cap">
+<h3>MCP 状态列表的工具名上限</h3>
+<p>异常或恶意 MCP 服务可声明大量工具，<code>GET /api/mcp/servers</code> 会把全部名称放进每次状态响应。现在每个服务最多返回 50 个工具名，另给 <code>tool_count</code> 真实总数；Web/Desktop 使用该计数显示，不再用截断数组长度冒充总数。连接状态、错误和配置字段不变。</p>
+<p><strong>验收</strong> 新增 60 工具状态用例通过：响应 50 个名称、<code>tool_count=60</code>；McpHub 3 项、Web/Desktop TypeScript、Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

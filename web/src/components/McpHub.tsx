@@ -241,7 +241,9 @@ export default function McpHub() {
                 </p>
                 {server.error && <p className="mcp-card__status">{server.error}</p>}
                 <p className="mcp-card__tools">
-                  {server.tools.length ? `工具：${server.tools.slice(0, 8).join(", ")}` : "未发现工具"}
+                  {(server.tool_count ?? server.tools.length)
+                    ? `工具（${server.tool_count ?? server.tools.length}）：${server.tools.slice(0, 8).join(", ")}`
+                    : "未发现工具"}
                 </p>
                 <div className="mcp-card__actions">
                   <button className="hub-btn" type="button" onClick={() => openEdit(server)}>编辑</button>

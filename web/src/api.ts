@@ -286,6 +286,7 @@ export interface McpServerRow {
   connected: boolean;
   error: string;
   tools: string[];
+  tool_count?: number;
   config: McpServerConfig;
 }
 

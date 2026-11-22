@@ -27,6 +27,7 @@ from crew.state.config import merge_mcp_url_secrets
 # env key 命中这些后缀（不区分大小写）视为敏感，GET 脱敏。
 _SECRET_KEY_RE = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)$", re.IGNORECASE)
 _SENSITIVE_NAME_RE = re.compile(r"(AUTH|COOKIE|KEY|SECRET|TOKEN|PASSWORD)", re.IGNORECASE)
+_STATUS_MAX_TOOLS = 50
 
 
 def _redact_env(env: Any) -> dict[str, Any]:
@@ -102,12 +103,14 @@ def create_mcp_servers_router(crew) -> APIRouter:
         result = []
         for row in mgr.status():
             config = configured.get(row["name"], row["config"])
+            tools = [str(item) for item in row["tools"]]
             result.append({
                 "name": row["name"],
                 "transport": config.get("transport") or row["transport"],
                 "connected": row["connected"],
                 "error": row["error"],
-                "tools": row["tools"],
+                "tools": tools[:_STATUS_MAX_TOOLS],
+                "tool_count": len(tools),
                 # The persisted config is the source of truth immediately after an
                 # update; the worker may still be reconnecting with the previous one.
                 "config": _redact_config(config),
