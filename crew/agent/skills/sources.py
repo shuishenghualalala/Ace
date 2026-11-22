@@ -375,11 +375,11 @@ def refresh_skill_source(raw_path: str) -> dict:
         raise
     if old_cache and old_cache != str(new_cache):
         shutil.rmtree(old_cache, ignore_errors=True)
-    return _public({
+    return _public(_source_stats({
         "kind": "url", "url": url, "cache_dir": str(new_cache),
         "label": label, "added_at": str(entry.get("added_at") or ""),
         "refreshed_at": _now(),
-    })
+    }))
 
 
 def _match_source(items: list[dict], text: str) -> dict | None:
@@ -409,7 +409,7 @@ def add_skill_source(raw_path: str, *, label: str = "") -> dict:
     if text.lower().startswith(("http://", "https://")):
         if text.lower().startswith("http://"):
             raise SkillSourceError("source_insecure", "远程市场源必须使用 HTTPS")
-        return _public(_add_url_source(text, display))
+        return _public(_source_stats(_add_url_source(text, display)))
     if len(text) > _MAX_PATH_CHARS:
         raise SkillSourceError("source_too_long", "市场源路径过长")
     path = _normalized_dir(text)
@@ -428,7 +428,7 @@ def add_skill_source(raw_path: str, *, label: str = "") -> dict:
             "label": display or path.name or str(path), "added_at": _now(),
         }
         _write_registry([*items, entry])
-        return _public(entry)
+        return _public(_source_stats(entry))
 
 
 def remove_skill_source(raw_path: str) -> bool:

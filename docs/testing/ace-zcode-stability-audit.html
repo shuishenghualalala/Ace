@@ -522,6 +522,12 @@
 <p><strong>验收</strong> 市场源定向 19 项通过，新增同名标签拒绝、两个来源均保留、再用路径移除一个的用例；Ruff 通过。Web/Desktop 始终传路径或 URL，不受影响。</p>
 <p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/cli/knowledge.py</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="market-source-stats-consistency">
+<h3>市场源诊断字段的一致性</h3>
+<p>来源列表已返回 <code>available</code>/<code>skill_count</code>，但登记与刷新响应仍只返回基础字段，调用方需要再列表一次才能确认结果。现在 <code>add_skill_source</code> 与 <code>refresh_skill_source</code> 的响应也带同一组诊断；本地目录不可用时显示「目录不可用」，URL 缓存缺失显示「缓存不可用」，避免把目录错误说成缓存问题。</p>
+<p><strong>验收</strong> 市场源定向 19 项、SkillsHub 5 项、Desktop 市场源组件 1 项通过；TypeScript、Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/cli/knowledge.py</code>、<code>web/src/components/SkillsHub.tsx</code>、<code>desktop/src/ui/features/skills-page.ts</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

@@ -426,7 +426,7 @@ export default function SkillsHub() {
                     <span className="hub__market-label">
                       {source.label}
                       {source.available === false
-                        ? "（缓存不可用）"
+                        ? source.kind === "url" ? "（缓存不可用）" : "（目录不可用）"
                         : source.skill_count != null ? `（${source.skill_count} 个技能）` : ""}
                     </span>
                     <code className="hub__market-path">{target}</code>

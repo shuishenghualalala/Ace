@@ -743,7 +743,10 @@ def _skill_source_list(args: Any, ctx: CliContext) -> CliResult:
     lines = []
     for item in sources:
         target = item.get("url") or item.get("path") or ""
-        status = "缓存不可用" if item.get("available") is False else f"{item.get('skill_count', 0)} 个技能"
+        if item.get("available") is False:
+            status = "缓存不可用" if item.get("kind") == "url" else "目录不可用"
+        else:
+            status = f"{item.get('skill_count', 0)} 个技能"
         lines.append(f"{item['label']}  {target}  {status}")
     text = "\n".join(lines)
     return CliResult(data=sources, text=text or "(未登记市场目录)")

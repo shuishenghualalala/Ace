@@ -524,7 +524,7 @@ async function openMarketSources(): Promise<void> {
         row.className = 'channel-connect-field';
         const label = document.createElement('strong');
         label.textContent = source.available === false
-          ? `${source.label}（缓存不可用）`
+          ? `${source.label}（${source.kind === 'url' ? '缓存不可用' : '目录不可用'}）`
           : source.skill_count != null ? `${source.label}（${source.skill_count} 个技能）` : source.label;
         const target = document.createElement('code');
         target.textContent = marketSourceTarget(source);
