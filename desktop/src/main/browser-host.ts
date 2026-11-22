@@ -77,6 +77,7 @@ const FILE_CHOOSER_GRACE_MS = 2_000;
 // an unreachable webfont can keep that promise pending until the command
 // deadline, so probe briefly and capture the painted frame through CDP instead.
 const SCREENSHOT_FONT_WAIT_MS = 2_000;
+const SCREENSHOT_FULL_PAGE_PLAYWRIGHT_WAIT_MS = 5_000;
 const DEBUGGER_SETUP_TIMEOUT_MS = 5_000;
 const ARTIFACT_SCHEME = 'crew-artifact';
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 25_000;
@@ -5150,10 +5151,15 @@ export class BrowserHost extends EventEmitter {
       if (!parsed.fullPage) return this.captureScreenshotFrame(tab, parsed, page);
       const fontsSettled = await this.screenshotFontsSettled(page);
       if (!fontsSettled) return this.captureScreenshotFrame(tab, parsed, page);
-      return page.screenshot({
-        ...commonOptions,
-        fullPage: true,
-      });
+      try {
+        return await page.screenshot({
+          ...commonOptions,
+          timeout: Math.min(commonOptions.timeout, SCREENSHOT_FULL_PAGE_PLAYWRIGHT_WAIT_MS),
+          fullPage: true,
+        });
+      } catch {
+        return this.captureScreenshotFrame(tab, parsed, page);
+      }
     })();
     let image: Buffer;
     try {

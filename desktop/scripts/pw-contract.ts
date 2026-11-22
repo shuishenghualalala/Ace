@@ -293,7 +293,8 @@ app.whenReady().then(async () => {
         '<!doctype html><meta charset="utf-8">'
         + '<title>BrowserHost output parity</title>'
         + '<button id="parity-target" type="button">Parity target</button>'
-        + '<div style="height:2400px">full-page-tail</div>',
+        + '<div style="height:2400px">full-page-tail</div>'
+        + '<div style="height:100px;background:#00ff00">full-page-bottom-marker</div>',
       );
       return;
     }
@@ -2678,6 +2679,9 @@ app.whenReady().then(async () => {
         throw new Error('strict ref public Locator.screenshot 未产出 PNG');
       }
 
+      const viewportBefore = await execute('eval', [
+        '() => ({ width: window.innerWidth, height: window.innerHeight })',
+      ]);
       const fullJpeg = path.join(artifacts, 'full.jpeg');
       const fullShot = await execute('screenshot', [
         '--full-page',
@@ -2694,6 +2698,29 @@ app.whenReady().then(async () => {
         || jpegBytes.at(-1) !== 0xd9
       ) {
         throw new Error('public Page.screenshot full-page JPEG 无效');
+      }
+      const fullImage = nativeImage.createFromBuffer(jpegBytes);
+      const fullSize = fullImage.getSize();
+      if (fullSize.height <= 800) {
+        throw new Error(`整页 JPEG 高度未超过视口: ${JSON.stringify(fullSize)}`);
+      }
+      const pixels = fullImage.toBitmap();
+      let bottomMarkerFound = false;
+      for (let y = Math.max(0, fullSize.height - 200); y < fullSize.height && !bottomMarkerFound; y += 1) {
+        for (let x = 0; x < fullSize.width; x += 1) {
+          const offset = (y * fullSize.width + x) * 4;
+          if (pixels[offset + 1] > 200 && pixels[offset] < 120 && pixels[offset + 2] < 120) {
+            bottomMarkerFound = true;
+            break;
+          }
+        }
+      }
+      if (!bottomMarkerFound) throw new Error('整页 JPEG 底部缺少绿色标记像素');
+      const viewportAfter = await execute('eval', [
+        '() => ({ width: window.innerWidth, height: window.innerHeight })',
+      ]);
+      if (viewportAfter.serialized !== viewportBefore.serialized) {
+        throw new Error('整页截图改变了自然 viewport');
       }
 
       const evaluated = await execute('eval', [
@@ -2803,7 +2830,10 @@ app.whenReady().then(async () => {
     } finally {
       await outputHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
-      await cleanupContractRoot(tempRoot);
+      await contractDeadline(cleanupContractRoot(tempRoot), 5_000, 'output parity profile cleanup')
+        .catch((error) => {
+          console.log(`Deferred output parity profile cleanup: ${String(error)}`);
+        });
     }
   });
 

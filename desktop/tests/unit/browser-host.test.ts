@@ -33,6 +33,7 @@ const electron = vi.hoisted(() => ({
   failInputType: '',
   screenshotVersion: 0,
   fontsPending: false,
+  pageScreenshotFails: false,
   loaderId: 'loader-1',
   layoutPageX: 0,
   layoutPageY: 0,
@@ -1041,6 +1042,7 @@ vi.mock('../../src/main/browser/playwright-engine', () => {
         locator: (selector: string) => makeLocator(selector, view, this),
         screenshot: async (options?: { type?: string }): Promise<Buffer> => {
           record('pageScreenshot', '', options);
+          if (electron.pageScreenshotFails) throw new Error('Playwright full-page capture failed');
           return screenshotImage(options);
         },
         ariaSnapshot: async (): Promise<string> => {
@@ -1488,6 +1490,7 @@ describe('BrowserHost', () => {
     electron.hitNodes = {};
     electron.failInputType = '';
     electron.screenshotVersion = 0;
+    electron.pageScreenshotFails = false;
     electron.loaderId = 'loader-1';
     electron.layoutPageX = 0;
     electron.layoutPageY = 0;
@@ -4668,7 +4671,7 @@ describe('BrowserHost', () => {
     expect(Number((pageScreenshot?.args[0] as { timeout?: number })?.timeout))
       .toBeGreaterThan(0);
     expect(Number((pageScreenshot?.args[0] as { timeout?: number })?.timeout))
-      .toBeLessThanOrEqual(15_000);
+      .toBeLessThanOrEqual(5_000);
     expect(electron.views[0].webContents.debugger.commands.some(
       (item: any) => item.method === 'Page.captureScreenshot',
     )).toBe(false);
@@ -4714,6 +4717,42 @@ describe('BrowserHost', () => {
       )).toBe(false);
     } finally {
       electron.fontsPending = false;
+      await host.dispose();
+    }
+  });
+
+  it('falls back to a CDP content capture when the ordinary full-page screenshot fails', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
+    await mkdir(outputDir, { recursive: true });
+    const png = path.join(outputDir, 'full-page-retry.png');
+    electron.pageScreenshotFails = true;
+    try {
+      const result: any = await host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          command: 'screenshot',
+          args: ['--full-page', '--type', 'png', '--scale', 'css', png],
+          proxy_url: PROXY_URL,
+        },
+      });
+      expect(result.data).toMatchObject({ path: png, type: 'png' });
+      expect(playwright.calls.some((call) => call.method === 'pageScreenshot')).toBe(true);
+      const capture = electron.views[0].webContents.debugger.commands.find(
+        (item: any) => item.method === 'Page.captureScreenshot',
+      );
+      expect(capture?.params).toMatchObject({
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: true,
+        clip: { x: 0, y: 0, width: 2048, height: 4096, scale: 1 },
+      });
+      expect(await stat(png)).toMatchObject({ size: 25 });
+    } finally {
+      electron.pageScreenshotFails = false;
       await host.dispose();
     }
   });
