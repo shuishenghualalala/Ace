@@ -46,7 +46,11 @@ function setupForm(): void {
 it('ignores a late probe result after switching transport', async () => {
   vi.resetModules();
   let resolveProbe!: (value: unknown) => void;
-  apiMock.probeMcpServer.mockReturnValue(new Promise((resolve) => { resolveProbe = resolve; }));
+  let probeSignal: AbortSignal | undefined;
+  apiMock.probeMcpServer.mockImplementation((_payload: unknown, signal?: AbortSignal) => {
+    probeSignal = signal;
+    return new Promise((resolve) => { resolveProbe = resolve; });
+  });
   const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
   bindMcpPane();
   await openMcpServerModal();
@@ -60,6 +64,7 @@ it('ignores a late probe result after switching transport', async () => {
   const stdio = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="stdio"]')!;
   stdio.checked = true;
   stdio.dispatchEvent(new Event('change', { bubbles: true }));
+  expect(probeSignal?.aborted).toBe(true);
   resolveProbe({ ok: true, tools: ['ping'], tool_count: 1, elapsed_ms: 5, error: null });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -88,7 +93,7 @@ it('probes an HTTP endpoint from the MCP settings form without saving', async ()
     transport: 'http',
     url: 'https://mcp.example.com/mcp',
     headers: { Authorization: 'Bearer secret' },
-  }));
+  }, expect.anything()));
 
   const result = document.getElementById('mcp-probe-result')!;
   await vi.waitFor(() => expect(result.textContent).toContain('连接成功'));

@@ -125,10 +125,11 @@ export const toolsApi = {
     getJSON<{ ok: boolean; servers: McpServerRow[] }>(`/api/mcp/servers/${encodeURIComponent(name)}/reload`, {
       method: 'POST',
     }),
-  probeMcpServer: (payload: McpServerPayload) =>
+  probeMcpServer: (payload: McpServerPayload, signal?: AbortSignal) =>
     getJSON<{ ok: boolean; tools: string[]; tool_count: number; elapsed_ms: number; error: string | null }>('/api/mcp/servers/probe', {
       method: 'POST',
       ...jsonBody(payload),
+      ...(signal ? { signal } : {}),
     }),
 
   // ── CUA Driver（Computer Use）一键安装（/api/mcp/cua-driver/*，登录用户可用）──

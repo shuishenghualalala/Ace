@@ -522,6 +522,8 @@ function fillMcpForm(server?: McpServerRow): void {
 
 function closeMcpServerModal(): void {
   probeEpoch += 1;
+  probeAbort?.abort();
+  probeAbort = null;
   const overlay = $('#mcp-server-overlay') as HTMLElement | null;
   if (overlay) overlay.hidden = true;
 }
@@ -532,6 +534,8 @@ export async function openMcpServerModal(server?: McpServerRow): Promise<void> {
   if (!overlay) return;
   fillMcpForm(server);
   probeEpoch += 1;
+  probeAbort?.abort();
+  probeAbort = null;
   const title = document.getElementById('mcp-server-title');
   if (title) title.textContent = server ? `编辑：${server.name}` : '新增 MCP 服务';
   const deleteBtn = document.getElementById('mcp-server-delete') as HTMLButtonElement | null;
@@ -548,6 +552,7 @@ export async function openMcpServerModal(server?: McpServerRow): Promise<void> {
 
 let formBound = false;
 let probeEpoch = 0;
+let probeAbort: AbortController | null = null;
 function bindMcpFormOnce(): void {
   if (formBound) return;
   formBound = true;
@@ -572,6 +577,8 @@ function bindMcpFormOnce(): void {
     input.addEventListener('change', () => {
       if (input.checked) {
         probeEpoch += 1;
+        probeAbort?.abort();
+        probeAbort = null;
         setTransportFields(input.value as McpTransport);
         resetProbeControl();
       }
@@ -631,6 +638,9 @@ function bindMcpFormOnce(): void {
         return;
       }
       const label = button.textContent ?? '测试连接';
+      probeAbort?.abort();
+      const controller = new AbortController();
+      probeAbort = controller;
       const epoch = ++probeEpoch;
       button.disabled = true;
       button.textContent = '测试中…';
@@ -644,7 +654,7 @@ function bindMcpFormOnce(): void {
           transport: payload.transport,
           url: payload.url,
           ...(payload.headers ? { headers: payload.headers } : {}),
-        });
+        }, controller.signal);
         if (probeEpoch !== epoch) return;
         if (probeResult) {
           if (result.ok) {
@@ -657,12 +667,13 @@ function bindMcpFormOnce(): void {
           }
         }
       } catch (error) {
-        if (probeEpoch !== epoch) return;
+        if (probeEpoch !== epoch || controller.signal.aborted) return;
         if (probeResult) probeResult.textContent = `连接失败：${(error as Error).message}`;
       } finally {
         if (probeEpoch === epoch) {
           button.disabled = false;
           button.textContent = label;
+          if (probeAbort === controller) probeAbort = null;
         }
       }
     })();
