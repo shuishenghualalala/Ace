@@ -768,6 +768,12 @@
 <p><strong>证据</strong> <code>mcp-hub-real-ed8efef620/web-mcp-manual-saved.png</code>、<code>web-mcp-manual-connected.png</code>。该结果证明 Web 入口与 Gateway/manager 的真实链路，不覆盖真实重启后的启动扫描。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/mcp_management.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-restart-auto-connect-e2e">
+<h3>MCP 重启扫描与手动连接的真实验收</h3>
+<p>用隔离用户目录、真实 Gateway 与 stdio MCP fixture 启动：配置 <code>auto_connect=false</code> 的服务在启动后状态为未连接、工具为空，未启动宿主进程。随后通过管理 API 显式 reload，服务连接成功并出现 <code>echo</code> 工具，Gateway 正常退出。测试进程显式设置既有的 <code>ACE_ALLOW_HOST_MCP_STDIO=1</code> 以允许隔离 fixture 启动，未修改产品配置或放宽默认策略。</p>
+<p><strong>证据</strong> <code>mcp-restart-c59ec38298/gateway.log</code>；输出为 <code>saved unconnected at startup, connected after explicit reload</code>。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>（启动扫描跳过）、<code>crew/gateway/routers/mcp_servers.py</code>（reload）、<code>tests/fixtures/echo_mcp_server.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
