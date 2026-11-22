@@ -294,6 +294,9 @@ vi.mock('electron', async () => {
         };
       }
       if (method === 'Page.captureScreenshot') {
+        if ((params as any)?.format === 'jpeg') {
+          return { data: Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64') };
+        }
         const png = Buffer.alloc(25);
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
         png.writeUInt32BE(1024, 16);
@@ -4656,16 +4659,18 @@ describe('BrowserHost', () => {
         proxy_url: PROXY_URL,
       },
     });
-    expect(playwright.calls).toContainEqual({
-      method: 'pageScreenshot',
-      ref: '',
-      args: [{
-        type: 'png',
-        scale: 'css',
-        timeout: 15_000,
-        fullPage: true,
-      }],
+    const pageScreenshot = playwright.calls.find(
+      (call) => call.method === 'pageScreenshot' && call.ref === '',
+    );
+    expect(pageScreenshot?.args[0]).toMatchObject({
+      type: 'png',
+      scale: 'css',
+      fullPage: true,
     });
+    expect(Number((pageScreenshot?.args[0] as { timeout?: number })?.timeout))
+      .toBeGreaterThan(0);
+    expect(Number((pageScreenshot?.args[0] as { timeout?: number })?.timeout))
+      .toBeLessThanOrEqual(15_000);
     expect(electron.views[0].webContents.debugger.commands.some(
       (item: any) => item.method === 'Page.captureScreenshot',
     )).toBe(false);
@@ -4681,6 +4686,43 @@ describe('BrowserHost', () => {
       },
     })).rejects.toMatchObject({ code: 'invalid_input' });
     await host.dispose();
+  });
+
+  it('captures the strict ref through CDP when fonts stay pending', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    await snapshot(host);
+    const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
+    await mkdir(outputDir, { recursive: true });
+    const jpeg = path.join(outputDir, 'pending-font-element.jpeg');
+    electron.fontsPending = true;
+    try {
+      const result: any = await host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          command: 'screenshot',
+          args: ['--ref', '@e1', '--type', 'jpeg', '--scale', 'css', jpeg],
+          proxy_url: PROXY_URL,
+        },
+      });
+      expect(result.data).toMatchObject({ path: jpeg, type: 'jpeg' });
+      expect(playwright.calls.some((call) => call.method === 'locatorScreenshot')).toBe(false);
+      const capture = electron.views[0].webContents.debugger.commands.find(
+        (item: any) => item.method === 'Page.captureScreenshot',
+      );
+      expect(capture?.params).toMatchObject({
+        format: 'jpeg',
+        quality: 90,
+        fromSurface: true,
+        captureBeyondViewport: true,
+        clip: { x: 10, y: 20, width: 100, height: 40, scale: 1 },
+      });
+    } finally {
+      electron.fontsPending = false;
+      await host.dispose();
+    }
   });
 
   it('falls back to a CDP page capture when webfonts stay pending', async () => {

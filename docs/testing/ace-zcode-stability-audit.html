@@ -550,8 +550,8 @@
 </article>
 <article id="browser-screenshot-fonts">
 <h3>页面字体加载挂起时导出截图</h3>
-<p>用户导出截图使用 Playwright 的 Page 截图。Playwright 在截图前等待 <code>document.fonts.ready</code>；页面引用无法完成的 Web 字体时，该 Promise 一直挂起，截图直到命令截止才超时，最终没有 PNG。Ace 先以 2 秒上限探测字体；正常就绪时仍走原 Playwright 路径。探测未就绪时改用 CDP <code>Page.captureScreenshot</code> 按布局尺寸裁剪当前已绘制帧，保留整页/视口、PNG/JPEG、CSS/设备像素选项以及原有的页面身份、字节签名和路径归属校验。元素引用截图与正常路径不变。</p>
-<p><strong>验收</strong> 浏览器宿主 88 项通过，新增用例复现字体挂起并断言不调用 Playwright 页面截图、改用 CDP 整页裁剪。桌面全量 2410 项、209 个文件通过，TypeScript、定向 ESLint 和隔离生产构建通过。真实 Chromium 加载挂起字体的回环页面：<code>document.fonts.ready</code> 在 2 秒内未完成，Playwright 截图在 2.5 秒超时，CDP 后备生成 900×600、7,282 字节的有效 PNG。该后备未在打包 Electron 内重跑，元素级截图仍可能在挂起字体上等到超时。</p>
+<p>用户导出截图使用 Playwright 的 Page 截图。Playwright 在截图前等待 <code>document.fonts.ready</code>；页面引用无法完成的 Web 字体时，该 Promise 一直挂起，截图直到命令截止才超时，最终没有 PNG。Ace 先以 2 秒上限探测字体；正常就绪时仍走原 Playwright 路径。探测未就绪时改用 CDP <code>Page.captureScreenshot</code> 按布局尺寸裁剪当前已绘制帧：整页使用内容尺寸，视口使用当前滚动位置，元素引用使用 locator 边界框并叠加滚动偏移。保留 PNG/JPEG、CSS/设备像素选项以及原有的页面身份、字节签名和路径归属校验。</p>
+<p><strong>验收</strong> 浏览器宿主 89 项通过，新增两例复现字体挂起：页面整页截图不调用 Playwright 页面截图，元素引用不调用 locator 截图，二者都改用 CDP 裁剪并核对裁剪参数。桌面全量 2411 项、209 个文件通过，TypeScript、定向 ESLint 和隔离生产构建通过。真实 Chromium 加载挂起字体的回环页面：<code>document.fonts.ready</code> 在 2 秒内未完成，Playwright 截图在 2.5 秒超时，CDP 后备生成 900×600、7,282 字节的有效 PNG。元素后备由单元测试中的 CDP 契约验证，未在打包 Electron 内重跑。</p>
 <p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code>、<code>desktop/tests/unit/browser-host.test.ts</code>。截图 <code>font-screenshot-proof/cdp-font-fallback.png</code>。Playwright <code>coreBundle.js</code> 的 <code>_preparePageForScreenshot</code> 等待字体。</p>
 </article>
 <article id="web-slash-commands">

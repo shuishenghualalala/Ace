@@ -4999,6 +4999,7 @@ export class BrowserHost extends EventEmitter {
     tab: BrowserTab,
     parsed: ReturnType<typeof parseScreenshotArgs>,
     page: unknown,
+    element?: { x: number; y: number; width: number; height: number },
   ): Promise<Buffer> {
     type Size = { width?: number; height?: number };
     type Metrics = {
@@ -5012,8 +5013,12 @@ export class BrowserHost extends EventEmitter {
     if (!viewport) {
       throw new BrowserHostError('无法读取页面尺寸，截图未生成', { code: 'invalid_screenshot' });
     }
-    const cssWidth = Math.round(parsed.fullPage ? Number(content?.width ?? 0) : Number(viewport.clientWidth ?? 0));
-    const cssHeight = Math.round(parsed.fullPage ? Number(content?.height ?? 0) : Number(viewport.clientHeight ?? 0));
+    const cssWidth = Math.round(parsed.fullPage
+      ? Number(content?.width ?? 0)
+      : Number(element?.width ?? viewport.clientWidth ?? 0));
+    const cssHeight = Math.round(parsed.fullPage
+      ? Number(content?.height ?? 0)
+      : Number(element?.height ?? viewport.clientHeight ?? 0));
     if (!(cssWidth > 0) || !(cssHeight > 0)) {
       throw new BrowserHostError('页面尺寸无效，截图未生成', { code: 'invalid_screenshot' });
     }
@@ -5039,10 +5044,10 @@ export class BrowserHost extends EventEmitter {
       format: parsed.type,
       ...(parsed.type === 'jpeg' ? { quality: 90 } : {}),
       fromSurface: true,
-      captureBeyondViewport: parsed.fullPage,
+      captureBeyondViewport: parsed.fullPage || element !== undefined,
       clip: {
-        x: parsed.fullPage ? 0 : Number(viewport.pageX ?? 0),
-        y: parsed.fullPage ? 0 : Number(viewport.pageY ?? 0),
+        x: element ? Number(viewport.pageX ?? 0) + element.x : parsed.fullPage ? 0 : Number(viewport.pageX ?? 0),
+        y: element ? Number(viewport.pageY ?? 0) + element.y : parsed.fullPage ? 0 : Number(viewport.pageY ?? 0),
         width: cssWidth,
         height: cssHeight,
         scale,
@@ -5105,23 +5110,34 @@ export class BrowserHost extends EventEmitter {
       timeout: timeoutMs,
       ...(parsed.type === 'jpeg' ? { quality: 90 } : {}),
     } as const;
-    const image = parsed.ref
-      ? await (() => {
+    const image = await (async () => {
+      const fontsSettled = await this.screenshotFontsSettled(page);
+      if (!fontsSettled) {
+        if (parsed.ref) {
           const record = this.ref(tab, parsed.ref);
           const locator = record.playwrightRef
             ? locatorFromRef(page, record.playwrightRef)
             : page.locator(record.selector);
-          return locator.screenshot(commonOptions);
-        })()
-      : await (async () => {
-          if (!await this.screenshotFontsSettled(page)) {
-            return this.captureScreenshotWithoutFontWait(tab, parsed, page);
+          const box = await locator.boundingBox();
+          if (!box) {
+            throw new BrowserHostError('目标元素当前不可见，截图未生成', { code: 'invalid_screenshot' });
           }
-          return page.screenshot({
-            ...commonOptions,
-            fullPage: parsed.fullPage,
-          });
-        })();
+          return this.captureScreenshotWithoutFontWait(tab, parsed, page, box);
+        }
+        return this.captureScreenshotWithoutFontWait(tab, parsed, page);
+      }
+      if (parsed.ref) {
+        const record = this.ref(tab, parsed.ref);
+        const locator = record.playwrightRef
+          ? locatorFromRef(page, record.playwrightRef)
+          : page.locator(record.selector);
+        return locator.screenshot(commonOptions);
+      }
+      return page.screenshot({
+        ...commonOptions,
+        fullPage: parsed.fullPage,
+      });
+    })();
     if (await this.currentPageIdentity(tab) !== pageIdentity) {
       throw new BrowserHostError('页面在截图期间已变化，请重新观察', {
         code: 'page_changed',
