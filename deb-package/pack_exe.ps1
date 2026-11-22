@@ -65,7 +65,9 @@ if (Test-Path $DesktopPkgPath) {
 # 内嵌运行时版本（三平台脚本保持一致）
 $BundledPythonVersion = "3.11.9"
 $BundledPythonRelease = "20240415"   # indygreg/python-build-standalone 发布批次
+$BundledPythonSha256 = "368474c69f476e7de4adaf50b61d9fcf6ec8b4db88cc43c5f71c860b3cd29c69"
 $BundledNodeVersion   = "20.18.3"
+$BundledNodeSha256 = "11d483dfba711bc7c9bcb513e80a2941be0c2e7cbf62753755785b9a6e80a731"
 
 Write-Host "===========================================" -ForegroundColor Cyan
 Write-Host " 构建 Windows amd64 安装包 (Inno Setup)" -ForegroundColor Cyan
@@ -208,6 +210,11 @@ function Test-TarGzArchive([string]$Path, [string]$TarExe) {
     return $LASTEXITCODE -eq 0
 }
 
+function Test-FileSha256([string]$Path, [string]$ExpectedSha256) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $ExpectedSha256
+}
+
 if (-not (Test-Path $pythonCacheExe)) {
     Write-Host "正在下载 Python $BundledPythonVersion standalone..." -ForegroundColor Yellow
     $pyArchive = "cpython-$BundledPythonVersion+$BundledPythonRelease-x86_64-pc-windows-msvc-install_only.tar.gz"
@@ -222,17 +229,20 @@ if (-not (Test-Path $pythonCacheExe)) {
     foreach ($u in $pyUrls) {
         try {
             Invoke-WebRequest -Uri $u -OutFile $pyTar -UseBasicParsing -TimeoutSec 300
+            if (-not (Test-FileSha256 $pyTar $BundledPythonSha256)) {
+                throw "Python 归档 SHA-256 不匹配"
+            }
             if (Test-TarGzArchive $pyTar $tarExe) {
                 $pyDownloaded = $true
                 break
             }
             Write-Host "  归档不完整，尝试下一个源: $u" -ForegroundColor Yellow
         } catch {
-            Write-Host "  下载失败，尝试下一个源: $u ($($_.Exception.Message))" -ForegroundColor Yellow
+            Write-Host "  下载或验真失败，尝试下一个源: $u ($($_.Exception.Message))" -ForegroundColor Yellow
         }
         Remove-Item -LiteralPath $pyTar -Force -ErrorAction SilentlyContinue
     }
-    if (-not $pyDownloaded) { throw "Python standalone 所有下载源均失败（网络错误或归档不完整）" }
+    if (-not $pyDownloaded) { throw "Python standalone 所有下载源均失败（网络错误、摘要不匹配或归档不完整）" }
     $tempExtract = Join-Path $ProjectRoot "dist\_python_extract"
     if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
     # install_only 归档内层为 python/ 目录，解出后整体移动到缓存目录。
@@ -353,6 +363,9 @@ if (-not (Test-Path $nodeCacheExe)) {
     foreach ($u in $nodeZipUrls) {
         try {
             Invoke-WebRequest -Uri $u -OutFile $nodeZipPath -UseBasicParsing -TimeoutSec 60
+            if (-not (Test-FileSha256 $nodeZipPath $BundledNodeSha256)) {
+                throw "Node.js 归档 SHA-256 不匹配"
+            }
             if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
             Expand-Archive -Path $nodeZipPath -DestinationPath $tempExtract -Force
             $innerDir = Get-ChildItem -Path $tempExtract -Directory | Select-Object -First 1
@@ -362,12 +375,12 @@ if (-not (Test-Path $nodeCacheExe)) {
             $nodeDownloaded = $true
             break
         } catch {
-            Write-Host "  下载或解包失败，尝试下一个源: $u ($($_.Exception.Message))" -ForegroundColor Yellow
+            Write-Host "  下载、验真或解包失败，尝试下一个源: $u ($($_.Exception.Message))" -ForegroundColor Yellow
         }
         Remove-Item -LiteralPath $nodeZipPath -Force -ErrorAction SilentlyContinue
         if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
     }
-    if (-not $nodeDownloaded) { throw "Node.js 所有下载源均失败（网络错误或归档不完整）" }
+    if (-not $nodeDownloaded) { throw "Node.js 所有下载源均失败（网络错误、摘要不匹配或归档不完整）" }
     Remove-Item $nodeZipPath -Force
     Move-Item -Path $innerDir.FullName -Destination $nodeCacheDir -Force
     Remove-Item $tempExtract -Recurse -Force

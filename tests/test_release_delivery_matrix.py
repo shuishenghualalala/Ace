@@ -73,7 +73,13 @@ def test_windows_pack_script_declares_utf8_for_windows_powershell() -> None:
     assert script.startswith(b"\xef\xbb\xbf")
 
 
-def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Path) -> None:
+def test_windows_runtime_archives_pin_sha256() -> None:
+    script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
+    assert '$BundledPythonSha256 = "368474c69f476e7de4adaf50b61d9fcf6ec8b4db88cc43c5f71c860b3cd29c69"' in script
+    assert '$BundledNodeSha256 = "11d483dfba711bc7c9bcb513e80a2941be0c2e7cbf62753755785b9a6e80a731"' in script
+
+
+def test_windows_python_archive_verifies_sha256_and_recovers(tmp_path: Path) -> None:
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     windows_tar = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "tar.exe"
     tar = str(windows_tar) if windows_tar.is_file() else shutil.which("tar")
@@ -81,27 +87,26 @@ def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Pa
         pytest.skip("PowerShell and tar are required")
 
     script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
-    function = (
-        "function Test-TarGzArchive"
-        + script.split("function Test-TarGzArchive", 1)[1].split("\n}\n", 1)[0]
-    )
+    functions = "function Test-TarGzArchive" + script.split("function Test-TarGzArchive", 1)[1].split(
+        "\nif (-not (Test-Path $pythonCacheExe))", 1
+    )[0]
     download_loop = "    $pyDownloaded = $false" + script.split("    $pyDownloaded = $false", 1)[1].split(
         "    $tempExtract =", 1
     )[0]
     harness = tmp_path / "verify-archive.ps1"
     harness.write_text(
-        "param([string]$Valid, [string]$Invalid, [string]$TarExe)\n"
+        "param([string]$Valid, [string]$Invalid, [string]$Unexpected, [string]$TarExe)\n"
         "$ErrorActionPreference = 'Stop'\n"
         "function Invoke-WebRequest([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$TimeoutSec) {\n"
         "    Copy-Item -LiteralPath $Uri -Destination $OutFile -Force\n"
         "}\n"
-        + function
-        + "\n}\n"
-        + "if (-not (Test-TarGzArchive $Valid $TarExe)) { throw 'valid archive rejected' }\n"
+        + functions
+        + "\nif (-not (Test-TarGzArchive $Valid $TarExe)) { throw 'valid archive rejected' }\n"
         + "if (Test-TarGzArchive $Invalid $TarExe) { throw 'truncated archive accepted' }\n"
         + "if (Test-TarGzArchive \"$Invalid.missing\" $TarExe) { throw 'missing archive accepted' }\n"
+        + "$BundledPythonSha256 = (Get-FileHash $Valid).Hash\n"
         + "$pyTar = Join-Path $PSScriptRoot 'download.tar.gz'\n"
-        + "$pyUrls = @($Invalid, $Valid)\n"
+        + "$pyUrls = @($Invalid, $Unexpected, $Valid)\n"
         + download_loop
         + "if ((Get-FileHash $pyTar).Hash -ne (Get-FileHash $Valid).Hash) { throw 'valid retry not retained' }\n",
         encoding="utf-8-sig",
@@ -113,6 +118,10 @@ def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Pa
         archive.add(payload, arcname="python/python.exe")
     invalid = tmp_path / "truncated.tar.gz"
     invalid.write_bytes(valid.read_bytes()[: valid.stat().st_size // 2])
+    unexpected = tmp_path / "unexpected.tar.gz"
+    payload.write_bytes(b"unexpected fixture")
+    with tarfile.open(unexpected, "w:gz") as archive:
+        archive.add(payload, arcname="python/python.exe")
 
     result = subprocess.run(
         [
@@ -123,6 +132,7 @@ def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Pa
             str(harness),
             str(valid),
             str(invalid),
+            str(unexpected),
             tar,
         ],
         capture_output=True,
@@ -131,28 +141,32 @@ def test_windows_python_archive_validation_recovers_from_truncation(tmp_path: Pa
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert script.index("Test-TarGzArchive $pyTar $tarExe") < script.index("& $tarExe -xzf")
+    assert script.index("Test-FileSha256 $pyTar $BundledPythonSha256") < script.index("Test-TarGzArchive $pyTar $tarExe")
 
 
-def test_windows_node_download_recovers_from_invalid_zip(tmp_path: Path) -> None:
+def test_windows_node_download_verifies_sha256_and_recovers(tmp_path: Path) -> None:
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     if not powershell:
         pytest.skip("PowerShell is required")
 
     script = (ROOT / "deb-package" / "pack_exe.ps1").read_text(encoding="utf-8-sig")
+    hash_function = "function Test-FileSha256" + script.split("function Test-FileSha256", 1)[1].split("\n}\n", 1)[0]
     download_loop = "    $nodeDownloaded = $false" + script.split("    $nodeDownloaded = $false", 1)[1].split(
         "    Move-Item -Path $innerDir.FullName", 1
     )[0]
     harness = tmp_path / "download-node.ps1"
     harness.write_text(
-        "param([string]$Valid, [string]$Invalid)\n"
+        "param([string]$Valid, [string]$Invalid, [string]$Unexpected)\n"
         "$ErrorActionPreference = 'Stop'\n"
         "function Invoke-WebRequest([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing, [int]$TimeoutSec) {\n"
         "    Copy-Item -LiteralPath $Uri -Destination $OutFile -Force\n"
         "}\n"
-        "$nodeZipPath = Join-Path $PSScriptRoot 'download.zip'\n"
-        "$tempExtract = Join-Path $PSScriptRoot 'extract'\n"
-        "$nodeZipUrls = @($Invalid, $Valid)\n"
+        + hash_function
+        + "\n}\n"
+        + "$BundledNodeSha256 = (Get-FileHash $Valid).Hash\n"
+        + "$nodeZipPath = Join-Path $PSScriptRoot 'download.zip'\n"
+        + "$tempExtract = Join-Path $PSScriptRoot 'extract'\n"
+        + "$nodeZipUrls = @($Invalid, $Unexpected, $Valid)\n"
         + download_loop
         + "if (-not (Test-Path (Join-Path $innerDir.FullName 'node.exe'))) { throw 'valid retry not extracted' }\n",
         encoding="utf-8-sig",
@@ -162,9 +176,12 @@ def test_windows_node_download_recovers_from_invalid_zip(tmp_path: Path) -> None
         archive.writestr("node-v20.18.3-win-x64/node.exe", b"node fixture")
     invalid = tmp_path / "truncated.zip"
     invalid.write_bytes(valid.read_bytes()[: valid.stat().st_size // 2])
+    unexpected = tmp_path / "unexpected.zip"
+    with zipfile.ZipFile(unexpected, "w") as archive:
+        archive.writestr("node-v20.18.3-win-x64/node.exe", b"unexpected fixture")
 
     result = subprocess.run(
-        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness), str(valid), str(invalid)],
+        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness), str(valid), str(invalid), str(unexpected)],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -175,6 +192,7 @@ def test_windows_node_download_recovers_from_invalid_zip(tmp_path: Path) -> None
     assert (tmp_path / "extract/node-v20.18.3-win-x64/node.exe").read_bytes() == b"node fixture"
     assert "https://npmmirror.com/mirrors/node/" in script
     assert "Invoke-WebRequest -Uri $u -OutFile $nodeZipPath -UseBasicParsing -TimeoutSec 60" in script
+    assert script.index("Test-FileSha256 $nodeZipPath $BundledNodeSha256") < script.index("Expand-Archive -Path $nodeZipPath")
 
 
 def test_windows_runtime_copy_supports_deep_paths(tmp_path: Path) -> None:
