@@ -1267,5 +1267,9 @@
 <h3>构建应用分段基线（2026-11-22）</h3>
 <p>在干净的 HEAD 检出上以临时配置测量：<code>crew.app</code> 导入 2.275 秒，<code>build_app</code> 2.941 秒，<code>startup(start_cron=False)</code> 0.501 秒。该测量不含 Electron 启动、浏览器插件真实宿主、发行包进程与首轮模型响应，不能替代发行包冷启动配对；只用于定位 Python 侧成本。</p>
 </section>
+<section id="full-suite-5075">
+<h3>全量后端复跑（2026-11-22）</h3>
+<p>在共享工作树完成 compact 与 external 懒加载后复跑后端全量（不含 <code>tests/security</code>）：<code>5075 passed, 30 skipped, 20 deselected</code>，0 failed，用时 32 分 48 秒。该结果包含并行会话新增的 session goals 与桌面相关后端用例；安全套件仍单独统计。</p>
+</section>
 </body>
 </html>
