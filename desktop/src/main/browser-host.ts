@@ -84,6 +84,7 @@ const DOWNLOAD_DEADLINE_MARGIN_MS = 500;
 const AUTOMATION_FOCUS_CONTINUATION_MS = 5_000;
 const EDITABLE_AX_ROLES = new Set(['combobox', 'searchbox', 'spinbutton', 'textbox']);
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1024, height: 720 });
+const MAX_ABANDONED_SCREENSHOT_CAPTURES = 2;
 
 type ControlMode = 'ai' | 'human' | 'paused';
 
@@ -291,6 +292,7 @@ interface BrowserTab {
     width: number;
     height: number;
   } | null;
+  abandonedScreenshotCaptures: number;
   lastFilled: {
     backendNodeId: number;
     pageIdentity: string;
@@ -2870,6 +2872,7 @@ export class BrowserHost extends EventEmitter {
       navigationEpoch: 0,
       navigationPending: false,
       visualEpoch: null,
+      abandonedScreenshotCaptures: 0,
       lastFilled: null,
       automationFocus: null,
       automationFocusPending: null,
@@ -5077,8 +5080,7 @@ export class BrowserHost extends EventEmitter {
   }
 
   /**
-   * Export a user-facing screenshot through Playwright's public Page/Locator
-   * APIs. This deliberately does not create a visual epoch: full-page,
+   * Export a user-facing screenshot without creating a visual epoch: full-page,
    * element-only and CSS-scaled images are not coordinate-click viewports.
    */
   private async screenshot(
@@ -5095,6 +5097,12 @@ export class BrowserHost extends EventEmitter {
     if (!ensureWithin(output, path.dirname(profile))) {
       throw new BrowserHostError('截图目标不属于账号浏览器目录', {
         code: 'invalid_artifact_path',
+      });
+    }
+    if (tab.abandonedScreenshotCaptures >= MAX_ABANDONED_SCREENSHOT_CAPTURES) {
+      throw new BrowserHostError('此前的截图仍在浏览器中执行，请稍后重试或重新打开标签页', {
+        code: 'screenshot_pending',
+        uncertain: false,
       });
     }
     const beforeSettleIdentity = await this.currentPageIdentity(tab);
@@ -5126,7 +5134,7 @@ export class BrowserHost extends EventEmitter {
       timeout: timeoutMs,
       ...(parsed.type === 'jpeg' ? { quality: 90 } : {}),
     } as const;
-    const image = await (async () => {
+    const capture = (async () => {
       if (parsed.ref) {
         const record = this.ref(tab, parsed.ref);
         const locator = record.playwrightRef
@@ -5147,6 +5155,26 @@ export class BrowserHost extends EventEmitter {
         fullPage: true,
       });
     })();
+    let image: Buffer;
+    try {
+      image = await withDeadline(
+        capture,
+        timeoutMs,
+        () => new BrowserHostError('浏览器截图超过命令截止时间', {
+          code: 'command_timeout',
+          uncertain: false,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof BrowserHostError && error.code === 'command_timeout') {
+        tab.abandonedScreenshotCaptures += 1;
+        const release = (): void => {
+          tab.abandonedScreenshotCaptures = Math.max(0, tab.abandonedScreenshotCaptures - 1);
+        };
+        void capture.then(release, release);
+      }
+      throw error;
+    }
     if (await this.currentPageIdentity(tab) !== pageIdentity) {
       throw new BrowserHostError('页面在截图期间已变化，请重新观察', {
         code: 'page_changed',

@@ -4755,6 +4755,33 @@ describe('BrowserHost', () => {
     }
   });
 
+  it('bounds abandoned screenshot captures instead of stacking pending work', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
+    await mkdir(outputDir, { recursive: true });
+    electron.fontsPending = true;
+    const capture = (index: number) => host.handleRpc({
+      runtime_key: RUNTIME_KEY,
+      method: 'execute',
+      params: {
+        profile_dir: PROFILE,
+        command: 'screenshot',
+        args: ['--full-page', path.join(outputDir, `pending-${index}.png`)],
+        proxy_url: PROXY_URL,
+        command_timeout_ms: 50,
+      },
+    });
+    try {
+      await expect(capture(1)).rejects.toMatchObject({ code: 'command_timeout' });
+      await expect(capture(2)).rejects.toMatchObject({ code: 'command_timeout' });
+      await expect(capture(3)).rejects.toMatchObject({ code: 'screenshot_pending' });
+    } finally {
+      electron.fontsPending = false;
+      await host.dispose();
+    }
+  });
+
   it('serializes evaluate results and closes the active tab when tab id is omitted', async () => {
     const host = new BrowserHost(() => fakeWindow());
     const first: any = await createTab(host);

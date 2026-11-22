@@ -2843,7 +2843,11 @@ app.whenReady().then(async () => {
       }) as { data?: { targetId?: string } };
       const targetId = String(created.data?.targetId ?? '');
       if (!targetId) throw new Error('挂起字体契约未创建 tab');
-      const execute = async (command: string, args: string[]): Promise<Record<string, unknown>> => {
+      const execute = async (
+        command: string,
+        args: string[],
+        timeoutMs = 15_000,
+      ): Promise<Record<string, unknown>> => {
         const response = await host.handleRpc({
           runtime_key: runtimeKey,
           method: 'execute',
@@ -2853,7 +2857,7 @@ app.whenReady().then(async () => {
             target_id: targetId,
             command,
             args,
-            command_timeout_ms: 15_000,
+            command_timeout_ms: timeoutMs,
           },
         }) as { data?: Record<string, unknown> };
         return response.data ?? {};
@@ -2939,9 +2943,33 @@ app.whenReady().then(async () => {
       ) {
         throw new Error(`挂起字体 device JPEG 无效: ${JSON.stringify(deviceSize)}`);
       }
+      let fullPageState = 'completed';
+      try {
+        await contractDeadline(
+          execute('screenshot', [
+            '--full-page', '--type', 'png',
+            path.join(artifacts, 'pending-font-full.png'),
+          ], 1_000),
+          5_000,
+          'pending font full-page screenshot',
+        );
+      } catch {
+        fullPageState = 'failed';
+      }
+      const recoveredOutput = path.join(artifacts, 'recovered-viewport.png');
+      await contractDeadline(
+        execute('screenshot', ['--type', 'png', recoveredOutput]),
+        5_000,
+        'viewport screenshot after full-page failure',
+      );
+      const recoveredSize = nativeImage.createFromBuffer(await readFile(recoveredOutput)).getSize();
+      if (recoveredSize.width <= 0 || recoveredSize.height <= 0) {
+        throw new Error('整页失败后视口截图未恢复');
+      }
       return `ordinary viewport ${ordinaryViewportSize.width}x${ordinaryViewportSize.height} + element；`
         + `pending fonts；CSS PNG ${width}x${height}；`
-        + `device JPEG ${deviceSize.width}x${deviceSize.height}；${Date.now() - startedAt}ms`;
+        + `device JPEG ${deviceSize.width}x${deviceSize.height}；full=${fullPageState}；`
+        + `recovered=${recoveredSize.width}x${recoveredSize.height}；${Date.now() - startedAt}ms`;
     } finally {
       for (const response of pendingFontResponses) response.end();
       if (!panelWindow.isDestroyed()) panelWindow.destroy();

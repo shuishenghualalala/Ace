@@ -110,6 +110,7 @@
 
   <p>开始等待时绑定当前账号、会话、目标标签与控制代次。定时阶段释放账号队列，长等待定期查询已绑定目标。文本条件继续由 Playwright 按短时段观察，每段结束后让其他会话使用队列。开始观察、继续及生成快照前都复核目标和控制权。无原生定向目标的驱动沿用原等待路径。</p>
   <p>视口与元素截图统一使用 Electron <code>capturePage</code>，元素先滚入视口再按当前边界捕获。整页正常时沿用 Playwright；字体探测超过 2 秒时使用 CDP 和内容尺寸。CSS 输出缩放到目标尺寸，device 保留原生像素。页面身份、PNG/JPEG 校验和输出目录授权在所有路径上保持一致。</p>
+  <p>截图执行段受原命令截止时间约束，超时后释放账号队列，后续操作无需等待旧调用落定。每个标签最多保留两个超时后仍在浏览器中执行的捕获；达到上限时新请求快速返回 <code>screenshot_pending</code>，旧调用结束后释放名额。该计数不代表截图已经成功，也不改变页面或标签生命周期。</p>
 
   <h3>2.5 子 Agent 与外部 Agent</h3>
   <table>
@@ -349,6 +350,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-22</td><td>截图超时后释放账号队列，并按标签限制两个未落定的遗留捕获，允许后续操作恢复。</td><td><code>desktop/src/main/browser-host.ts</code>、截图失败恢复与堆积上限回归。</td></tr>
       <tr><td>2026-11-22</td><td>普通视口与元素截图统一走原生帧，避免 Playwright 在元素稳定或页面捕获阶段超时；整页路径保持独立。</td><td><code>desktop/src/main/browser-host.ts</code>、普通与挂起字体真实契约。</td></tr>
       <tr><td>2026-11-22</td><td>修复真实 Electron 中挂起字体的元素截图：后备改为原生矩形捕获，保留 CSS/device 像素和文件校验。</td><td><code>desktop/src/main/browser-host.ts</code>、真实 <code>pw-contract</code> 与 BrowserHost 回归。</td></tr>
       <tr><td>2026-11-22</td><td>无密钥 Gateway 回放补齐 <code>mcp_install</code> 的一次审批、配置落盘及新工具注册验证。</td><td><code>tests/test_replay_mcp_approval.py</code>、MCP 对话安装验收。</td></tr>
