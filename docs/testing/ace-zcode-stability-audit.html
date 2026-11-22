@@ -726,6 +726,12 @@
 <p><strong>验收</strong> SkillsHub 5 项通过，原有加载失败用例改为断言不出现「尚未登记市场目录」；Web TypeScript 通过。</p>
 <p class="evidence">Ace <code>web/src/components/SkillsHub.tsx</code>、<code>web/src/components/SkillsHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>packages/adapters/src/plugins/marketplace.ts:291–337</code> 的市场源加载路径。</p>
 </article>
+<article id="mcp-payload-validation">
+<h3>MCP 配置的 args 与 header 校验</h3>
+<p>stdio 的 <code>args</code> 原先直接 <code>list()</code>，对象或嵌套值会写入配置并在启动时产生难定位错误；HTTP headers 值也未拒绝 CR/LF。现在 args 必须是字符串数组，headers 值不得包含换行，错误在保存/探测前以 400 返回；合法配置行为不变。</p>
+<p><strong>验收</strong> 新增非字符串 args 与含换行 header 用例均 400；定向用例与 Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

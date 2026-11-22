@@ -490,6 +490,33 @@ async def test_list_redacts_status_errors(api, monkeypatch):
     assert "header-secret" not in error
 
 
+async def test_create_rejects_non_string_stdio_args(api):
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={"name": "bad-args", "transport": "stdio", "command": "echo", "args": [{"x": 1}]},
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 400
+    assert "args" in response.json()["error"]
+
+
+async def test_create_rejects_header_newlines(api):
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "bad-header",
+            "transport": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"X-Test": "ok\r\nInjected: yes"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 400
+    assert "换行" in response.json()["error"]
+
+
 async def test_probe_rejects_non_admin(api, monkeypatch):
     from crew.gateway.auth import AuthenticationError
     import crew.gateway.routers.mcp_servers as router

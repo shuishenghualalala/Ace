@@ -47,7 +47,10 @@ def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | N
 
     if command:
         cfg["command"] = command
-        cfg["args"] = list(payload.get("args") or [])
+        raw_args = payload.get("args") or []
+        if not isinstance(raw_args, list) or any(not isinstance(item, str) for item in raw_args):
+            return None, "args 必须是字符串数组"
+        cfg["args"] = list(raw_args)
         # transport 仅作记录，stdio 时忽略
     elif url:
         if transport not in _VALID_TRANSPORTS:
@@ -65,7 +68,10 @@ def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | N
         if headers is not None:
             if not isinstance(headers, dict):
                 return None, "headers 必须是对象"
-            cfg["headers"] = {str(key): str(value) for key, value in headers.items()}
+            normalized_headers = {str(key): str(value) for key, value in headers.items()}
+            if any("\r" in value or "\n" in value for value in normalized_headers.values()):
+                return None, "headers 值不能包含换行"
+            cfg["headers"] = normalized_headers
     else:
         return None, "必须提供 command（stdio）或 url（http/sse）"
 
