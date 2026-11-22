@@ -1050,6 +1050,21 @@ def test_mcp_probe_failure_exits_nonzero(capsys, cli_home, monkeypatch):
     assert code == 1
 
 
+def test_mcp_list_redacts_status_errors():
+    import crew.cli.integration as integration
+
+    manager = SimpleNamespace(status=lambda: [{
+        "name": "leaky",
+        "transport": "http",
+        "connected": False,
+        "error": "failed https://mcp.example.com/mcp?token=abc123",
+        "tools": [],
+        "config": {"url": "https://mcp.example.com/mcp", "transport": "http"},
+    }])
+    view = integration._mcp_servers_view(SimpleNamespace(mcp_manager=manager))
+    assert "token=abc123" not in view[0]["error"]
+
+
 def test_mcp_add_no_auto_connect_saves_without_starting(monkeypatch):
     import crew.cli.integration as integration
 

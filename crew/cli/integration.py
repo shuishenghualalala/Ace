@@ -167,6 +167,8 @@ def _mcp_interaction_proxy(args: Any, ctx: CliContext) -> CliResult:
 
 
 def _mcp_servers_view(app: Any) -> list[dict[str, Any]]:
+    from crew.tools.redact import redact_sensitive_display_text
+
     mgr = getattr(app, "mcp_manager", None)
     if mgr is None:
         return []
@@ -175,7 +177,7 @@ def _mcp_servers_view(app: Any) -> list[dict[str, Any]]:
             "name": row["name"],
             "transport": row["transport"],
             "connected": row["connected"],
-            "error": row["error"],
+            "error": redact_sensitive_display_text(str(row.get("error") or "")),
             "tools": row["tools"],
             "config": _redact_config(row["config"]),
         }
