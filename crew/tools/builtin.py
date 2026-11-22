@@ -47,6 +47,30 @@ from crew.security.terminal_guard import (
     detect_hardline_command,
 )
 
+_RUNTIME_ERROR_MESSAGES = {
+    "runtime_crashed": "安全运行时异常退出，命令未执行",
+    "runtime_protocol_mismatch": "安全运行时协议不匹配，命令未执行",
+    "sandbox_unavailable": "当前平台的安全沙箱不可用，命令未执行",
+    "sandbox_denied": "安全沙箱拒绝执行该命令",
+    "policy_denied": "安全策略拒绝执行该命令",
+    "network_unavailable": "安全运行时无法应用当前网络策略",
+    "timeout": "安全运行时执行超时",
+    "output_truncated": "安全运行时输出超过限制",
+}
+
+
+def _runtime_error_message(code: str, output: str) -> str:
+    """Keep the stable code while surfacing the last native diagnostic line."""
+    base = _RUNTIME_ERROR_MESSAGES.get(code, "安全运行时失败，命令未执行")
+    detail = next(
+        (line.strip() for line in reversed(strip_ansi(output).splitlines()) if line.strip()),
+        "",
+    )
+    if detail and detail not in base:
+        return f"{base}：{detail[:500]}"
+    return base
+
+
 FILE_READ_SCHEMA = {
     "name": "file_read",
     "description": (
@@ -1021,20 +1045,10 @@ async def handle_terminal(
             error="命令执行超时" if timed_out else "命令已取消",
         )
     elif session.stable_error_code:
-        runtime_messages = {
-            "runtime_crashed": "安全运行时异常退出，命令未执行",
-            "runtime_protocol_mismatch": "安全运行时协议不匹配，命令未执行",
-            "sandbox_unavailable": "当前平台的安全沙箱不可用，命令未执行",
-            "sandbox_denied": "安全沙箱拒绝执行该命令",
-            "policy_denied": "安全策略拒绝执行该命令",
-            "network_unavailable": "安全运行时无法应用当前网络策略",
-            "timeout": "安全运行时执行超时",
-            "output_truncated": "安全运行时输出超过限制",
-        }
         result.update(
             success=False,
             status="timed_out" if session.stable_error_code == "timeout" else "failed",
-            error=runtime_messages.get(session.stable_error_code, "安全运行时失败，命令未执行"),
+            error=_runtime_error_message(session.stable_error_code, text),
             error_code=session.stable_error_code,
             retryable=session.stable_error_code == "sandbox_denied",
             retry_hint=(

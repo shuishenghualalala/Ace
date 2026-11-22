@@ -17,9 +17,21 @@ from crew.security.models import (
 )
 from crew.tools.builtin import (
     _parse_additional_permissions,
+    _runtime_error_message,
     _validate_destructive_terminal_targets,
     handle_terminal,
 )
+
+
+def test_runtime_error_message_keeps_stable_code_and_native_detail():
+    message = _runtime_error_message(
+        "sandbox_unavailable",
+        "warming up\nACE_SECURITY_STATE_DIR is not configured",
+    )
+
+    assert message.startswith("当前平台的安全沙箱不可用")
+    assert "ACE_SECURITY_STATE_DIR is not configured" in message
+    assert _runtime_error_message("sandbox_denied", "") == "安全沙箱拒绝执行该命令"
 
 
 class _ApprovalOnlyService:
