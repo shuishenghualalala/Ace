@@ -225,7 +225,9 @@ def create_mcp_servers_router(crew) -> APIRouter:
         cfg, err = _validate_server_payload(payload)
         if err is not None:
             return JSONResponse({"ok": False, "error": err}, status_code=400)
-
+        existing = (crew.config.mcp_servers or {}).get(name) or {}
+        if "auto_connect" not in cfg and isinstance(existing.get("auto_connect"), bool):
+            cfg["auto_connect"] = existing["auto_connect"]
         # 统一配置事务（Config.update_mcp_server）：候选值 → 持久化 → 发布，
         # 持久化失败内存与磁盘保持旧 command，不会出现"内存已改、磁盘仍旧"。
         try:

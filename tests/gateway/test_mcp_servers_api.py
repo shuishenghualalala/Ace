@@ -596,7 +596,7 @@ async def test_create_rejects_long_header_value(api):
 async def test_update_to_manual_stops_the_worker(api, monkeypatch):
     client, crew, _ = api
     assert crew.mcp_manager is not None
-    crew.config.add_mcp_server("swap", {"command": "echo", "transport": "stdio"})
+    crew.config.add_mcp_server("swap", {"command": "echo", "transport": "stdio", "auto_connect": False})
     removed: list[str] = []
     registered: list[str] = []
     reloaded: list[str] = []
@@ -617,10 +617,11 @@ async def test_update_to_manual_stops_the_worker(api, monkeypatch):
     monkeypatch.setattr(crew.mcp_manager, "reload_one", fake_reload)
     response = await client.put(
         "/api/mcp/servers/swap",
-        json={"transport": "stdio", "command": "echo", "auto_connect": False},
+        json={"transport": "stdio", "command": "echo"},
         headers=LOCAL_HEADERS,
     )
     assert response.status_code == 200
+    assert crew.config.mcp_servers["swap"]["auto_connect"] is False
     assert removed == ["swap"]
     assert registered == ["swap"]
     assert reloaded == []
