@@ -614,7 +614,7 @@
 </article>
 <article id="mcp-slice-regression">
 <h3>MCP 管理切片回归基线</h3>
-<p>当前工作树的 MCP 管理切片完成一次完整回归：Gateway MCP Server API 39 项、Web 全量 45 个文件 338 项、CLI 48 项通过/1 项跳过、Desktop 全量 211 个文件 2420 项通过/2 项跳过。覆盖探测超时/并发/工具上限、状态接口异常行、脱敏字段与 URL 查询合并、编辑态探测密钥补全、管理员准入、args/env/header 校验、Web 新增/编辑/删除、配置待切换、搜索过滤、手动/静默刷新、错误与空态区分、Esc 与焦点管理。</p>
+<p>当前工作树的 MCP 管理切片完成一次完整回归：Gateway MCP Server API 41 项、Web 全量 45 个文件 338 项、CLI 48 项通过/1 项跳过、Desktop 全量 211 个文件 2421 项通过/2 项跳过。覆盖探测超时/并发/工具上限、状态接口异常行、脱敏字段与 URL 查询合并、编辑态探测密钥补全、管理员准入、args/env/header 校验、auto_connect 手动连接、Web 新增/编辑/删除、配置待切换、搜索过滤、手动/静默刷新、错误与空态区分、Esc 与焦点管理。</p>
 <p><strong>真实服务验收</strong> Windows Chrome + 生产 Web + 隔离 Gateway + 本地 MCP HTTP 服务：添加服务、测试连接成功、保存后自动显示「已连接」与 <code>ping</code> 工具、删除后回到空态。截图 <code>mcp-hub-real-2a2f6b8a22/web-mcp-real-connected.png</code>。该结果包含另一进程的未提交改动，不是干净提交上的发布证明。</p>
 <p class="evidence">Ace <code>tests/gateway/test_mcp_servers_api.py</code>、<code>web</code> Vitest、<code>tests/test_cli.py</code>、<code>desktop</code> MCP 组件测试。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
