@@ -100,9 +100,12 @@
   <pre><code>crew session list
 crew chat --workspace-id &lt;工作空间 ID&gt; --session-id &lt;会话 ID&gt;
 crew chat --continue
-crew run --continue "继续这次工作"</code></pre>
+crew run --continue "继续这次工作"
+crew run -p "继续这次工作"
+printf '继续这次工作' | crew run</code></pre>
   <p><code>crew chat</code> 启动与执行 <code>/new</code> 后显示当前会话 ID。显式续接在开启输入前查询当前账号的公开会话目录，并核对所选工作空间。不存在、属于其他账号、内部会话或工作空间不符时直接退出，不创建替代会话。续接用原 ID 读取历史和会话配置；终端不重印旧消息，可用 <code>crew session show</code> 查看。未传 ID 时沿用新建流程。</p>
   <p><code>-c</code>/<code>--continue</code> 在相同账号和工作空间中按最近更新时间选取第一份有消息的会话；置顶不改变最近判定，只创建未使用的空会话会被跳过。没有可续接内容时以退出码 1 结束且不创建新会话。<code>--continue</code> 不能与 <code>--session-id</code> 同时使用。非交互 <code>crew run --continue</code> 使用同一解析规则，把新问题追加到该会话，不生成第二个会话。</p>
+  <p><code>crew run</code> 的消息可用位置参数、<code>-p</code>/<code>--prompt</code> 或非 TTY stdin 提供，三者只能选一个；stdin 读取后去掉首尾空白，空输入以退出码 1 结束。交互终端未提供消息时直接报错，不会阻塞等待输入。</p>
 
   <h3 id="skill-market-sources">3.2 本地技能市场目录</h3>
   <pre><code>crew skill source add &lt;绝对目录或 HTTPS 清单 URL&gt; --label 团队技能

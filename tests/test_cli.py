@@ -924,6 +924,25 @@ def test_run_non_interactive_json(capsys, cli_home):
     assert "收到" in data["text"]
 
 
+def test_run_accepts_prompt_option_and_stdin(capsys, cli_home, monkeypatch):
+    code, out = run_cli(capsys, "run", "-p", "来自选项", "--output-format", "json")
+    assert code == 0
+    assert json_out(out)["session_id"]
+
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("来自标准输入"))
+    code, out = run_cli(capsys, "run", "--output-format", "json")
+    assert code == 0
+    data = json_out(out)
+    assert data["session_id"]
+    assert data["text"]
+
+    code, _out = run_cli(capsys, "run", "位置", "-p", "选项")
+    assert code == 1
+
+
 @pytest.mark.parametrize("output", ["json", "stream-json"])
 def test_run_returns_structured_rejection_for_required_approval(
     capsys, cli_home, external_write_dir, monkeypatch, output,

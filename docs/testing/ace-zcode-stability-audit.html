@@ -504,6 +504,12 @@
 <p><strong>验收</strong> SkillsHub 组件 5 项通过，新增来源接口拒绝时显示错误文本且不冒充空状态的用例；Web TypeScript 检查通过。未启动真实 Gateway 失败注入。</p>
 <p class="evidence">Ace <code>web/src/components/SkillsHub.tsx</code>、<code>web/src/components/SkillsHub.test.tsx</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="cli-run-prompt-stdin">
+<h3>CLI 一次性对话接受 --prompt 与 stdin</h3>
+<p><code>crew run</code> 原先只接受位置参数，难以处理以 <code>-</code> 开头的文本或管道输入。现在支持 <code>-p/--prompt</code> 和非 TTY stdin：位置参数、选项、stdin 三者只能选一个，stdin 去首尾空白，空输入退出码 1；交互终端未提供消息时直接报错，不阻塞。该入口仍走既有 <code>run</code> 会话、审批和结构化输出路径，不新增会话语义。</p>
+<p><strong>验收</strong> CLI 新增用例通过：<code>-p</code> 与 stdin 都生成结构化结果和会话 ID；位置参数与选项冲突由解析层拒绝。现有非交互 JSON 回归通过，Ruff 通过。测试使用 FakeProvider，未调用真实模型。</p>
+<p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:61</code> 的 <code>-p, --prompt</code> 入口。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

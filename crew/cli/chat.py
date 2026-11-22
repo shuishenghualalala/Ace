@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import uuid
 from typing import Any
 
@@ -43,7 +44,11 @@ def register(subparsers, handlers: dict[str, Any]) -> None:
     )
     chat.set_defaults(handler=_chat)
     run = subparsers.add_parser("run", help="一次性非交互对话")
-    run.add_argument("prompt", help="要发送的消息")
+    run.add_argument("prompt", nargs="?", default="", help="要发送的消息（也可用 --prompt 或 stdin）")
+    run.add_argument(
+        "-p", "--prompt", dest="prompt_option", default="",
+        help="要发送的消息；与位置参数二选一，适合以 - 开头的文本",
+    )
     run.add_argument("--mode", choices=("agent", "team", "dynamic_kanban"), default="agent")
     run.add_argument("--session-id", default="", help="复用已有会话，缺省新建")
     run.add_argument(
@@ -305,9 +310,18 @@ def _render_chunk(chunk: ResponseChunk) -> None:
 
 
 async def _run(args: Any, ctx: CliContext) -> CliResult:
-    prompt = str(args.prompt or "").strip()
+    positional = str(getattr(args, "prompt", "") or "").strip()
+    option = str(getattr(args, "prompt_option", "") or "").strip()
+    if positional and option:
+        raise CliError("位置参数与 --prompt 只能提供一个")
+    prompt = option or positional
+    if not prompt and not sys.stdin.isatty():
+        try:
+            prompt = sys.stdin.read().strip()
+        except (OSError, ValueError):
+            prompt = ""
     if not prompt:
-        raise CliError("prompt 不能为空")
+        raise CliError("prompt 不能为空；可通过位置参数、--prompt 或 stdin 提供")
     output_format = args.output_format or ("json" if ctx.json_output else "text")
     explicit_session = args.session_id.strip() or None
     if args.continue_last and explicit_session is not None:
