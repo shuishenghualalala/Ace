@@ -62,6 +62,11 @@ def test_warm_packaging_checks_member_wheels_before_staging() -> None:
         assert script.index("sync_workspace_wheels.py") < script.index(cache_copy)
 
 
+def test_windows_pack_script_declares_utf8_for_windows_powershell() -> None:
+    script = (ROOT / "deb-package" / "pack_exe.ps1").read_bytes()
+    assert script.startswith(b"\xef\xbb\xbf")
+
+
 def test_optional_catalog_development_path_is_repository_root() -> None:
     assert skills.get_optional_skills_dir() == ROOT / "optional-skills"
 

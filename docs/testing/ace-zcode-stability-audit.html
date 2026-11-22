@@ -1376,6 +1376,8 @@
 <p><strong>真实模型冒烟</strong> 使用维护者提供的本机配置，在独立临时 Crew Home、默认 owner profile 和私有凭证库中运行，沙箱开关保持启用。模型实际调用一次 <code>file_read</code> 并在最终答复中回填工作区随机标记，用例 8.67 秒、退出码 0。模型配置、密钥、接口和标记未写入审计。</p>
 <p><strong>函数级剖析</strong> 另用独立新配置对 <code>build_app</code> 做 cProfile：关闭剖析前墙钟为 2.458 秒，函数累计归因包括兼容事件循环 <code>run_async_compat</code> 593 毫秒、Blueprint 模块导入 579 毫秒、28 次 SQLite 连接合计 462 毫秒，其中 25 次 WAL 检查/切换合计 259 毫秒。它们分别落入已有 F10、Sites 按需装配和 Work 准备实验的覆盖范围；那些实验未得到稳定的首答收益，本轮不重复改代码。剖析有测量开销，数值只用于热点归因，不与未剖析样本直接比较。</p>
 <p class="evidence">Ace <code>crew/app.py</code>、<code>crew/state/logging.py</code>、<code>tests/test_provider_lifecycle.py</code>。ZCode <code>packages/desktop/src/main/rendererActionTraceBroker.ts:137</code>、<code>packages/desktop/src/main/index.ts:1217</code>。</p>
+<h3>Windows 打包前置验证</h3>
+<p>当前 HEAD 的隔离快照在本机 Windows PowerShell 5.1 中首先因无 BOM UTF-8 脚本的误读而无法解析。<code>pack_exe.ps1</code> 现显式携带 UTF-8 BOM，实际 <code>Parser.ParseFile</code> 通过；发行矩阵新增对应字节级回归并通过。完成编码修正后的标准构建已成功编译原生安全运行时、校验随包组件并生成 Electron <code>win-unpacked</code>，但随后的 Python 归档在下载后损坏，tar 报告截断并退出，尚未得到可验收的完整 staging 或安装器。</p>
 <h3>桌面全量复核（2026-11-22）</h3>
 <p>在当前共享工作树运行完整桌面 Vitest：211 个测试文件全部通过，共 2417 项通过、2 项跳过，耗时 95.55 秒。该结果覆盖本轮截图与既有桌面交互，但工作树同时包含另一进程的未提交改动，因此它是当前组合状态的回归证据，不是某个单独提交的隔离全量结果。</p>
 <h3>观测如何归因</h3>

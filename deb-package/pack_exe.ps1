@@ -1,4 +1,4 @@
-param (
+﻿param (
     [string]$Version = "",
     [string]$IsccPath = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
 )
