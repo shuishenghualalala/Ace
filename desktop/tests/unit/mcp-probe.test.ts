@@ -117,6 +117,27 @@ it('saves auto_connect=false from the MCP form', async () => {
   }));
 });
 
+it('keeps auto_connect=false when editing an MCP server', async () => {
+  vi.resetModules();
+  apiMock.updateMcpServer.mockResolvedValue({ ok: true, servers: [] });
+  apiMock.mcpServers.mockResolvedValue({ servers: [] });
+  const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
+  bindMcpPane();
+  await openMcpServerModal({
+    name: 'manual', transport: 'stdio', connected: false, error: '', tools: [],
+    config: { command: 'echo', transport: 'stdio', auto_connect: false },
+  });
+  const autoConnect = document.getElementById('mcp-auto-connect') as HTMLInputElement;
+  expect(autoConnect.checked).toBe(false);
+  document.getElementById('mcp-server-form')!.dispatchEvent(
+    new Event('submit', { bubbles: true, cancelable: true }),
+  );
+  await vi.waitFor(() => expect(apiMock.updateMcpServer).toHaveBeenCalled());
+  expect(apiMock.updateMcpServer).toHaveBeenCalledWith('manual', expect.objectContaining({
+    auto_connect: false,
+  }));
+});
+
 it('probes an HTTP endpoint from the MCP settings form without saving', async () => {
   vi.resetModules();
   const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
