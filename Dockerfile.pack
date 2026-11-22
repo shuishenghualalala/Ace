@@ -51,6 +51,7 @@ RUN mkdir -p /tmp/runtimes/python \
     && echo "  downloading: ${PYTHON_URL}" \
     && curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 "$PYTHON_URL" -o /tmp/python.tar.gz \
     && test -s /tmp/python.tar.gz \
+    && echo "78b1c16a9fd032997ba92a60f46a64f795cd18ff335659dfdf6096df277b24d5  /tmp/python.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/python.tar.gz -C /tmp/runtimes/python --strip-components=1 \
     && rm /tmp/python.tar.gz \
     && /tmp/runtimes/python/bin/python3 --version \
@@ -117,6 +118,7 @@ RUN find /tmp/runtimes/python /app/crew -type d -name __pycache__ -prune -exec r
 RUN mkdir -p /tmp/runtimes/node \
     && echo "Downloading Node.js v${BUNDLED_NODE_VERSION}..." \
     && curl -fsSL "https://npmmirror.com/mirrors/node/v${BUNDLED_NODE_VERSION}/node-v${BUNDLED_NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+    && echo "595bcc9a28e6d1ee5fc7277b5c3cb029275b98ec0524e162a0c566c992a7ee5c  /tmp/node.tar.xz" | sha256sum -c - \
     && tar -xf /tmp/node.tar.xz -C /tmp/runtimes/node --strip-components=1 \
     && rm /tmp/node.tar.xz \
     && rm -rf /tmp/runtimes/node/lib/node_modules/corepack \
@@ -167,6 +169,7 @@ RUN apt-get -o Acquire::Retries=5 update -o Acquire::Check-Valid-Until=false && 
         imagemagick \
         file \
     && curl -fsSL "https://npmmirror.com/mirrors/node/v22.18.0/node-v22.18.0-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+    && echo "c1bfeecf1d7404fa74728f9db72e697decbd8119ccc6f5a294d795756dfcfca7  /tmp/node.tar.xz" | sha256sum -c - \
     && tar -xf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
     && rm /tmp/node.tar.xz \
     && node --version \

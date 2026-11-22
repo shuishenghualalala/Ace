@@ -286,6 +286,31 @@ def test_frozen_catalog_resolver_requires_meipass_content(monkeypatch, tmp_path:
     assert skills.get_optional_skills_dir().is_dir()
 
 
+def test_linux_runtime_archives_verify_sha256_before_extract() -> None:
+    source = (ROOT / "Dockerfile.pack").read_text(encoding="utf-8")
+    cases = (
+        (
+            "78b1c16a9fd032997ba92a60f46a64f795cd18ff335659dfdf6096df277b24d5",
+            "/tmp/python.tar.gz",
+            "tar -xzf /tmp/python.tar.gz",
+        ),
+        (
+            "595bcc9a28e6d1ee5fc7277b5c3cb029275b98ec0524e162a0c566c992a7ee5c",
+            "/tmp/node.tar.xz",
+            "tar -xf /tmp/node.tar.xz -C /tmp/runtimes/node",
+        ),
+        (
+            "c1bfeecf1d7404fa74728f9db72e697decbd8119ccc6f5a294d795756dfcfca7",
+            "/tmp/node.tar.xz",
+            "tar -xf /tmp/node.tar.xz -C /usr/local",
+        ),
+    )
+    for digest, archive, extract in cases:
+        check = f'echo "{digest}  {archive}" | sha256sum -c -'
+        assert check in source
+        assert source.index(check) < source.index(extract)
+
+
 def test_pack_scripts_exclude_web_frontend() -> None:
     pack_mac = (ROOT / "deb-package" / "pack_mac.sh").read_text(encoding="utf-8")
     dockerfile = (ROOT / "Dockerfile.pack").read_text(encoding="utf-8")
