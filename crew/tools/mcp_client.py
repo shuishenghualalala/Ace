@@ -1160,6 +1160,7 @@ async def probe_remote_server(cfg: dict[str, Any], *, timeout: float = 5.0) -> d
         try:
             await asyncio.wait_for(worker.stop(), timeout=MCP_PROBE_STOP_TIMEOUT_SECONDS)
         except Exception:
+            worker.force_abort("MCP 探测关闭超时")
             log.warning("MCP 探测连接关闭超时或失败")
 
 

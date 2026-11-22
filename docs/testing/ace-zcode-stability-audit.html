@@ -552,6 +552,12 @@
 <p><strong>边界</strong> 这不是干净提交上的发布证明：运行期间另一进程仍有 Gateway、i18n、文档和测试的未提交改动，Desktop 结果包含该工作树状态。未运行全量 Python 后端、真实模型、公开网络或 Electron 窗口 E2E。</p>
 <p class="evidence">Ace <code>desktop</code> Vitest、<code>web</code> Vitest、<code>tests/test_cli.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>tests/test_skill_sources.py</code>。测试日志临时保存在隔离 proof 目录，未纳入仓库。</p>
 </article>
+<article id="mcp-probe-stop-abort">
+<h3>MCP 探测关闭超时后的 worker 取消</h3>
+<p>关闭阶段有 2 秒上限后，若远端传输仍卡住，原实现只记录警告，worker task 可能继续占用连接。现在超时路径调用 <code>force_abort</code> 取消 worker task，再返回探测结果；不等待该 task 的最终退出，因此 API 和并发槽位仍能释放。底层 transport 是否完全关闭仍依赖其自身取消响应。</p>
+<p><strong>验收</strong> 停止阻塞 worker 用例通过：探测在 1 秒内返回，且 fake worker 的 <code>force_abort</code> 被调用；Ruff 通过。未连接公开网络。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>tests/test_mcp.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
