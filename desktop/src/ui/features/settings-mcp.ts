@@ -91,6 +91,7 @@ export function mcpStatusText(s: McpServerRow): string {
   if (s.error) return `失败：${s.error}`;
   if (s.config_pending) return '重连中';
   if (s.connected) return '已连接';
+  if (s.config.auto_connect === false) return '手动连接';
   return '未连接';
 }
 

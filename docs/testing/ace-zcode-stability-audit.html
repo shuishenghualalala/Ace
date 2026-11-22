@@ -786,6 +786,12 @@
 <p><strong>验收</strong> 状态投影用例覆盖 auto_connect=false，脱敏断言保持通过；定向用例、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/test_mcp.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-manual-label">
+<h3>MCP 手动连接服务的状态文案</h3>
+<p><code>auto_connect=false</code> 的服务在未连接时原先与启动失败一样显示「未连接」，用户难以判断是正常待启动还是故障。Web 卡片与 Desktop 状态现在显示「手动」「手动连接」，错误与「重连中」仍优先；连接成功后恢复「已连接」。</p>
+<p><strong>验收</strong> McpHub 新增手动标记用例；Desktop 状态用例覆盖 auto_connect=false。Web 10 项、Desktop 状态 9 项、TypeScript 通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>web/src/styles/global.css</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

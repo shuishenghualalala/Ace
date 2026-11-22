@@ -30,6 +30,10 @@ describe('mcpStatusText', () => {
   it('shows disconnected when neither', () => {
     expect(mcpStatusText(row({}))).toBe('未连接');
   });
+
+  it('shows manual when auto_connect is false', () => {
+    expect(mcpStatusText(row({ config: { auto_connect: false } }))).toBe('手动连接');
+  });
 });
 
 describe('mcpStatusChipClass', () => {

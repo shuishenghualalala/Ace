@@ -105,6 +105,19 @@ it("edits an MCP server without echoing masked secrets", async () => {
   }));
 });
 
+it("marks a manually connected server instead of calling it disconnected", async () => {
+  apiMock.mcpServers.mockResolvedValue({
+    ok: true,
+    servers: [{
+      name: "manual", transport: "http", connected: false, error: "", tools: [],
+      config: { url: "https://mcp.example.com/mcp", transport: "http", auto_connect: false },
+    }],
+  });
+  await render();
+  expect(host.textContent).toContain("手动");
+  expect(host.textContent).not.toContain("未连接");
+});
+
 it("shows failure before connected when a server reports both", async () => {
   apiMock.mcpServers.mockResolvedValue({
     ok: true,

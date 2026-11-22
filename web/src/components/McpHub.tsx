@@ -329,8 +329,8 @@ export default function McpHub() {
               <article key={server.name} className="mcp-card">
                 <header className="mcp-card__head">
                   <strong>{server.name}</strong>
-                  <span className={server.error ? "mcp-chip is-error" : server.config_pending ? "mcp-chip is-pending" : server.connected ? "mcp-chip is-online" : "mcp-chip"}>
-                    {server.error ? "失败" : server.config_pending ? "重连中" : server.connected ? "已连接" : "未连接"}
+                  <span className={server.error ? "mcp-chip is-error" : server.config_pending ? "mcp-chip is-pending" : server.connected ? "mcp-chip is-online" : server.config.auto_connect === false ? "mcp-chip is-manual" : "mcp-chip"}>
+                    {server.error ? "失败" : server.config_pending ? "重连中" : server.connected ? "已连接" : server.config.auto_connect === false ? "手动" : "未连接"}
                   </span>
                 </header>
                 <p className="mcp-card__meta">
