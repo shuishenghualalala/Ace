@@ -493,6 +493,8 @@
 <h3>D7c · Windows 终端在沙箱身份就绪后仍报告运行时不可用</h3>
 <p>现场首条失败来自 <code>terminal</code>，返回 <code>sandbox_unavailable</code>，当时此预览用户目录没有身份文件。身份就绪后，第二条失败仍用同一错误码，原因是组件被误判为目标平台不符。终端桥接过滤环境时去掉处理器变量，发行包内 Python 3.11.9 的 <code>platform.machine()</code> 因此为空。ZCode 的桌面架构保护从 Electron <code>process.arch</code> 读取当前进程架构；Ace 的 Python 桥接现从解释器目标读取。</p>
 <p><strong>验收</strong> 用发行包 Python、真实 <code>build_spawn_env</code> 与原样 x64 helper 复现旧版失败，修复后原样清单完整性检查通过。分别用错误架构和错误 SHA-256 的私有清单验证仍然拒绝。相关 pytest 共 50 项通过。组合运行还暴露 4 项独立失败，其中 2 项依赖配置过的原生 helper，另 2 项检测到 Apple Silicon 已提交预编译清单的源摘要落后于 Rust 源码。隔离验证覆盖真实发行组件的完整性检查，原生终端启动需要另有配置完成的 Windows 沙箱。</p>
+<p><strong>复核（2026-11-22）</strong> 提交 <code>b624a61f</code> 的实现仍在当前工作树：Windows 使用 <code>sysconfig.get_platform()</code> 识别目标解释器架构。针对桥接过滤环境的 x64/arm64 两个回归通过。继续追踪其余 <code>sandbox_unavailable</code> 来源后，Windows 原生运行时仅在身份目录、账号或文件沙箱能力不可用时使用该码；ACL 准入失败为 <code>sandbox_denied</code>，WFP 就绪失败为 <code>network_unavailable</code>。通用平台回退分支只会编入不支持的目标平台，没有发现同一架构误判的残留路径。</p>
+<p class="evidence">Ace <code>crew/security/launch.py:655–678</code>、<code>tests/security/test_execution_routing.py:406–414</code>、<code>security-runtime/src/windows/mod.rs:62–90</code>、<code>:93–102</code>、<code>:104–110</code>、<code>security-runtime/src/main.rs:724–748</code>。ZCode <code>packages/desktop/src/main/desktopArchitectureGuard.ts:26–40</code>。</p>
 </article>
 <article id="windows-sandbox-visible-startup">
 <h3>D7d · 直接启动 Windows 发行版时应自动准备沙箱</h3>
