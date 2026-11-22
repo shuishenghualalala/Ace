@@ -68,6 +68,7 @@ it("edits an MCP server without echoing masked secrets", async () => {
         transport: "http",
         headers: { Authorization: "***" },
         env: { API_KEY: "***" },
+        auto_connect: false,
       },
     }],
   });
@@ -75,6 +76,7 @@ it("edits an MCP server without echoing masked secrets", async () => {
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent === "编辑");
   await act(async () => edit?.click());
   expect(host.querySelector<HTMLInputElement>('input[aria-label="服务名称"]')?.disabled).toBe(true);
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="启动时自动连接"]')?.checked).toBe(false);
   expect(host.textContent).toContain("Authorization: ***");
   const url = host.querySelector<HTMLInputElement>('input[aria-label="MCP URL"]')!;
   await act(async () => {
@@ -90,7 +92,7 @@ it("edits an MCP server without echoing masked secrets", async () => {
     url: "https://mcp.example.com/next",
     headers: { Authorization: "***" },
     env: { API_KEY: "***" },
-    auto_connect: true,
+    auto_connect: false,
   }, expect.anything()));
   const save = [...host.querySelectorAll("button")].find((button) => button.textContent === "保存");
   await act(async () => save?.click());
@@ -99,7 +101,7 @@ it("edits an MCP server without echoing masked secrets", async () => {
     url: "https://mcp.example.com/next",
     headers: { Authorization: "***" },
     env: { API_KEY: "***" },
-    auto_connect: true,
+    auto_connect: false,
   }));
 });
 
