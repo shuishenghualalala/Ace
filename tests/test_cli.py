@@ -1065,6 +1065,23 @@ def test_mcp_probe_name_merges_saved_secrets(monkeypatch):
     assert captured["url"] == "http://127.0.0.1:9/mcp?token=stored&mode=2"
 
 
+def test_mcp_probe_unknown_saved_name_is_rejected(monkeypatch):
+    import crew.cli.integration as integration
+    from crew.cli.app import CliError
+
+    async def fake_probe(_cfg):
+        raise AssertionError("probe should not run")
+
+    monkeypatch.setattr("crew.tools.mcp_client.probe_remote_server", fake_probe)
+    ctx = SimpleNamespace(app=SimpleNamespace(config=SimpleNamespace(mcp_servers={})))
+    args = SimpleNamespace(
+        name="missing", url="http://127.0.0.1:9/mcp", transport="http",
+        headers="", json_payload=None,
+    )
+    with pytest.raises(CliError, match="未找到已保存"):
+        asyncio.run(integration._mcp_servers_probe(args, ctx))
+
+
 def test_skill_source_commands_register_list_and_remove(capsys, cli_home, tmp_path):
     market = tmp_path / "team-market"
     skill_dir = market / "market-doc"

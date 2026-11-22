@@ -217,6 +217,8 @@ async def _mcp_servers_probe(args: Any, ctx: CliContext) -> CliResult:
                     }
             if isinstance(cfg.get("url"), str) and isinstance(stored.get("url"), str):
                 cfg["url"] = merge_mcp_url_secrets(cfg["url"], stored["url"])
+        else:
+            raise CliError(f"未找到已保存的 MCP 服务: {name}")
     if cfg.get("command") or not cfg.get("url"):
         raise CliError("probe 只支持 HTTP/SSE 端点；stdio 请保存后连接")
     result = await probe_remote_server(cfg)
