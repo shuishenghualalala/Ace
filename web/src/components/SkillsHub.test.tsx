@@ -81,9 +81,16 @@ it("registers and removes a local skill market source", async () => {
 });
 
 it("refreshes a remote HTTPS source", async () => {
-  const remote = { kind: "url" as const, url: "https://skills.example.com/manifest.json", label: "Remote" };
+  const remote = {
+    kind: "url" as const,
+    url: "https://skills.example.com/manifest.json",
+    label: "Remote",
+    available: false,
+    skill_count: 0,
+  };
   apiMock.skillSources.mockResolvedValue({ sources: [remote] });
   await render();
+  expect(host.textContent).toContain("缓存不可用");
   const refresh = [...host.querySelectorAll("button")].find((button) => button.textContent === "刷新");
   await act(async () => refresh?.click());
   await vi.waitFor(() => expect(apiMock.refreshSkillSource).toHaveBeenCalledWith(remote.url));

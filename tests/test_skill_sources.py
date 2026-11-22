@@ -41,7 +41,12 @@ def test_market_source_registry_round_trip(isolated_skill_env):
     assert entry["kind"] == "dir"
     assert entry["path"] == str(market.resolve())
     assert entry["label"] == "Team Skills"
-    assert skills.list_skill_sources() == [entry]
+    listed = skills.list_skill_sources()
+    assert listed[0]["available"] is True
+    assert listed[0]["skill_count"] == 0
+    assert {key: listed[0][key] for key in ("kind", "path", "label")} == {
+        "kind": "dir", "path": str(market.resolve()), "label": "Team Skills",
+    }
 
     registry = isolated_skill_env.crew_home / "skill_market_sources.json"
     data = json.loads(registry.read_text(encoding="utf-8"))
@@ -163,6 +168,9 @@ def test_url_market_source_lists_and_installs_inline_skill(isolated_skill_env, m
     entry = skills.add_skill_source(url, label="Remote Team")
     assert entry["kind"] == "url"
     assert "cache_dir" not in entry
+    listed = skills.list_skill_sources()[0]
+    assert listed["available"] is True
+    assert listed["skill_count"] == 1
     item = next(item for item in skills.list_local_skills() if item["slug"] == "remote-doc")
     assert item["source"] == "local"
     assert item["market_source"] == url
@@ -302,7 +310,11 @@ def test_url_cache_outside_crew_home_is_not_scanned_or_deleted(isolated_skill_en
     }), encoding="utf-8")
 
     sources = skills.list_skill_sources()
-    assert sources == [{"kind": "url", "url": url, "label": "Evil", "added_at": ""}]
+    assert sources[0]["kind"] == "url"
+    assert sources[0]["url"] == url
+    assert sources[0]["available"] is False
+    assert sources[0]["skill_count"] == 0
+    assert "cache_dir" not in sources[0]
     assert not any(item["slug"] == "outside" for item in skills.list_local_skills())
     assert skills.remove_skill_source(url) is True
     assert (outside / "SKILL.md").is_file()
@@ -317,4 +329,8 @@ def test_legacy_registry_directories_still_load(isolated_skill_env):
         "directories": [{"path": str(market.resolve()), "label": "Legacy", "added_at": ""}],
     }), encoding="utf-8")
     sources = skills.list_skill_sources()
-    assert sources == [{"kind": "dir", "path": str(market.resolve()), "label": "Legacy", "added_at": ""}]
+    assert sources[0]["kind"] == "dir"
+    assert sources[0]["path"] == str(market.resolve())
+    assert sources[0]["label"] == "Legacy"
+    assert sources[0]["available"] is True
+    assert sources[0]["skill_count"] == 0

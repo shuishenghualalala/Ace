@@ -37,7 +37,7 @@ beforeEach(() => {
   apiMock.skillSources.mockResolvedValue({ sources: [] });
   apiMock.addSkillSource.mockResolvedValue({
     ok: true,
-    source: { kind: 'dir', path: 'D:\\team-skills', label: 'team-skills' },
+    source: { kind: 'dir', path: 'D:\\team-skills', label: 'team-skills', available: true, skill_count: 1 },
   });
 });
 
@@ -57,12 +57,15 @@ it('registers a market source from the skills page', async () => {
   setter?.call(input, 'D:\\team-skills');
   input.dispatchEvent(new Event('input', { bubbles: true }));
   apiMock.skillSources.mockResolvedValue({
-    sources: [{ kind: 'dir', path: 'D:\\team-skills', label: 'team-skills' }],
+    sources: [{
+      kind: 'dir', path: 'D:\\team-skills', label: 'team-skills', available: true, skill_count: 1,
+    }],
   });
 
   const form = input.closest('form')!;
   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(apiMock.addSkillSource).toHaveBeenCalledWith('D:\\team-skills'));
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')?.textContent).toContain('team-skills'));
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('1 个技能');
   expect(apiMock.skillStore).toHaveBeenCalledTimes(2);
 });

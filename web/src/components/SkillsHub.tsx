@@ -423,7 +423,12 @@ export default function SkillsHub() {
                 const target = source.url ?? source.path ?? "";
                 return (
                   <li key={target} className="hub__market-item">
-                    <span className="hub__market-label">{source.label}</span>
+                    <span className="hub__market-label">
+                      {source.label}
+                      {source.available === false
+                        ? "（缓存不可用）"
+                        : source.skill_count != null ? `（${source.skill_count} 个技能）` : ""}
+                    </span>
                     <code className="hub__market-path">{target}</code>
                     {source.url && (
                       <button

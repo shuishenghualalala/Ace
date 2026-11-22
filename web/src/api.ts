@@ -265,6 +265,8 @@ export interface SkillMarketSource {
   url?: string;
   label: string;
   added_at?: string;
+  available?: boolean;
+  skill_count?: number;
 }
 
 export const api = {

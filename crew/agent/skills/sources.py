@@ -158,10 +158,28 @@ def _write_registry(items: list[dict]) -> None:
             pass
 
 
+def _source_stats(entry: dict) -> dict:
+    if entry.get("kind") == "url":
+        root = Path(entry["cache_dir"]) if entry.get("cache_dir") else None
+    else:
+        root = Path(entry["path"])
+    try:
+        available = bool(root is not None and root.is_dir())
+    except OSError:
+        available = False
+    count = 0
+    if available and root is not None:
+        try:
+            count = sum(1 for child in root.iterdir() if (child / "SKILL.md").is_file())
+        except OSError:
+            count = 0
+    return {**entry, "available": available, "skill_count": count}
+
+
 def list_skill_sources() -> list[dict]:
-    """Return registered sources (without the internal cache path)."""
+    """Return registered sources with availability/count diagnostics."""
     with _lock:
-        return [_public(item) for item in _read_registry()]
+        return [_public(_source_stats(item)) for item in _read_registry()]
 
 
 def _skill_source_entries() -> list[dict]:

@@ -510,6 +510,12 @@
 <p><strong>验收</strong> CLI 新增用例通过：<code>-p</code> 与 stdin 都生成结构化结果和会话 ID；位置参数与选项冲突由解析层拒绝。现有非交互 JSON 回归通过，Ruff 通过。测试使用 FakeProvider，未调用真实模型。</p>
 <p class="evidence">Ace <code>crew/cli/chat.py</code>、<code>tests/test_cli.py</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts:61</code> 的 <code>-p, --prompt</code> 入口。</p>
 </article>
+<article id="market-source-health">
+<h3>市场源可用性与技能数诊断</h3>
+<p>来源列表原先只显示标签和路径/URL，用户无法判断远程缓存是否仍可用。现在每个来源返回 <code>available</code> 与 <code>skill_count</code>：本地目录检查是否仍存在并统计一级技能目录，URL 源额外检查缓存路径是否在允许目录内。Web/Desktop 显示「N 个技能」，缓存缺失时显示「缓存不可用」并保留刷新入口；CLI 列表同步显示状态。</p>
+<p><strong>验收</strong> 市场源定向 18 项通过，覆盖本地目录计数、URL 缓存可用计数和越界缓存不可用；SkillsHub 5 项、Desktop 市场源组件 1 项通过，TypeScript 与 Ruff 通过。未启动真实远程清单。</p>
+<p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/cli/knowledge.py</code>、<code>web/src/components/SkillsHub.tsx</code>、<code>desktop/src/ui/features/skills-page.ts</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
