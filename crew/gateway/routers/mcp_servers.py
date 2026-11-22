@@ -81,6 +81,7 @@ def _redact_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def create_mcp_servers_router(crew) -> APIRouter:
     router = APIRouter()
+    probe_slots = asyncio.Semaphore(2)
 
     async def _ensure_mgr_started():
         """确保 mcp_manager 已 start（注入 registry）。
@@ -122,7 +123,17 @@ def create_mcp_servers_router(crew) -> APIRouter:
                 {"ok": False, "error": "只支持探测 HTTP/SSE 端点；stdio 请保存后连接"},
                 status_code=400,
             )
-        result = await probe_remote_server(cfg)
+        try:
+            await asyncio.wait_for(probe_slots.acquire(), timeout=1.0)
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                {"ok": False, "code": "mcp_probe_busy", "error": "同时进行的 MCP 探测过多，请稍后再试"},
+                status_code=429,
+            )
+        try:
+            result = await probe_remote_server(cfg)
+        finally:
+            probe_slots.release()
         error = result.get("error")
         return JSONResponse({
             "ok": bool(result.get("ok")),

@@ -6,6 +6,7 @@ admin 鉴权 + CRUD 往返 + 持久化到临时 config.yaml + 单 server 重连 
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -261,6 +262,40 @@ async def test_probe_remote_endpoint_without_persisting(api, monkeypatch):
     )
     assert rejected.status_code == 400
     assert "stdio" in rejected.json()["error"]
+
+
+async def test_probe_limits_concurrent_probes(api, monkeypatch):
+    client, _, _ = api
+    import crew.gateway.routers.mcp_servers as mcp_router
+
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    calls = 0
+
+    async def fake_probe(cfg):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+        await release.wait()
+        return {"ok": True, "tools": [], "error": None}
+
+    monkeypatch.setattr(mcp_router, "probe_remote_server", fake_probe)
+    payload = {"url": "http://127.0.0.1:9/mcp", "transport": "http"}
+    tasks = [
+        asyncio.create_task(client.post("/api/mcp/servers/probe", json=payload, headers=LOCAL_HEADERS))
+        for _ in range(3)
+    ]
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.sleep(1.1)
+    finally:
+        release.set()
+    responses = await asyncio.gather(*tasks)
+    statuses = sorted(response.status_code for response in responses)
+    assert statuses == [200, 200, 429]
+    busy = next(response for response in responses if response.status_code == 429)
+    assert busy.json()["code"] == "mcp_probe_busy"
 
 
 async def test_invalid_http_urls_rejected_before_persist(api):

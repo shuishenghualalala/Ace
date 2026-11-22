@@ -474,6 +474,12 @@
 <p><strong>验收</strong> 浏览器桥接测试 14 项通过，新增无宿主错误码断言与未就绪宿主超时错误码两例；Ruff 通过。无桌面浏览代理仍未实现，本轮只改善失败原因准确性，未启动真实 Electron 宿主。</p>
 <p class="evidence">Ace <code>crew/browser/electron_bridge.py</code>、<code>tests/test_electron_browser_bridge.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts</code> 的控制端口不可用路径。</p>
 </article>
+<article id="mcp-probe-backpressure">
+<h3>MCP 探测的并发背压</h3>
+<p>每个探测会真实建立远端连接，Web/Desktop 连续点击或脚本并发请求可能堆积连接。Gateway 现在为探测路由持有两个槽位：第三个请求最多等待 1 秒，仍无空位时返回 429 与稳定 <code>code=mcp_probe_busy</code>；槽位在探测结束的 <code>finally</code> 中释放。保存、重连和其它 MCP 管理路由不受影响，CLI 直接调用本地 worker 也不经过该背压。</p>
+<p><strong>验收</strong> Gateway MCP API 新增并发用例通过：两个阻塞探测占满槽位后第三个返回 429/code，释放后前两个均成功；全量 MCP API 24 项与真实 HTTP 探测夹具通过，Ruff 通过。未连接公开网络。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
