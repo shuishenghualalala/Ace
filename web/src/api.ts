@@ -259,6 +259,12 @@ export interface SessionGoalSnapshot {
 
 const sessionGoalPath = (id: string) => `/api/session/${encodeURIComponent(id)}/goal`;
 
+export interface SkillMarketSource {
+  path: string;
+  label: string;
+  added_at?: string;
+}
+
 export const api = {
   config: () => getJSON<AppConfig>("/api/config"),
   switchModel: (modelId: string) =>
@@ -508,6 +514,13 @@ export const api = {
     getJSON<{ ok: boolean }>(`/api/skills/${encodeURIComponent(slug)}/install`, { method: "POST" }),
   uninstallSkill: (slug: string) =>
     getJSON<{ ok: boolean }>(`/api/skills/${encodeURIComponent(slug)}`, { method: "DELETE" }),
+  skillSources: () => getJSON<{ sources: SkillMarketSource[] }>("/api/skills/sources"),
+  addSkillSource: (path: string, label = "") =>
+    getJSON<{ ok: boolean; source: SkillMarketSource }>("/api/skills/sources", {
+      method: "POST", ...jsonBody({ path, label }),
+    }),
+  removeSkillSource: (path: string) =>
+    getJSON<{ ok: boolean }>(`/api/skills/sources?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
   scenarios: (count = 4) => getJSON<Scenario[]>(`/api/scenarios?count=${count}`),
   scenarioIntroLines: (count = 8) => getJSON<CrewIntroLine[]>(`/api/scenarios/intro-lines?count=${count}`),
   scenarioLoadingStatuses: (count = 8) => getJSON<CrewLoadingStatus[]>(`/api/scenarios/loading-status?count=${count}`),

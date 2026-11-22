@@ -420,6 +420,12 @@
 <p><strong>验收</strong> Gateway 技能接口 7 项通过：管理员请求正确转发路径、标签与操作者；市场源列表；删除成功与 404；导入转发 <code>validate=False</code> 和来源；已登记错误映射为 400/code；三个变更接口对非管理员均返回 403。相关技能、CLI 与 Ruff 回归通过。该切片只提供 HTTP 入口，桌面/Web 的源管理界面尚未接入。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/misc.py</code>、<code>tests/gateway/test_global_skills_api.py</code>、<code>crew/agent/skills/sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="web-skill-market-directory">
+<h3>Web 技能页登记本地市场目录</h3>
+<p>Web 技能页新增可折叠的「市场目录」区：输入绝对路径后调用来源注册 API，成功即刷新目录列表与技能商店；已登记项显示名称和路径，移除前二次确认，只取消登记，不删除已安装副本。错误直接显示在表单下方，不静默失败。变更受管理员约束，本机 owner 视为管理员；目录中的技能出现在「可安装」并保留本地标记，安装仍走原复制流程。Web 只登记本地目录，不执行目录代码，也不接受远程 URL。</p>
+<p><strong>验收</strong> SkillsHub 新增 2 项组件测试通过：提交路径触发注册并在重载后显示条目、移除调用删除接口；拒绝时显示 Gateway 错误且保留列表状态。Web 全量 326 项通过，TypeScript 与生产构建通过。Windows Chrome 加载生产 Web 与隔离 Gateway：从真实技能页展开市场目录，添加临时目录后显示标签和路径，移除后回到空态；Gateway 侧核对登记列表最终为空，截图保存。该 E2E 使用本地临时目录，未访问远程市场。</p>
+<p class="evidence">Ace <code>web/src/components/SkillsHub.tsx</code>、<code>web/src/api.ts</code>、<code>web/src/components/SkillsHub.test.tsx</code>、<code>crew/gateway/routers/misc.py</code>。截图 <code>skill-source-ui-69d17a4167/web-skill-source-added.png</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

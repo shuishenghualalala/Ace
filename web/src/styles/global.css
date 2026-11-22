@@ -6046,6 +6046,23 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text); outline: none; flex: 1;
 }
 .hub__search input::placeholder { color: var(--text-3); }
+.hub__market-form { display: flex; gap: 8px; margin: 10px 0; }
+.hub__market-form input {
+  flex: 1; min-width: 0; height: 34px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-soft); color: var(--text); outline: none; font-size: 13px;
+}
+.hub__market-form input::placeholder { color: var(--text-3); }
+.hub__market-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.hub__market-item {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft);
+}
+.hub__market-label { flex: 0 0 auto; font-weight: 700; font-size: 13px; color: var(--text); }
+.hub__market-path {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text-3); font-size: 12px;
+}
 .hub__search-sprite {
   position: relative;
   width: 17px;

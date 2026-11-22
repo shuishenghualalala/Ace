@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { OptionalSkill, Skill, SkillStore } from "../types";
-import { api } from "../api";
+import { api, type SkillMarketSource } from "../api";
 import browserKeycapSvg from "../assets/skills/browser-keycap.svg";
 import clockKeycapSvg from "../assets/skills/clock-keycap.svg";
 import cloudKeycapSvg from "../assets/skills/cloud-keycap.svg";
@@ -205,10 +205,48 @@ export default function SkillsHub() {
   const [q, setQ] = useState("");
   const [installedCategory, setInstalledCategory] = useState("全部");
   const [optionalCategory, setOptionalCategory] = useState("全部");
+  const [sources, setSources] = useState<SkillMarketSource[]>([]);
+  const [sourcePath, setSourcePath] = useState("");
+  const [sourceBusy, setSourceBusy] = useState(false);
+  const [sourceError, setSourceError] = useState("");
 
   const load = () => api.skillStore().then(setStore).catch(() => setStore({ installed: [], optional: [] }));
+  const loadSources = () => api.skillSources()
+    .then((result) => setSources(result.sources))
+    .catch(() => setSources([]));
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { void load(); void loadSources(); }, []);
+
+  const handleAddSource = async (event: FormEvent) => {
+    event.preventDefault();
+    const path = sourcePath.trim();
+    if (!path || sourceBusy) return;
+    setSourceBusy(true);
+    setSourceError("");
+    try {
+      await api.addSkillSource(path);
+      setSourcePath("");
+      await Promise.all([loadSources(), load()]);
+    } catch (error) {
+      setSourceError(error instanceof Error ? error.message : "无法添加市场目录");
+    } finally {
+      setSourceBusy(false);
+    }
+  };
+
+  const handleRemoveSource = async (path: string) => {
+    if (!confirm(`确认移除市场目录 "${path}" 吗？已安装技能不会被删除。`)) return;
+    setSourceBusy(true);
+    setSourceError("");
+    try {
+      await api.removeSkillSource(path);
+      await Promise.all([loadSources(), load()]);
+    } catch (error) {
+      setSourceError(error instanceof Error ? error.message : "无法移除市场目录");
+    } finally {
+      setSourceBusy(false);
+    }
+  };
 
   const handleInstall = async (slug: string) => {
     await api.installSkill(slug);
@@ -312,6 +350,53 @@ export default function SkillsHub() {
             </div>
           )}
         </section>
+
+        <details className="hub__section hub__market">
+          <summary className="hub__section-head">
+            <span className="hub__section-title">市场目录</span>
+            <span className="hub__count">{sources.length}</span>
+          </summary>
+          <p className="hub__empty">
+            登记本机技能目录后，其中的技能会出现在「可安装」。变更需要管理员权限，Ace 不会执行目录中的代码。
+          </p>
+          <form className="hub__market-form" onSubmit={handleAddSource}>
+            <input
+              aria-label="市场目录路径"
+              placeholder="绝对路径，例如 D:\\team-skills"
+              value={sourcePath}
+              onChange={(event) => setSourcePath(event.target.value)}
+              disabled={sourceBusy}
+            />
+            <button
+              className="hub-btn hub-btn--primary"
+              type="submit"
+              disabled={sourceBusy || !sourcePath.trim()}
+            >
+              添加目录
+            </button>
+          </form>
+          {sourceError && <p className="hub__empty" role="alert">{sourceError}</p>}
+          {sources.length === 0 ? (
+            <p className="hub__empty">尚未登记市场目录</p>
+          ) : (
+            <ul className="hub__market-list">
+              {sources.map((source) => (
+                <li key={source.path} className="hub__market-item">
+                  <span className="hub__market-label">{source.label}</span>
+                  <code className="hub__market-path">{source.path}</code>
+                  <button
+                    type="button"
+                    className="hub-btn hub-btn--ghost"
+                    disabled={sourceBusy}
+                    onClick={() => void handleRemoveSource(source.path)}
+                  >
+                    移除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </details>
       </div>
     </div>
   );
