@@ -432,6 +432,12 @@
 <p><strong>验收</strong> SkillsHub 组件共 3 项通过，新增导入路径调用与表单清空断言；Web 全量 327 项通过，TypeScript 与生产构建通过。Windows Chrome + 生产 Web + 隔离 Gateway：先添加并移除临时市场目录，再通过同一页面导入准备好的技能目录；Gateway <code>GET /api/skills</code> 出现 <code>prepared-skill</code>，用户技能目录副本包含 <code>SKILL.md</code>，源目录保留。截图 <code>skill-source-ui-9164ac6f44/web-skill-source-removed.png</code> 记录导入后的页面。</p>
 <p class="evidence">Ace <code>web/src/components/SkillsHub.tsx</code>、<code>web/src/api.ts</code>、<code>web/src/components/SkillsHub.test.tsx</code>、<code>crew/gateway/routers/misc.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="remote-skill-market-manifest">
+<h3>HTTPS 技能清单源与本地缓存</h3>
+<p>ZCode 的插件市场来源支持 GitHub、Git、HTTPS 清单和本地目录。Ace 先完成本地目录与单技能导入；本轮补 HTTPS 清单源：只接受 <code>https://</code>，拒绝账号密码、重定向、本机/私有地址、无法解析主机和超时；清单为 <code>version:1</code>，最多 50 个技能，每个技能内联 SKILL.md <code>content</code>，单技能 64 KiB、总清单 256 KiB。通过校验后把技能写入 <code>CREW_HOME/skill_market_cache/</code> 缓存，再与本地源一样列出、复制安装；移除 URL 源会清理缓存。清单不自动刷新，更新需移除后重登。安装仍走路径 containment、审计与原子发布，不执行技能内容。</p>
+<p><strong>验收</strong> 市场源定向 15 项通过：目录与 URL 登记、去重、无效/缺失/重叠目录、遗留 v1 登记读取、URL 缓存清单列出与复制安装、HTTP/私有主机/坏清单/超长内容拒绝、<code>_fetch_manifest</code> 的成功解析；技能组合与 CLI 回归通过，Ruff 通过。Windows 隔离 CLI 的本地目录与单目录导入端到端仍通过。远程 HTTPS 实际下载未在公开网络执行，抓取层由受控 Client 夹具覆盖；DNS 校验与后续连接之间仍存在理论上的重绑定窗口，未支持 Git/插件市场。</p>
+<p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/agent/skills/manage.py</code>、<code>tests/test_skill_sources.py</code>、<code>web/src/components/SkillsHub.tsx</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

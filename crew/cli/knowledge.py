@@ -647,12 +647,12 @@ def _register_skill(subparsers) -> None:
     uninstall.add_argument("--slug", required=True)
     uninstall.set_defaults(handler=_skill_uninstall)
 
-    source = cmds.add_parser("source", help="管理本地技能市场目录")
+    source = cmds.add_parser("source", help="管理技能市场源（本地目录或 HTTPS 清单）")
     source_cmds = source.add_subparsers(dest="skill_source_cmd")
-    source_list = source_cmds.add_parser("list", help="列出已登记的市场目录")
+    source_list = source_cmds.add_parser("list", help="列出已登记的市场源")
     source_list.set_defaults(handler=_skill_source_list)
-    source_add = source_cmds.add_parser("add", help="登记一个本地市场目录")
-    source_add.add_argument("path", help="包含一个或多个 SKILL.md 子目录的绝对路径")
+    source_add = source_cmds.add_parser("add", help="登记一个本地目录或 HTTPS 技能清单")
+    source_add.add_argument("path", help="包含 SKILL.md 子目录的绝对路径，或 version:1 的 HTTPS JSON 清单")
     source_add.add_argument("--label", default="", help="展示名称，缺省取目录名")
     source_add.set_defaults(handler=_skill_source_add)
     source_remove = source_cmds.add_parser("remove", help="移除市场目录登记")
@@ -737,7 +737,9 @@ def _skill_source_list(args: Any, ctx: CliContext) -> CliResult:
     from crew.agent.skills import list_skill_sources
 
     sources = list_skill_sources()
-    text = "\n".join(f"{item['label']}  {item['path']}" for item in sources)
+    text = "\n".join(
+        f"{item['label']}  {item.get('url') or item.get('path') or ''}" for item in sources
+    )
     return CliResult(data=sources, text=text or "(未登记市场目录)")
 
 
@@ -750,7 +752,7 @@ def _skill_source_add(args: Any, ctx: CliContext) -> CliResult:
         raise CliError(str(exc)) from exc
     return CliResult(
         data=entry,
-        text=f"已登记市场目录 {entry['label']}  {entry['path']}",
+        text=f"已登记市场源 {entry['label']}  {entry.get('url') or entry.get('path') or ''}",
     )
 
 
@@ -762,8 +764,8 @@ def _skill_source_remove(args: Any, ctx: CliContext) -> CliResult:
     except ValueError as exc:
         raise CliError(str(exc)) from exc
     if not removed:
-        raise CliError("未找到该市场目录登记")
-    return CliResult(data={"ok": True, "path": args.path}, text=f"已移除市场目录 {args.path}")
+        raise CliError("未找到该市场源登记")
+    return CliResult(data={"ok": True, "path": args.path}, text=f"已移除市场源 {args.path}")
 
 
 def _skill_evolution(args: Any, ctx: CliContext) -> CliResult:

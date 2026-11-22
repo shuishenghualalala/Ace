@@ -38,14 +38,15 @@ def test_market_source_registry_round_trip(isolated_skill_env):
     market = isolated_skill_env.tmp / "team-market"
     market.mkdir()
     entry = skills.add_skill_source(str(market), label="Team Skills")
+    assert entry["kind"] == "dir"
     assert entry["path"] == str(market.resolve())
     assert entry["label"] == "Team Skills"
     assert skills.list_skill_sources() == [entry]
 
     registry = isolated_skill_env.crew_home / "skill_market_sources.json"
     data = json.loads(registry.read_text(encoding="utf-8"))
-    assert data["version"] == 1
-    assert data["directories"][0]["path"] == str(market.resolve())
+    assert data["version"] == 2
+    assert data["sources"][0]["path"] == str(market.resolve())
 
     with pytest.raises(skills.SkillSourceError, match="已登记"):
         skills.add_skill_source(str(market))
@@ -145,3 +146,107 @@ def test_removed_market_source_disappears_from_store(isolated_skill_env):
     assert skills.remove_skill_source(str(market)) is True
     skills._invalidate_cache()
     assert not any(item["slug"] == "team-doc" for item in skills.list_local_skills())
+
+
+def test_url_market_source_lists_and_installs_inline_skill(isolated_skill_env, monkeypatch):
+    import crew.agent.skills.sources as source_module
+
+    url = "https://skills.example.com/manifest.json"
+    monkeypatch.setattr(source_module, "_validate_remote_url", lambda value: value)
+    monkeypatch.setattr(source_module, "_fetch_manifest", lambda value: [{
+        "slug": "remote-doc",
+        "name": "Remote document skill",
+        "description": "Synthetic remote skill",
+        "content": "---\nname: remote-doc\ndescription: Synthetic remote skill\n---\nbody\n",
+    }])
+
+    entry = skills.add_skill_source(url, label="Remote Team")
+    assert entry["kind"] == "url"
+    assert "cache_dir" not in entry
+    item = next(item for item in skills.list_local_skills() if item["slug"] == "remote-doc")
+    assert item["source"] == "local"
+    assert item["market_source"] == url
+    assert item["market_label"] == "Remote Team"
+
+    assert skills.install_skill("remote-doc", operator_account_id="test", source="test")
+    dst = skills.get_user_skills_dir() / "remote-doc"
+    assert (dst / "SKILL.md").is_file() and not dst.is_symlink()
+    assert skills.remove_skill_source(url) is True
+    assert skills.list_skill_sources() == []
+
+
+def test_url_market_source_rejects_insecure_and_private_hosts(isolated_skill_env):
+    import crew.agent.skills.sources as source_module
+
+    with pytest.raises(skills.SkillSourceError) as exc:
+        skills.add_skill_source("http://skills.example.com/manifest.json")
+    assert exc.value.code == "source_insecure"
+    with pytest.raises(skills.SkillSourceError) as exc:
+        source_module._validate_remote_url("https://127.0.0.1/manifest.json")
+    assert exc.value.code == "source_private_host"
+
+
+def test_market_manifest_validation_rules():
+    import crew.agent.skills.sources as source_module
+
+    with pytest.raises(skills.SkillSourceError):
+        source_module._parse_manifest({"version": 2, "skills": []})
+    with pytest.raises(skills.SkillSourceError):
+        source_module._parse_manifest({"version": 1, "skills": [{"slug": "../bad", "name": "x", "content": "x"}]})
+    with pytest.raises(skills.SkillSourceError):
+        source_module._parse_manifest({"version": 1, "skills": [
+            {"slug": "same", "name": "a", "content": "x"},
+            {"slug": "same", "name": "b", "content": "y"},
+        ]})
+    parsed = source_module._parse_manifest({"version": 1, "skills": [
+        {"slug": "good", "name": "Good", "description": "ok", "content": "body"},
+    ]})
+    assert parsed[0]["slug"] == "good"
+
+
+def test_https_manifest_fetch_decodes_bounded_json(monkeypatch):
+    import httpx
+
+    import crew.agent.skills.sources as source_module
+
+    class FakeResponse:
+        status_code = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def iter_bytes(self):
+            yield b'{"version":1,"skills":[{"slug":"remote","name":"Remote","content":"body"}]}'
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    parsed = source_module._fetch_manifest("https://skills.example.com/manifest.json")
+    assert parsed[0]["slug"] == "remote"
+
+
+def test_legacy_registry_directories_still_load(isolated_skill_env):
+    market = isolated_skill_env.tmp / "legacy-market"
+    market.mkdir()
+    registry = isolated_skill_env.crew_home / "skill_market_sources.json"
+    registry.write_text(json.dumps({
+        "version": 1,
+        "directories": [{"path": str(market.resolve()), "label": "Legacy", "added_at": ""}],
+    }), encoding="utf-8")
+    sources = skills.list_skill_sources()
+    assert sources == [{"kind": "dir", "path": str(market.resolve()), "label": "Legacy", "added_at": ""}]

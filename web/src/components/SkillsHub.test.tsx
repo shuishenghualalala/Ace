@@ -56,7 +56,7 @@ it("registers and removes a local skill market source", async () => {
   await render();
   expect(host.textContent).toContain("尚未登记市场目录");
 
-  const input = host.querySelector<HTMLInputElement>('input[aria-label="市场目录路径"]');
+  const input = host.querySelector<HTMLInputElement>('input[aria-label="市场源"]');
   expect(input).not.toBeNull();
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -94,7 +94,7 @@ it("imports a prepared skill directory", async () => {
 it("shows the Gateway error when a source is refused", async () => {
   apiMock.addSkillSource.mockRejectedValue(new Error("该市场源已登记"));
   await render();
-  const input = host.querySelector<HTMLInputElement>('input[aria-label="市场目录路径"]')!;
+  const input = host.querySelector<HTMLInputElement>('input[aria-label="市场源"]')!;
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
     setter?.call(input, "D:\\duplicate");

@@ -260,7 +260,9 @@ export interface SessionGoalSnapshot {
 const sessionGoalPath = (id: string) => `/api/session/${encodeURIComponent(id)}/goal`;
 
 export interface SkillMarketSource {
-  path: string;
+  kind?: "dir" | "url";
+  path?: string;
+  url?: string;
   label: string;
   added_at?: string;
 }

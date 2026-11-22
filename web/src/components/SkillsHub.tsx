@@ -377,12 +377,12 @@ export default function SkillsHub() {
             <span className="hub__count">{sources.length}</span>
           </summary>
           <p className="hub__empty">
-            登记本机技能目录后，其中的技能会出现在「可安装」。变更需要管理员权限，Ace 不会执行目录中的代码。
+            登记本机目录或 HTTPS 技能清单后，其中的技能会出现在「可安装」。变更需要管理员权限，Ace 不会执行目录中的代码。
           </p>
           <form className="hub__market-form" onSubmit={handleAddSource}>
             <input
-              aria-label="市场目录路径"
-              placeholder="绝对路径，例如 D:\\team-skills"
+              aria-label="市场源"
+              placeholder="绝对目录或 HTTPS 清单 URL"
               value={sourcePath}
               onChange={(event) => setSourcePath(event.target.value)}
               disabled={sourceBusy}
@@ -400,20 +400,23 @@ export default function SkillsHub() {
             <p className="hub__empty">尚未登记市场目录</p>
           ) : (
             <ul className="hub__market-list">
-              {sources.map((source) => (
-                <li key={source.path} className="hub__market-item">
-                  <span className="hub__market-label">{source.label}</span>
-                  <code className="hub__market-path">{source.path}</code>
-                  <button
-                    type="button"
-                    className="hub-btn hub-btn--ghost"
-                    disabled={sourceBusy}
-                    onClick={() => void handleRemoveSource(source.path)}
-                  >
-                    移除
-                  </button>
-                </li>
-              ))}
+              {sources.map((source) => {
+                const target = source.url ?? source.path ?? "";
+                return (
+                  <li key={target} className="hub__market-item">
+                    <span className="hub__market-label">{source.label}</span>
+                    <code className="hub__market-path">{target}</code>
+                    <button
+                      type="button"
+                      className="hub-btn hub-btn--ghost"
+                      disabled={sourceBusy}
+                      onClick={() => void handleRemoveSource(target)}
+                    >
+                      移除
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
           <p className="hub__empty">也可以直接导入一个已准备好、包含 SKILL.md 的技能目录。</p>

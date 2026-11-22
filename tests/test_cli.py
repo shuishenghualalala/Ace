@@ -989,11 +989,11 @@ def test_skill_source_commands_register_list_and_remove(capsys, cli_home, tmp_pa
     )
 
     code, out = run_cli(capsys, "skill", "source", "add", str(market), "--label", "Team")
-    assert code == 0 and "已登记市场目录" in out
+    assert code == 0 and "已登记市场源" in out
     code, out = run_cli(capsys, "skill", "source", "list")
     assert code == 0 and "Team" in out and str(market.resolve()) in out
     code, out = run_cli(capsys, "skill", "source", "remove", str(market))
-    assert code == 0 and "已移除市场目录" in out
+    assert code == 0 and "已移除市场源" in out
     code, out = run_cli(capsys, "skill", "source", "list")
     assert code == 0 and "未登记市场目录" in out
 

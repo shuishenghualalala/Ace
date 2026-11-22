@@ -53,7 +53,7 @@ from .core import (
 )
 from .index import _invalidate_cache, get_skills, scan_skills
 from .scanner import _iter_skill_files
-from .sources import list_skill_sources
+from .sources import _skill_source_entries
 
 # 安装事实是宿主级全局状态。同步装卸只持有短锁；异步 repair 在生成内容阶段不持锁，
 # 发布前用树指纹检测并发修改，避免长时间阻塞事件循环。
@@ -589,10 +589,13 @@ def list_local_skills() -> list[dict]:
     installed_slugs = set(get_skills().keys())
     result: list[dict] = []
     seen_slugs: set[str] = set()
-    roots: list[tuple[Path, dict | None]] = [(_patched("get_local_skills_dir")(), None)]
-    for source in list_skill_sources():
-        roots.append((Path(source["path"]), source))
-    for root, source in roots:
+    roots: list[tuple[Path, dict | None, str]] = [(_patched("get_local_skills_dir")(), None, "")]
+    for source in _skill_source_entries():
+        if source.get("kind") == "url":
+            roots.append((Path(source["cache_dir"]), source, str(source.get("url") or "")))
+        else:
+            roots.append((Path(source["path"]), source, str(source.get("path") or "")))
+    for root, source, market_source in roots:
         try:
             safe_root = root.expanduser().resolve()
         except OSError:
@@ -606,7 +609,8 @@ def list_local_skills() -> list[dict]:
             seen_slugs.add(info["slug"])
             item = {**info, "source": "local"}
             if source is not None:
-                item["market_source"] = str(safe_root)
+                item["market_source"] = market_source
+                item["market_root"] = str(safe_root)
                 item["market_label"] = str(source.get("label") or safe_root.name)
             result.append(item)
 
@@ -657,7 +661,7 @@ def install_skill(
             return False
 
         src = Path(info["skill_dir"])
-        market_root = Path(info["market_source"]) if info.get("market_source") else None
+        market_root = Path(info["market_root"]) if info.get("market_root") else None
         user_dir = _patched("get_user_skills_dir")()
         user_dir.mkdir(parents=True, exist_ok=True)
         dst = user_dir / src.name
