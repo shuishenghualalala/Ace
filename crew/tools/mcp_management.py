@@ -34,6 +34,7 @@ MCP_RELOAD_TOOL = "mcp_reload"
 MCP_UPDATE_TOOL = "mcp_update"
 SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _VALID_TRANSPORTS = {"stdio", "http", "sse"}
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _STATUS_MAX_TOOLS = 50
 _STATUS_MAX_ERROR_CHARS = 500
 
@@ -69,6 +70,8 @@ def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | N
             if not isinstance(headers, dict):
                 return None, "headers 必须是对象"
             normalized_headers = {str(key): str(value) for key, value in headers.items()}
+            if any(not _HEADER_NAME_RE.match(key) for key in normalized_headers):
+                return None, "headers 名必须是合法 HTTP token"
             if any("\r" in value or "\n" in value for value in normalized_headers.values()):
                 return None, "headers 值不能包含换行"
             cfg["headers"] = normalized_headers

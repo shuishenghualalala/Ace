@@ -517,6 +517,22 @@ async def test_create_rejects_header_newlines(api):
     assert "换行" in response.json()["error"]
 
 
+async def test_create_rejects_invalid_header_name(api):
+    client, _crew, _ = api
+    response = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "bad-header-name",
+            "transport": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"Bad Header": "value"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 400
+    assert "HTTP token" in response.json()["error"]
+
+
 async def test_probe_rejects_non_admin(api, monkeypatch):
     from crew.gateway.auth import AuthenticationError
     import crew.gateway.routers.mcp_servers as router
