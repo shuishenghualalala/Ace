@@ -381,12 +381,14 @@ class ElectronBrowserBridge:
                 "桌面浏览器宿主仍在初始化，请稍后重试",
                 retryable=True,
                 connection_generation=connection.generation,
+                code="browser_host_initializing",
             ) from exc
         if self._connections.get(key) is not connection:
             raise ElectronBridgeError(
                 "桌面浏览器宿主连接已切换",
                 retryable=True,
                 connection_generation=connection.generation,
+                code="browser_host_replaced",
             )
         if connection.initialization_error is not None:
             raise connection.initialization_error
@@ -408,6 +410,7 @@ class ElectronBrowserBridge:
                 "桌面内置浏览器尚未连接；请打开 Crew 桌面应用并保持登录",
                 retryable=True,
                 connection_generation=self._generations.get(key, 0),
+                code="browser_host_unavailable",
             )
         deadline = time.monotonic() + max(0.01, timeout)
 
@@ -436,6 +439,7 @@ class ElectronBrowserBridge:
                             "桌面浏览器宿主连接已切换",
                             retryable=True,
                             connection_generation=connection.generation,
+                            code="browser_host_replaced",
                         )
                     # Mark before the await. If send_json raises or times out,
                     # the transport cannot prove that a mutation was not received.

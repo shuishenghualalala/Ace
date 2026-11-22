@@ -468,6 +468,12 @@
 <p><strong>验收</strong> 新增 Desktop 组件测试通过：打开弹层、提交目录、刷新来源列表并显示标签；技能页现有生命周期/全局作用域测试与新增用例合计 8 项通过，TypeScript 检查通过。未执行真实 Electron 点击回归；弹层复用设置面板既有样式，未新增样式体系。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/skills-page.ts</code>、<code>desktop/src/ui/api/feature-system.ts</code>、<code>desktop/tests/unit/skills-market-source.test.ts</code>、<code>crew/gateway/routers/misc.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="browser-host-error-codes">
+<h3>浏览器宿主不可用的稳定错误码</h3>
+<p>独立 Gateway/CLI 未连接桌面宿主时，浏览器 RPC 原先只有可重试错误文本，上层无法区分「没有宿主」「宿主仍在初始化」和「宿主连接被替换」。现在分别返回 <code>browser_host_unavailable</code>、<code>browser_host_initializing</code>、<code>browser_host_replaced</code>，均保留 <code>retryable</code>，且失败发生在发送 RPC 之前，不把未发送动作声明为已执行或已停止。发送阶段发现连接切换也带 <code>browser_host_replaced</code>。</p>
+<p><strong>验收</strong> 浏览器桥接测试 14 项通过，新增无宿主错误码断言与未就绪宿主超时错误码两例；Ruff 通过。无桌面浏览代理仍未实现，本轮只改善失败原因准确性，未启动真实 Electron 宿主。</p>
+<p class="evidence">Ace <code>crew/browser/electron_bridge.py</code>、<code>tests/test_electron_browser_bridge.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/browser/index.ts</code> 的控制端口不可用路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

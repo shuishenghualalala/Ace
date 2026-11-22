@@ -133,6 +133,29 @@ async def test_reconnect_fails_old_pending_calls_and_replaces_socket() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unready_host_reports_initializing_code() -> None:
+    bridge = ElectronBrowserBridge()
+    key = "crew_0123456789ab"
+    release = asyncio.Event()
+
+    async def registered() -> None:
+        await release.wait()
+
+    socket = _Socket()
+    task = asyncio.create_task(bridge.serve(socket, key, on_registered=registered))  # type: ignore[arg-type]
+    await socket.accepted.wait()
+    try:
+        with pytest.raises(ElectronBridgeError, match="初始化") as captured:
+            await bridge.request(key, "execute", {"command": "snapshot"}, timeout=0.05)
+        assert captured.value.code == "browser_host_initializing"
+        assert captured.value.retryable is True
+    finally:
+        release.set()
+        await socket.incoming.put(WebSocketDisconnect())
+        await task
+
+
+@pytest.mark.asyncio
 async def test_no_host_is_retryable_without_stopping_browser_lifecycle() -> None:
     bridge = ElectronBrowserBridge()
 
@@ -149,6 +172,7 @@ async def test_no_host_is_retryable_without_stopping_browser_lifecycle() -> None
     assert captured.value.request_sent is False
     assert captured.value.uncertain is False
     assert captured.value.browser_stopped is False
+    assert captured.value.code == "browser_host_unavailable"
     assert captured.value.stop_unconfirmed is False
 
 

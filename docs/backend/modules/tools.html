@@ -104,6 +104,7 @@
   </table>
   <p>浏览器宿主按账号 Profile 创建持久 Electron <code>Session</code>，同一账号的 Crew 会话复用该 Session，以保留站点登录状态；Crew 会话之间仍分别校验标签、页面引用和控制权。因共享 Session，同源 Cookie、<code>localStorage</code> 与 IndexedDB 可被该账号的不同 Crew 会话复用，不构成聊天级站点存储隔离。</p>
   <p>浏览器插件同时挂载 <code>/browser-use</code> 和 <code>/web-gui-tester</code>。后者指导模型用实际界面交互做黑盒测试，区分结构观察、已查看的截图与不能验证的环节。它不注册额外工具，不改变审批或网络规则；浏览器插件关闭时，两项从后续回合的模型技能索引隐藏。</p>
+  <p>没有桌面宿主时，浏览器 RPC 返回可重试错误并带稳定 <code>code=browser_host_unavailable</code>；宿主已连接但仍在初始化返回 <code>browser_host_initializing</code>，宿主被替换返回 <code>browser_host_replaced</code>。这些失败发生在发送 RPC 之前，不会声明动作已执行或浏览器已停止。</p>
 
   <p>浏览器等待文本时，<code>text</code> 在任一同文元素可见时满足，<code>text_gone</code> 在可见匹配为空时满足。两个条件沿用命令的剩余截止时间。停止回合时，Gateway 通过原浏览器宿主连接取消该标签页的等待。宿主按账号、连接和原请求 ID 核对，已经执行的等待收尾后释放账号队列。</p>
 
