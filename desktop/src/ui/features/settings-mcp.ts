@@ -478,11 +478,13 @@ function readMcpForm(): McpServerPayload {
 function setTransportFields(transport: McpTransport): void {
   const stdioWrap = document.getElementById('mcp-stdio-wrap');
   const remoteWrap = document.getElementById('mcp-remote-wrap');
+  const probe = document.getElementById('mcp-server-probe') as HTMLButtonElement | null;
   if (stdioWrap) stdioWrap.hidden = transport !== 'stdio';
   if (remoteWrap) remoteWrap.hidden = transport === 'stdio';
+  if (probe) probe.hidden = transport === 'stdio';
 }
 
-/** 填充弹层（新增或编辑）。编辑时密钥类 env 显示为空（留空保留原值由后端处理）。 */
+/** 填充弹层（新增或编辑）。编辑时保留 *** 占位符，由后端更新时还原密钥。 */
 function fillMcpForm(server?: McpServerRow): void {
   const set = (id: string, v: string): void => {
     const el = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;

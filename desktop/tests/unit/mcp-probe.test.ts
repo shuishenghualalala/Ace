@@ -81,10 +81,19 @@ it('probes an HTTP endpoint from the MCP settings form without saving', async ()
   const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
   bindMcpPane();
   await openMcpServerModal();
+  const probeButton = document.getElementById('mcp-server-probe') as HTMLButtonElement;
 
   const http = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="http"]')!;
   http.checked = true;
   http.dispatchEvent(new Event('change', { bubbles: true }));
+  expect(probeButton.hidden).toBe(false);
+  const stdio = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="stdio"]')!;
+  stdio.checked = true;
+  stdio.dispatchEvent(new Event('change', { bubbles: true }));
+  expect(probeButton.hidden).toBe(true);
+  http.checked = true;
+  http.dispatchEvent(new Event('change', { bubbles: true }));
+  expect(probeButton.hidden).toBe(false);
   (document.getElementById('mcp-url') as HTMLInputElement).value = 'https://mcp.example.com/mcp';
   (document.getElementById('mcp-headers') as HTMLTextAreaElement).value = 'Authorization: Bearer secret';
 
@@ -102,7 +111,6 @@ it('probes an HTTP endpoint from the MCP settings form without saving', async ()
   expect(apiMock.createMcpServer).not.toHaveBeenCalled();
   expect(apiMock.updateMcpServer).not.toHaveBeenCalled();
 
-  const stdio = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="stdio"]')!;
   stdio.checked = true;
   stdio.dispatchEvent(new Event('change', { bubbles: true }));
   expect(result.hidden).toBe(true);
