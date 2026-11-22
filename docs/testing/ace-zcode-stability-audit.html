@@ -800,8 +800,8 @@
 </article>
 <article id="cli-mcp-list-tool-cap">
 <h3>CLI MCP 列表的工具栏上限</h3>
-<p><code>crew mcp servers list --json</code> 原先原样输出 manager 行全部工具名，异常服务可让一次列表输出无界增长。现在与 Gateway 状态一致：每服务最多 50 个工具名，另给 <code>tool_count</code> 真实数量；连接状态、脱敏错误与配置不变。</p>
-<p><strong>验收</strong> 60 工具状态用例输出 50 个名称、<code>tool_count=60</code>；定向用例、Ruff 通过。</p>
+<p><code>crew mcp servers list --json</code> 原先原样输出 manager 行全部工具名，异常服务可让一次列表输出无界增长。现在与 Gateway 状态一致：每服务最多 50 个工具名，另给 <code>tool_count</code> 真实数量；配置与 worker 不一致时返回 <code>config_pending</code>，连接状态、脱敏错误与配置不变。</p>
+<p><strong>验收</strong> 60 工具状态用例输出 50 个名称、<code>tool_count=60</code>；配置待切换用例返回 true；定向用例、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts</code> 的 CLI 参数入口。</p>
 </article>
 <article id="mcp-update-stop-warning">

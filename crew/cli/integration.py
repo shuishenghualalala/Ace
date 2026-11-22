@@ -172,11 +172,13 @@ def _mcp_servers_view(app: Any) -> list[dict[str, Any]]:
     mgr = getattr(app, "mcp_manager", None)
     if mgr is None:
         return []
+    configured = getattr(getattr(app, "config", None), "mcp_servers", None) or {}
     return [
         {
             "name": row["name"],
             "transport": row["transport"],
             "connected": row["connected"],
+            "config_pending": row.get("config") != configured.get(row["name"], row.get("config")),
             "error": redact_sensitive_display_text(str(row.get("error") or "")),
             "tools": [str(item) for item in (row.get("tools") or [])][:_STATUS_MAX_TOOLS],
             "tool_count": len(row.get("tools") or []),

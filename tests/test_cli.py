@@ -1081,6 +1081,27 @@ def test_mcp_list_caps_tools():
     assert view[0]["tool_count"] == 60
 
 
+def test_mcp_list_marks_config_pending():
+    import crew.cli.integration as integration
+
+    manager = SimpleNamespace(status=lambda: [{
+        "name": "pending",
+        "transport": "http",
+        "connected": True,
+        "error": "",
+        "tools": [],
+        "config": {"url": "https://mcp.example.com/old", "transport": "http"},
+    }])
+    app = SimpleNamespace(
+        mcp_manager=manager,
+        config=SimpleNamespace(mcp_servers={
+            "pending": {"url": "https://mcp.example.com/new", "transport": "http"},
+        }),
+    )
+    view = integration._mcp_servers_view(app)
+    assert view[0]["config_pending"] is True
+
+
 def test_mcp_add_no_auto_connect_saves_without_starting(monkeypatch):
     import crew.cli.integration as integration
 
