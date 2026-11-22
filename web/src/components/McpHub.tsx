@@ -88,6 +88,7 @@ export default function McpHub() {
   const refreshTimers = useRef<number[]>([]);
   const probeEpoch = useRef(0);
   const probeAbort = useRef<AbortController | null>(null);
+  const lastFocused = useRef<HTMLElement | null>(null);
 
   const load = async (silent = false): Promise<void> => {
     if (!silent) setLoading(true);
@@ -121,6 +122,7 @@ export default function McpHub() {
   }, []);
 
   const openAdd = (): void => {
+    lastFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     probeEpoch.current += 1;
     abortProbe();
     setEditing("");
@@ -131,6 +133,7 @@ export default function McpHub() {
   };
 
   const openEdit = (server: McpServerRow): void => {
+    lastFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     probeEpoch.current += 1;
     abortProbe();
     setEditing(server.name);
@@ -148,6 +151,37 @@ export default function McpHub() {
     setModalOpen(false);
     setProbeMessage("");
   };
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const modal = document.querySelector<HTMLElement>(".mcp-modal");
+    const focusables = (): HTMLElement[] => Array.from(
+      modal?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href]',
+      ) ?? [],
+    );
+    const initial = modal?.querySelector<HTMLInputElement>("input");
+    (initial ?? focusables()[0])?.focus();
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Tab") return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      lastFocused.current?.focus();
+    };
+  }, [modalOpen]);
 
   useEffect(() => {
     if (!modalOpen) return;

@@ -690,6 +690,12 @@
 <p><strong>验收</strong> McpHub 新增 Esc 用例：打开后按 Escape 弹层消失；组件 7 项、TypeScript 通过。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-modal-focus">
+<h3>Web MCP 弹层的焦点进入、循环与恢复</h3>
+<p>MCP 新增/编辑弹层此前打开后焦点留在页面按钮，Tab 可走到弹层外；关闭后也没有回到触发入口。现在打开时记录触发元素并聚焦首个输入框，Tab/Shift+Tab 在弹层可用控件间循环，关闭或保存后恢复触发元素焦点。焦点逻辑与 Escape、探测 abort、保存中保护共用同一弹层状态。</p>
+<p><strong>验收</strong> McpHub 7 项通过，Esc 用例同时断言打开后焦点在首个输入、关闭后回到「添加服务」按钮；TypeScript 通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

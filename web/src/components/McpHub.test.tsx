@@ -104,12 +104,15 @@ it("edits an MCP server without echoing masked secrets", async () => {
 it("closes the MCP form with Escape", async () => {
   await render();
   const add = [...host.querySelectorAll("button")].find((button) => button.textContent === "添加服务");
+  add?.focus();
   await act(async () => add?.click());
   expect(host.querySelector(".mcp-modal")).not.toBeNull();
+  expect(document.activeElement).toBe(host.querySelector(".mcp-modal input"));
   await act(async () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
   });
   expect(host.querySelector(".mcp-modal")).toBeNull();
+  expect(document.activeElement).toBe(add);
 });
 
 it("refreshes the MCP server list on demand", async () => {
