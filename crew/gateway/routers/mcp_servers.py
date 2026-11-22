@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncio
 
@@ -22,6 +23,7 @@ from crew.tools.mcp_management import SERVER_NAME_RE as _NAME_RE
 from crew.tools.mcp_management import add_mcp_server, validate_server_payload as _validate_server_payload
 # env key 命中这些后缀（不区分大小写）视为敏感，GET 脱敏。
 _SECRET_KEY_RE = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)$", re.IGNORECASE)
+_SENSITIVE_NAME_RE = re.compile(r"(AUTH|COOKIE|KEY|SECRET|TOKEN|PASSWORD)", re.IGNORECASE)
 
 
 def _redact_env(env: Any) -> dict[str, Any]:
@@ -34,10 +36,44 @@ def _redact_env(env: Any) -> dict[str, Any]:
     return out
 
 
+def _redact_headers(headers: Any) -> dict[str, Any]:
+    if not isinstance(headers, dict):
+        return {}
+    return {
+        str(key): "***" if _SENSITIVE_NAME_RE.search(str(key)) else value
+        for key, value in headers.items()
+    }
+
+
+def _redact_url(url: Any) -> str:
+    text = str(url or "")
+    parts = urlsplit(text)
+    if not parts.query:
+        return text
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    changed = False
+    redacted = []
+    for key, value in pairs:
+        if _SENSITIVE_NAME_RE.search(key):
+            redacted.append((key, "***"))
+            changed = True
+        else:
+            redacted.append((key, value))
+    if not changed:
+        return text
+    return urlunsplit((
+        parts.scheme, parts.netloc, parts.path, urlencode(redacted, safe="*"), parts.fragment,
+    ))
+
+
 def _redact_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """脱敏单个 server 配置（仅 env）。"""
+    """脱敏单个 server 配置（env、headers 与 URL 敏感查询参数）。"""
     out = dict(cfg)
     out["env"] = _redact_env(cfg.get("env"))
+    if "headers" in cfg:
+        out["headers"] = _redact_headers(cfg.get("headers"))
+    if "url" in cfg:
+        out["url"] = _redact_url(cfg.get("url"))
     return out
 
 

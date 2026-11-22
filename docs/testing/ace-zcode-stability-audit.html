@@ -444,6 +444,12 @@
 <p><strong>验收</strong> 市场源定向 17 项通过，新增刷新替换缓存、刷新失败保留旧缓存两例；Gateway 技能接口 7 项通过，覆盖刷新转发与管理员拒绝；SkillsHub 组件 4 项通过，覆盖远程源刷新按钮；Web 全量 327 项、TypeScript 与 Ruff 通过。未对公开 HTTPS 站点执行真实刷新，网络层仍由受控 Client 夹具覆盖。</p>
 <p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/cli/knowledge.py</code>、<code>crew/gateway/routers/misc.py</code>、<code>web/src/components/SkillsHub.tsx</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="mcp-endpoint-redaction">
+<h3>MCP 直连端点的 URL 校验与敏感字段脱敏</h3>
+<p>MCP Server 管理原先只检查 <code>transport</code> 与 <code>headers</code> 存在，<code>file://</code>、相对地址或内嵌账号密码的 URL 会先落盘再连接失败；GET 状态只脱敏 env，<code>Authorization</code> 头和 URL 查询里的 token 会原样回显。现在 HTTP/SSE 地址必须是绝对 <code>http(s)</code> URL、含主机名、无空白字符、不能内嵌账号密码；headers 必须是对象并规范化为字符串键值。GET 状态同时脱敏 env 敏感键、Authorization/Cookie/Key/Token/Password 类 headers，以及 URL 查询中的同类参数；落盘配置仍保留原值，连接使用原值。显式拒绝在持久化前返回 400。</p>
+<p><strong>验收</strong> MCP Server API 全量 22 项通过，新增 <code>file://</code>/<code>ftp://</code>/内嵌凭据/非 URL 拒绝且不落盘、Authorization 与查询 token 脱敏三例。真实 API 创建 <code>http://127.0.0.1:1/mcp?token=…&amp;mode=1</code>：GET 返回 <code>token=***</code>、保留 <code>mode=1</code> 与可见 header，config.yaml 中仍是原始 URL；删除后状态清空。Ruff 通过。该脱敏只覆盖已知敏感名称，自定义秘密字段仍需调用方使用 headers/env 的命名约定。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的 HTTP/SSE 端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

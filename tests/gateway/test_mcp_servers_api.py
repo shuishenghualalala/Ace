@@ -227,6 +227,48 @@ async def test_reload_nonexistent_returns_404(api):
 
 # ---- 密钥脱敏 ----
 
+async def test_invalid_http_urls_rejected_before_persist(api):
+    client, crew, _ = api
+    for url in (
+        "file:///etc/passwd",
+        "ftp://example.com/mcp",
+        "http://user:pass@example.com/mcp",
+        "not-a-url",
+    ):
+        resp = await client.post(
+            "/api/mcp/servers",
+            json={"name": "bad-url", "url": url, "transport": "http"},
+            headers=LOCAL_HEADERS,
+        )
+        assert resp.status_code == 400, url
+        assert "bad-url" not in (crew.config.mcp_servers or {})
+
+
+async def test_secret_headers_and_url_query_redacted_in_get(api):
+    client, _, config_yaml = api
+    url = "http://127.0.0.1:1/mcp?token=abc123&mode=1"
+    resp = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "remote-secret",
+            "url": url,
+            "transport": "http",
+            "headers": {"Authorization": "Bearer secret", "X-Trace": "visible"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert resp.status_code == 201
+    resp = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
+    srv = next(s for s in resp.json()["servers"] if s["name"] == "remote-secret")
+    assert srv["config"]["headers"]["Authorization"] == "***"
+    assert srv["config"]["headers"]["X-Trace"] == "visible"
+    assert "token=***" in srv["config"]["url"]
+    assert "mode=1" in srv["config"]["url"]
+    persisted = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    assert persisted["mcp_servers"]["remote-secret"]["url"] == url
+    await client.delete("/api/mcp/servers/remote-secret", headers=LOCAL_HEADERS)
+
+
 async def test_secret_env_redacted_in_get(api):
     client, _, _ = api
     resp = await client.post(

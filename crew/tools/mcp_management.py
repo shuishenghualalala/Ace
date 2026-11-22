@@ -52,11 +52,20 @@ def validate_server_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | N
     elif url:
         if transport not in _VALID_TRANSPORTS:
             return None, f"transport 必须是 {sorted(_VALID_TRANSPORTS)} 之一"
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None, "url 必须是 http(s) 绝对地址"
+        if parsed.username or parsed.password:
+            return None, "url 不能包含账号或密码，请改用 headers"
+        if any(char.isspace() for char in url):
+            return None, "url 不能包含空白字符"
         cfg["url"] = url
         cfg["transport"] = transport
         headers = payload.get("headers")
         if headers is not None:
-            cfg["headers"] = dict(headers)
+            if not isinstance(headers, dict):
+                return None, "headers 必须是对象"
+            cfg["headers"] = {str(key): str(value) for key, value in headers.items()}
     else:
         return None, "必须提供 command（stdio）或 url（http/sse）"
 
