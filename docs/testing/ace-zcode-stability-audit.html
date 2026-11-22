@@ -678,6 +678,12 @@
 <p><strong>验收</strong> MCP API 全量 32 项通过；新增非管理员列表/探测 403 用例，本地账号全流程不受影响。Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/gateway/auth.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-manual-refresh">
+<h3>Web MCP 列表的手动状态刷新</h3>
+<p>MCP worker 可能由后台重连、账号切换或外部配置修改改变状态，页面原本只能逐项点「重连」或整页刷新。新增顶部「刷新」按钮，调用同一状态接口并静默更新列表，不重建表单、不改变搜索条件；初始加载期间按钮禁用。</p>
+<p><strong>验收</strong> McpHub 新增手动刷新用例：初始一次请求，点击后第二次请求；组件 6 项、TypeScript 与生产构建通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
