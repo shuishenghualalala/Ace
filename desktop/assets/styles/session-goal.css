@@ -25,6 +25,20 @@
 .desktop-goal p { margin: 0; overflow-wrap: anywhere; }
 .desktop-goal__objective { white-space: pre-wrap; }
 .desktop-goal__hint, .desktop-goal__feedback { color: var(--mw-text-secondary); }
+.desktop-goal__budget {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--mw-space-1);
+  color: var(--mw-text-secondary);
+}
+.desktop-goal select {
+  padding: 0 var(--mw-space-1);
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-2);
+  color: inherit;
+  background: var(--mw-bg-subtle);
+  font: inherit;
+}
 .desktop-goal form { display: grid; gap: var(--mw-space-2); }
 .desktop-goal textarea {
   width: 100%;

@@ -62,15 +62,18 @@ export interface BackendSession {
   agent_binding?: SessionAgentBinding;
 }
 
-export type SessionGoalAction = 'set' | 'pause' | 'resume' | 'complete' | 'advance' | 'verify';
+export type SessionGoalAction = 'set' | 'pause' | 'resume' | 'complete' | 'advance' | 'verify' | 'continue' | 'stop_continue';
 export type SessionGoalRunState = 'accepted' | 'running' | 'stopping' | 'finished' | 'stopped' | 'interrupted' | 'failed';
 export type SessionGoalVerificationState = 'running' | 'passed' | 'incomplete' | 'unconfirmed' | 'interrupted';
+export type SessionGoalContinuationState = 'running' | 'passed' | 'exhausted' | 'stopped' | 'yielded' | 'failed' | 'interrupted';
 
 export interface SessionGoalSnapshot {
   version: string;
   goal: { objective: string; status: 'active' | 'paused' | 'completed' } | null;
   supports_advance?: true;
   supports_verify?: true;
+  supports_continue?: true;
+  max_continue_budget?: number;
   run?: { request_id: string; state: SessionGoalRunState; code: string };
   verification?: {
     request_id: string;
@@ -78,6 +81,15 @@ export interface SessionGoalSnapshot {
     state: SessionGoalVerificationState;
     code: string;
     evidence_sequences: number[];
+  };
+  continuation?: {
+    request_id: string;
+    state: SessionGoalContinuationState;
+    code: string;
+    iterations: number;
+    budget: number;
+    step_request_id: string;
+    verification_request_id: string;
   };
 }
 
@@ -1374,7 +1386,8 @@ export const sessionApi = {
       signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     }),
   changeSessionGoal: async (
-    id: string, change: { version: string; action: SessionGoalAction; objective?: string }, signal: AbortSignal,
+    id: string, change: { version: string; action: SessionGoalAction; objective?: string; budget?: number },
+    signal: AbortSignal,
   ): Promise<SessionGoalChangeResult> => {
     const path = `/api/session/${encodeURIComponent(id)}/goal`;
     const init = jsonBody(change);

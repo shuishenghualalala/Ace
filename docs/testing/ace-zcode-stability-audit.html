@@ -370,6 +370,12 @@
 <p><strong>验收</strong> 桌面面板、回合与回放 148 项通过；原生路由与相邻 IPC 和网关就绪/重启组合 119 项通过（包含面板测试），TypeScript、定向 ESLint 和构建通过。原生发送的行为等价基线会重试断线的 Goal POST。候选在网关就绪后复查提交时的渲染文档、账号（含同账号重新登录）和 Gateway 代际，不重试目标写入、不跟随重定向。实际回环 HTTP 分别在读完写入后断开与返回 307，两种情况都只观察到一次物理 POST；其他路由仍沿用启动重试。</p>
 <p class="evidence">Ace <code>desktop/src/ui/features/session-goal.ts</code>、<code>desktop/src/main/gateway-fetch-dispatch.ts</code>、<code>desktop/tests/unit/gateway-fetch-dispatch.test.ts</code>。渲染器用隔离 IPC 适配器连接真实网关；原生传输异常另通过真实回环插座验证，不是正式 Electron 安装包的故障注入。</p>
 </article>
+<article id="desktop-goal-continuation">
+<h3>桌面启动和停止有界自动推进</h3>
+<p>Ace 桌面在网关声明支持时显示自动轮次选择和「自动推进」。点击后提交带预算的 <code>continue</code>，面板分别显示自动运行、单轮、验收和目标状态；运行中只保留「停止自动推进」与「暂停目标」。停止只结束自动运行并保留启用中的目标，暂停同时暂停目标。状态按持久标识恢复，关闭面板不停止运行；回执不明时只重新读取，不重发启动或停止。</p>
+<p><strong>验收</strong> 桌面单测 2404 项、208 个文件通过；TypeScript、定向 ESLint、样式检查和隔离生产构建通过。Windows Chrome 加载实际桌面渲染器与生产构建，通过隔离 IPC 适配器连接真实 Gateway 并打开保存的会话。选择 3 轮启动后自动完成两轮（第一轮证据不足、第二轮验收通过），面板显示「自动推进已通过验收 · 2/3 轮」且目标完成。随后设置第二个目标并按 2 轮启动，在验收模型确实运行时点击「停止自动推进」，面板显示「自动推进已停止 · 1/2 轮」、目标仍启用、在途验收中断；同一会话的普通消息随后正常完成。整个流程只提交 5 次目标写入，公开聊天记录与模型调用次数一致。适配器隔离于正式 Electron 安装包。</p>
+<p class="evidence">Ace <code>desktop/src/ui/features/session-goal.ts</code>、<code>desktop/src/ui/api/feature-session.ts</code>、<code>desktop/tests/unit/desktop-session-goal.test.ts</code>。截图 <code>goal-continuation-desktop-067b92f978/desktop-goal-continued.png</code>、<code>desktop-goal-continuation-stopped.png</code>。ZCode <code>packages/ui/src/v4/ConversationStatusPanel.tsx:463–557</code>、<code>packages/ui/src/v4/conversationGoalSummaryModel.ts:46–69</code>。</p>
+</article>
 <article id="bounded-goal-continuation">
 <h3>由用户启动的有界 Goal 自动推进</h3>
 <p>ZCode 的续跑由用户提交触发，在每次继续前重新验收目标；验收通过、目标变化、等待用户命令或后台任务时停止。Ace 新增 <code>continue</code> 与 <code>stop_continue</code>，只有显式提交才启动。每次运行保存独立 <code>continue_</code> 标识、当前目标版本、轮次上限和已完成次数，默认 4 轮、上限 12 轮；设置目标本身仍不会启动任何模型调用。循环串行复用已交付的单轮推进与独立验收：每轮先推进一个无工具前台回合，再以已保存证据验收；验收通过即完成目标，明确证据不足才消耗下一轮预算，判定不确定、证据变化或无法确认时停止而不是继续猜测。</p>

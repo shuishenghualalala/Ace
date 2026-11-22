@@ -303,7 +303,118 @@ it('keeps manual actions without a capability flag or prior step', async () => {
   expect(button('暂停目标').disabled).toBe(false);
   expect(button('标记目标完成').disabled).toBe(false);
   expect(() => button('推进一轮')).toThrow();
+  expect(document.querySelector<HTMLSelectElement>('[data-budget]')!.hidden).toBe(true);
   expect(fetch.mock.calls).toHaveLength(1);
+});
+
+const available = (version: string) => ({
+  ...goal(version, 'Check the saved sample', 'active'),
+  supports_advance: true, supports_verify: true, supports_continue: true, max_continue_budget: 12,
+});
+const ongoing = (version: string, state: string, iterations: number, code = '', status = 'active') => ({
+  ...goal(version, 'Check the saved sample', status),
+  supports_advance: true, supports_verify: true, supports_continue: true, max_continue_budget: 12,
+  continuation: {
+    request_id: 'continue_sample', state, code, iterations, budget: 3,
+    step_request_id: 'goal_sample', verification_request_id: iterations ? 'verify_sample' : '',
+  },
+});
+const bridged = (data: unknown, status = 200) => ({
+  body: JSON.stringify(data), status, headers: { 'content-type': 'application/json' },
+});
+
+it('starts a budgeted automatic run once and follows its rounds until verification passes', async () => {
+  vi.useFakeTimers();
+  let started = false;
+  let reads = 0;
+  const gatewayFetch = vi.fn(async (_url: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === 'POST') {
+      expect(JSON.parse(String(init.body))).toEqual({ action: 'continue', version: 'ready', budget: 3 });
+      started = true;
+      return bridged(ongoing('running', 'running', 0), 202);
+    }
+    if (!started) return bridged(available('ready'));
+    reads += 1;
+    return bridged(reads === 1
+      ? ongoing('progress', 'running', 1)
+      : ongoing('passed', 'passed', 2, 'goal_continue_passed', 'completed'));
+  });
+  vi.stubGlobal('Crew', { gatewayFetch });
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  const select = document.querySelector<HTMLSelectElement>('[data-budget]')!;
+  expect(select.hidden).toBe(false);
+  expect(select.options).toHaveLength(12);
+  select.value = '3';
+  button('自动推进').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).toContain('正在自动推进 · 0/3 轮');
+  expect(button('停止自动推进').hidden).toBe(false);
+  expect(button('暂停目标').disabled).toBe(false);
+  expect(() => button('推进一轮')).toThrow();
+  expect(() => button('自动推进')).toThrow();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(document.body.textContent).toContain('正在自动推进 · 1/3 轮');
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(document.body.textContent).toContain('自动推进已通过验收 · 2/3 轮');
+  expect(document.body.textContent).toContain('验收通过，目标已完成。');
+  expect(document.body.textContent).toContain('会话目标 · 已完成');
+  expect(() => button('停止自动推进')).toThrow();
+  expect(gatewayFetch.mock.calls).toHaveLength(4);
+});
+
+it('stops an automatic run without pausing the goal and sends the stop once', async () => {
+  vi.useFakeTimers();
+  let stopped = false;
+  const gatewayFetch = vi.fn(async (_url: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === 'POST') {
+      expect(JSON.parse(String(init.body))).toEqual({ action: 'stop_continue', version: 'progress' });
+      stopped = true;
+      return bridged(ongoing('stopped', 'stopped', 1, 'goal_continue_cancelled'));
+    }
+    return bridged(stopped
+      ? ongoing('stopped', 'stopped', 1, 'goal_continue_cancelled')
+      : ongoing('progress', 'running', 1));
+  });
+  vi.stubGlobal('Crew', { gatewayFetch });
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).toContain('正在自动推进 · 1/3 轮');
+  button('停止自动推进').click();
+  button('停止自动推进').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).toContain('自动推进已停止 · 1/3 轮');
+  expect(document.body.textContent).toContain('已停止自动推进，目标仍启用。');
+  expect(document.body.textContent).toContain('会话目标 · 已启用');
+  expect(button('自动推进').disabled).toBe(false);
+  expect(document.querySelector<HTMLButtonElement>('[data-stop-continue]')!.hidden).toBe(true);
+  expect(gatewayFetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+});
+
+it('does not repeat an automatic-run start after an unconfirmed receipt', async () => {
+  vi.useFakeTimers();
+  let posts = 0;
+  let reads = 0;
+  const gatewayFetch = vi.fn(async (_url: string, init?: { method?: string }) => {
+    if (init?.method === 'POST') {
+      posts += 1;
+      throw new Error('Connection closed');
+    }
+    reads += 1;
+    return bridged(reads === 1 ? available('ready') : ongoing('progress', 'running', 1));
+  });
+  vi.stubGlobal('Crew', { gatewayFetch });
+  openDesktopSessionGoal('');
+  await vi.advanceTimersByTimeAsync(0);
+  button('自动推进').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).toContain('未能确认目标更新');
+  expect(() => button('自动推进')).toThrow();
+  button('重新读取目标').click();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(document.body.textContent).toContain('正在自动推进 · 1/3 轮');
+  expect(button('停止自动推进').hidden).toBe(false);
+  expect(posts).toBe(1);
 });
 
 it.each([
