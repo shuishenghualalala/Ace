@@ -1050,6 +1050,100 @@ def test_mcp_probe_failure_exits_nonzero(capsys, cli_home, monkeypatch):
     assert code == 1
 
 
+def test_mcp_add_no_auto_connect_saves_without_starting(monkeypatch):
+    import crew.cli.integration as integration
+
+    class FakeConfig:
+        def __init__(self):
+            self.mcp_servers = {}
+
+        def add_mcp_server(self, name, cfg):
+            self.mcp_servers[name] = dict(cfg)
+
+        def update_mcp_server(self, name, cfg):
+            self.mcp_servers[name] = dict(cfg)
+
+    class FakeManager:
+        _registry = object()
+
+        def __init__(self):
+            self.started = []
+
+        def register_pending(self, name, cfg):
+            self.pending = (name, cfg)
+
+        def status(self):
+            return []
+
+        async def add_server(self, name, cfg):
+            self.started.append(name)
+            return True
+
+        async def remove_server(self, name):
+            return True
+
+        async def reload_one(self, name, cfg=None):
+            self.started.append(name)
+            return True
+
+    manager = FakeManager()
+    app = SimpleNamespace(config=FakeConfig(), mcp_manager=manager, registry=object())
+    args = SimpleNamespace(
+        name="manual", command="echo", args="", url=None, transport=None,
+        env="", json_payload=None, auto_connect=False,
+    )
+    result = asyncio.run(integration._mcp_servers_add(args, SimpleNamespace(app=app)))
+    assert result.data["ok"] is True
+    assert manager.started == []
+    assert app.config.mcp_servers["manual"]["auto_connect"] is False
+    assert manager.pending[0] == "manual"
+
+
+def test_mcp_update_preserves_no_auto_connect(monkeypatch):
+    import crew.cli.integration as integration
+
+    class FakeConfig:
+        def __init__(self):
+            self.mcp_servers = {"swap": {"command": "echo", "transport": "stdio", "auto_connect": False}}
+
+        def update_mcp_server(self, name, cfg):
+            self.mcp_servers[name] = dict(cfg)
+
+    class FakeManager:
+        _registry = object()
+
+        def __init__(self):
+            self.started = []
+            self.removed = []
+            self.pending = None
+
+        def register_pending(self, name, cfg):
+            self.pending = (name, cfg)
+
+        def status(self):
+            return []
+
+        async def remove_server(self, name):
+            self.removed.append(name)
+            return True
+
+        async def reload_one(self, name, cfg=None):
+            self.started.append(name)
+            return True
+
+    manager = FakeManager()
+    app = SimpleNamespace(config=FakeConfig(), mcp_manager=manager, registry=object())
+    args = SimpleNamespace(
+        name="swap", command="echo", args="", url=None, transport=None,
+        env="", json_payload=None, auto_connect=None,
+    )
+    result = asyncio.run(integration._mcp_servers_update(args, SimpleNamespace(app=app)))
+    assert result.data["ok"] is True
+    assert app.config.mcp_servers["swap"]["auto_connect"] is False
+    assert manager.removed == ["swap"]
+    assert manager.started == []
+
+
 def test_mcp_probe_name_merges_saved_secrets(monkeypatch):
     import crew.cli.integration as integration
 

@@ -125,6 +125,11 @@ def _add_mcp_server_args(parser, *, require_name: bool = False) -> None:
     parser.add_argument("--url", help="http/sse 地址")
     parser.add_argument("--transport", choices=("http", "sse"), help="url 模式的传输协议")
     parser.add_argument("--env", default="", help="env JSON 对象")
+    auto_group = parser.add_mutually_exclusive_group()
+    auto_group.add_argument("--auto-connect", dest="auto_connect", action="store_true", default=None,
+                            help="保存后立即连接（默认）")
+    auto_group.add_argument("--no-auto-connect", dest="auto_connect", action="store_false",
+                            help="只保存配置，不自动连接；稍后可用 reload 手动连接")
     parser.add_argument("--json", dest="json_payload", help="完整配置 JSON（与显式参数合并）")
 
 
@@ -141,6 +146,9 @@ def _mcp_payload(args: Any) -> dict[str, Any]:
         if not isinstance(env, dict):
             raise CliError("env 必须是 JSON 对象")
         payload["env"] = env
+    auto_connect = getattr(args, "auto_connect", None)
+    if auto_connect is not None:
+        payload["auto_connect"] = auto_connect
     return payload
 
 
@@ -257,7 +265,8 @@ async def _mcp_servers_add(args: Any, ctx: CliContext) -> CliResult:
     await _ensure_mcp_started(app)
     if app.mcp_manager is not None:
         app.mcp_manager.register_pending(name, cfg)
-        asyncio.create_task(app.mcp_manager.add_server(name, cfg))
+        if cfg.get("auto_connect") is not False:
+            asyncio.create_task(app.mcp_manager.add_server(name, cfg))
     return CliResult(data={"ok": True, "servers": _mcp_servers_view(app)}, text=f"已添加 MCP server {name}")
 
 
@@ -271,6 +280,9 @@ async def _mcp_servers_update(args: Any, ctx: CliContext) -> CliResult:
     cfg, err = _validate_server_payload(payload)
     if err is not None:
         raise CliError(err)
+    existing = (app.config.mcp_servers or {}).get(name) or {}
+    if "auto_connect" not in cfg and isinstance(existing.get("auto_connect"), bool):
+        cfg["auto_connect"] = existing["auto_connect"]
     # 统一配置事务（Config.update_mcp_server）：候选值 → 持久化 → 发布，
     # 持久化失败内存与磁盘保持旧 command，不会出现"内存已改、磁盘仍旧"。
     try:
@@ -281,7 +293,11 @@ async def _mcp_servers_update(args: Any, ctx: CliContext) -> CliResult:
         raise CliError(f"持久化失败: {exc}") from exc
     await _ensure_mcp_started(app)
     if app.mcp_manager is not None:
-        asyncio.create_task(app.mcp_manager.reload_one(name, cfg))
+        if cfg.get("auto_connect") is False:
+            await app.mcp_manager.remove_server(name)
+            app.mcp_manager.register_pending(name, cfg)
+        else:
+            asyncio.create_task(app.mcp_manager.reload_one(name, cfg))
     return CliResult(data={"ok": True, "servers": _mcp_servers_view(app)}, text=f"已更新 MCP server {name}")
 
 
