@@ -21,6 +21,8 @@ from fastapi.responses import JSONResponse
 
 from crew.tools.mcp_management import SERVER_NAME_RE as _NAME_RE
 from crew.tools.mcp_management import add_mcp_server, validate_server_payload as _validate_server_payload
+from crew.tools.mcp_client import probe_remote_server
+from crew.tools.redact import redact_sensitive_text
 # env key 命中这些后缀（不区分大小写）视为敏感，GET 脱敏。
 _SECRET_KEY_RE = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)$", re.IGNORECASE)
 _SENSITIVE_NAME_RE = re.compile(r"(AUTH|COOKIE|KEY|SECRET|TOKEN|PASSWORD)", re.IGNORECASE)
@@ -109,6 +111,24 @@ def create_mcp_servers_router(crew) -> APIRouter:
     @router.get("/api/mcp/servers")
     async def list_servers() -> JSONResponse:
         return JSONResponse({"ok": True, "servers": _servers_view()})
+
+    @router.post("/api/mcp/servers/probe")
+    async def probe_server(payload: dict[str, Any] | None = None) -> JSONResponse:
+        cfg, err = _validate_server_payload(payload or {})
+        if err is not None:
+            return JSONResponse({"ok": False, "error": err}, status_code=400)
+        if cfg.get("command") or not cfg.get("url"):
+            return JSONResponse(
+                {"ok": False, "error": "只支持探测 HTTP/SSE 端点；stdio 请保存后连接"},
+                status_code=400,
+            )
+        result = await probe_remote_server(cfg)
+        error = result.get("error")
+        return JSONResponse({
+            "ok": bool(result.get("ok")),
+            "tools": list(result.get("tools") or []),
+            "error": redact_sensitive_text(str(error)) if error else None,
+        })
 
     @router.post("/api/mcp/servers")
     async def create_server(payload: dict[str, Any] | None = None) -> JSONResponse:

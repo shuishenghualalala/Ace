@@ -227,6 +227,42 @@ async def test_reload_nonexistent_returns_404(api):
 
 # ---- 密钥脱敏 ----
 
+async def test_probe_remote_endpoint_without_persisting(api, monkeypatch):
+    client, crew, _ = api
+    import crew.gateway.routers.mcp_servers as mcp_router
+
+    calls = []
+
+    async def fake_probe(cfg):
+        calls.append(cfg)
+        return {"ok": True, "tools": ["ping"], "error": None}
+
+    monkeypatch.setattr(mcp_router, "probe_remote_server", fake_probe)
+    resp = await client.post(
+        "/api/mcp/servers/probe",
+        json={
+            "url": "http://127.0.0.1:9/mcp",
+            "transport": "http",
+            "headers": {"X-Test": "1"},
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "tools": ["ping"], "error": None}
+    assert calls == [{
+        "url": "http://127.0.0.1:9/mcp",
+        "transport": "http",
+        "headers": {"X-Test": "1"},
+    }]
+    assert crew.config.mcp_servers == {}
+
+    rejected = await client.post(
+        "/api/mcp/servers/probe", json={"command": "echo"}, headers=LOCAL_HEADERS,
+    )
+    assert rejected.status_code == 400
+    assert "stdio" in rejected.json()["error"]
+
+
 async def test_invalid_http_urls_rejected_before_persist(api):
     client, crew, _ = api
     for url in (

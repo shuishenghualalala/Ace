@@ -1121,6 +1121,36 @@ class _ServerWorker:
         self._drain_queue(reason)
 
 
+async def probe_remote_server(cfg: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
+    """Probe an HTTP/SSE MCP endpoint without persisting configuration.
+
+    Only remote transports are accepted: a stdio probe would execute a host
+    command, so that path stays behind the normal save-and-connect approval.
+    """
+    if cfg.get("command") or not cfg.get("url"):
+        return {"ok": False, "tools": [], "error": "只支持探测 HTTP/SSE 端点"}
+    probe_cfg = dict(cfg)
+    probe_cfg["reconnect"] = {"enabled": False}
+    probe_cfg["fail_on_startup_error"] = True
+    probe_cfg["ping_interval"] = 0
+    worker = _ServerWorker("__probe__", probe_cfg, Registry(), startup_timeout=timeout)
+    try:
+        accepted = await worker.start()
+        error = worker._error
+        tools = [
+            str(getattr(tool, "name", "")).strip()
+            for tool in worker._tools
+            if str(getattr(tool, "name", "")).strip()
+        ]
+        return {
+            "ok": bool(accepted and error is None),
+            "tools": tools,
+            "error": str(error) if error is not None else None,
+        }
+    finally:
+        await worker.stop()
+
+
 class MCPClientManager:
     """管理所有配置的 MCP server 连接。"""
 

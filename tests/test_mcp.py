@@ -20,7 +20,7 @@ from crew.plugins.manager import PluginManager
 from crew.state.config import Config
 from crew.tasks.task_manager import InMemoryTaskManager
 from crew.team.team_manager import InProcessTeamManager
-from crew.tools.mcp_client import MCPClientManager
+from crew.tools.mcp_client import MCPClientManager, probe_remote_server
 from crew.tools.registry import Registry, register_builtin_tools
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "echo_mcp_server.py")
@@ -216,6 +216,14 @@ async def test_mcp_client_streamable_http_connects_and_calls(monkeypatch, tmp_pa
                 assert failed.is_error
                 assert 'cannot continue\n\nStructured content:\n{"state": "incomplete"}' in failed.content
                 assert "iVBORw0KGgo=" not in failed.content
+
+                probe = await probe_remote_server({
+                    "url": "http://127.0.0.1:8000/mcp",
+                    "transport": "http",
+                    "headers": {"X-MCP-Test": "probe"},
+                })
+                assert probe["ok"] is True, probe
+                assert "http_echo" in probe["tools"]
             finally:
                 await mgr.aclose()
     finally:
