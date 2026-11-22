@@ -5079,7 +5079,7 @@ export class BrowserHost extends EventEmitter {
     }) as { data?: unknown };
     const data = String(captured?.data ?? '');
     if (!data) {
-      throw new BrowserHostError('Playwright 未返回截图数据，截图未生成', { code: 'invalid_screenshot' });
+      throw new BrowserHostError('浏览器未返回截图数据，截图未生成', { code: 'invalid_screenshot' });
     }
     return Buffer.from(data, 'base64');
   }
@@ -5211,7 +5211,7 @@ export class BrowserHost extends EventEmitter {
         && image[image.length - 2] === 0xff
         && image[image.length - 1] === 0xd9;
     if (!validImage) {
-      throw new BrowserHostError('Playwright 返回了无效的截图数据', {
+      throw new BrowserHostError('浏览器返回了无效的截图数据', {
         code: 'invalid_screenshot',
       });
     }

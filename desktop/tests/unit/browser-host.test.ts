@@ -4801,6 +4801,44 @@ describe('BrowserHost', () => {
     }
   });
 
+  it('reports invalid CDP screenshot payloads without blaming Playwright', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
+    await mkdir(outputDir, { recursive: true });
+    electron.pageScreenshotFails = true;
+    const debuggerSession = electron.views[0].webContents.debugger;
+    const send = debuggerSession.sendCommand.bind(debuggerSession);
+    let payload = '';
+    vi.spyOn(debuggerSession, 'sendCommand').mockImplementation(
+      async (method: string, params?: unknown, sessionId?: string) => {
+        if (method === 'Page.captureScreenshot') return { data: payload };
+        return send(method, params, sessionId);
+      },
+    );
+    try {
+      for (const [index, message] of [
+        '浏览器未返回截图数据，截图未生成',
+        '浏览器返回了无效的截图数据',
+      ].entries()) {
+        payload = index === 0 ? '' : Buffer.from('not-an-image').toString('base64');
+        await expect(host.handleRpc({
+          runtime_key: RUNTIME_KEY,
+          method: 'execute',
+          params: {
+            profile_dir: PROFILE,
+            command: 'screenshot',
+            args: ['--full-page', path.join(outputDir, `invalid-${index}.png`)],
+            proxy_url: PROXY_URL,
+          },
+        })).rejects.toMatchObject({ code: 'invalid_screenshot', message });
+      }
+    } finally {
+      electron.pageScreenshotFails = false;
+      await host.dispose();
+    }
+  });
+
   it('bounds abandoned screenshot captures instead of stacking pending work', async () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
