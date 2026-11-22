@@ -28,6 +28,10 @@ import {
 import * as pwActions from './browser/playwright-actions';
 import * as pwConsole from './browser/playwright-console';
 import * as pwNetwork from './browser/playwright-network';
+import {
+  CAPTURE_WINDOW_PRESENTATION_GRACE_MS,
+  startCaptureWindowPresentation,
+} from './browser/capture-window-presentation';
 import { PlaywrightEngine } from './browser/playwright-engine';
 import { readArtifactResource, type ArtifactResourceRoot } from './browser/artifact-resources';
 import { browserZoomShortcut, nextBrowserZoom, type BrowserZoomAction } from '../shared/browser-zoom';
@@ -5135,7 +5139,15 @@ export class BrowserHost extends EventEmitter {
       timeout: timeoutMs,
       ...(parsed.type === 'jpeg' ? { quality: 90 } : {}),
     } as const;
+    const presentation = this.panel?.tab === tab
+      ? startCaptureWindowPresentation(this.panel.window)
+      : owner.engine.startCapturePresentation(tab.view);
     const capture = (async () => {
+      if (presentation) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, CAPTURE_WINDOW_PRESENTATION_GRACE_MS);
+        });
+      }
       if (parsed.ref) {
         const record = this.ref(tab, parsed.ref);
         const locator = record.playwrightRef
@@ -5180,6 +5192,8 @@ export class BrowserHost extends EventEmitter {
         void capture.then(release, release);
       }
       throw error;
+    } finally {
+      presentation?.release();
     }
     if (await this.currentPageIdentity(tab) !== pageIdentity) {
       throw new BrowserHostError('页面在截图期间已变化，请重新观察', {

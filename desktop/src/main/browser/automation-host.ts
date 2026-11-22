@@ -20,7 +20,8 @@
  * 3. view 必须 `addChildView` 挂到某个 `BrowserWindow` 上 —— 游离的 view 即使前两条
  *    都满足也不行。
  *
- * 本文件负责 2 和 3：提供一个**永不 show 的**宿主窗口。用户全程看不到任何东西。
+ * 本文件负责 2 和 3：提供默认隐藏的宿主窗口。截图需要新帧时，窗口只进行
+ * 透明且不抢焦点的临时展示，结束后恢复隐藏，用户全程看不到页面内容。
  * 条件 1 在 `playwright-engine.ts` 里随会话建立时下发。
  *
  * ## 与面板的关系
@@ -33,6 +34,7 @@
 import { BrowserWindow } from 'electron';
 
 import type { WebContentsView } from 'electron';
+import { startCaptureWindowPresentation } from './capture-window-presentation';
 
 /** 宿主窗口尺寸即自动化默认视口。与面板常用尺寸保持一致，避免移动时布局跳变。 */
 export const AUTOMATION_VIEWPORT = { width: 1280, height: 800 } as const;
@@ -52,9 +54,14 @@ export class AutomationHost {
     const host = this.ensureWindow();
     host.contentView.addChildView(view);
     view.setBounds({ x: 0, y: 0, ...AUTOMATION_VIEWPORT });
-    // 条件 2：相对宿主窗口可见。宿主窗口本身永远 show:false。
+    // 条件 2：相对宿主窗口可见。宿主窗口默认隐藏。
     view.setVisible(true);
     this.mounted.add(view);
+  }
+
+  startCapturePresentation(view: WebContentsView) {
+    if (!this.window || !this.mounted.has(view)) return undefined;
+    return startCaptureWindowPresentation(this.window, false);
   }
 
   /** 从宿主窗口摘除（移交面板或标签页关闭时）。 */
@@ -80,11 +87,10 @@ export class AutomationHost {
     if (this.window && !this.window.isDestroyed()) return this.window;
     this.window = new BrowserWindow({
       ...AUTOMATION_VIEWPORT,
-      // 条件 3 的载体。show 恒为 false —— 这个窗口从创建到销毁都不会出现在
-      // 屏幕上，也不进任务栏。它存在的唯一理由是给 view 一个合成上下文。
+      // 条件 3 的载体。默认隐藏且不进任务栏，为 view 提供合成上下文。
       show: false,
       skipTaskbar: true,
-      // 即便某条路径误调 show()，也不该抢走用户焦点。
+      // 临时截图展示也不能抢走用户焦点。
       focusable: false,
       webPreferences: {
         nodeIntegration: false,

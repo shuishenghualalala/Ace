@@ -1024,6 +1024,10 @@ vi.mock('../../src/main/browser/playwright-engine', () => {
       else await dialog.accept(options.promptText);
       return observed;
     }
+    startCapturePresentation(): { release(): void } | undefined {
+      return undefined;
+    }
+
     async pageForView(view: any): Promise<unknown> {
       let page = this.pages.get(view);
       if (page) return page;
@@ -4800,6 +4804,8 @@ describe('BrowserHost', () => {
     const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
     await mkdir(outputDir, { recursive: true });
     electron.fontsPending = true;
+    const presentation = { release: vi.fn() };
+    vi.spyOn(playwright.engines[0], 'startCapturePresentation').mockReturnValue(presentation);
     const capture = (index: number) => host.handleRpc({
       runtime_key: RUNTIME_KEY,
       method: 'execute',
@@ -4815,6 +4821,7 @@ describe('BrowserHost', () => {
       await expect(capture(1)).rejects.toMatchObject({ code: 'command_timeout' });
       await expect(capture(2)).rejects.toMatchObject({ code: 'command_timeout' });
       await expect(capture(3)).rejects.toMatchObject({ code: 'screenshot_pending' });
+      expect(presentation.release).toHaveBeenCalledTimes(2);
     } finally {
       electron.fontsPending = false;
       await host.dispose();

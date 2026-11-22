@@ -2973,32 +2973,58 @@ app.whenReady().then(async () => {
       ) {
         throw new Error(`挂起字体 device JPEG 无效: ${JSON.stringify(deviceSize)}`);
       }
-      let fullPageState = 'completed';
-      try {
-        await contractDeadline(
-          execute('screenshot', [
-            '--full-page', '--type', 'png',
-            path.join(artifacts, 'pending-font-full.png'),
-          ], 1_000),
-          5_000,
-          'pending font full-page screenshot',
-        );
-      } catch {
-        fullPageState = 'failed';
+      const viewportBefore = await execute('eval', [
+        '() => ({ width: window.innerWidth, height: window.innerHeight })',
+      ]);
+      const fullOutput = path.join(artifacts, 'pending-font-full.png');
+      await contractDeadline(
+        execute('screenshot', ['--full-page', '--type', 'png', fullOutput], 15_000),
+        20_000,
+        'pending font full-page screenshot',
+      );
+      const fullImage = nativeImage.createFromBuffer(await readFile(fullOutput));
+      const fullSize = fullImage.getSize();
+      if (fullSize.width <= 0 || fullSize.height <= 800) {
+        throw new Error(`挂起字体整页 PNG 尺寸无效: ${JSON.stringify(fullSize)}`);
+      }
+      const pixels = fullImage.toBitmap();
+      let bottomMarkerFound = false;
+      for (let y = Math.max(0, fullSize.height - 200); y < fullSize.height && !bottomMarkerFound; y += 1) {
+        for (let x = 0; x < fullSize.width; x += 1) {
+          const offset = (y * fullSize.width + x) * 4;
+          if (pixels[offset] < 20 && pixels[offset + 1] > 235 && pixels[offset + 2] < 20) {
+            bottomMarkerFound = true;
+            break;
+          }
+        }
+      }
+      if (!bottomMarkerFound) throw new Error('挂起字体整页 PNG 底部缺少绿色标记像素');
+      const viewportAfter = await execute('eval', [
+        '() => ({ width: window.innerWidth, height: window.innerHeight })',
+      ]);
+      if (viewportAfter.serialized !== viewportBefore.serialized) {
+        throw new Error(`挂起字体整页截图改变 viewport: ${viewportBefore.serialized} -> ${viewportAfter.serialized}`);
+      }
+      const unrestoredWindows = BrowserWindow.getAllWindows().filter((window) => (
+        !window.isDestroyed() && (window.isVisible() || window.getOpacity() !== 1)
+      ));
+      if (unrestoredWindows.length > 0) {
+        throw new Error('挂起字体整页截图未恢复所有隐藏窗口状态');
       }
       const recoveredOutput = path.join(artifacts, 'recovered-viewport.png');
       await contractDeadline(
         execute('screenshot', ['--type', 'png', recoveredOutput]),
         5_000,
-        'viewport screenshot after full-page failure',
+        'viewport screenshot after full-page screenshot',
       );
       const recoveredSize = nativeImage.createFromBuffer(await readFile(recoveredOutput)).getSize();
       if (recoveredSize.width <= 0 || recoveredSize.height <= 0) {
-        throw new Error('整页失败后视口截图未恢复');
+        throw new Error('整页截图后视口截图未恢复');
       }
       return `ordinary viewport ${ordinaryViewportSize.width}x${ordinaryViewportSize.height} + element；`
         + `pending fonts；CSS PNG ${width}x${height}；`
-        + `device JPEG ${deviceSize.width}x${deviceSize.height}；full=${fullPageState}；`
+        + `device JPEG ${deviceSize.width}x${deviceSize.height}；`
+        + `full PNG ${fullSize.width}x${fullSize.height}；`
         + `recovered=${recoveredSize.width}x${recoveredSize.height}；${Date.now() - startedAt}ms`;
     } finally {
       for (const response of pendingFontResponses) response.end();

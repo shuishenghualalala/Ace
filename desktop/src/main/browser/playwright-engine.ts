@@ -237,6 +237,10 @@ export class PlaywrightEngine {
     this.host.mount(view);
   }
 
+  startCapturePresentation(view: WebContentsView) {
+    return this.host.startCapturePresentation(view);
+  }
+
   async context(): Promise<BrowserContext> {
     const browser = await this.ensureBrowser();
     const [context] = browser.contexts();
