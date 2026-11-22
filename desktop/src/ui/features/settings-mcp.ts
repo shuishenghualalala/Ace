@@ -534,6 +534,13 @@ export async function openMcpServerModal(server?: McpServerRow): Promise<void> {
   if (title) title.textContent = server ? `编辑：${server.name}` : '新增 MCP 服务';
   const deleteBtn = document.getElementById('mcp-server-delete') as HTMLButtonElement | null;
   if (deleteBtn) deleteBtn.hidden = !server;
+  const probeResult = document.getElementById('mcp-probe-result');
+  const probeBtn = document.getElementById('mcp-server-probe') as HTMLButtonElement | null;
+  if (probeResult) {
+    probeResult.hidden = true;
+    probeResult.textContent = '';
+  }
+  if (probeBtn) probeBtn.disabled = false;
   overlay.hidden = false;
 }
 
@@ -584,6 +591,47 @@ function bindMcpFormOnce(): void {
         setTimeout(() => { void renderMcpServers(); }, 3000);
       } catch (error) {
         notify(`保存失败：${(error as Error).message}`);
+      }
+    })();
+  });
+
+  const probeBtn = document.getElementById('mcp-server-probe') as HTMLButtonElement | null;
+  const probeResult = document.getElementById('mcp-probe-result');
+  probeBtn?.addEventListener('click', () => {
+    void (async (): Promise<void> => {
+      const button = probeBtn;
+      if (!button) return;
+      const payload = readMcpForm();
+      if ((payload.transport !== 'http' && payload.transport !== 'sse') || !payload.url) {
+        notify('测试连接只支持 HTTP/SSE URL');
+        return;
+      }
+      const label = button.textContent ?? '测试连接';
+      button.disabled = true;
+      button.textContent = '测试中…';
+      if (probeResult) {
+        probeResult.hidden = false;
+        probeResult.textContent = '正在连接…';
+      }
+      try {
+        const result = await backendApi.probeMcpServer({
+          transport: payload.transport,
+          url: payload.url,
+          ...(payload.headers ? { headers: payload.headers } : {}),
+        });
+        if (probeResult) {
+          if (result.ok) {
+            const preview = result.tools.slice(0, 8).join(', ');
+            probeResult.textContent = `连接成功，发现 ${result.tools.length} 个工具${preview ? `：${preview}` : ''}`;
+          } else {
+            probeResult.textContent = `连接失败：${result.error || '未知错误'}`;
+          }
+        }
+      } catch (error) {
+        if (probeResult) probeResult.textContent = `连接失败：${(error as Error).message}`;
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
       }
     })();
   });

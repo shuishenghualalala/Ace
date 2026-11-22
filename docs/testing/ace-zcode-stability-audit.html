@@ -453,7 +453,7 @@
 <article id="mcp-endpoint-probe">
 <h3>保存前探测 MCP HTTP/SSE 端点</h3>
 <p>MCP 配置原先只能先保存再等待后台连接，失败信息出现在状态列表。新增 <code>POST /api/mcp/servers/probe</code>：校验同一套 payload 后，用一次性 worker 连接 HTTP/SSE 端点并列出工具，不写入 <code>config.yaml</code>、不注册全局工具、不启动常驻重连；探测超时 5 秒，错误经统一脱敏返回。stdio 预检会执行宿主命令，因此明确拒绝，仍要求保存后由正常审批链路连接。探测不改变已有 server。</p>
-<p><strong>验收</strong> 真实 MCP HTTP 服务夹具经 ASGI 传输完成探测，返回 <code>http_echo</code> 工具且不污染主客户端；Gateway MCP API 全量 23 项通过，新增探测转发且不落盘、stdio 拒绝两例。Ruff 通过。该能力只覆盖 HTTP/SSE，尚无 Desktop 预检按钮；远端工具的实际调用权限仍由正常审批控制。</p>
+<p><strong>验收</strong> 真实 MCP HTTP 服务夹具经 ASGI 传输完成探测，返回 <code>http_echo</code> 工具且不污染主客户端；Gateway MCP API 全量 23 项通过，新增探测转发且不落盘、stdio 拒绝两例。Desktop MCP 设置弹层新增「测试连接」按钮：读取当前 HTTP/SSE 表单调用同一接口，就地显示工具数量与名称或错误，不触发保存；stdio 显示明确提示。新增组件测试与 Desktop TypeScript 检查通过。Ruff 通过。该能力只覆盖 HTTP/SSE；远端工具的实际调用权限仍由正常审批控制。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/test_mcp.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
 <article id="external-marketplace-sources">
