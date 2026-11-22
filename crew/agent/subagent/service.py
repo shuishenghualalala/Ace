@@ -397,13 +397,20 @@ class SubagentRun:
         self.id = str(run_id)
         self.local_agent = local_agent
         self.descriptor = descriptor
-        self._result = result if inspect.isawaitable(result) else _immediate_result(result)
+        self._result = result
         self._dispose_callback = dispose
         self._disposed = False
         self._dispose_lock: Any | None = None
 
     @property
     def result(self) -> Awaitable[SubagentResult]:
+        if not inspect.isawaitable(self._result):
+            self._result = _immediate_result(self._result)
+        return self._result
+
+    @property
+    def result_for_handoff(self) -> Awaitable[SubagentResult] | SubagentResult:
+        """Transfer the original source without allocating an unobserved coroutine."""
         return self._result
 
     @property

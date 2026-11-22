@@ -213,8 +213,8 @@ product.subagent Generation
     <thead><tr><th>文件</th><th>作用</th></tr></thead>
     <tbody>
       <tr><td><code>crew/agent/subagent/__init__.py</code></td><td>公共兼容入口。按名称首次访问时经 <code>__getattr__</code> 解析实际实现并缓存对象；仅导入轻量 service 契约不会连带加载 feature、runtime 与 tools，既有 <code>__all__</code> 和对象身份保持不变。</td></tr>
-      <tr><td><code>crew/agent/subagent/service.py</code></td><td>稳定值对象、错误、Provider/Service 协议与注册表。</td></tr>
-      <tr><td><code>crew/agent/subagent/runtime.py</code></td><td>唯一预检/发布边界、运行跟踪、批量隔离与关闭。</td></tr>
+      <tr><td><code>crew/agent/subagent/service.py</code></td><td>稳定值对象、错误、Provider/Service 协议与注册表。直接结果只在首次读取 <code>result</code> 时包装并缓存 awaitable；<code>result_for_handoff</code> 供 Runtime 原样转移来源，dispose 不强制读取结果。</td></tr>
+      <tr><td><code>crew/agent/subagent/runtime.py</code></td><td>唯一预检/发布边界、运行跟踪、批量隔离与关闭；包装 Provider 句柄时通过 handoff 来源保留延迟结果语义。</td></tr>
       <tr><td><code>crew/agent/subagent/feature.py</code></td><td>以 Feature service 发布 SubagentService，供可选插件消费。</td></tr>
       <tr><td><code>crew/agent/subagent/providers.py</code></td><td>进程内执行循环、chunk 折叠、双超时与资源释放。</td></tr>
       <tr><td><code>crew/agent/subagent/policy.py</code></td><td>工具与模型能力的纯策略代数。</td></tr>

@@ -602,7 +602,7 @@ class SubagentRuntime:
 
         wrapped = SubagentRun(
             run.id,
-            run.result,
+            run.result_for_handoff,
             dispose=dispose,
             local_agent=run.local_agent,
             descriptor=descriptor,

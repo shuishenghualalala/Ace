@@ -358,6 +358,30 @@ async def test_absolute_timeout_wins_over_continuous_progress():
 
 
 @pytest.mark.asyncio
+async def test_direct_run_result_is_wrapped_only_once_when_read(monkeypatch):
+    calls: list[SubagentResult] = []
+
+    def wrap(result: SubagentResult):
+        calls.append(result)
+
+        async def immediate() -> SubagentResult:
+            return result
+
+        return immediate()
+
+    monkeypatch.setattr("crew.agent.subagent.service._immediate_result", wrap)
+    outcome = SubagentResult(output="ready")
+    run = SubagentRun("run::lazy", outcome)
+
+    assert calls == []
+    result = run.result
+    assert calls == [outcome]
+    assert run.result is result
+    assert calls == [outcome]
+    assert await result is outcome
+
+
+@pytest.mark.asyncio
 async def test_cleanup_failure_does_not_overwrite_terminal_result():
     child = _Child("completed", cleanup_error=True)
     active = ActiveSubagents()
