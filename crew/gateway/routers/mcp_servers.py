@@ -247,7 +247,9 @@ def create_mcp_servers_router(crew) -> APIRouter:
                     await crew.mcp_manager.remove_server(name)
                     crew.mcp_manager.register_pending(name, cfg)
                 except Exception as exc:  # noqa: BLE001 - configuration is already durable
-                    warning = f"配置已保存，但停止旧连接失败：{exc}"
+                    warning = redact_sensitive_display_text(
+                        f"配置已保存，但停止旧连接失败：{exc}"
+                    )
             else:
                 asyncio.create_task(crew.mcp_manager.reload_one(name, cfg))
 

@@ -634,7 +634,7 @@ async def test_update_manual_reports_saved_when_stopping_worker_fails(api, monke
     registered: list[str] = []
 
     async def failing_remove(_name):
-        raise RuntimeError("stop failed")
+        raise RuntimeError("stop failed https://mcp.example.com/mcp?token=abc123")
 
     def fake_register(name, _cfg):
         registered.append(name)
@@ -648,6 +648,7 @@ async def test_update_manual_reports_saved_when_stopping_worker_fails(api, monke
     )
     assert response.status_code == 200
     assert response.json()["warning"]
+    assert "token=abc123" not in response.json()["warning"]
     assert crew.config.mcp_servers["swap"]["auto_connect"] is False
     assert registered == []
 
