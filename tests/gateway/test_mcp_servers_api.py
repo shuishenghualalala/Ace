@@ -593,6 +593,39 @@ async def test_create_rejects_long_header_value(api):
     assert "8192" in response.json()["error"]
 
 
+async def test_update_to_manual_stops_the_worker(api, monkeypatch):
+    client, crew, _ = api
+    assert crew.mcp_manager is not None
+    crew.config.add_mcp_server("swap", {"command": "echo", "transport": "stdio"})
+    removed: list[str] = []
+    registered: list[str] = []
+    reloaded: list[str] = []
+
+    async def fake_remove(name):
+        removed.append(name)
+        return True
+
+    def fake_register(name, _cfg):
+        registered.append(name)
+
+    async def fake_reload(name, _cfg):
+        reloaded.append(name)
+        return True
+
+    monkeypatch.setattr(crew.mcp_manager, "remove_server", fake_remove)
+    monkeypatch.setattr(crew.mcp_manager, "register_pending", fake_register)
+    monkeypatch.setattr(crew.mcp_manager, "reload_one", fake_reload)
+    response = await client.put(
+        "/api/mcp/servers/swap",
+        json={"transport": "stdio", "command": "echo", "auto_connect": False},
+        headers=LOCAL_HEADERS,
+    )
+    assert response.status_code == 200
+    assert removed == ["swap"]
+    assert registered == ["swap"]
+    assert reloaded == []
+
+
 async def test_create_rejects_invalid_env_key(api):
     client, _crew, _ = api
     response = await client.post(

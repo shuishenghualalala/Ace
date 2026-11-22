@@ -264,6 +264,10 @@
                 <textarea class="channel-connect-input" id="mcp-headers" rows="2" placeholder="Authorization: Bearer ..."></textarea>
               </div>
               <div class="channel-connect-field">
+                <label class="channel-connect-label" for="mcp-auto-connect">启动时自动连接</label>
+                <label class="channel-connect-hint"><input type="checkbox" id="mcp-auto-connect" checked /> 关闭后保存不连接，可稍后点「重连」手动启动</label>
+              </div>
+              <div class="channel-connect-field">
                 <label class="channel-connect-label" for="mcp-env">环境变量（每行 KEY=VALUE）</label>
                 <textarea class="channel-connect-input" id="mcp-env" rows="3" placeholder="API_KEY=sk-...&#10;ENV=prod"></textarea>
                 <span class="channel-connect-hint">密钥类变量显示为 *** 时保留原值，填写新值则覆盖</span>

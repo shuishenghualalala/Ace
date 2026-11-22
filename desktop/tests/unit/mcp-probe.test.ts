@@ -35,6 +35,7 @@ function setupForm(): void {
         <div id="mcp-stdio-wrap"><input id="mcp-command" /><input id="mcp-args" /></div>
         <div id="mcp-remote-wrap" hidden><input id="mcp-url" /><textarea id="mcp-headers"></textarea></div>
         <textarea id="mcp-env"></textarea>
+        <input type="checkbox" id="mcp-auto-connect" checked />
       </form>
       <p id="mcp-probe-result" hidden></p>
       <button type="button" id="mcp-server-delete" hidden>删除服务</button>
@@ -91,6 +92,29 @@ it('ignores a late probe result after switching transport', async () => {
   const button = document.getElementById('mcp-server-probe') as HTMLButtonElement;
   expect(button.disabled).toBe(false);
   expect(button.textContent).toBe('测试连接');
+});
+
+it('saves auto_connect=false from the MCP form', async () => {
+  vi.resetModules();
+  apiMock.createMcpServer.mockResolvedValue({ ok: true, servers: [] });
+  const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
+  bindMcpPane();
+  await openMcpServerModal();
+  const stdio = document.querySelector<HTMLInputElement>('input[name="mcp-transport"][value="stdio"]')!;
+  stdio.checked = true;
+  stdio.dispatchEvent(new Event('change', { bubbles: true }));
+  (document.getElementById('mcp-name') as HTMLInputElement).value = 'manual';
+  (document.getElementById('mcp-command') as HTMLInputElement).value = 'echo';
+  (document.getElementById('mcp-auto-connect') as HTMLInputElement).checked = false;
+  document.getElementById('mcp-server-form')!.dispatchEvent(
+    new Event('submit', { bubbles: true, cancelable: true }),
+  );
+  await vi.waitFor(() => expect(apiMock.createMcpServer).toHaveBeenCalled());
+  expect(apiMock.createMcpServer).toHaveBeenCalledWith(expect.objectContaining({
+    name: 'manual',
+    command: 'echo',
+    auto_connect: false,
+  }));
 });
 
 it('probes an HTTP endpoint from the MCP settings form without saving', async () => {

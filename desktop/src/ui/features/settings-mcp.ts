@@ -437,6 +437,8 @@ function readMcpForm(): McpServerPayload {
   const value = (id: string): string => (document.getElementById(id) as HTMLInputElement | null)?.value.trim() ?? '';
   const transport = (document.querySelector<HTMLInputElement>('input[name="mcp-transport"]:checked')?.value ?? 'stdio') as McpTransport;
   const payload: McpServerPayload = { transport };
+  const autoConnect = document.getElementById('mcp-auto-connect') as HTMLInputElement | null;
+  payload.auto_connect = autoConnect ? autoConnect.checked : true;
   if (transport === 'stdio') {
     payload.command = value('mcp-command');
     const argsRaw = value('mcp-args');
@@ -500,6 +502,8 @@ function fillMcpForm(server?: McpServerRow): void {
     input.checked = input.value === transport;
   });
   setTransportFields(transport);
+  const autoConnect = document.getElementById('mcp-auto-connect') as HTMLInputElement | null;
+  if (autoConnect) autoConnect.checked = server ? server.config.auto_connect !== false : true;
 
   if (server) {
     set('mcp-name', server.name);

@@ -744,6 +744,12 @@
 <p><strong>验收</strong> Gateway 新增手动服务用例：保存后 <code>add_server</code> 未调用、状态 connected=false、配置保留 auto_connect=false；McpHub 9 项、TypeScript 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/mcp_client.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-auto-connect-desktop">
+<h3>Desktop MCP 的手动连接开关</h3>
+<p>Desktop MCP 表单新增「启动时自动连接」复选框：新增时取消勾选会以 <code>auto_connect=false</code> 保存且不启动命令；编辑时取消勾选会停掉现有 worker、保留配置；列表的「重连」仍可手动启动。默认勾选，旧配置不带该字段时按自动连接处理。</p>
+<p><strong>验收</strong> Desktop 表单用例：取消勾选提交后 create payload 含 <code>auto_connect=false</code>；Gateway 编辑用例断言 remove/register 被调用、reload 未调用。Desktop 组件 4 项、TypeScript 与 Ruff 通过。</p>
+<p class="evidence">Ace <code>desktop/assets/index.html</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/src/ui/api/feature-tools.ts</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

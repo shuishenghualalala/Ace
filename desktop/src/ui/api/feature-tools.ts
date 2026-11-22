@@ -38,6 +38,7 @@ export interface McpServerConfig {
   url?: string;
   transport?: McpTransport;
   headers?: Record<string, string>;
+  auto_connect?: boolean;
 }
 
 /** 后端 /api/mcp/servers 返回的单个 server 行。 */
@@ -61,6 +62,7 @@ export interface McpServerPayload {
   url?: string;
   transport?: McpTransport;
   headers?: Record<string, string>;
+  auto_connect?: boolean;
 }
 
 // ── CUA Driver（Computer Use）一键安装（/api/mcp/cua-driver/*，登录用户可用）──
