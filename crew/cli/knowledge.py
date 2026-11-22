@@ -638,6 +638,11 @@ def _register_skill(subparsers) -> None:
     install.add_argument("--slug", required=True)
     install.set_defaults(handler=_skill_install)
 
+    import_dir = cmds.add_parser("import", help="从已准备好的技能目录导入单个技能")
+    import_dir.add_argument("path", help="包含 SKILL.md 的技能目录")
+    import_dir.add_argument("--slug", default="", help="安装后的目录名，缺省取源目录名")
+    import_dir.set_defaults(handler=_skill_import)
+
     uninstall = cmds.add_parser("uninstall", help="卸载用户技能")
     uninstall.add_argument("--slug", required=True)
     uninstall.set_defaults(handler=_skill_uninstall)
@@ -696,6 +701,27 @@ def _skill_install(args: Any, ctx: CliContext) -> CliResult:
     if not ok:
         raise CliError("技能不存在或已安装")
     return CliResult(data={"ok": True, "slug": args.slug}, text=f"已安装技能 {args.slug}")
+
+
+def _skill_import(args: Any, ctx: CliContext) -> CliResult:
+    from pathlib import Path
+
+    from crew.agent.skills import install_skill_from_dir
+
+    source_dir = Path(args.path).expanduser()
+    if not source_dir.is_dir() or not (source_dir / "SKILL.md").is_file():
+        raise CliError("导入目录不存在或缺少 SKILL.md")
+    ok = install_skill_from_dir(
+        source_dir,
+        slug=str(args.slug or "").strip(),
+        operator_account_id=ctx.owner,
+        source="cli-import",
+        validate=False,
+    )
+    if not ok:
+        raise CliError("技能未通过发布校验或目标已存在")
+    slug = str(args.slug or "").strip() or source_dir.name
+    return CliResult(data={"ok": True, "slug": slug}, text=f"已导入技能 {slug}")
 
 
 def _skill_uninstall(args: Any, ctx: CliContext) -> CliResult:

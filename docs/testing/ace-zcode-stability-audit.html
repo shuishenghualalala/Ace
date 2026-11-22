@@ -407,6 +407,12 @@
 <p><strong>验收</strong> 新增市场源定向 10 项通过：登记持久化与去重、无效/缺失/重叠目录拒绝、列表来源与同名优先级、复制安装与源独立、卸载保留源、移除后不再列出。技能与本地安装组合 139 项通过、8 项跳过；CLI 主测试 40 项通过、1 项跳过。Windows 独立 CLI 进程使用隔离 <code>CREW_HOME</code>：登记临时目录后商店 JSON 出现带 <code>market_label=Team</code> 和真实路径的条目；<code>crew skill install</code> 在用户目录生成非软链副本；移除源后条目消失而副本与源文件仍在。该能力只登记本地目录，远程市场 URL 和源管理界面仍未实现。</p>
 <p class="evidence">Ace <code>crew/agent/skills/sources.py</code>、<code>crew/agent/skills/manage.py</code>、<code>crew/cli/knowledge.py</code>、<code>tests/test_skill_sources.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
 </article>
+<article id="skill-direct-import">
+<h3>从准备好的目录导入单个技能</h3>
+<p>技能市场安装覆盖已登记来源中的技能，但没有覆盖用户直接准备或从别处分发来的单个技能目录。Ace 增加 <code>crew skill import &lt;目录&gt;</code>：核对目录中存在 <code>SKILL.md</code> 后，沿用现有互斥锁、路径 containment、审计日志和原子发布，把整套目录复制到用户技能目录；<code>--slug</code> 可指定目标目录名，缺省取源目录名。该入口跳过仅面向模型生成技能的正文长度与描述完整性编辑检查，但不会跳过文件安全校验，也不执行技能中的内容；目标已存在时失败，不覆盖。</p>
+<p><strong>验收</strong> CLI 定向新增导入成功与缺失目录两例通过。Windows 独立 CLI 进程使用隔离 <code>CREW_HOME</code> 与 Python 写入的准备目录：<code>crew skill import</code> 退出 0，<code>crew skill list --json</code> 出现 <code>prepared-skill</code>，用户技能目录中的副本包含 <code>SKILL.md</code>，源目录保持不变。</p>
+<p class="evidence">Ace <code>crew/cli/knowledge.py</code>、<code>crew/agent/skills/manage.py</code>、<code>tests/test_cli.py</code>。ZCode <code>apps/zcode-cli/packages/adapters/src/plugins/marketplace.ts:79–81,290–334</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

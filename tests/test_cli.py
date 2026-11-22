@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -995,3 +996,20 @@ def test_skill_source_commands_register_list_and_remove(capsys, cli_home, tmp_pa
     assert code == 0 and "已移除市场目录" in out
     code, out = run_cli(capsys, "skill", "source", "list")
     assert code == 0 and "未登记市场目录" in out
+
+
+def test_skill_import_copies_a_prepared_directory(capsys, cli_home, tmp_path):
+    skill_dir = tmp_path / "prepared-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: prepared-skill\ndescription: Prepared skill for CLI import.\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    code, out = run_cli(capsys, "skill", "import", str(skill_dir))
+    assert code == 0 and "已导入技能 prepared-skill" in out
+    installed = Path(cli_home) / "skills" / "prepared-skill"
+    assert (installed / "SKILL.md").is_file()
+
+    code, _out = run_cli(capsys, "skill", "import", str(tmp_path / "missing-skill"))
+    assert code == 1
