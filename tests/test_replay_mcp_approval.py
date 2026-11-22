@@ -1,4 +1,4 @@
-"""Keyless Gateway approval for MCP update over a real HTTP MCP server."""
+"""Keyless Gateway approvals for MCP lifecycle changes over a real HTTP server."""
 
 from __future__ import annotations
 
@@ -83,8 +83,18 @@ async def _open_ws(app):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tool_name", "tool_arguments", "final_text", "expected_header"),
+    ("tool_name", "tool_arguments", "final_text", "expected_change"),
     [
+        (
+            "mcp_install",
+            {
+                "name": "echo",
+                "transport": "http",
+                "url": "__MCP_URL__",
+            },
+            "installed",
+            "install",
+        ),
         (
             "mcp_update",
             {
@@ -94,9 +104,9 @@ async def _open_ws(app):
                 "headers": {"X-Replay": "1"},
             },
             "updated",
-            "X-Replay",
+            "update",
         ),
-        ("mcp_remove", {"name": "echo"}, "removed", None),
+        ("mcp_remove", {"name": "echo"}, "removed", "remove"),
     ],
 )
 async def test_gateway_replays_mcp_approval(
@@ -105,7 +115,7 @@ async def test_gateway_replays_mcp_approval(
     tool_name,
     tool_arguments,
     final_text,
-    expected_header,
+    expected_change,
 ):
     from crew.app import build_app
 
@@ -132,8 +142,12 @@ async def test_gateway_replays_mcp_approval(
         encoding="utf-8",
     )
     replay = ReplayServer.from_jsonl(fixture).start()
+    initial_servers = {} if tool_name == "mcp_install" else {
+        "echo": {"url": mcp_url, "transport": "http"},
+    }
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
+        "mcp_servers: {}\n" if not initial_servers else
         "mcp_servers:\n"
         "  echo:\n"
         f"    url: {mcp_url}\n"
@@ -165,7 +179,7 @@ async def test_gateway_replays_mcp_approval(
         gateway_dev_mode=False,
         gateway_admin_accounts=["local"],
         auth_mode="local",
-        mcp_servers={"echo": {"url": mcp_url, "transport": "http"}},
+        mcp_servers=initial_servers,
     )
     config.activate_model("replay")
     crew = build_app(config=config, enable_team=False)
@@ -178,11 +192,12 @@ async def test_gateway_replays_mcp_approval(
     )
     try:
         await crew.startup(start_cron=False)
-        for _ in range(100):
-            rows = crew.mcp_manager.status() if crew.mcp_manager is not None else []
-            if rows and all(row.get("connected") for row in rows):
-                break
-            await asyncio.sleep(0.05)
+        if initial_servers:
+            for _ in range(100):
+                rows = crew.mcp_manager.status() if crew.mcp_manager is not None else []
+                if rows and all(row.get("connected") for row in rows):
+                    break
+                await asyncio.sleep(0.05)
         request_id = f"replay-{tool_name}-turn"
         frames = []
         async with _open_ws(app) as (send, receive):
@@ -213,8 +228,11 @@ async def test_gateway_replays_mcp_approval(
             event.get("kind") == "followup_question" for event in frames
         ), frames
         persisted = config_file.read_text(encoding="utf-8")
-        if expected_header:
-            assert expected_header in persisted
+        if expected_change == "install":
+            assert "echo:" in persisted
+            assert "echo__echo" in crew.registry.names()
+        elif expected_change == "update":
+            assert "X-Replay" in persisted
         else:
             assert "echo:" not in persisted
         assert any(
@@ -222,6 +240,7 @@ async def test_gateway_replays_mcp_approval(
             and (event.get("body") or {}).get("text") == final_text
             for event in frames
         ), frames
+        assert replay.remaining == 0
     finally:
         await crew.shutdown()
         replay.stop()

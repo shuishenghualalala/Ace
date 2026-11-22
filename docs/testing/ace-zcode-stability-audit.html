@@ -1250,7 +1250,7 @@
 </table>
 <p>两轮预取在原构造处都已结束。首次 <code>build_app</code> 分别缩短 1.286 和 1.168 秒，同时 Gateway 模块导入拉长 0.756 和 0.900 秒。启动到首正文净缩短 0.533 和 0.306 秒，实际发送后的首正文两轮各多等待约 0.08 和 0.09 秒。试验中的模型类别由夹具提前确定，生产配置还涉及用户模板、凭据和环境变量时序。发行继续使用原装配。本节各组的新用户目录样本仍高于五秒验收目标。</p>
 <h3>无密钥回放与 MCP 审批验收</h3>
-<p><code>tests/e2e/replay_server.py</code> 以录制的模型响应替代真实模型 HTTP/SSE 边界，应用、Provider、工具、SQLite 和会话入口保持真实。现有六个组装态场景：并行读取部分失败、读取后写入、工具搜索后创建 Cron、HTTP MCP 的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上的 <code>mcp_update</code> 与 <code>mcp_remove</code> 各一次审批；审批场景分别核对 <code>X-Replay</code> 写入配置和配置中不再有 echo。回放与审批用例合计 9 项通过；CI 安装 <code>mcp</code> extra，避免 MCP 用例被静默跳过。</p>
+<p><code>tests/e2e/replay_server.py</code> 以录制的模型响应替代真实模型 HTTP/SSE 边界，应用、Provider、工具、SQLite 和会话入口保持真实。现有七个组装态场景：并行读取部分失败、读取后写入、工具搜索后创建 Cron、HTTP MCP 的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上的 <code>mcp_install</code>、<code>mcp_update</code> 与 <code>mcp_remove</code> 各一次审批；分别核对 echo 配置落盘与 <code>echo__echo</code> 注册、<code>X-Replay</code> 写入配置和配置中不再有 echo。回放与审批用例合计 10 项通过；CI 安装 <code>mcp</code> extra，避免 MCP 用例被静默跳过。</p>
 <h3>全量回归与状态表归属</h3>
 <p>本轮全量后端回归（不含 <code>tests/security</code>）为 <code>5044 passed, 30 skipped, 20 deselected</code>，0 failed，用时 29 分 28 秒。session goals 新建的 <code>session_goals</code>、<code>session_goal_steps</code>、<code>session_goal_verifications</code> 已加入主库 core 归属清单；此前失败的 session goals 验证与登出栅栏用例现已通过。</p>
 <h3>后端全量与安全基线</h3>

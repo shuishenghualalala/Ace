@@ -345,6 +345,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-22</td><td>无密钥 Gateway 回放补齐 <code>mcp_install</code> 的一次审批、配置落盘及新工具注册验证。</td><td><code>tests/test_replay_mcp_approval.py</code>、MCP 对话安装验收。</td></tr>
       <tr><td>2026-11-20</td><td>新增只读 <code>mcp_status</code>：管理员前台可列出服务连接状态、脱敏目标和工具数，用于对话内 MCP 诊断；不返回配置凭据，子 Agent、Plan 和普通账号不可见。</td><td><code>crew/tools/mcp_management.py</code>、工具注册表可见性、MCP 管理测试。</td></tr>
       <tr><td>2026-11-20</td><td>新增 <code>mcp_remove</code>：对话内一次批准后删除指定 MCP 配置并断开运行实例；批准绑定当前配置摘要，已不存在的服务幂等返回。</td><td><code>crew/tools/mcp_management.py</code>、MCP 配置事务与运行实例移除。</td></tr>
       <tr><td>2026-11-20</td><td><code>mcp_status</code> 增加 <code>state</code>：区分已连接、重连中、预算耗尽失败、启动中和未启动，避免仅凭 <code>connected=false</code> 猜测。</td><td><code>crew/tools/mcp_client.py</code>、<code>crew/tools/mcp_management.py</code>。</td></tr>

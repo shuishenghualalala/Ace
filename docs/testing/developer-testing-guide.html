@@ -164,7 +164,7 @@ cd web &amp;&amp; npm run typecheck</code></pre>
   </ul>
 
   <h3>4.1 无密钥回放（组装态）</h3>
-  <p><code>tests/e2e/replay_server.py</code> 用录制的 JSONL 响应替代模型 HTTP 边界；应用仍走真实 <code>build_app</code>、Provider、工具、SQLite 和会话入口，不需要 API Key。当前样例覆盖并行 <code>file_read</code> 的部分失败、<code>file_read</code> → <code>file_write</code> 的写入流程、<code>tool_search</code> → <code>cron_create</code> 的持久化任务、HTTP MCP server 上的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上 <code>mcp_update</code> 与 <code>mcp_remove</code> 各一次审批；响应耗尽时服务器返回失败，不会静默重复最后一条。fixture 从真实 trace 提取后必须人工审查是否含本地路径、用户数据或密钥。</p>
+  <p><code>tests/e2e/replay_server.py</code> 用录制的 JSONL 响应替代模型 HTTP 边界；应用仍走真实 <code>build_app</code>、Provider、工具、SQLite 和会话入口，不需要 API Key。当前样例覆盖并行 <code>file_read</code> 的部分失败、<code>file_read</code> → <code>file_write</code> 的写入流程、<code>tool_search</code> → <code>cron_create</code> 的持久化任务、HTTP MCP server 上的 <code>mcp_status</code>，以及真实 Gateway WebSocket 上 <code>mcp_install</code>、<code>mcp_update</code> 与 <code>mcp_remove</code> 各一次审批；安装场景同时核对配置落盘和工具注册。响应耗尽时服务器返回失败，不会静默重复最后一条。fixture 从真实 trace 提取后必须人工审查是否含本地路径、用户数据或密钥。</p>
   <pre><code># 从一次真实 E2E 的 llm.jsonl 提取回放响应
 python scripts/record_replay_fixture.py \
   --trace build/e2e/&lt;run&gt;/&lt;category&gt;/&lt;case&gt;/llm.jsonl \
