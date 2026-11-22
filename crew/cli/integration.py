@@ -212,7 +212,8 @@ def _mcp_servers_list(args: Any, ctx: CliContext) -> CliResult:
             status = "未连接"
         line = f"{server['name']}\t{server['transport']}\t{status}\t{server.get('tool_count', 0)} tools"
         if server.get("error"):
-            line += f"\t{server['error'][:120]}"
+            error = " ".join(str(server["error"]).split())[:120]
+            line += f"\t{error}"
         lines.append(line)
     return CliResult(data={"ok": True, "servers": servers}, text="\n".join(lines))
 

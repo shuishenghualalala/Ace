@@ -1063,7 +1063,7 @@ def test_mcp_list_renders_human_status():
             "tools": [], "config": {"command": "echo", "transport": "stdio", "auto_connect": False},
         },
         {
-            "name": "broken", "transport": "http", "connected": True, "error": "boom",
+            "name": "broken", "transport": "http", "connected": True, "error": "boom\nfake\trow",
             "tools": [], "config": {"url": "https://mcp.example.com/broken", "transport": "http"},
         },
     ])
@@ -1078,7 +1078,8 @@ def test_mcp_list_renders_human_status():
     result = integration._mcp_servers_list(None, SimpleNamespace(app=app))
     assert "remote" in result.text and "已连接" in result.text
     assert "manual" in result.text and "手动" in result.text
-    assert "broken" in result.text and "失败" in result.text and "boom" in result.text
+    assert "broken" in result.text and "失败" in result.text and "boom fake row" in result.text
+    assert len(result.text.splitlines()) == 3
     assert result.data["servers"][0]["name"] == "remote"
 
 
