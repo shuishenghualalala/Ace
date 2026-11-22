@@ -732,6 +732,12 @@
 <p><strong>验收</strong> 新增非字符串 args、含换行 header 与非法 header 名用例均 400；定向用例与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-env-args-limits">
+<h3>MCP stdio 参数与环境变量的边界</h3>
+<p>stdio 配置的 <code>args</code>/<code>env</code> 原先只做字符串化，没有数量或长度上限，异常键（含 <code>=</code> 或 NUL）会在进程启动时才失败。现在 args 最多 128 项、单项 8192 字符；env 最多 128 项、键不能为空或含 <code>=</code>/NUL、单值 8192 字符；headers 同时限制 128 项/8192 字符。超限在保存前 400，合法配置不变。</p>
+<p><strong>验收</strong> 新增非法 env 键与超长 arg 用例均 400；定向用例、Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
