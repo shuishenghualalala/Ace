@@ -774,6 +774,12 @@
 <p><strong>证据</strong> <code>mcp-restart-c59ec38298/gateway.log</code>；输出为 <code>saved unconnected at startup, connected after explicit reload</code>。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_client.py</code>（启动扫描跳过）、<code>crew/gateway/routers/mcp_servers.py</code>（reload）、<code>tests/fixtures/echo_mcp_server.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-chat-install-auto-connect">
+<h3>对话安装 MCP 时的延迟连接</h3>
+<p><code>mcp_install</code>/<code>mcp_update</code> 的 schema 原先不暴露 <code>auto_connect</code>，对话安装只能立即连接。现在两者接受可选布尔值；false 时仍走同一次权限确认、保存与 <code>saved_not_connected</code> 状态，但不启动连接，之后可从管理页或 <code>mcp_reload</code> 手动启动。未提供时沿用默认自动连接；更新时由后端保留旧值。</p>
+<p><strong>验收</strong> 对话安装用例：带 <code>auto_connect=false</code> 完成一次审批后保存成功、connected=false、未调用连接 fixture，配置保留 false；定向用例与 Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>tests/gateway/test_mcp_install_chat.py</code>、<code>docs/backend/modules/tools.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

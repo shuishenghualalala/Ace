@@ -268,6 +268,24 @@ async def test_gateway_admin_confirms_install_once_and_repeat_reuses_config(gate
     assert gateway.io == [ARGS["name"]]
 
 
+async def test_gateway_install_can_save_without_auto_connect(gateway):
+    session_id = "mcp-install-manual"
+    arguments = {**ARGS, "auto_connect": False}
+    async with open_ws(gateway.app) as (send, receive):
+        await begin_install(gateway, send, "manual", arguments=arguments, session_id=session_id)
+        card, frames = await read_until(receive, lambda row: is_permission_card(row) or row.get("is_final"))
+        assert is_permission_card(card), frames
+        await reply_permission(send, session_id, "manual", card)
+        final, frames = await read_until(receive, lambda row: row.get("is_final") is True)
+        assert final["kind"] == "final", frames
+        created = payload_for(gateway, "install-manual")
+        assert created["saved"] is True
+        assert created["connected"] is False
+        assert created["status"] == "saved_not_connected"
+        assert config_servers(gateway)[ARGS["name"]]["auto_connect"] is False
+        assert gateway.io == []
+
+
 async def test_gateway_cancel_while_awaiting_approval_leaves_config_unchanged(gateway):
     original = gateway.config_file.read_bytes()
     session_id = "mcp-install-fixture"

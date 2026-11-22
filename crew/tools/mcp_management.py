@@ -430,6 +430,10 @@ def register_mcp_tools(app: Any) -> None:
                     "url": {"type": "string", "description": "Full HTTP or SSE endpoint"},
                     "env": string_map,
                     "headers": string_map,
+                    "auto_connect": {
+                        "type": "boolean",
+                        "description": "Set false to save without connecting; default true.",
+                    },
                 },
                 "required": ["name"],
                 "additionalProperties": False,
@@ -685,6 +689,10 @@ def register_mcp_tools(app: Any) -> None:
                     "url": {"type": "string", "description": "Full HTTP or SSE endpoint"},
                     "env": string_map,
                     "headers": string_map,
+                    "auto_connect": {
+                        "type": "boolean",
+                        "description": "Set false to save without connecting; default true.",
+                    },
                 },
                 "required": ["name"],
                 "additionalProperties": False,
