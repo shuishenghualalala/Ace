@@ -282,6 +282,34 @@ async def test_probe_stop_is_bounded(monkeypatch):
     assert HangingStopWorker.last is not None and HangingStopWorker.last.aborted is True
 
 
+async def test_disabled_reconnect_reports_one_shot_failure(monkeypatch):
+    from crew.tools.mcp_client import _ServerWorker
+
+    worker = _ServerWorker(
+        "probe-disabled",
+        {
+            "url": "http://127.0.0.1/mcp",
+            "transport": "http",
+            "reconnect": {"enabled": False},
+            "fail_on_startup_error": True,
+        },
+        Registry(),
+        startup_timeout=1,
+    )
+
+    async def fail(_stack):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(worker, "_open", fail)
+    try:
+        assert await worker.start() is False
+        await asyncio.sleep(0)
+        assert "不重试" in str(worker._error)
+        assert "预算" not in str(worker._error)
+    finally:
+        await worker.stop()
+
+
 async def test_mcp_client_empty_config_noop():
     reg = Registry()
     mgr = MCPClientManager({})

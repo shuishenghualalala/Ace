@@ -570,6 +570,12 @@
 <p><strong>验收</strong> Gateway MCP API 25 项通过，新增 <code>***</code> 更新保留原密钥并落盘验证；Web 全量 45 个文件、331 项通过；Windows Chrome + 隔离 Gateway 实际编辑 URL 后卡片立即显示新地址并删除成功；Desktop TypeScript 通过。未连接真实 MCP 服务。</p>
 <p class="evidence">Ace <code>crew/state/config.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-probe-no-retry-message">
+<h3>探测失败不再伪装成重连预算耗尽</h3>
+<p>探测使用一次性 worker 并关闭重连，但失败路径沿用常驻连接的「重连失败（预算 10 次已耗尽）」文案，误导用户以为已经重试。现在关闭重连时返回「连接失败……一次性/探测连接不重试」，只有常驻连接真正耗尽预算才显示重连预算文案；两者仍注销工具并保留原异常。启动等待与探测超时逻辑不变。</p>
+<p><strong>验收</strong> 新增关闭重连的单次失败用例通过：错误文案包含「不重试」且不含「预算」；Ruff 通过。未连接公开网络。</p>
+<p class="evidence">Ace <code>crew/tools/mcp_client.py</code>、<code>tests/test_mcp.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

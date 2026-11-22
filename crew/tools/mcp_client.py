@@ -632,11 +632,18 @@ class _ServerWorker:
                         not self._reconnect_enabled
                         or failed_attempts > self._reconnect_max_attempts
                     ):
-                        self._permanent_error = RuntimeError(
-                            f"MCP server {self.name} 重连失败"
-                            f"（预算 {self._reconnect_max_attempts} 次已耗尽）：{exc}。"
-                            "该 server 的全部工具已注销；在管理面板重载该 server 后才会重试"
-                        )
+                        if self._reconnect_enabled:
+                            detail = (
+                                f"MCP server {self.name} 重连失败"
+                                f"（预算 {self._reconnect_max_attempts} 次已耗尽）：{exc}。"
+                                "该 server 的全部工具已注销；在管理面板重载该 server 后才会重试"
+                            )
+                        else:
+                            detail = (
+                                f"MCP server {self.name} 连接失败：{exc}。"
+                                "一次性/探测连接不重试"
+                            )
+                        self._permanent_error = RuntimeError(detail)
                         self._error = self._permanent_error
                         log.error("%s", self._permanent_error)
                         async with self._sync_lock:
