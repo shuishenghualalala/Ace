@@ -606,6 +606,12 @@
 <p><strong>验收</strong> 新增 60 工具状态用例通过：响应 50 个名称、<code>tool_count=60</code>；McpHub 3 项、Web/Desktop TypeScript、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-status-malformed">
+<h3>MCP 状态接口容忍异常行</h3>
+<p>状态接口原先直接对 worker 行执行 <code>row["tools"]</code> 与 <code>config.get</code>；若某行缺少工具列表、配置不是对象或被损坏，整次 <code>GET /api/mcp/servers</code> 会 500，掩盖其它正常服务。现在按行兜底：工具缺失按空列表、非对象配置按空对象，保留名称/传输/连接/错误字段，状态接口继续返回其它行。</p>
+<p><strong>验收</strong> 新增异常行用例通过：<code>tools=None</code> 与非对象配置返回空工具、<code>tool_count=0</code>、空配置对象；MCP 状态定向与 Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

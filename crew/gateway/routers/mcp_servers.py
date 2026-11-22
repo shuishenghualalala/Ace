@@ -102,8 +102,12 @@ def create_mcp_servers_router(crew) -> APIRouter:
         configured = crew.config.mcp_servers if isinstance(crew.config.mcp_servers, dict) else {}
         result = []
         for row in mgr.status():
-            config = configured.get(row["name"], row["config"])
-            tools = [str(item) for item in row["tools"]]
+            config = configured.get(row["name"], row.get("config"))
+            if not isinstance(config, dict):
+                config = row.get("config")
+            if not isinstance(config, dict):
+                config = {}
+            tools = [str(item) for item in (row.get("tools") or [])]
             result.append({
                 "name": row["name"],
                 "transport": config.get("transport") or row["transport"],

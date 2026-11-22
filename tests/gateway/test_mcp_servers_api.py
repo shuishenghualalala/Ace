@@ -454,6 +454,24 @@ async def test_list_caps_reported_tool_names(api, monkeypatch):
     assert server["tool_count"] == 60
 
 
+async def test_list_tolerates_malformed_status_rows(api, monkeypatch):
+    client, crew, _ = api
+    assert crew.mcp_manager is not None
+    monkeypatch.setattr(crew.mcp_manager, "status", lambda: [{
+        "name": "broken",
+        "transport": "http",
+        "connected": False,
+        "error": "",
+        "tools": None,
+        "config": "not-a-dict",
+    }])
+    response = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
+    server = next(item for item in response.json()["servers"] if item["name"] == "broken")
+    assert server["tools"] == []
+    assert server["tool_count"] == 0
+    assert server["config"] == {"env": {}}
+
+
 async def test_secret_env_redacted_in_get(api):
     client, _, _ = api
     resp = await client.post(
