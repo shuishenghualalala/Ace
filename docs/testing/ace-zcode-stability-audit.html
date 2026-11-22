@@ -544,9 +544,15 @@
 <p>ZCode 的官方 Browser Use 0.5.1 清单只注册技能。ZCode 宿主另行注入 <code>node_repl</code>，由带会话身份的控制端口访问桌面内置浏览器或显式启用的 CLI headless CDP。只安装技能或 MCP 子进程不能取得该控制端口。Ace 已提供 Electron 内置浏览器和结构化工具，复用该插件发布 <code>/web-gui-tester</code>。该技能只用真实界面操作与观察，不增加权限或独立执行入口。</p>
 <p>Kimi Code CLI 源码可从 <a href="https://github.com/MoonshotAI/kimi-code">官方仓库</a> 获取。本地 <code>692bb0a40</code> 的 WebBridge 插件只含技能，安装器从 CDN 下载平台 daemon，另需 Chrome/Edge 扩展才能控制用户现有浏览器。daemon 选择 Windows x64、macOS/Linux x64 或 arm64；本地技能对 Windows shell Unicode 请求体另有文件编码路径。公开版本 <a href="https://github.com/MoonshotAI/kimi-code/blob/fc3b521b8b68468268bb4cfe7f45008ce08b2b99/plugins/official/kimi-webbridge/kimi.plugin.json">2.0.11 的清单</a> 仍标注 <code>Proprietary</code>。本轮只核对源码和安装路径，未迁移 daemon、扩展或真实登录态。</p>
 <p><strong>验收</strong> 实际 Gateway 在旧版技能目录中找不到此项；仅加入技能而未接入会话开关时，禁用浏览器后仍出现在模型索引。候选通过目录、WebSocket 激活正文、工具 schema 与禁用后的新回合检查。相关 Python 回归 323 项通过、8 项跳过，Ruff 通过。</p>
-<p>另用 Windows 原生 Electron、验证实例令牌的浏览器连接与可控模型，访问隔离的回环页。真实点击后结构快照出现此前不可见的随机反馈，公开历史保留同一反馈，Gateway 与 Electron 均退出并释放监听。后台导出截图在 Playwright 等到字体就绪后超时，原生直连契约和签名工具链路均复现；未生成 PNG，视觉验收未通过，原因尚未归因。该试验未使用真实模型或用户的浏览器。</p>
-<p><strong>剩余差距</strong> Ace 的独立 Gateway/CLI 仍要求桌面宿主，已存在的 ManagedChromiumEngine 未接入生产 Browser RPC。无桌面浏览器、Windows 后台截图及其它平台原生验证分开验收。</p>
+<p>另用 Windows 原生 Electron、验证实例令牌的浏览器连接与可控模型，访问隔离的回环页。真实点击后结构快照出现此前不可见的随机反馈，公开历史保留同一反馈，Gateway 与 Electron 均退出并释放监听。后台导出截图在 Playwright 等到字体就绪后超时，原生直连契约和签名工具链路均复现；未生成 PNG，视觉验收未通过，原因当时尚未归因，后续定位与修复见下一节。该试验未使用真实模型或用户的浏览器。</p>
+<p><strong>剩余差距</strong> Ace 的独立 Gateway/CLI 仍要求桌面宿主，已存在的 ManagedChromiumEngine 未接入生产 Browser RPC。无桌面浏览器、其它平台原生验证分开验收。</p>
 <p class="evidence">Ace <code>plugins/browser/tool.py:1857</code>、<code>crew/gateway/ws.py:685–703</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/app/built-in-node-repl.ts:16–51</code>、<code>node-repl-browser-broker.ts:162–197</code>、<code>packages/adapters/src/browser/executable.ts:64–87</code>。Kimi Code <code>packages/agent-core-v2/src/app/capability/entries/kimiWebbridge.ts:36–49、195–273</code>。</p>
+</article>
+<article id="browser-screenshot-fonts">
+<h3>页面字体加载挂起时导出截图</h3>
+<p>用户导出截图使用 Playwright 的 Page 截图。Playwright 在截图前等待 <code>document.fonts.ready</code>；页面引用无法完成的 Web 字体时，该 Promise 一直挂起，截图直到命令截止才超时，最终没有 PNG。Ace 先以 2 秒上限探测字体；正常就绪时仍走原 Playwright 路径。探测未就绪时改用 CDP <code>Page.captureScreenshot</code> 按布局尺寸裁剪当前已绘制帧，保留整页/视口、PNG/JPEG、CSS/设备像素选项以及原有的页面身份、字节签名和路径归属校验。元素引用截图与正常路径不变。</p>
+<p><strong>验收</strong> 浏览器宿主 88 项通过，新增用例复现字体挂起并断言不调用 Playwright 页面截图、改用 CDP 整页裁剪。桌面全量 2410 项、209 个文件通过，TypeScript、定向 ESLint 和隔离生产构建通过。真实 Chromium 加载挂起字体的回环页面：<code>document.fonts.ready</code> 在 2 秒内未完成，Playwright 截图在 2.5 秒超时，CDP 后备生成 900×600、7,282 字节的有效 PNG。该后备未在打包 Electron 内重跑，元素级截图仍可能在挂起字体上等到超时。</p>
+<p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code>、<code>desktop/tests/unit/browser-host.test.ts</code>。截图 <code>font-screenshot-proof/cdp-font-fallback.png</code>。Playwright <code>coreBundle.js</code> 的 <code>_preparePageForScreenshot</code> 等待字体。</p>
 </article>
 <article id="web-slash-commands">
 <h3>Web 输入斜杠时区分命令与技能</h3>

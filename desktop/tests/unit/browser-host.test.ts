@@ -32,6 +32,7 @@ const electron = vi.hoisted(() => ({
   hitNodes: {} as Record<number, { backendNodeId: number; parentId?: number }>,
   failInputType: '',
   screenshotVersion: 0,
+  fontsPending: false,
   loaderId: 'loader-1',
   layoutPageX: 0,
   layoutPageY: 0,
@@ -289,6 +290,7 @@ vi.mock('electron', async () => {
             clientWidth: 1024,
             clientHeight: 720,
           },
+          cssContentSize: { width: 2048, height: 4096 },
         };
       }
       if (method === 'Page.captureScreenshot') {
@@ -1169,6 +1171,9 @@ vi.mock('../../src/main/browser/playwright-engine', () => {
           record('setViewportSize', '', size);
         },
         evaluate: async (_runner: unknown, expression?: string): Promise<unknown> => {
+          if (typeof _runner === 'function' && String(_runner).includes('fonts')) {
+            return electron.fontsPending ? await new Promise(() => {}) : true;
+          }
           if (typeof _runner === 'function' && expression === undefined) {
             record('evaluateViewport', '');
             const bounds = view.getBounds();
@@ -4676,6 +4681,43 @@ describe('BrowserHost', () => {
       },
     })).rejects.toMatchObject({ code: 'invalid_input' });
     await host.dispose();
+  });
+
+  it('falls back to a CDP page capture when webfonts stay pending', async () => {
+    const host = new BrowserHost(() => fakeWindow());
+    await createTab(host);
+    await snapshot(host);
+    const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
+    await mkdir(outputDir, { recursive: true });
+    const png = path.join(outputDir, 'pending-fonts.png');
+    electron.fontsPending = true;
+    try {
+      const result: any = await host.handleRpc({
+        runtime_key: RUNTIME_KEY,
+        method: 'execute',
+        params: {
+          profile_dir: PROFILE,
+          command: 'screenshot',
+          args: ['--full-page', '--type', 'png', '--scale', 'css', png],
+          proxy_url: PROXY_URL,
+        },
+      });
+      expect(result.data).toMatchObject({ path: png, type: 'png' });
+      expect(playwright.calls.some((call) => call.method === 'pageScreenshot')).toBe(false);
+      const capture = electron.views[0].webContents.debugger.commands.find(
+        (item: any) => item.method === 'Page.captureScreenshot',
+      );
+      expect(capture?.params).toMatchObject({
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: true,
+        clip: { x: 0, y: 0, width: 2048, height: 4096, scale: 1 },
+      });
+      expect(await stat(png)).toMatchObject({ size: 25 });
+    } finally {
+      electron.fontsPending = false;
+      await host.dispose();
+    }
   });
 
   it('serializes evaluate results and closes the active tab when tab id is omitted', async () => {

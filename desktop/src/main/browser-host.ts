@@ -73,6 +73,10 @@ const MODAL_SETTLE_MS = 500;
 // animation/timer. Keep the listener armed across the click and allow a
 // bounded post-click grace period before falling back to the exact file input.
 const FILE_CHOOSER_GRACE_MS = 2_000;
+// Playwright screenshot waits for document.fonts.ready. A page that references
+// an unreachable webfont can keep that promise pending until the command
+// deadline, so probe briefly and capture the painted frame through CDP instead.
+const SCREENSHOT_FONT_WAIT_MS = 2_000;
 const DEBUGGER_SETUP_TIMEOUT_MS = 5_000;
 const ARTIFACT_SCHEME = 'crew-artifact';
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 25_000;
@@ -4966,6 +4970,92 @@ export class BrowserHost extends EventEmitter {
   }
 
   /**
+   * Probe font readiness without blocking the screenshot for the full command
+   * deadline. A rejected or unavailable probe is treated as ready so the
+   * normal Playwright path remains the default.
+   */
+  private async screenshotFontsSettled(page: unknown): Promise<boolean> {
+    const evaluate = (page as { evaluate?: (fn: () => unknown) => Promise<unknown> }).evaluate;
+    if (typeof evaluate !== 'function') return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const probe = Promise.resolve(evaluate.call(page, () => {
+        const fonts = (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts;
+        return fonts?.ready ? fonts.ready.then(() => true) : true;
+      })).then((value) => value !== false).catch(() => true);
+      return await Promise.race([
+        probe,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), SCREENSHOT_FONT_WAIT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /** Capture the current painted frame without Playwright's font wait. */
+  private async captureScreenshotWithoutFontWait(
+    tab: BrowserTab,
+    parsed: ReturnType<typeof parseScreenshotArgs>,
+    page: unknown,
+  ): Promise<Buffer> {
+    type Size = { width?: number; height?: number };
+    type Metrics = {
+      cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
+      cssLayoutViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number };
+      cssContentSize?: Size;
+    };
+    const metrics = await this.send(tab, 'Page.getLayoutMetrics') as Metrics;
+    const viewport = metrics.cssVisualViewport ?? metrics.cssLayoutViewport;
+    const content = metrics.cssContentSize;
+    if (!viewport) {
+      throw new BrowserHostError('无法读取页面尺寸，截图未生成', { code: 'invalid_screenshot' });
+    }
+    const cssWidth = Math.round(parsed.fullPage ? Number(content?.width ?? 0) : Number(viewport.clientWidth ?? 0));
+    const cssHeight = Math.round(parsed.fullPage ? Number(content?.height ?? 0) : Number(viewport.clientHeight ?? 0));
+    if (!(cssWidth > 0) || !(cssHeight > 0)) {
+      throw new BrowserHostError('页面尺寸无效，截图未生成', { code: 'invalid_screenshot' });
+    }
+    let scale = 1;
+    if (parsed.scale === 'device') {
+      const evaluate = (page as { evaluate?: (fn: () => unknown) => Promise<unknown> }).evaluate;
+      if (typeof evaluate === 'function') {
+        let dprTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const dpr = await Promise.race([
+            Promise.resolve(evaluate.call(page, () => window.devicePixelRatio)).catch(() => 1),
+            new Promise<number>((resolve) => {
+              dprTimer = setTimeout(() => resolve(1), 500);
+            }),
+          ]);
+          if (typeof dpr === 'number' && Number.isFinite(dpr) && dpr > 0) scale = dpr;
+        } finally {
+          if (dprTimer !== undefined) clearTimeout(dprTimer);
+        }
+      }
+    }
+    const captured = await this.send(tab, 'Page.captureScreenshot', {
+      format: parsed.type,
+      ...(parsed.type === 'jpeg' ? { quality: 90 } : {}),
+      fromSurface: true,
+      captureBeyondViewport: parsed.fullPage,
+      clip: {
+        x: parsed.fullPage ? 0 : Number(viewport.pageX ?? 0),
+        y: parsed.fullPage ? 0 : Number(viewport.pageY ?? 0),
+        width: cssWidth,
+        height: cssHeight,
+        scale,
+      },
+    }) as { data?: unknown };
+    const data = String(captured?.data ?? '');
+    if (!data) {
+      throw new BrowserHostError('Playwright 未返回截图数据，截图未生成', { code: 'invalid_screenshot' });
+    }
+    return Buffer.from(data, 'base64');
+  }
+
+  /**
    * Export a user-facing screenshot through Playwright's public Page/Locator
    * APIs. This deliberately does not create a visual epoch: full-page,
    * element-only and CSS-scaled images are not coordinate-click viewports.
@@ -5023,10 +5113,15 @@ export class BrowserHost extends EventEmitter {
             : page.locator(record.selector);
           return locator.screenshot(commonOptions);
         })()
-      : await page.screenshot({
-          ...commonOptions,
-          fullPage: parsed.fullPage,
-        });
+      : await (async () => {
+          if (!await this.screenshotFontsSettled(page)) {
+            return this.captureScreenshotWithoutFontWait(tab, parsed, page);
+          }
+          return page.screenshot({
+            ...commonOptions,
+            fullPage: parsed.fullPage,
+          });
+        })();
     if (await this.currentPageIdentity(tab) !== pageIdentity) {
       throw new BrowserHostError('页面在截图期间已变化，请重新观察', {
         code: 'page_changed',
