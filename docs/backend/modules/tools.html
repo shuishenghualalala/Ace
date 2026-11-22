@@ -109,6 +109,7 @@
   <p>浏览器等待文本时，<code>text</code> 在任一同文元素可见时满足，<code>text_gone</code> 在可见匹配为空时满足。两个条件沿用命令的剩余截止时间。停止回合时，Gateway 通过原浏览器宿主连接取消该标签页的等待。宿主按账号、连接和原请求 ID 核对，已经执行的等待收尾后释放账号队列。</p>
 
   <p>开始等待时绑定当前账号、会话、目标标签与控制代次。定时阶段释放账号队列，长等待定期查询已绑定目标。文本条件继续由 Playwright 按短时段观察，每段结束后让其他会话使用队列。开始观察、继续及生成快照前都复核目标和控制权。无原生定向目标的驱动沿用原等待路径。</p>
+  <p>导出截图先以 2 秒上限探测字体就绪，正常时沿用 Playwright。字体持续挂起时，整页和视口使用 CDP；元素先滚入视口，再由 Electron <code>capturePage</code> 按当前边界捕获。CSS 输出缩放到元素尺寸，device 保留原生像素。页面身份、PNG/JPEG 校验和输出目录授权不因后备路径改变。</p>
 
   <h3>2.5 子 Agent 与外部 Agent</h3>
   <table>
@@ -348,6 +349,7 @@ snapshot_file(path, *, max_bytes=None) -> FileVersion  # 身份 + 内容 hash，
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-22</td><td>修复真实 Electron 中挂起字体的元素截图：后备改为原生矩形捕获，保留 CSS/device 像素和文件校验。</td><td><code>desktop/src/main/browser-host.ts</code>、真实 <code>pw-contract</code> 与 BrowserHost 回归。</td></tr>
       <tr><td>2026-11-22</td><td>无密钥 Gateway 回放补齐 <code>mcp_install</code> 的一次审批、配置落盘及新工具注册验证。</td><td><code>tests/test_replay_mcp_approval.py</code>、MCP 对话安装验收。</td></tr>
       <tr><td>2026-11-20</td><td>新增只读 <code>mcp_status</code>：管理员前台可列出服务连接状态、脱敏目标和工具数，用于对话内 MCP 诊断；不返回配置凭据，子 Agent、Plan 和普通账号不可见。</td><td><code>crew/tools/mcp_management.py</code>、工具注册表可见性、MCP 管理测试。</td></tr>
       <tr><td>2026-11-20</td><td>新增 <code>mcp_remove</code>：对话内一次批准后删除指定 MCP 配置并断开运行实例；批准绑定当前配置摘要，已不存在的服务幂等返回。</td><td><code>crew/tools/mcp_management.py</code>、MCP 配置事务与运行实例移除。</td></tr>

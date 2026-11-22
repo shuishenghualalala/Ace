@@ -461,11 +461,14 @@ vi.mock('electron', async () => {
     }
 
     async capturePage(): Promise<any> {
-      return {
+      const image = {
         getSize: () => ({ width: 1024, height: 720 }),
         toDataURL: () => 'data:image/png;base64,AA==',
         toPNG: () => Buffer.from('png'),
+        toJPEG: () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        resize: () => image,
       };
+      return image;
     }
   }
 
@@ -4688,13 +4691,14 @@ describe('BrowserHost', () => {
     await host.dispose();
   });
 
-  it('captures the strict ref through CDP when fonts stay pending', async () => {
+  it('captures the strict ref as a native element rectangle when fonts stay pending', async () => {
     const host = new BrowserHost(() => fakeWindow());
     await createTab(host);
     await snapshot(host);
     const outputDir = path.join(path.dirname(PROFILE), 'artifacts');
     await mkdir(outputDir, { recursive: true });
     const jpeg = path.join(outputDir, 'pending-font-element.jpeg');
+    const capture = vi.spyOn(electron.views[0].webContents, 'capturePage');
     electron.fontsPending = true;
     try {
       const result: any = await host.handleRpc({
@@ -4709,16 +4713,10 @@ describe('BrowserHost', () => {
       });
       expect(result.data).toMatchObject({ path: jpeg, type: 'jpeg' });
       expect(playwright.calls.some((call) => call.method === 'locatorScreenshot')).toBe(false);
-      const capture = electron.views[0].webContents.debugger.commands.find(
+      expect(capture).toHaveBeenCalledWith({ x: 10, y: 20, width: 100, height: 40 });
+      expect(electron.views[0].webContents.debugger.commands.some(
         (item: any) => item.method === 'Page.captureScreenshot',
-      );
-      expect(capture?.params).toMatchObject({
-        format: 'jpeg',
-        quality: 90,
-        fromSurface: true,
-        captureBeyondViewport: true,
-        clip: { x: 10, y: 20, width: 100, height: 40, scale: 1 },
-      });
+      )).toBe(false);
     } finally {
       electron.fontsPending = false;
       await host.dispose();

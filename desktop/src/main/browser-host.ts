@@ -5040,14 +5040,30 @@ export class BrowserHost extends EventEmitter {
         }
       }
     }
+    if (element) {
+      const nativeImage = await tab.view.webContents.capturePage({
+        x: Math.round(element.x),
+        y: Math.round(element.y),
+        width: cssWidth,
+        height: cssHeight,
+      });
+      const scaled = parsed.scale === 'css'
+        ? nativeImage.resize({ width: cssWidth, height: cssHeight, quality: 'best' })
+        : nativeImage;
+      const image = parsed.type === 'jpeg' ? scaled.toJPEG(90) : scaled.toPNG();
+      if (!image.length) {
+        throw new BrowserHostError('浏览器未返回元素截图数据', { code: 'invalid_screenshot' });
+      }
+      return image;
+    }
     const captured = await this.send(tab, 'Page.captureScreenshot', {
       format: parsed.type,
       ...(parsed.type === 'jpeg' ? { quality: 90 } : {}),
       fromSurface: true,
-      captureBeyondViewport: parsed.fullPage || element !== undefined,
+      captureBeyondViewport: parsed.fullPage,
       clip: {
-        x: element ? Number(viewport.pageX ?? 0) + element.x : parsed.fullPage ? 0 : Number(viewport.pageX ?? 0),
-        y: element ? Number(viewport.pageY ?? 0) + element.y : parsed.fullPage ? 0 : Number(viewport.pageY ?? 0),
+        x: parsed.fullPage ? 0 : Number(viewport.pageX ?? 0),
+        y: parsed.fullPage ? 0 : Number(viewport.pageY ?? 0),
         width: cssWidth,
         height: cssHeight,
         scale,
@@ -5118,6 +5134,7 @@ export class BrowserHost extends EventEmitter {
           const locator = record.playwrightRef
             ? locatorFromRef(page, record.playwrightRef)
             : page.locator(record.selector);
+          await locator.scrollIntoViewIfNeeded();
           const box = await locator.boundingBox();
           if (!box) {
             throw new BrowserHostError('目标元素当前不可见，截图未生成', { code: 'invalid_screenshot' });

@@ -21,7 +21,7 @@
 import { app, BrowserWindow, WebContentsView } from 'electron';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -143,6 +143,7 @@ function modalPrivateProbe(engine: PlaywrightEngine, page: Page): string {
 }
 
 app.whenReady().then(async () => {
+  const pendingFontResponses = new Set<ServerResponse>();
   const crossOriginRequests: string[] = [];
   const crossOriginServer = createServer((request, response) => {
     crossOriginRequests.push(`${request.method ?? ''} ${request.url ?? ''}`);
@@ -280,6 +281,11 @@ app.whenReady().then(async () => {
     }
     if (request.url?.startsWith('/host-output-api')) {
       response.end(JSON.stringify({ ok: true, url: request.url }));
+      return;
+    }
+    if (request.url?.startsWith('/host-output-font')) {
+      pendingFontResponses.add(response);
+      response.once('close', () => pendingFontResponses.delete(response));
       return;
     }
     if (request.url?.startsWith('/host-output-parity')) {
@@ -2798,6 +2804,101 @@ app.whenReady().then(async () => {
       await outputHost.dispose().catch(() => undefined);
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
       await cleanupContractRoot(tempRoot);
+    }
+  });
+
+  await check('BrowserHost 挂起字体的严格元素截图契约', async () => {
+    const ownerDigest = createHash('sha256').update('pw-contract-pending-font', 'utf8').digest('hex');
+    const runtimeKey = `crew_${ownerDigest.slice(0, 12)}`;
+    const accountDir = `acct_${ownerDigest.slice(0, 16)}`;
+    const sessionHash = createHash('sha256')
+      .update('pw-contract-pending-font-session', 'utf8').digest('hex').slice(0, 32);
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-pending-font-'));
+    const profile = path.join(tempRoot, 'accounts', accountDir, 'browser', 'profile');
+    const artifacts = path.join(path.dirname(profile), 'artifacts');
+    await mkdir(profile, { recursive: true });
+    await mkdir(artifacts, { recursive: true });
+    const panelWindow = new BrowserWindow({
+      show: false,
+      width: 1100,
+      height: 800,
+      webPreferences: { sandbox: true },
+    });
+    const host = new BrowserHost(() => panelWindow);
+    try {
+      const created = await host.handleRpc({
+        runtime_key: runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: profile,
+          proxy_url: policyProxyURL,
+          command: 'tab',
+          args: [
+            'new', '--label', `s${sessionHash}-1`,
+            new URL('/host-output-parity', topOriginURL).href,
+          ],
+          mutating: true,
+          command_timeout_ms: 15_000,
+        },
+      }) as { data?: { targetId?: string } };
+      const targetId = String(created.data?.targetId ?? '');
+      if (!targetId) throw new Error('挂起字体契约未创建 tab');
+      const execute = async (command: string, args: string[]): Promise<Record<string, unknown>> => {
+        const response = await host.handleRpc({
+          runtime_key: runtimeKey,
+          method: 'execute',
+          params: {
+            profile_dir: profile,
+            proxy_url: policyProxyURL,
+            target_id: targetId,
+            command,
+            args,
+            command_timeout_ms: 15_000,
+          },
+        }) as { data?: Record<string, unknown> };
+        return response.data ?? {};
+      };
+      await execute('eval', [`() => {
+        const style = document.createElement('style');
+        style.textContent = '@font-face{font-family:PendingFont;'
+          + 'src:url("/host-output-font")} '
+          + '#parity-target{font-family:PendingFont}';
+        document.head.append(style);
+        return document.getElementById('parity-target').getBoundingClientRect().width > 0;
+      }`]);
+      const fontStatus = await execute('eval', ['() => document.fonts.status']);
+      if (fontStatus.serialized !== '"loading"') {
+        throw new Error(`字体未进入挂起加载状态: ${fontStatus.serialized}`);
+      }
+      const snapshotResult = await execute('snapshot', ['--compact']);
+      const snapshotText = String(snapshotResult.snapshot ?? '');
+      const targetRef = /button "Parity target" \[ref=(@e\d+)\]/.exec(snapshotText)?.[1];
+      if (!targetRef) throw new Error('挂起字体快照缺少目标 ref');
+      const output = path.join(artifacts, 'pending-font-element.png');
+      const startedAt = Date.now();
+      await contractDeadline(
+        execute('screenshot', ['--ref', targetRef, '--type', 'png', '--scale', 'css', output]),
+        10_000,
+        'pending font strict-ref screenshot',
+      );
+      const image = await readFile(output);
+      const width = image.readUInt32BE(16);
+      const height = image.readUInt32BE(20);
+      if (
+        !image.subarray(0, 8).equals(
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        )
+        || width <= 0 || width > 1024 || height <= 0 || height > 720
+      ) {
+        throw new Error(`挂起字体元素截图无效: ${width}x${height}`);
+      }
+      return `pending fonts；strict-ref native ${width}x${height}；${Date.now() - startedAt}ms`;
+    } finally {
+      for (const response of pendingFontResponses) response.end();
+      if (!panelWindow.isDestroyed()) panelWindow.destroy();
+      await contractDeadline(host.dispose(), 5_000, 'pending-font host dispose').catch(() => undefined);
+      await contractDeadline(cleanupContractRoot(tempRoot), 5_000, 'pending-font profile cleanup')
+        .catch(() => undefined);
     }
   });
 
