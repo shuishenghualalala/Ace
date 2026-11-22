@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import yaml
 from dotenv import dotenv_values, load_dotenv
@@ -176,6 +177,30 @@ def is_owner_overridable_model_profile(profile: ModelProfile | None) -> bool:
     其它 builtin profile 仍保留管理员才能修改的全局语义。
     """
     return bool(profile and profile.builtin and profile.id == "default")
+
+
+def merge_mcp_url_secrets(new_url: str, old_url: str) -> str:
+    """Replace masked query values in a new MCP URL with the stored originals."""
+    if not new_url or "***" not in new_url or not old_url:
+        return new_url
+    new_parts = urlsplit(new_url)
+    old_query = dict(parse_qsl(urlsplit(old_url).query, keep_blank_values=True))
+    pairs: list[tuple[str, str]] = []
+    changed = False
+    for key, value in parse_qsl(new_parts.query, keep_blank_values=True):
+        if value == "***" and key in old_query:
+            value = old_query[key]
+            changed = True
+        pairs.append((key, value))
+    if not changed:
+        return new_url
+    return urlunsplit((
+        new_parts.scheme,
+        new_parts.netloc,
+        new_parts.path,
+        urlencode(pairs, safe="*"),
+        new_parts.fragment,
+    ))
 
 
 @dataclass
@@ -1106,6 +1131,10 @@ class Config:
         for section in ("env", "headers"):
             if section in updated:
                 updated[section] = merge_masked(current.get(section), updated[section])
+        if isinstance(updated.get("url"), str):
+            updated["url"] = merge_mcp_url_secrets(
+                updated["url"], str(current.get("url") or ""),
+            )
         return self._commit_mcp_servers({**servers, key: updated})
 
     def delete_mcp_server(self, name: str) -> Path:

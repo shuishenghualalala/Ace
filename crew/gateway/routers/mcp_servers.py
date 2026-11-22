@@ -23,6 +23,7 @@ from crew.tools.mcp_management import SERVER_NAME_RE as _NAME_RE
 from crew.tools.mcp_management import add_mcp_server, validate_server_payload as _validate_server_payload
 from crew.tools.mcp_client import probe_remote_server
 from crew.tools.redact import redact_sensitive_text
+from crew.state.config import merge_mcp_url_secrets
 # env key 命中这些后缀（不区分大小写）视为敏感，GET 脱敏。
 _SECRET_KEY_RE = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)$", re.IGNORECASE)
 _SENSITIVE_NAME_RE = re.compile(r"(AUTH|COOKIE|KEY|SECRET|TOKEN|PASSWORD)", re.IGNORECASE)
@@ -135,6 +136,8 @@ def create_mcp_servers_router(crew) -> APIRouter:
                         **{key: previous[key] for key, value in current.items()
                            if value == "***" and key in previous},
                     }
+            if isinstance(cfg.get("url"), str) and isinstance(stored.get("url"), str):
+                cfg["url"] = merge_mcp_url_secrets(cfg["url"], stored["url"])
         if cfg.get("command") or not cfg.get("url"):
             return JSONResponse(
                 {"ok": False, "error": "只支持探测 HTTP/SSE 端点；stdio 请保存后连接"},

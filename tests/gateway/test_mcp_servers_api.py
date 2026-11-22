@@ -274,7 +274,7 @@ async def test_probe_merges_masked_secrets_from_saved_server(api, monkeypatch):
         "/api/mcp/servers",
         json={
             "name": "remote-secret",
-            "url": "http://127.0.0.1:9/mcp",
+            "url": "http://127.0.0.1:9/mcp?token=stored&mode=1",
             "transport": "http",
             "headers": {"Authorization": "Bearer stored", "X-Trace": "old"},
         },
@@ -292,7 +292,7 @@ async def test_probe_merges_masked_secrets_from_saved_server(api, monkeypatch):
         "/api/mcp/servers/probe",
         json={
             "name": "remote-secret",
-            "url": "http://127.0.0.1:9/mcp",
+            "url": "http://127.0.0.1:9/mcp?token=***&mode=2",
             "transport": "http",
             "headers": {"Authorization": "***", "X-Trace": "new"},
         },
@@ -300,6 +300,7 @@ async def test_probe_merges_masked_secrets_from_saved_server(api, monkeypatch):
     )
     assert response.status_code == 200
     assert captured["headers"] == {"Authorization": "Bearer stored", "X-Trace": "new"}
+    assert captured["url"] == "http://127.0.0.1:9/mcp?token=stored&mode=2"
 
 
 async def test_probe_limits_concurrent_probes(api, monkeypatch):
@@ -406,6 +407,34 @@ async def test_update_masked_secret_preserves_original(api):
     }
     persisted = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
     assert persisted["mcp_servers"]["secret-update"]["env"]["API_KEY"] == "sk-original"
+
+
+async def test_update_masked_url_query_preserves_secret(api):
+    client, crew, config_yaml = api
+    created = await client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "url-secret",
+            "url": "http://127.0.0.1:9/mcp?token=stored&mode=1",
+            "transport": "http",
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert created.status_code == 201
+    updated = await client.put(
+        "/api/mcp/servers/url-secret",
+        json={
+            "url": "http://127.0.0.1:9/mcp?token=***&mode=2",
+            "transport": "http",
+        },
+        headers=LOCAL_HEADERS,
+    )
+    assert updated.status_code == 200
+    assert crew.config.mcp_servers["url-secret"]["url"] == (
+        "http://127.0.0.1:9/mcp?token=stored&mode=2"
+    )
+    persisted = yaml.safe_load(config_yaml.read_text(encoding="utf-8"))
+    assert persisted["mcp_servers"]["url-secret"]["url"].endswith("token=stored&mode=2")
 
 
 async def test_secret_env_redacted_in_get(api):
