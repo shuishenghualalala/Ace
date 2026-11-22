@@ -76,6 +76,17 @@ it('ignores a late probe result after switching transport', async () => {
   expect(button.textContent).toBe('测试连接');
 });
 
+it('closes the MCP form with Escape', async () => {
+  vi.resetModules();
+  const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');
+  bindMcpPane();
+  await openMcpServerModal();
+  const overlay = document.getElementById('mcp-server-overlay') as HTMLElement;
+  expect(overlay.hidden).toBe(false);
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+  expect(overlay.hidden).toBe(true);
+});
+
 it('probes an HTTP endpoint from the MCP settings form without saving', async () => {
   vi.resetModules();
   const { bindMcpPane, openMcpServerModal } = await import('../../src/ui/features/settings-mcp');

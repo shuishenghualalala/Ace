@@ -687,6 +687,13 @@ function bindMcpFormOnce(): void {
   document.getElementById('mcp-server-overlay')?.addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeMcpServerModal();
   });
+  document.addEventListener('keydown', (e) => {
+    const overlay = $('#mcp-server-overlay') as HTMLElement | null;
+    if (e.key === 'Escape' && overlay && !overlay.hidden) {
+      e.preventDefault();
+      closeMcpServerModal();
+    }
+  });
   document.getElementById('mcp-server-delete')?.addEventListener('click', async () => {
     const nameInput = document.getElementById('mcp-name') as HTMLInputElement | null;
     const name = nameInput?.value.trim() ?? '';
