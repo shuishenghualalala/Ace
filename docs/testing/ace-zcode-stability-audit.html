@@ -684,6 +684,12 @@
 <p><strong>验收</strong> McpHub 新增手动刷新用例：初始一次请求，点击后第二次请求；组件 6 项、TypeScript 与生产构建通过。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="web-mcp-escape">
+<h3>Web MCP 弹层的 Esc 关闭</h3>
+<p>MCP 新增/编辑弹层原先只能点关闭或遮罩退出，键盘用户没有直接取消路径。现在弹层打开期间监听 Escape，按 Esc 与关闭按钮共用取消逻辑：保存中不关闭、递增探测 epoch、abort 在途探测并清空结果；卸载或关闭时移除监听。</p>
+<p><strong>验收</strong> McpHub 新增 Esc 用例：打开后按 Escape 弹层消失；组件 7 项、TypeScript 通过。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

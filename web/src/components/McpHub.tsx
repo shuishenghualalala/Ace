@@ -149,6 +149,15 @@ export default function McpHub() {
     setProbeMessage("");
   };
 
+  useEffect(() => {
+    if (!modalOpen) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") closeModal();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [modalOpen, saving]);
+
   const save = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     if (!form.name.trim()) {
