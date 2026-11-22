@@ -1029,7 +1029,7 @@
 <article id="web-side-chat">
 <h3>Web 侧边聊天共享已保存前缀，独立执行</h3>
 <p>ZCode 的 <code>createSelectionSideSession</code> 先提交独立子会话，再把首条输入交给子会话的准入路径。创建时过滤运行中助手和工具增量，不复制父 Goal 或队列。Ace 首版重用 SQLite 分叉和现有对话面板；从同账号的内置主会话取固定已保存切口，先显示独立侧边面板，后续由用户向该会话发送。使用原工作空间，不复制审批、队列、Goal 或浏览器状态。切换来源时旧创建响应不能改变当前侧栏。</p>
-<p><strong>验收</strong> 基线没有 <code>/side</code> 候选，Gateway 未实现相应 POST。候选 Web 307 项通过，TypeScript 和生产构建通过；Gateway 与会话事件回归 53 项通过。Windows Chrome 加载生产 Web 与隔离 Gateway：父回合保持流式时，侧聊从实际已保存历史完成独立问答；只停止侧聊的第二个请求，父会话仍继续并最终完成。公开历史分别包含各自输出，侧聊内容不进入父历史。Gateway 退出释放双端口。使用受控模型，未接触真实会话。</p>
+<p><strong>验收</strong> 基线没有 <code>/side</code> 候选，Gateway 未实现相应 POST。候选 Web 307 项通过，TypeScript 和生产构建通过；Gateway 与会话事件回归 53 项通过。Windows Chrome 加载生产 Web 与隔离 Gateway：父回合保持流式时，侧聊从实际已保存历史完成独立问答；只停止侧聊的第二个请求，父会话仍继续并最终完成。公开历史分别包含各自输出，侧聊内容不进入父历史。Gateway 退出释放双端口。使用受控模型，未接触真实会话。补充组件用例：关闭仍在创建的侧边聊天会 abort 请求，迟到响应不加载历史。</p>
 <p class="evidence">Ace <code>crew/gateway/routers/sessions.py</code>、<code>crew/state/session_store.py</code>、<code>web/src/features/SideChat.tsx</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/selection-side-session.ts:12–78</code>、<code>packages/core/src/runtime/methods/session-fork.ts:811–859</code>、<code>packages/ui/src/app-shell/SelectionSideChatPane.tsx:24–54</code>。</p>
 </article>
 <article id="desktop-side-chat-admission">

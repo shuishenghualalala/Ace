@@ -55,6 +55,22 @@ it("drops a late child from a previous parent even if its HTTP request finishes 
   expect(loadHistory.mock.calls).toEqual([["new-child"]]);
 });
 
+it("aborts an opening side chat and ignores its late response", async () => {
+  let deliver!: (result: Awaited<ReturnType<typeof api.createSideChat>>) => void;
+  const request = new Promise<Awaited<ReturnType<typeof api.createSideChat>>>((resolve) => { deliver = resolve; });
+  const create = vi.spyOn(api, "createSideChat").mockReturnValueOnce(request);
+  const loadHistory = vi.fn(async () => {});
+  await act(async () => root.render(<Harness parentId="parent" loadHistory={loadHistory} />));
+  await act(async () => open());
+  const buttons = host.querySelectorAll("button");
+  await act(async () => buttons[1]!.click());
+  expect(output()).toBe("");
+  expect(create.mock.calls[0]![1].aborted).toBe(true);
+  await act(async () => deliver({ ok: true, source_session_id: "parent", session_id: "child", workspace_id: "default" }));
+  expect(output()).toBe("");
+  expect(loadHistory).not.toHaveBeenCalled();
+});
+
 it("refuses an invalid response that points back to the parent", async () => {
   vi.spyOn(api, "createSideChat").mockResolvedValue({ ok: true, source_session_id: "parent", session_id: "parent", workspace_id: "default" });
   const loadHistory = vi.fn(async () => {});
