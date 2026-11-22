@@ -30,6 +30,7 @@ from crew.core.types import (
     coerce_tool_arguments,
 )
 from crew.providers.classify import classify_provider_error
+from crew.providers.http_client import create_async_client
 from crew.providers.keying import ApiKeyResolver, require_api_key
 from crew.providers.vendors import REASONING_LEVELS, VendorCompat
 from crew.state.logging import llm_trace
@@ -356,7 +357,7 @@ class OpenAIProvider(LLMProvider):
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
-            http_client=httpx.AsyncClient(verify=get_shared_ssl_context(), timeout=timeout),
+            http_client=create_async_client(verify=get_shared_ssl_context(), timeout=timeout),
         )
         self._close_lock = asyncio.Lock()
         self._closed = False

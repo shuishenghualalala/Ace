@@ -17,6 +17,7 @@ from crew.core.errors import (
 from crew.core.interfaces import LLMProvider
 from crew.core.observability import capture_payload, event
 from crew.providers.classify import classify_provider_error
+from crew.providers.http_client import create_async_client
 from crew.providers.keying import ApiKeyResolver, require_api_key
 from crew.core.types import (
     IMAGE_INPUT_UNAVAILABLE_NOTICE,
@@ -191,7 +192,7 @@ class AnthropicProvider(LLMProvider):
         # 拖慢启动（叠加安全软件扫描可卡 40s）。详见 crew.providers.ssl_context。
         from crew.providers.ssl_context import get_shared_ssl_context
 
-        self._client = httpx.AsyncClient(
+        self._client = create_async_client(
             timeout=timeout,
             verify=get_shared_ssl_context(),
         )
