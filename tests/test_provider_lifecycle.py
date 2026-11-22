@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from pathlib import Path
 
 import pytest
 import yaml
@@ -189,13 +190,14 @@ async def test_app_shutdown_closes_agent_owned_before_global_provider_and_is_ide
 
 
 @pytest.mark.asyncio
-async def test_last_app_shutdown_releases_llm_trace_file(tmp_path):
+async def test_last_app_shutdown_releases_log_files(tmp_path):
     import crew.state.logging as trace_log
 
     cfg = Config(
         db_path=str(tmp_path / "crew.db"),
         memory_db_path=str(tmp_path / "memory.db"),
         crew_home=str(tmp_path / ".crew"),
+        log_file=str(tmp_path / "logs" / "crew.log"),
     )
     app = build_app(config=cfg, enable_team=False)
     app.cron_service = None
@@ -209,7 +211,9 @@ async def test_last_app_shutdown_releases_llm_trace_file(tmp_path):
         await app.shutdown()
         assert trace_log._LLM_LISTENER is None
         trace_file.unlink()
+        Path(cfg.log_file).unlink()
         assert not trace_file.exists()
+        assert not Path(cfg.log_file).exists()
     finally:
         if not app._shutdown_complete:
             await app.shutdown()

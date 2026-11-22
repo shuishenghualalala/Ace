@@ -73,7 +73,7 @@
       <tr><td>内建请求能力启动</td><td>Agent Factory、默认执行 Driver 和四个上下文贡献器在一个兼容事件循环内依次激活。每个定义仍由同一个 Feature Runtime 事务单独安装并记录 scope，宿主按安装逆序关闭。调用者已有事件循环时，沿用同步桥的独立线程完成整组装配。插件发现和长生命周期的托管 Feature 各自沿用原启动阶段。</td><td>首启与嵌入式宿主回归</td></tr>
       <tr><td>技能索引预热</td><td><code>startup_services</code> 在就绪后后台调用进程级 <code>skill_index().aget()</code>，不阻塞 Gateway 就绪或会话准入；首个提示词直接复用索引。关闭时取消并等待预热任务，失败只记录调试日志。</td><td>首轮请求、CLI 与嵌入式宿主</td></tr>
       <tr><td>测试宿主回收</td><td>无 Gateway lifespan 的 ASGI、CLI 测试也通过 <code>await app.shutdown()</code> 回收宿主。Work 构建时即激活，关闭其 FeatureScope 后才释放八个 Store。Linux 三次构建的旧拆卸残留 27、49、71 个 SQLite 文件描述符；正常关停后每轮 Work 数据库句柄均归零。测试结束时恢复临时替换的 MCP manager。个别宿主的关停异常会报告给所属用例，其余宿主继续关停。</td><td>测试夹具与 Work 生命周期回归</td></tr>
-      <tr><td>关闭编排</td><td>先停止 Dispatcher，再停用托管 Feature、drain 内置 Scope，最后关闭尚未迁移的业务服务、Provider、插件和 Store。最后一个 App 关闭时，在同一共享资源边界停止技能目录监听，并在线程内排空、关闭进程级 LLM trace listener 与文件；其他 App 仍存活时不关闭共享 trace。</td><td>迁移中</td></tr>
+      <tr><td>关闭编排</td><td>先停止 Dispatcher，再停用托管 Feature、drain 内置 Scope，最后关闭尚未迁移的业务服务、Provider、插件和 Store。最后一个 App 关闭时，在同一共享资源边界停止技能目录监听，并在线程内调用统一 <code>shutdown_logging</code>：排空并关闭 LLM trace，移除本模块安装的 Rich、文件和环形缓冲处理器，允许后续实例重新初始化；其他 App 仍存活时不关闭共享日志。</td><td>迁移中</td></tr>
     </tbody>
   </table>
 
@@ -118,6 +118,7 @@ async for chunk in app.handle(envelope):
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-22</td><td>统一日志关停覆盖普通文件、trace 和环形缓冲处理器，并允许后续 App 重新初始化。</td><td><code>crew/app.py</code>、<code>crew/state/logging.py</code>、日志重开与真实模型 E2E。</td></tr>
       <tr><td>2026-11-22</td><td>最后一个 App 关停时排空并关闭共享 LLM trace listener 与文件，其他实例存活时保持可用。</td><td><code>crew/app.py</code>、Windows 临时目录回收与日志生命周期。</td></tr>
       <tr><td>YYYY-MM-DD</td><td>初始建立</td><td>—</td></tr>
       <tr><td>2026-11-20</td><td><code>startup_services</code> 后台预热进程级技能索引，首轮提示词复用；预热失败不影响启动，关闭时取消并等待。</td><td>CrewApp 启动/关闭、首轮提示词。</td></tr>

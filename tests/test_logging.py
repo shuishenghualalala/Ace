@@ -66,6 +66,24 @@ def test_llm_trace_shutdown_flushes_without_hanging(tmp_path):
         _reset_llm_trace()
 
 
+def test_logging_can_be_initialized_again_after_shutdown(tmp_path):
+    first = tmp_path / "first" / "crew.log"
+    second = tmp_path / "second" / "crew.log"
+    try:
+        clog.setup_logging(log_file=str(first), llm_trace=True)
+        clog.llm_trace("request", {"session_id": "before-reopen"})
+        clog.shutdown_logging()
+        assert clog._CONFIGURED is False
+
+        clog.setup_logging(log_file=str(second), llm_trace=True)
+        clog.llm_trace("request", {"session_id": "after-reopen"})
+        assert clog.flush_llm_trace()
+        assert second.is_file()
+        assert "after-reopen" in (second.parent / "llm.jsonl").read_text(encoding="utf-8")
+    finally:
+        clog.shutdown_logging()
+
+
 def test_llm_trace_setup_twice_replaces_listener(tmp_path):
     """重复 setup 先停旧 listener，不叠加写文件。"""
     _reset_llm_trace()

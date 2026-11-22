@@ -396,6 +396,25 @@ def shutdown_llm_trace(timeout: float = 5.0) -> None:
             pass
 
 
+def shutdown_logging(timeout: float = 5.0) -> None:
+    """Release process logging installed by setup_logging and permit a fresh setup."""
+    global _CONFIGURED, _RING
+    shutdown_llm_trace(timeout)
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, (RichHandler, logging.FileHandler, RingBufferHandler)):
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001 - continue releasing the remaining handlers
+                pass
+    for filter_ in list(root.filters):
+        if isinstance(filter_, RolePrefixFilter):
+            root.removeFilter(filter_)
+    _RING = None
+    _CONFIGURED = False
+
+
 _LLM_TRACE_ATEXIT_REGISTERED = False
 _LLM_TRACE_ATEXIT_LOCK = threading.Lock()
 
