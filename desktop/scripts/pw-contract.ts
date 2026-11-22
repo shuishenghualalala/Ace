@@ -18,7 +18,7 @@
  * 退出码非 0 即契约破裂。
  */
 
-import { app, BrowserWindow, WebContentsView } from 'electron';
+import { app, BrowserWindow, nativeImage, WebContentsView } from 'electron';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
@@ -2892,7 +2892,26 @@ app.whenReady().then(async () => {
       ) {
         throw new Error(`挂起字体元素截图无效: ${width}x${height}`);
       }
-      return `pending fonts；strict-ref native ${width}x${height}；${Date.now() - startedAt}ms`;
+      const deviceOutput = path.join(artifacts, 'pending-font-element-device.jpeg');
+      const deviceResult = await contractDeadline(
+        execute('screenshot', [
+          '--ref', targetRef, '--type', 'jpeg', '--scale', 'device', deviceOutput,
+        ]),
+        10_000,
+        'pending font device-pixel JPEG screenshot',
+      );
+      const deviceImage = await readFile(deviceOutput);
+      const deviceSize = nativeImage.createFromBuffer(deviceImage).getSize();
+      if (
+        deviceResult.type !== 'jpeg'
+        || deviceImage[0] !== 0xff || deviceImage[1] !== 0xd8
+        || deviceImage.at(-2) !== 0xff || deviceImage.at(-1) !== 0xd9
+        || deviceSize.width < width || deviceSize.height < height
+      ) {
+        throw new Error(`挂起字体 device JPEG 无效: ${JSON.stringify(deviceSize)}`);
+      }
+      return `pending fonts；CSS PNG ${width}x${height}；`
+        + `device JPEG ${deviceSize.width}x${deviceSize.height}；${Date.now() - startedAt}ms`;
     } finally {
       for (const response of pendingFontResponses) response.end();
       if (!panelWindow.isDestroyed()) panelWindow.destroy();
