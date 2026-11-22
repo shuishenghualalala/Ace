@@ -849,6 +849,7 @@
 <h3>D7a · 同一浏览器标签切换控制权时页面闪烁</h3>
 <p>现场预览版 <code>5b647266</code> 在本地时间 11:51:03 成功打开本地 HTML。截图时间为 11:51:40，随后诊断在 11:51:56.552 记录前台渲染器心跳超时，11:51:57.510 新窗口就绪。隔离 Windows Electron 43.1 另复现同一内嵌 HTML 标签由人工切换到 AI 时，原生视图被隐藏、移除并重新挂载。ZCode 用稳定的 guest generation 保留浏览器视图，控制权由浏览器管理器更新。</p>
 <p><strong>修复和验收</strong> 同标签同会话的模式切换保留原生视图。迟到的旧模式布局只在身份与视图仍匹配时保留挂载，输入权限仍取主进程当前状态。120 项桌面回归通过。隔离 Windows Electron 使用实际 WebContentsView 和本地 HTML，接管往返及迟到布局均为零隐藏、零移除、零挂载、零导航。主动切出标签仍会移除原生视图。现场窗口心跳超时的具体来源尚待核实。</p>
+<p><strong>未解决：挂起字体整页的长时限恢复</strong> 原挂起字体契约在 1 秒整页时限后通过视口恢复；将该时限单独延长至 15 秒后，整页仍失败，且下一次视口截图在 5 秒内也未恢复，契约以 0/1 结束。实验只改临时测试时限，脚本已按原始字节恢复。这说明普通整页回退不能覆盖隐藏窗口、挂起字体和迟到底层调用组合；当前超时/遗弃计数只限制排队，不等于实际产帧与自愈。后续需要在 surface/presentation 生命周期内修复，并用长时限整页及后续操作同时验收，不能沿用短时限恢复结果宣称完成。</p>
 <p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code> 与 <code>browser-panel.ts</code>。ZCode <code>BrowserViewportSurface.tsx</code> 与 <code>browserGuestManager.ts</code>。</p>
 </article>
 <article id="browser-inspector-refresh">
