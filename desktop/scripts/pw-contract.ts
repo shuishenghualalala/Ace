@@ -3035,6 +3035,141 @@ app.whenReady().then(async () => {
     }
   });
 
+  await check('BrowserHost 账号站点存储共享与隔离契约', async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-site-storage-'));
+    const panelWindow = new BrowserWindow({
+      show: false,
+      width: 1100,
+      height: 800,
+      webPreferences: { sandbox: true },
+    });
+    const host = new BrowserHost(() => panelWindow);
+    const account = (name: string) => {
+      const digest = createHash('sha256').update(name).digest('hex');
+      return {
+        runtimeKey: `crew_${digest.slice(0, 12)}`,
+        profile: path.join(tempRoot, 'accounts', `acct_${digest.slice(0, 16)}`, 'browser', 'profile'),
+      };
+    };
+    const accountA = account('pw-contract-site-storage-a');
+    const accountB = account('pw-contract-site-storage-b');
+    await mkdir(accountA.profile, { recursive: true });
+    await mkdir(accountB.profile, { recursive: true });
+    const pageURL = new URL('/host-output-parity', topOriginURL).href;
+    const newTab = async (
+      identity: { runtimeKey: string; profile: string },
+      sessionName: string,
+    ): Promise<string> => {
+      const sessionHash = createHash('sha256').update(sessionName).digest('hex').slice(0, 32);
+      const created = await contractDeadline(host.handleRpc({
+        runtime_key: identity.runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: identity.profile,
+          proxy_url: policyProxyURL,
+          command: 'tab',
+          args: ['new', '--label', `s${sessionHash}-1`, pageURL],
+          mutating: true,
+          command_timeout_ms: 15_000,
+        },
+      }) as Promise<{ data?: { targetId?: string } }>, 20_000, `create ${sessionName}`);
+      const targetId = String(created.data?.targetId ?? '');
+      if (!targetId) throw new Error('站点存储契约未创建 tab');
+      return targetId;
+    };
+    const evaluate = async (
+      identity: { runtimeKey: string; profile: string },
+      targetId: string,
+      expression: string,
+    ): Promise<unknown> => {
+      const response = await contractDeadline(host.handleRpc({
+        runtime_key: identity.runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: identity.profile,
+          proxy_url: policyProxyURL,
+          target_id: targetId,
+          command: 'eval',
+          args: [expression],
+          command_timeout_ms: 15_000,
+        },
+      }) as Promise<{ data?: { serialized?: string } }>, 20_000, 'site-storage eval');
+      return JSON.parse(String(response.data?.serialized));
+    };
+    const marker = 'account-a-only';
+    const writeStorage = `async () => {
+      const marker = ${JSON.stringify(marker)};
+      localStorage.setItem('crew_storage_contract', marker);
+      document.cookie = 'crew_storage_contract=' + marker + '; path=/; SameSite=Lax';
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('crew-storage-contract', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('values');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction('values', 'readwrite');
+        transaction.objectStore('values').put(marker, 'marker');
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      db.close();
+      return 'stored';
+    }`;
+    const readStorage = `async () => {
+      const local = localStorage.getItem('crew_storage_contract');
+      const pair = document.cookie.split('; ').find(
+        (entry) => entry.startsWith('crew_storage_contract='),
+      );
+      const cookie = pair ? pair.slice('crew_storage_contract='.length) : null;
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('crew-storage-contract', 1);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      if (!db.objectStoreNames.contains('values')) {
+        db.close();
+        return { local, cookie, indexed: null };
+      }
+      const indexed = await new Promise((resolve, reject) => {
+        const request = db.transaction('values', 'readonly').objectStore('values').get('marker');
+        request.onsuccess = () => resolve(request.result ?? null);
+        request.onerror = () => reject(request.error);
+      });
+      db.close();
+      return { local, cookie, indexed };
+    }`;
+    try {
+      const sessionA1 = await newTab(accountA, 'pw-contract-site-storage-a1');
+      const stored = await evaluate(accountA, sessionA1, writeStorage);
+      if (stored !== 'stored') throw new Error(`站点存储写入未完成: ${String(stored)}`);
+      const sessionA2 = await newTab(accountA, 'pw-contract-site-storage-a2');
+      const shared = await evaluate(accountA, sessionA2, readStorage);
+      const expectedShared = { local: marker, cookie: marker, indexed: marker };
+      if (JSON.stringify(shared) !== JSON.stringify(expectedShared)) {
+        throw new Error(`同账号跨会话站点存储不一致: ${JSON.stringify(shared)}`);
+      }
+      const sessionB1 = await newTab(accountB, 'pw-contract-site-storage-b1');
+      const isolated = await evaluate(accountB, sessionB1, readStorage);
+      const expectedIsolated = { local: null, cookie: null, indexed: null };
+      if (JSON.stringify(isolated) !== JSON.stringify(expectedIsolated)) {
+        throw new Error(`不同账号站点存储未隔离: ${JSON.stringify(isolated)}`);
+      }
+      return `A1 write；A2 Cookie/localStorage/IndexedDB=${marker}；B1 三项均为空`;
+    } finally {
+      try {
+        await contractDeadline(host.dispose(), 5_000, 'site-storage host dispose');
+      } finally {
+        if (!panelWindow.isDestroyed()) panelWindow.destroy();
+        await contractDeadline(cleanupContractRoot(tempRoot), 5_000, 'site-storage profile cleanup')
+          .catch((error) => {
+            console.log(`Deferred site-storage profile cleanup: ${String(error)}`);
+          });
+      }
+    }
+  });
+
   await check('BrowserHost run_code timeout 撤销、恢复与并发归因契约', async () => {
     const identity = (name: string): {
       runtimeKey: string;
