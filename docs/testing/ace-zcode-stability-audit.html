@@ -642,6 +642,12 @@
 <p><strong>验收</strong> Desktop 探测组件测试 2 项通过，迟到结果用例断言切换传输后传入的 signal 已 aborted；TypeScript 通过。</p>
 <p class="evidence">Ace <code>desktop/src/ui/api/feature-tools.ts</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/mcp-probe.test.ts</code>、<code>docs/frontend/desktop-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="mcp-status-error-redaction">
+<h3>MCP 状态与探测错误的显示边界脱敏</h3>
+<p>状态列表和探测响应会把 worker/传输异常原样返回。通用日志脱敏刻意不改写 URL query，导致异常里的 <code>?token=…</code>、userinfo 或 Authorization 文本进入 Web/Desktop。现在两处错误都改用显示边界脱敏：URL 敏感 query、userinfo、HTTP 请求目标、Authorization 头、已知密钥前缀均被替换；普通参数保留。状态接口仍返回 50 个工具名上限与异常行兜底。</p>
+<p><strong>验收</strong> 新增状态错误脱敏用例：错误含 URL token、<code>sk-</code> key 与 Authorization，响应中三者均不可见；定向用例与 Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/redact.py</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from crew.tools.mcp_management import SERVER_NAME_RE as _NAME_RE
 from crew.tools.mcp_management import add_mcp_server, validate_server_payload as _validate_server_payload
 from crew.tools.mcp_client import probe_remote_server
-from crew.tools.redact import redact_sensitive_text
+from crew.tools.redact import redact_sensitive_display_text
 from crew.state.config import merge_mcp_url_secrets
 # env key 命中这些后缀（不区分大小写）视为敏感，GET 脱敏。
 _SECRET_KEY_RE = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD)$", re.IGNORECASE)
@@ -112,7 +112,7 @@ def create_mcp_servers_router(crew) -> APIRouter:
                 "name": row["name"],
                 "transport": config.get("transport") or row["transport"],
                 "connected": row["connected"],
-                "error": row["error"],
+                "error": redact_sensitive_display_text(str(row.get("error") or "")),
                 "tools": tools[:_STATUS_MAX_TOOLS],
                 "tool_count": len(tools),
                 # The persisted config is the source of truth immediately after an
@@ -168,7 +168,7 @@ def create_mcp_servers_router(crew) -> APIRouter:
             "tools": tools,
             "tool_count": int(result.get("tool_count") or len(tools)),
             "elapsed_ms": int(result.get("elapsed_ms") or 0),
-            "error": redact_sensitive_text(str(error)) if error else None,
+            "error": redact_sensitive_display_text(str(error)) if error else None,
         })
 
     @router.post("/api/mcp/servers")

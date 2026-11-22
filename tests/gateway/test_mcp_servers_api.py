@@ -472,6 +472,24 @@ async def test_list_tolerates_malformed_status_rows(api, monkeypatch):
     assert server["config"] == {"env": {}}
 
 
+async def test_list_redacts_status_errors(api, monkeypatch):
+    client, crew, _ = api
+    assert crew.mcp_manager is not None
+    monkeypatch.setattr(crew.mcp_manager, "status", lambda: [{
+        "name": "leaky",
+        "transport": "http",
+        "connected": False,
+        "error": "failed https://mcp.example.com/mcp?token=abc123 with sk-live-1234567890 and Authorization: Bearer header-secret",
+        "tools": [],
+        "config": {"url": "https://mcp.example.com/mcp", "transport": "http"},
+    }])
+    response = await client.get("/api/mcp/servers", headers=LOCAL_HEADERS)
+    error = next(item for item in response.json()["servers"] if item["name"] == "leaky")["error"]
+    assert "token=abc123" not in error
+    assert "sk-live-1234567890" not in error
+    assert "header-secret" not in error
+
+
 async def test_secret_env_redacted_in_get(api):
     client, _, _ = api
     resp = await client.post(
