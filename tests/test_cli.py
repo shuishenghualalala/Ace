@@ -1065,6 +1065,22 @@ def test_mcp_list_redacts_status_errors():
     assert "token=abc123" not in view[0]["error"]
 
 
+def test_mcp_list_caps_tools():
+    import crew.cli.integration as integration
+
+    manager = SimpleNamespace(status=lambda: [{
+        "name": "big",
+        "transport": "http",
+        "connected": True,
+        "error": "",
+        "tools": [f"tool-{index}" for index in range(60)],
+        "config": {"url": "https://mcp.example.com/mcp", "transport": "http"},
+    }])
+    view = integration._mcp_servers_view(SimpleNamespace(mcp_manager=manager))
+    assert len(view[0]["tools"]) == 50
+    assert view[0]["tool_count"] == 60
+
+
 def test_mcp_add_no_auto_connect_saves_without_starting(monkeypatch):
     import crew.cli.integration as integration
 

@@ -32,7 +32,7 @@ from crew.channels.router_helpers import (
 )
 from crew.cli.app import CliContext, CliError, CliResult, parse_json
 from crew.gateway.helpers import require_external_agents_enabled
-from crew.gateway.routers.mcp_servers import _NAME_RE, _redact_config, _validate_server_payload
+from crew.gateway.routers.mcp_servers import _NAME_RE, _redact_config, _STATUS_MAX_TOOLS, _validate_server_payload
 from crew.gateway.routers.plugins import (
     _drop_owner_agent_cache,
     _plugin_states,
@@ -178,7 +178,8 @@ def _mcp_servers_view(app: Any) -> list[dict[str, Any]]:
             "transport": row["transport"],
             "connected": row["connected"],
             "error": redact_sensitive_display_text(str(row.get("error") or "")),
-            "tools": row["tools"],
+            "tools": [str(item) for item in (row.get("tools") or [])][:_STATUS_MAX_TOOLS],
+            "tool_count": len(row.get("tools") or []),
             "config": _redact_config(row["config"]),
         }
         for row in mgr.status()
