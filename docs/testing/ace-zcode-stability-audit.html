@@ -834,6 +834,12 @@
 <p><strong>验收</strong> 方括号归一（含端口形式）与 <code>InvalidURL</code> 提示用例通过；Provider 生命周期 16 项、客户端边界 3 项、远程登录 12 项通过，Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/providers/http_client.py</code>、<code>openai_provider.py</code>、<code>anthropic_provider.py</code>、<code>tests/test_provider_http_client.py</code>。</p>
 </article>
+<article id="release-runtime-manifest-stale">
+<h3>预构建安全运行时的源码哈希滞后</h3>
+<p>仓库当前只提交了 <code>security-runtime/prebuilt/darwin-arm64</code>。该 manifest 最后一次随 <code>9d1af587</code> 更新，源码哈希仍为 <code>db79aeec…</code>；其后 19 个 <code>src/tests/Cargo</code> 文件变化，当前哈希为 <code>d8aa11c0…</code>。因此发布校验在 Windows 上先报源码哈希不一致，二进制摘要校验尚未执行。</p>
+<p><strong>结论</strong> 需要在 macOS arm64 上重建运行时并重新生成 manifest（同时更新源码哈希、二进制 SHA 与文件数）；Windows 不能生成可信的 darwin 预构建。未修改 manifest 或伪造二进制，避免发布证据失真。</p>
+<p class="evidence">Ace <code>security-runtime/prebuilt/darwin-arm64/runtime-manifest.json</code>、<code>scripts/write_security_runtime_evidence.py</code>、<code>tests/security/test_release_security_workflows.py</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
