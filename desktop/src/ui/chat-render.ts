@@ -430,7 +430,9 @@ function renderThinkingBlock(message: ChatMessage, turnLive: boolean): HTMLEleme
       <div class="process-timeline__thinking md-body chat-markdown"></div>
     </details>`,
   );
-  details.open = streaming;
+  // 输出过程中也默认折叠：只显示摘要行（图标/时长），用户可手动展开；
+  // 思考正文仍通过 data-thinking-for 持续更新，不依赖 details 是否展开。
+  details.open = false;
   details.querySelector<HTMLElement>('.process-timeline__title')!.textContent = title;
   patchTranscriptMarkdown(
     details.querySelector<HTMLElement>('.process-timeline__thinking')!,

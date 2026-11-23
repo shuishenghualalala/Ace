@@ -114,7 +114,7 @@
   <ul>
     <li>用户手动折叠/展开后状态写入 <code>localStorage</code>，<b>跨重启保留</b>。</li>
     <li>新工具调用到达 / 模型继续输出文字时，<b>不再自动展开</b>已被用户折叠的卡片或回合。</li>
-    <li>无用户偏好时：工具时间线项默认折叠（仅展示标题与耗时）；思考项流式中默认展开、完成后默认收起；流式回合默认展开，完成默认折叠。</li>
+    <li>无用户偏好时：工具时间线项默认折叠（仅展示标题与耗时）；思考项默认折叠（输出过程中也只显示摘要行，可手动展开）；流式回合默认展开，完成默认折叠。</li>
   </ul>
   <h3>3.2 滚动</h3>
   <ul>
@@ -248,9 +248,9 @@
     <li>回合折叠区（<code>.msg__fold-content</code>）内的过程内容统一挂进一条 <code>.process-timeline</code>：每项 28px 圆角图标格，项与项之间左侧虚线连接，结构与样式对齐 web <code>AgentProcessTimeline</code>（Kimi 风格）。</li>
     <li>图标按语义分类（<code>toolIconKind</code>，参考 Kimi）：写入/修改=笔、读取=书、grep/glob=放大镜、web/browser=地球、todo=清单、memory=数据库、team/delegate/agent=双人、skills=星、cron=时钟、其余=终端；思考=灯泡（流式中脉冲）、状态=时钟、错误=叹号、旁白=ghost 占位。</li>
     <li>工具项标题语义化带参数（<code>tool-labels.ts</code> 的 <code>toolDisplayTitle</code>，对齐 web <code>processDisplay</code>）：<code>terminal</code>→「运行 command」、<code>file_write</code>→「写入 basename」、<code>grep/glob</code>→「搜索 query」；<code>uiLabel</code> 优先，未知工具回退 <code>formatToolDisplayName</code>（中文别名，比 web 的裸名回退覆盖更全）。</li>
-    <li>可展开项用 <code>&lt;details class="process-timeline__details"&gt;</code>：工具项带 <code>data-fold-key</code> 持久化折叠（默认折叠），展开为 Request（args pretty JSON）/ Response（<code>formatToolResultDisplay</code>）两个 <code>.process-code-block</code>；思考项不持久化（流式中展开、完成后收起）。无参数无结果的工具渲染为静态行（不可展开）。</li>
+    <li>可展开项用 <code>&lt;details class="process-timeline__details"&gt;</code>：工具项带 <code>data-fold-key</code> 持久化折叠（默认折叠），展开为 Request（args pretty JSON）/ Response（<code>formatToolResultDisplay</code>）两个 <code>.process-code-block</code>；思考项不持久化（默认折叠，输出过程中也折叠，可手动展开）。无参数无结果的工具渲染为静态行（不可展开）。</li>
     <li>回合顶部计时头（<code>summary.msg__turn-header</code>）：灰字「已工作 X 分 X 秒」+ 右侧 chevron + 下方细分隔线，点击折叠/展开过程区（默认逻辑不变：有正文→默认折、流式中展开；复用 fold-state 持久化）。文案走 i18n（<code>chat.turn.working</code>，英文 <code>Worked …</code>），时长由 <code>formatTurnDuration</code> 按语言格式化（中文「10 分 22 秒」，英文复用 <code>formatDuration</code>）；流式中由 chat-controller 的 1s ticker 原地刷新，结束后定格。Team 回合经 <code>turnHeaderLabel</code> 覆盖为专属标题（规划标题 / 「已思考 X」）。</li>
-    <li>思考块标题：<code>思考 · 持续了几秒</code>（思考流进行中，或结束后时长 &lt;3 秒/无计时数据）/ <code>思考 · 持续了 N 秒</code>（结束后 ≥3 秒）。计时为纯前端方案：thinkingReducer 用首个 thinking 帧到达时刻记 <code>thinkingStartedAt</code>（只记一次），final/error 封口时结算 <code>thinkingDurationMs</code> 写回消息；历史回放无该数据时不显示时长。展开正文为浅灰字 + 左侧竖线引用式样式。正文/工具落到同一条消息后思考块即视为结束（收起 + 最终时长）。</li>
+    <li>思考块标题：<code>思考 · 持续了几秒</code>（思考流进行中，或结束后时长 &lt;3 秒/无计时数据）/ <code>思考 · 持续了 N 秒</code>（结束后 ≥3 秒）。计时为纯前端方案：thinkingReducer 用首个 thinking 帧到达时刻记 <code>thinkingStartedAt</code>（只记一次），final/error 封口时结算 <code>thinkingDurationMs</code> 写回消息；历史回放无该数据时不显示时长。展开正文为浅灰字 + 左侧竖线引用式样式。思考块在输出过程中也默认折叠，仅显示摘要行；正文/工具落到同一条消息后视为结束并显示最终时长。</li>
     <li>回合底部行时间取<b>回合完成时间</b>（末段 assistant 的 <code>timestamp</code>，final 时由 finalReducer patch；历史回放全段统一为 <code>turn_finished_at</code>）。取批次首条会停在回合开始时刻（多段回合曾因此显示错误）。</li>
     <li>旧 <code>.tool-card*</code> / <code>.thinking-block*</code> / <code>.msg__tools</code> / <code>.line-status</code> / <code>.line-error</code> / <code>.msg__text--narration</code> 类名已全部移除；工作室（pet-studio）羊皮纸主题与 dark 模式对时间线有专门覆盖。</li>
   </ul>
@@ -330,6 +330,7 @@
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-23</td><td>思考过程默认折叠：桌面端流式输出期间，thinking 时间线项也只显示摘要行与运行态图标，不再自动展开正文；用户仍可手动展开。</td><td><code>desktop/src/ui/chat-render.ts</code>、<code>desktop/tests/unit/render-agent-turn.test.ts</code>、本文档。</td></tr>
       <tr><td>2026-09-03</td><td>模型配置弹层支持选择厂商：Gateway 新增只读 <code>GET /api/config/vendors</code> 暴露厂商注册表；桌面端表单以厂商下拉驱动 Base URL 只读自动填充、模型目录下拉、上下文窗口与最大输出 token 按元数据自动取值（自定义默认 256K / 32768），自定义路径保持原有手填行为；设置页模型列表按厂商分组展示；修复模型弹窗主按钮红字、移除「AI」占位图标。</td><td><code>crew/providers/vendors.py</code>、<code>crew/gateway/routers/config.py</code>、<code>backend-client.ts</code>、<code>config-panes.ts</code>、<code>settings-integrations.ts</code>、<code>index.html</code> 模型表单、<code>settings.css</code>/<code>channel-config.css</code>/<code>settings-integrations.css</code>、后端 gateway 定向测试与 Desktop 定向单测（model-form-vendor +10、model-list-grouping +3）及本文档；无新数据表、无新核心模块。</td></tr>
       <tr><td>2026-08-31</td><td>灵感新建会话不再写仅用于标签判断的 <code>inspiration_creation</code>，改为给普通 builtin 主 Agent 挂载 <code>capability_profiles=["sites.authoring"]</code>；显示身份保持“灵感”，实际工具、Skill 与 Prompt 由后端 Capability Profile 解析。</td><td><code>app.ts</code>、<code>backend-client.ts</code>、Session AgentConfig 契约及灵感模块文档；不新增独立 Site Agent，不改变聊天执行器。</td></tr>
       <tr><td>2026-08-17</td><td>邮箱登录会话验证保留 Gateway 真实错误：无效 Cookie 仍清理，<code>ACTIVE_OWNER_CONFLICT</code> 等错误的文案、代码和 HTTP 状态码透传到登录 UI。</td><td><code>desktop/src/main/auth-session.ts</code>、<code>desktop/tests/unit/auth-session.test.ts</code>、桌面认证文档。</td></tr>

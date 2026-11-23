@@ -436,14 +436,14 @@ describe('renderAgentTurn', () => {
     expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了 5 秒');
   });
 
-  it('流式思考中时间线项默认展开且标题为「持续了几秒」', () => {
+  it('流式思考中时间线项默认折叠但保留实时标题与运行态', () => {
     const root = renderAgentTurn(makeMessages({ streaming: true, content: '' }), {
       isStreaming: true,
       userPinnedOpen: null,
       turnDurationMs: 3_000,
     });
     const item = root.querySelector('.process-timeline__item[data-thinking-for]');
-    expect(item?.querySelector('details.process-timeline__details')?.open).toBe(true);
+    expect(item?.querySelector('details.process-timeline__details')?.open).toBe(false);
     expect(item?.querySelector('.process-timeline__title')?.textContent).toBe('思考 · 持续了几秒');
     expect(item?.querySelector('.process-timeline__icon--running')).not.toBeNull();
   });
