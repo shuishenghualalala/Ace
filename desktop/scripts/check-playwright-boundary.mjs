@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const compatPath = path.join(desktopRoot, 'src', 'main', 'browser', 'playwright-compat.ts');
@@ -15,6 +16,13 @@ const packagePath = path.join(desktopRoot, 'package.json');
 const lockPath = path.join(desktopRoot, 'package-lock.json');
 const esbuildPath = path.join(desktopRoot, 'esbuild.config.mjs');
 const contractPath = path.join(desktopRoot, 'scripts', 'pw-contract.ts');
+const packagedSmokePath = path.join(desktopRoot, 'scripts', 'smoke-packaged-desktop.mjs');
+
+function normalizePath(file) {
+  return path.resolve(file).split(path.sep).join('/');
+}
+
+const packageRootImportPaths = new Set([compatPath, packagedSmokePath].map(normalizePath));
 
 const failures = [];
 const candidateVersion = process.env.CREW_PLAYWRIGHT_CANDIDATE_VERSION || '';
@@ -112,8 +120,30 @@ if (fs.existsSync(installedPlaywrightPackage)) {
 }
 
 const sourceExtensions = new Set(['.ts', '.tsx', '.js', '.mjs', '.cjs']);
-const importPattern =
-  /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)['"]([^'"]*playwright-core[^'"]*)['"]/g;
+
+function playwrightSpecifiers(source, file) {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, false);
+  const specifiers = [];
+  function visit(node) {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+      && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      specifiers.push(node.moduleSpecifier.text);
+    }
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)
+      && node.moduleReference.expression && ts.isStringLiteralLike(node.moduleReference.expression)) {
+      specifiers.push(node.moduleReference.expression.text);
+    }
+    if (ts.isCallExpression(node) && node.arguments.length
+      && ts.isStringLiteralLike(node.arguments[0])
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+        || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      specifiers.push(node.arguments[0].text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return specifiers.filter(specifier => specifier.includes('playwright-core'));
+}
 
 function scanTree(root) {
   if (!fs.existsSync(root)) return;
@@ -129,16 +159,16 @@ function scanTree(root) {
     }
     if (!entry.isFile() || !sourceExtensions.has(path.extname(entry.name))) continue;
     const source = fs.readFileSync(file, 'utf8');
-    for (const match of source.matchAll(importPattern)) {
-      const specifier = match[1];
+    for (const specifier of playwrightSpecifiers(source, file)) {
+      const relativeFile = path.relative(desktopRoot, file).split(path.sep).join('/');
       if (specifier.includes('/lib/') || specifier.startsWith('playwright-core/lib')) {
-        fail(`${path.relative(desktopRoot, file)} 禁止引用 playwright-core/lib/**`);
+        fail(`${relativeFile} 禁止引用 playwright-core/lib/**`);
         continue;
       }
-      if (path.resolve(file) !== compatPath || specifier !== 'playwright-core') {
+      if (!packageRootImportPaths.has(normalizePath(file)) || specifier !== 'playwright-core') {
         fail(
-          `${path.relative(desktopRoot, file)} 直接引用了 ${specifier}；`
-          + '只允许 playwright-compat.ts 引用包根',
+          `${relativeFile} 直接引用了 ${specifier}；`
+          + '只允许 playwright-compat.ts 和发行 smoke 的公开 CDP 驱动引用包根',
         );
       }
     }

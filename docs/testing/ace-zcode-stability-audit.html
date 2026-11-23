@@ -1756,6 +1756,13 @@
 <h3>观测如何归因</h3>
 <p>沿用 <a href="../frontend/stream-performance-diagnostics.html">首 token 诊断</a> 和 <a href="observability-tracing.html">已有 tracing</a>。以 <code>request_id</code> 串起 Desktop 接收、网关受理、provider 首事件、首正文、持久化和首绘，以 <code>gateway_instance_id</code>、进程代次、退出原因串起启动与回收。恢复路径记录模式、游标距离、缺口、队列字节与同步耗时。按平台、通道、事件类别等有限维度报 P50/P95/P99，实例和请求 ID 留在结构化事件。采样只记行为类别、计时和大小。审计基线的 <code>first-visible-text</code> 出现在回合门控前，<code>first-dom-patch</code> 也可能早于正文挂载。<a href="#first-text-timing">F8</a> 已分别记录收到正文、接纳正文、确认挂载和下一绘制时机。用故障测试验证每个阶段都能找到，便于判断慢在模型、路由、重放、磁盘或绘制。</p>
 </section>
+<article id="playwright-public-cdp-boundary">
+<h3>发行 smoke 的公开 CDP 导入边界</h3>
+<p><code>npm run check:playwright-boundary</code> 原先拒绝 <code>smoke-packaged-desktop.mjs</code> 的公开包根导入，使桌面标准检查在测试前停止。该脚本只通过 <code>chromium.connectOverCDP</code> 驱动独立发行进程，不进入生产 Engine。ZCode 的桌面 smoke 和 E2E 同样直接使用公开 Playwright 包根；Ace 需要修正的是测试驱动与生产兼容层之间的门禁分类，不是放开 Engine 私有依赖。</p>
+<p><strong>修复</strong> 静态门禁以规范化绝对路径显式允许 compat 与发行 smoke 导入包根，诊断统一为相对 POSIX 路径，其它文件及所有 <code>playwright-core/lib/**</code> 仍拒绝。负面探针还发现原正则漏掉裸 <code>import</code>；现改用项目已有 TypeScript 语法树收集静态/动态导入、再导出、<code>require</code> 和 <code>import = require</code>，注释示例不再误报。</p>
+<p><strong>验收</strong> 原始检查由一项失败转为通过。临时探针中的六类私有导入全部命中，任意其它脚本的公开包根导入也仍失败，探针随后删除。现有 Windows staging 包的完整发行 smoke 通过，冷启动 48.227 秒、首聊 1.834 秒、停止及后继 2.060 秒、Renderer 恢复 1.677 秒、Gateway 重启 10.246 秒、重开 9.517 秒、重启历史 0.386 秒、最终退出 2.554 秒，三代 Gateway 均正常替换。该单轮冷启动只记录当前样本，不宣称性能变化；完整 <code>npm run check</code> 仍有既有严格设计审计项，未宣称整链全绿。</p>
+<p class="evidence">Ace <code>desktop/scripts/check-playwright-boundary.mjs</code>、<code>desktop/scripts/smoke-packaged-desktop.mjs</code>、<code>desktop/src/main/browser/playwright-compat.ts</code>。ZCode <code>packages/desktop/scripts/auto-update-install-reentry-smoke.mjs:6</code>、<code>packages/desktop/test/e2e/conversation-session/manual-review/pending/workflow-tool-summary.test.mjs:5–9</code>。</p>
+</article>
 </main>
 <section id="build-app-baseline">
 <h3>构建应用分段基线（2026-11-22）</h3>

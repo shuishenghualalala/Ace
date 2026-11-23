@@ -1,10 +1,11 @@
 /**
- * **本仓库唯一允许 import `playwright-core` 的文件。**
+ * **生产引擎唯一直接 import `playwright-core` 的文件。**
  *
  * 约束（升级 Playwright 时只需审这一个文件 + 契约测试）：
  *
- * - 不允许任何其他文件 `import 'playwright-core'`；
- * - 不允许业务代码 `import 'playwright-core/lib/**'`；
+ * - 发行 smoke 仅作为进程外公开 CDP 驱动直接导入包根；
+ * - 不允许其它文件 `import 'playwright-core'`；
+ * - 不允许任何文件 `import 'playwright-core/lib/**'`；
  * - 版本在 package.json 里锁死（当前 `1.62.0`，不带 `^`），升级走单独 PR。
  *
  * ## 用到的非文档化表面（升级必查）

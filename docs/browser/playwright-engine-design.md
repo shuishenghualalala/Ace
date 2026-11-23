@@ -298,14 +298,16 @@ globals；`page.context()` 等 public 对象仍可使用。route/event callback 
 
 1. `desktop/package.json` 精确同步锁定 `playwright-core` 与 `@playwright/test`；当前均为
    1.62.0，不使用 `^`/`~`。
-2. 所有源码只从包根导入，且仅 `playwright-compat.ts` 可以直接 import
-   `playwright-core`。静态门禁拒绝其它文件和 `playwright-core/lib/**` import。
+2. 生产源码只从包根导入，且仅 `playwright-compat.ts` 可以直接 import
+   `playwright-core`。`scripts/smoke-packaged-desktop.mjs` 是显式列出的进程外发行驱动，
+   可以导入包根并使用公开 CDP；门禁拒绝其它文件和任何 `playwright-core/lib/**` import。
 3. compat 集中收口升级敏感点：
    - `Locator.normalize()` 结果的 `_selector`；
    - `aria-ref` selector engine；
    - 从 `lib/coreBundle` 结构化提取官方 InjectedScript source。
 4. `check:playwright-boundary` 校验 manifest/lock/node_modules 版本一致、compat
-   结构、esbuild external 与真实契约覆盖。
+   结构、esbuild external 与真实契约覆盖。门禁用 TypeScript 语法树收集静态/动态导入、
+   再导出和 `require`，不扫描注释中的示例。
 5. 若未来引入 managed Chromium，其 Chromium、headless shell、FFmpeg 需要按 OS/CPU
    staging，marker 同时锁 core 版本、平台和架构；缺任一 artifact 即失败。
 6. 当前升级 PR 必须跑 typecheck、unit 与真实 hidden Electron contract。加入 managed
