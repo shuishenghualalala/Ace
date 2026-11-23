@@ -7,7 +7,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { backendApi, type BrowserPageState } from '../../src/ui/backend-client';
-import { bindComposerMention, buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, serializeMentionInput, teamMemberMentionId, workMentionText } from '../../src/ui/features/composer-mention';
+import { bindComposerMention, buildChippedNodes, compactMentionText, computePinyin, detectTrigger, fetchBrowserTabMentions, filterBrowserTabs, getUserAgentMentions, iterChipTokens, mentionTextForSkill, matchSkill, renderChip, runComposerSlashCommand, serializeMentionInput, teamMemberMentionId, workMentionText } from '../../src/ui/features/composer-mention';
 
 describe('桌面斜杠命令', () => {
   it('技能目录仍在等待时，输入 /pl 已可选中并执行 Plan', async () => {
@@ -39,6 +39,40 @@ describe('桌面斜杠命令', () => {
       deliver();
       skills.mockRestore();
       vi.useRealTimers();
+      document.body.replaceChildren();
+    }
+  });
+});
+
+describe('桌面斜杠命令分发', () => {
+  it('runs every chat command and passes only the Goal argument', () => {
+    document.body.innerHTML = '<textarea data-composer-input></textarea>';
+    const runs = {
+      plan: vi.fn(), craft: vi.fn(), new: vi.fn(), goal: vi.fn(), side: vi.fn(), btw: vi.fn(),
+    };
+    const dispose = bindComposerMention(() => [
+      { token: '/plan', detail: '进入计划模式', run: runs.plan },
+      { token: '/craft', detail: '回到普通对话', run: runs.craft },
+      { token: '/new', detail: '新建对话', run: runs.new },
+      { token: '/goal', detail: '会话目标', acceptsArgument: true, run: runs.goal },
+      { token: '/side', detail: '侧边聊天', run: runs.side },
+      { token: '/btw', detail: '侧边聊天', run: runs.btw },
+    ]);
+    try {
+      expect(runComposerSlashCommand('/plan')).toBe(true);
+      expect(runComposerSlashCommand('/craft')).toBe(true);
+      expect(runComposerSlashCommand('/new')).toBe(true);
+      expect(runComposerSlashCommand('/goal Reconcile A  and B')).toBe(true);
+      expect(runComposerSlashCommand('/side')).toBe(true);
+      expect(runComposerSlashCommand('/btw')).toBe(true);
+      expect(runComposerSlashCommand('/unknown')).toBeUndefined();
+      expect(runComposerSlashCommand('/plan now')).toBeUndefined();
+      expect(runs.goal).toHaveBeenCalledWith('Reconcile A  and B');
+      for (const run of [runs.plan, runs.craft, runs.new, runs.side, runs.btw]) {
+        expect(run).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      dispose();
       document.body.replaceChildren();
     }
   });

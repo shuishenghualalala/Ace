@@ -865,6 +865,14 @@
 <p><strong>结论</strong> 未修改其测试或实现；待其接口/mock 同步后重跑。MCP Web/Desktop 与 CLI 定向用例仍通过。</p>
 <p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code>、<code>desktop/tests/unit/browser-host.test.ts</code>、<code>desktop/src/main/browser/playwright-engine.ts</code>。</p>
 </article>
+<article id="slash-command-matrix">
+<h3>斜杠命令逐项回归（Web / Desktop / CLI）</h3>
+<p>Web 命令 <code>/plan</code>、<code>/craft</code>、<code>/new</code>、<code>/side</code>、<code>/btw</code>、<code>/goal</code> 逐项验证：菜单过滤、键盘选择、技能与命令分区、技能只填充不发送、所有命令不进入主对话发送路径；附件或场景绑定时斜杠按普通文本处理。新增 <code>/craft</code> 退出 Plan 用例后，Composer 全量 16 项通过（斜杠 8 项）。</p>
+<p>Desktop 命令 <code>/plan</code>、<code>/craft</code>、<code>/new</code>、<code>/goal &lt;text&gt;</code>、<code>/side</code>、<code>/btw</code> 通过真实补全绑定逐项分发；未知命令和带参数的非 Goal 命令不执行。composer-mention 58 项、Goal 29 项、侧聊 2 项通过。</p>
+<p>CLI REPL 覆盖 <code>/help</code>、<code>/new</code>、<code>/team</code>、<code>/agent</code>、<code>/plan</code>、<code>/todo</code>、<code>/compact</code>、未知命令转插件、<code>/quit</code>；验证新建会话后 Goal/Plan/待办/压缩使用新会话 ID。新增 REPL 用例 1 项通过。</p>
+<p><strong>验收</strong> Web 32 项、Desktop 89 项、CLI 1 项、Gateway Goal 40 项均通过。未做真实浏览器/Electron 斜杠 E2E；Desktop 各命令的实际副作用由对应功能测试覆盖，斜杠层只验证分发。</p>
+<p class="evidence">Ace <code>web/src/components/Composer.tsx</code>、<code>web/src/components/ComposerSlashMenu.tsx</code>、<code>desktop/src/ui/features/composer-mention.ts</code>、<code>crew/cli/chat.py</code>、<code>tests/test_cli_chat_repl.py</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

@@ -235,6 +235,19 @@ describe("Composer slash input", () => {
     expect(input.value).toBe("");
   });
 
+  it("exits plan mode through /craft without submitting a chat turn", async () => {
+    vi.spyOn(api, "skills").mockResolvedValue([]);
+    const onExitPlan = vi.fn();
+    const onSend = vi.fn();
+    const input = await mount({ planActive: true, onExitPlan, onSend });
+    await type(input, "/cr");
+    expect(container.querySelector('[role="option"]')?.textContent).toContain("/craft");
+    press(input, "Enter");
+    expect(onExitPlan).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input.value).toBe("");
+  });
+
   it("does not interpret a slash token as a command when it has attachments", async () => {
     const attachments = [{ id: "f", name: "fixture.txt", path: "fixture.txt", type: "file" as const }];
     const onSend = vi.fn();
