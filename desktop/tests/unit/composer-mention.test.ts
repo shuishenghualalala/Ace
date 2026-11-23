@@ -45,6 +45,41 @@ describe('桌面斜杠命令', () => {
 });
 
 describe('桌面斜杠命令分发', () => {
+  it('accepts Tab and arrow-key selection for commands', async () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<div><textarea data-composer-input></textarea></div>';
+    const input = document.querySelector('textarea')!;
+    const skills = vi.spyOn(backendApi, 'skills').mockResolvedValue([]);
+    const plan = vi.fn();
+    const craft = vi.fn();
+    const dispose = bindComposerMention(() => [
+      { token: '/plan', detail: '进入计划模式', run: plan },
+      { token: '/craft', detail: '回到普通对话', run: craft },
+    ]);
+    try {
+      const trigger = (value: string) => {
+        input.value = value;
+        input.setSelectionRange(value.length, value.length);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      input.focus();
+      trigger('/');
+      await vi.advanceTimersByTimeAsync(40);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+      expect(plan).toHaveBeenCalledTimes(1);
+      trigger('/');
+      await vi.advanceTimersByTimeAsync(40);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+      expect(craft).toHaveBeenCalledTimes(1);
+    } finally {
+      dispose();
+      skills.mockRestore();
+      vi.useRealTimers();
+      document.body.replaceChildren();
+    }
+  });
+
   it('runs every chat command and passes only the Goal argument', () => {
     document.body.innerHTML = '<textarea data-composer-input></textarea>';
     const runs = {

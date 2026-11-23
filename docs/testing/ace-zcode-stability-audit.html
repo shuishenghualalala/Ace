@@ -868,9 +868,9 @@
 <article id="slash-command-matrix">
 <h3>斜杠命令逐项回归（Web / Desktop / CLI）</h3>
 <p>Web 命令 <code>/plan</code>、<code>/craft</code>、<code>/new</code>、<code>/side</code>、<code>/btw</code>、<code>/goal</code> 逐项验证：菜单过滤、键盘选择、技能与命令分区、技能只填充不发送、所有命令不进入主对话发送路径；附件或场景绑定时斜杠按普通文本处理。新增 <code>/craft</code> 与 Tab 选中用例后，Composer 全量 17 项通过（斜杠 9 项）。</p>
-<p>Desktop 命令 <code>/plan</code>、<code>/craft</code>、<code>/new</code>、<code>/goal &lt;text&gt;</code>、<code>/side</code>、<code>/btw</code> 通过真实补全绑定逐项分发；未知命令和带参数的非 Goal 命令不执行。composer-mention 58 项、Goal 29 项、侧聊 2 项通过。</p>
+<p>Desktop 命令 <code>/plan</code>、<code>/craft</code>、<code>/new</code>、<code>/goal &lt;text&gt;</code>、<code>/side</code>、<code>/btw</code> 通过真实补全绑定逐项分发；未知命令和带参数的非 Goal 命令不执行，Tab/方向键选择也覆盖。composer-mention 59 项、Goal 29 项、侧聊 2 项通过。</p>
 <p>CLI REPL 覆盖 <code>/help</code>、<code>/new</code>、<code>/team</code>、<code>/agent</code>、<code>/plan</code>、<code>/todo</code>、<code>/compact</code>、未知命令转插件、<code>/quit</code> 与 <code>/exit</code>；验证新建会话后 Goal/Plan/待办/压缩使用新会话 ID，未装配 <code>plan_manager</code> 时 <code>/plan</code> 只提示不可用，并直接验证待办标记与压缩器调用。新增 REPL 用例 3 项通过。</p>
-<p><strong>验收</strong> Web 33 项、Desktop 89 项、CLI 3 项、Gateway Goal 40 项均通过。未做真实浏览器/Electron 斜杠 E2E；Desktop 各命令的实际副作用由对应功能测试覆盖，斜杠层只验证分发。</p>
+<p><strong>验收</strong> Web 33 项、Desktop 90 项、CLI 3 项、Gateway Goal 40 项均通过。未做真实浏览器/Electron 斜杠 E2E；Desktop 各命令的实际副作用由对应功能测试覆盖，斜杠层只验证分发。</p>
 <p class="evidence">Ace <code>web/src/components/Composer.tsx</code>、<code>web/src/components/ComposerSlashMenu.tsx</code>、<code>desktop/src/ui/features/composer-mention.ts</code>、<code>crew/cli/chat.py</code>、<code>tests/test_cli_chat_repl.py</code>。</p>
 </article>
 <article id="external-marketplace-sources">
