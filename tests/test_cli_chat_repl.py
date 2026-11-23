@@ -96,3 +96,45 @@ async def test_repl_plan_without_manager_and_exit_alias(monkeypatch) -> None:
     assert any("Plan 模式不可用" in line for line in printed)
     assert plugins.commands == []
     assert len(prompt.prompts) == 2
+
+
+@pytest.mark.asyncio
+async def test_compact_and_todos_read_the_current_session(monkeypatch) -> None:
+    printed: list[str] = []
+    seen: list[tuple] = []
+    monkeypatch.setattr(chat.console, "print", lambda *args, **_kwargs: printed.append(" ".join(map(str, args))))
+
+    class TodoStore:
+        def read(self):
+            return [
+                {"id": 1, "status": "in_progress", "content": "inspect"},
+                {"id": 2, "status": "completed", "content": "ship"},
+            ]
+
+    class Plan:
+        def todo_store(self, session_id, *, owner_account_id):
+            seen.append(("todos", session_id, owner_account_id))
+            return TodoStore()
+
+    class Compactor:
+        async def compact_now(self, history, session_id, *, owner_account_id):
+            seen.append(("compact", session_id, owner_account_id, history))
+            return [], True
+
+    class Store:
+        async def load_async(self, session_id, *, owner_account_id):
+            return []
+
+    app = SimpleNamespace(
+        plan_manager=Plan(),
+        agents=SimpleNamespace(peek=lambda session_id, owner: SimpleNamespace(compactor=Compactor())),
+        session_store=Store(),
+    )
+    chat._print_todos(app, "cli_current", "local")
+    await chat._compact_context(app, "cli_current", "local")
+
+    assert any("inspect" in line and "[>]" in line for line in printed)
+    assert any("ship" in line and "[x]" in line for line in printed)
+    assert any("已压缩上下文" in line for line in printed)
+    assert seen[0] == ("todos", "cli_current", "local")
+    assert seen[1][0:3] == ("compact", "cli_current", "local")
