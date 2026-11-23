@@ -86,6 +86,7 @@ export default function McpHub() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [errorStatus, setErrorStatus] = useState(0);
+  const [notice, setNotice] = useState("");
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editing, setEditing] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
@@ -93,6 +94,7 @@ export default function McpHub() {
   const [probing, setProbing] = useState(false);
   const [probeMessage, setProbeMessage] = useState("");
   const refreshTimers = useRef<number[]>([]);
+  const noticeTimer = useRef<number | null>(null);
   const probeEpoch = useRef(0);
   const probeAbort = useRef<AbortController | null>(null);
   const lastFocused = useRef<HTMLElement | null>(null);
@@ -124,9 +126,19 @@ export default function McpHub() {
     probeAbort.current = null;
   };
 
+  const showNotice = (text: string): void => {
+    setNotice(text);
+    if (noticeTimer.current != null) window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => {
+      noticeTimer.current = null;
+      setNotice("");
+    }, 3000);
+  };
+
   useEffect(() => { void load(); }, []);
   useEffect(() => () => {
     for (const timer of refreshTimers.current) window.clearTimeout(timer);
+    if (noticeTimer.current != null) window.clearTimeout(noticeTimer.current);
     abortProbe();
   }, []);
 
@@ -134,6 +146,7 @@ export default function McpHub() {
     lastFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     probeEpoch.current += 1;
     abortProbe();
+    setNotice("");
     setEditing("");
     setForm(EMPTY_FORM);
     setProbeMessage("");
@@ -145,6 +158,7 @@ export default function McpHub() {
     lastFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     probeEpoch.current += 1;
     abortProbe();
+    setNotice("");
     setEditing(server.name);
     setForm(formFromServer(server));
     setProbeMessage("");
@@ -216,6 +230,11 @@ export default function McpHub() {
       } else {
         await api.createMcpServer({ ...payload, name: form.name.trim() });
       }
+      showNotice(
+        form.autoConnect
+          ? `MCP 服务已${editing ? "更新" : "新增"}，正在后台连接…`
+          : `MCP 服务已${editing ? "更新" : "新增"}，未自动连接`,
+      );
       setModalOpen(false);
       await load();
       refreshSoon();
@@ -323,6 +342,7 @@ export default function McpHub() {
       </div>
 
       <div className="hub__body">
+        {notice && <p className="mcp-probe" role="status">{notice}</p>}
         {error && <p className="hub__empty" role="alert">{error}</p>}
         {loading ? (
           <p className="hub__empty">正在加载 MCP 服务…</p>

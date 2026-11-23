@@ -740,7 +740,7 @@
 </article>
 <article id="mcp-auto-connect">
 <h3>MCP 保存后不自动连接的开关</h3>
-<p>新增/编辑服务原先总是立即启动连接，用户无法先保存配置再择机启动。现在 payload 支持 <code>auto_connect</code>：false 时只持久化并登记为未连接，不创建 stdio 进程或 HTTP 连接；启动扫描也跳过该服务，列表仍显示配置，点「重连」可手动启动。编辑为 false 会停止现有 worker、保留配置。Web 与 Desktop 表单均提供「启动时自动连接」复选框。</p>
+<p>新增/编辑服务原先总是立即启动连接，用户无法先保存配置再择机启动。现在 payload 支持 <code>auto_connect</code>：false 时只持久化并登记为未连接，不创建 stdio 进程或 HTTP 连接；启动扫描也跳过该服务，列表仍显示配置，点「重连」可手动启动。编辑为 false 会停止现有 worker、保留配置。Web 与 Desktop 表单均提供「启动时自动连接」复选框；Web 保存后显示 3 秒状态提示，Desktop 用通知区分是否已自动连接。</p>
 <p><strong>验收</strong> Gateway 新增手动服务用例：保存后 <code>add_server</code> 未调用、状态 connected=false、配置保留 auto_connect=false；编辑停 worker 用例断言 remove/register、reload 未调用；manager 启动扫描定向用例通过；McpHub 9 项（含编辑 false 保持）、Desktop 5 项、TypeScript 与 Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/tools/mcp_management.py</code>、<code>crew/gateway/routers/mcp_servers.py</code>、<code>crew/tools/mcp_client.py</code>、<code>web/src/components/McpHub.tsx</code>、<code>tests/gateway/test_mcp_servers_api.py</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>

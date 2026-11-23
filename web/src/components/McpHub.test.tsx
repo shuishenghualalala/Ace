@@ -317,4 +317,5 @@ it("lists MCP servers and probes an HTTP endpoint before saving", async () => {
     name: "probe-target",
     auto_connect: false,
   });
+  await vi.waitFor(() => expect(host.textContent).toContain("未自动连接"));
 });
