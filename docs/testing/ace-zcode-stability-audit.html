@@ -861,8 +861,8 @@
 </article>
 <article id="desktop-browser-mock-drift">
 <h3>Desktop 浏览器 mock 与宿主接口漂移（共享工作树）</h3>
-<p>共享工作树当前 Desktop 全量：212 个文件通过、1 个文件失败，共 91 项失败；全部集中在 <code>browser-host.test.ts</code>，首个根因是 <code>BrowserHost.ensureOwner</code> 调用 <code>engine.setCapturePresentationFallback</code>，测试的 <code>PlaywrightEngine</code> mock 尚未提供该方法。该漂移来自另一进程未提交的 browser-host/engine 改动，与本轮 MCP 403 和 Provider 边界无关。</p>
-<p><strong>结论</strong> 未修改其测试或实现；待其接口/mock 同步后重跑。MCP Web/Desktop 与 CLI 定向用例仍通过。</p>
+<p>共享工作树曾出现 Desktop 全量 212 个文件通过、1 个文件失败、共 91 项失败；全部集中在 <code>browser-host.test.ts</code>，根因是 <code>BrowserHost.ensureOwner</code> 调用 <code>engine.setCapturePresentationFallback</code>，测试的 <code>PlaywrightEngine</code> mock 尚未提供该方法。该漂移来自另一进程未提交的 browser-host/engine 改动，与本轮 MCP 403 和 Provider 边界无关。</p>
+<p><strong>结论</strong> 对方已在 <code>01670314</code> 同步 mock；Desktop 全量复跑为 <strong>213 个文件、2434 项通过 / 2 项跳过</strong>。我方未修改其测试或实现。</p>
 <p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code>、<code>desktop/tests/unit/browser-host.test.ts</code>、<code>desktop/src/main/browser/playwright-engine.ts</code>。</p>
 </article>
 <article id="slash-command-matrix">
