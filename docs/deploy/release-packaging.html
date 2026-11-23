@@ -121,7 +121,7 @@ git push origin v1.1.0</pre>
   <pre>node desktop/scripts/smoke-packaged-desktop.mjs "&lt;发行程序完整路径&gt;"</pre>
   <p>每轮创建带中文的临时 HOME、Electron 用户目录和工作区。桌面正常启动后，脚本通过 Gateway 启动日志、本轮实例密钥及两个本机 health 端口验证内嵌 Python 子进程身份。模型连接使用临时密钥和本机 SSE 服务。</p>
   <p>冒烟从桌面输入框开始，验证首聊、流式生成中的定向停止，以及迟到的旧请求停止指令与后继回合。随后对当前聊天窗口触发一次 Renderer 崩溃，检查替换窗口、会话历史以及 Gateway 进程连续性。脚本终止已经验证归属的 Gateway 子进程，确认桌面自动拉起新进程并可重新读取历史。使用正式退出入口关闭应用，验证主进程、Gateway 和两个监听端口均已释放，再用同一目录重新启动并从桌面查看持久化历史。</p>
-  <p>标准输出记录各阶段耗时与失败阶段。成功后回收临时目录，失败时保留该目录供检查 <code>desktop.log</code>、Gateway 启动日志及 Renderer 恢复日志。</p>
+  <p>标准输出记录各阶段耗时与失败阶段。默认在成功后回收临时目录，失败时保留该目录供检查 <code>desktop.log</code>、Gateway 启动日志及 Renderer 恢复日志。需要分析成功运行的冷启动或首轮请求时，设置 <code>ACE_RELEASE_SMOKE_KEEP_PROFILE=1</code>，结果 JSON 会包含保留目录的 <code>profile</code> 字段；检查完成后由运行者删除该隔离目录。</p>
 
   <h2>注意事项</h2>
   <ul>

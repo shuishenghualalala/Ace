@@ -1770,6 +1770,12 @@
 <p><strong>验收</strong> 同一 Windows staging 包在 opt-in 模式下完整 smoke 通过，冷启动 10.740 秒、首聊 0.893 秒；保留日志显示 Renderer 0.783 秒就绪、Gateway 核心 9.392 秒就绪。默认模式再次完整通过，冷启动 10.813 秒、首聊 0.855 秒，临时目录确认删除；opt-in 目录及日志确认存在。两轮 Gateway 重启、Renderer 恢复、精确停止、历史和正常退出均通过。48.227 秒单轮不是持续回归，但其原始现场已被旧默认策略删除，不能补写根因；本轮也没有产品性能改动。</p>
 <p class="evidence">Ace <code>desktop/scripts/smoke-packaged-desktop.mjs</code>。ZCode <code>packages/desktop/src/main/startupTelemetryDelivery.ts:4–53</code>。</p>
 </article>
+<article id="release-0ec4c414-build-network-failure">
+<h3>0ec4c414 Windows 构建受依赖网络中断阻断</h3>
+<p>从 <code>0ec4c414</code> 的干净 Git 归档执行标准 <code>pack_exe.ps1</code>，不包含共享工作树未提交改动。Electron 43.1.0、Rust Release、运行组件验签和桌面 staging 均成功。首次构建在 PyMuPDF 63.0 MB 文件仅取得约 3.8 MB 后报告哈希不匹配；第二次取得 57.7 MB 后读取超时。第三次仅为该次命令设置 <code>PIP_TIMEOUT=120</code>，同一镜像与完整性检查保持不变，主依赖安装成功，但随后在 <code>runtime-requirements.txt</code> 的 Markdown 下载处连续发生代理连接重置并失败。最终 <code>crew-gateway/runtimes/python/python.exe</code> 与包体报告均未生成，因此没有运行该提交的发行 smoke，也没有生成安装器。</p>
+<p><strong>依赖复现风险</strong> 仓库已有 <code>uv.lock</code>，其中 PyMuPDF 为 2.0；Windows/macOS 打包实际执行未带锁约束的 <code>pip install ".[wiki,pdf,docx,xlsx]"</code>，本次解析为 2.1，依赖缓存戳也未包含 <code>uv.lock</code>。ZCode 桌面的 <code>bundle.mjs</code> 使用 pnpm workspace 与既有锁文件。两者语言生态不同，但 Ace 当前不能保证同一提交在不同时间解析出同一 Python 依赖闭包。按维护者要求本轮停止，不继续重试或夹带锁定策略修改；旧提交的完整 smoke 通过结果不能替代本次构建。</p>
+<p class="evidence">Ace <code>deb-package/pack_exe.ps1:260–306</code>、<code>deb-package/pack_mac.sh:229–258</code>、<code>uv.lock:2992–2994</code>、<code>packages/crew-wiki/pyproject.toml:18–26</code>。ZCode <code>packages/desktop/scripts/bundle.mjs</code>、<code>pnpm-lock.yaml</code>。</p>
+</article>
 </main>
 <section id="build-app-baseline">
 <h3>构建应用分段基线（2026-11-22）</h3>
