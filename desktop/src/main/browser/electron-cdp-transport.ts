@@ -29,6 +29,10 @@ import type {
   Session,
   WebContentsView,
 } from 'electron';
+import {
+  CAPTURE_WINDOW_PRESENTATION_GRACE_MS,
+  type CaptureWindowPresentation,
+} from './capture-window-presentation';
 
 /** Playwright 的 `ConnectOverCDPTransport` 结构。 */
 export interface CdpTransport {
@@ -397,6 +401,9 @@ export class ElectronCdpTransport implements CdpTransport {
   private readonly pendingPermissionCommands: PendingPermissionCommand[] = [];
   private permissionReplayTail: Promise<void> = Promise.resolve();
   private inputCommandLeaseHook: InputCommandLeaseHook | null = null;
+  private capturePresentationHook: (
+    (view: WebContentsView) => CaptureWindowPresentation | undefined
+  ) | null = null;
   private childSessionLifecycleHook: ChildSessionLifecycleHook | null = null;
   private pageLifecycleHook: PageLifecycleHook | null = null;
   /**
@@ -439,6 +446,12 @@ export class ElectronCdpTransport implements CdpTransport {
   /** BrowserHost 可在引擎创建后接入精确的 native-input lease。 */
   setInputCommandLeaseHook(hook: InputCommandLeaseHook | null): void {
     this.inputCommandLeaseHook = hook;
+  }
+
+  setCapturePresentationHook(
+    hook: ((view: WebContentsView) => CaptureWindowPresentation | undefined) | null,
+  ): void {
+    this.capturePresentationHook = hook;
   }
 
   /**
@@ -766,6 +779,22 @@ export class ElectronCdpTransport implements CdpTransport {
       return await this.dispatchBrowserSession(method, params);
     }
     if (!sessionId) return await this.dispatchRoot(method, params);
+    if (method === 'Page.captureScreenshot') {
+      const view = this.route(sessionId)?.tab.view;
+      const lease = view
+        ? this.capturePresentationHook?.(view)
+        : undefined;
+      if (lease) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, CAPTURE_WINDOW_PRESENTATION_GRACE_MS);
+        });
+      }
+      try {
+        return await this.dispatchTab(method, params, sessionId);
+      } finally {
+        lease?.release();
+      }
+    }
     return await this.dispatchTab(method, params, sessionId);
   }
 

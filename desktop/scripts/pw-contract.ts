@@ -606,6 +606,7 @@ app.whenReady().then(async () => {
 
   const host = new AutomationHost();
   const transport = new ElectronCdpTransport();
+  transport.setCapturePresentationHook((view) => host.startCapturePresentation(view));
 
   const view = new WebContentsView({
     webPreferences: {
@@ -1945,7 +1946,10 @@ app.whenReady().then(async () => {
       await enginePage.getByRole('button', { name: '延迟出现' }).click();
       const text = await enginePage.locator('#late-result').textContent();
       if (text !== '延迟按钮已点击') throw new Error(`首次 Engine 点击未生效: ${text}`);
-      return 'connect → attach-ready → focus → click 正常';
+      await enginePage.reload();
+      const image = await enginePage.screenshot({ timeout: 10_000 });
+      if (image.length < 1000) throw new Error(`Engine reload 后截图过小: ${image.length}`);
+      return `connect → attach-ready → focus → click；reload 后截图 ${image.length} bytes`;
     } finally {
       engine.unregisterTab(engineView);
       await engine.dispose();

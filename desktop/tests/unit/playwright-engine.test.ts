@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   mount: vi.fn(),
   unmount: vi.fn(),
   disposeHost: vi.fn(),
+  startCapturePresentation: vi.fn(),
 }));
 
 vi.mock('../../src/main/browser/automation-host', () => ({
@@ -14,6 +15,7 @@ vi.mock('../../src/main/browser/automation-host', () => ({
     mount = mocks.mount;
     unmount = mocks.unmount;
     dispose = mocks.disposeHost;
+    startCapturePresentation = mocks.startCapturePresentation;
   },
 }));
 
@@ -269,6 +271,27 @@ describe('PlaywrightEngine', () => {
     oldPage.emit('close');
     expect(engine.hasPendingFileChooser(view)).toBe(true);
     expect(engine.takePendingFileChooser(view)).toBe(chooser);
+    await engine.dispose();
+  });
+
+  it('CDP 截图在成功和失败时都释放窗口展示租约', async () => {
+    const engine = new PlaywrightEngine();
+    const { view } = fakeView();
+    const release = vi.fn();
+    mocks.startCapturePresentation.mockReturnValue({ release });
+    const transport = (engine as any).transport;
+    vi.spyOn(transport, 'route').mockReturnValue({ tab: { view } });
+    vi.spyOn(transport, 'dispatchTab')
+      .mockResolvedValueOnce({ data: 'image' })
+      .mockRejectedValueOnce(new Error('capture failed'));
+
+    await expect(transport.dispatch('Page.captureScreenshot', {}, 'pw-tab-1'))
+      .resolves.toEqual({ data: 'image' });
+    expect(release).toHaveBeenCalledTimes(1);
+    await expect(transport.dispatch('Page.captureScreenshot', {}, 'pw-tab-1'))
+      .rejects.toThrow('capture failed');
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(mocks.startCapturePresentation).toHaveBeenCalledTimes(2);
     await engine.dispose();
   });
 });

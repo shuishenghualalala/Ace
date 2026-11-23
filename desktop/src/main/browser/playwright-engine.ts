@@ -83,6 +83,10 @@ export class PlaywrightEngine {
   /** BrowserHost session coordinator learns about Playwright-only modal states. */
   private modalStateHook: ModalStateHook | null = null;
 
+  constructor() {
+    this.transport.setCapturePresentationHook((view) => this.host.startCapturePresentation(view));
+  }
+
   /**
    * 接入 BrowserHost 的精确输入租约。
    *
