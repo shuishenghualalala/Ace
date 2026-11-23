@@ -385,8 +385,9 @@ finally {
   }
   provider.closeAllConnections();
   if (provider.listening) await new Promise(resolve => provider.close(resolve));
+  const keepProfile = process.env.ACE_RELEASE_SMOKE_KEEP_PROFILE === '1';
   console.log(JSON.stringify({ platform, executable, stages_ms: timings, gateways: [...verifiedGateways.values()], status: failure ? 'failed' : 'passed',
-    ...(failure ? { failed_stage: currentStage, profile: root } : {}) }, null, 2));
-  if (!failure) fs.rmSync(root, { recursive: true, force: true, maxRetries: 4, retryDelay: 150 });
+    ...(failure ? { failed_stage: currentStage } : {}), ...(failure || keepProfile ? { profile: root } : {}) }, null, 2));
+  if (!failure && !keepProfile) fs.rmSync(root, { recursive: true, force: true, maxRetries: 4, retryDelay: 150 });
 }
 if (failure) throw failure;

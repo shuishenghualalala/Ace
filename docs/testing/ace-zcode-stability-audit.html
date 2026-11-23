@@ -1764,6 +1764,12 @@
 <p><strong>验收</strong> 原始检查由一项失败转为通过。临时探针中的六类私有导入全部命中，任意其它脚本的公开包根导入也仍失败，探针随后删除。现有 Windows staging 包的完整发行 smoke 通过，冷启动 48.227 秒、首聊 1.834 秒、停止及后继 2.060 秒、Renderer 恢复 1.677 秒、Gateway 重启 10.246 秒、重开 9.517 秒、重启历史 0.386 秒、最终退出 2.554 秒，三代 Gateway 均正常替换。该单轮冷启动只记录当前样本，不宣称性能变化；完整 <code>npm run check</code> 仍有既有严格设计审计项，未宣称整链全绿。</p>
 <p class="evidence">Ace <code>desktop/scripts/check-playwright-boundary.mjs</code>、<code>desktop/scripts/smoke-packaged-desktop.mjs</code>、<code>desktop/src/main/browser/playwright-compat.ts</code>。ZCode <code>packages/desktop/scripts/auto-update-install-reentry-smoke.mjs:6</code>、<code>packages/desktop/test/e2e/conversation-session/manual-review/pending/workflow-tool-summary.test.mjs:5–9</code>。</p>
 </article>
+<article id="packaged-smoke-profile-retention">
+<h3>发行 smoke 可按需保留成功现场</h3>
+<p>原脚本失败后保留隔离目录，成功后只输出各阶段总耗时并立即删除现场。一次 48.227 秒冷启动因此无法回看 Gateway 与 Renderer 日志。ZCode 的 <code>startupTelemetryDelivery.ts</code> 已区分结构化启动事件及其投递状态；Ace 本项只补本机隔离证据，不增加远端上报。设置 <code>ACE_RELEASE_SMOKE_KEEP_PROFILE=1</code> 时成功结果也带 <code>profile</code> 并保留目录，默认成功清理和失败保留行为不变。</p>
+<p><strong>验收</strong> 同一 Windows staging 包在 opt-in 模式下完整 smoke 通过，冷启动 10.740 秒、首聊 0.893 秒；保留日志显示 Renderer 0.783 秒就绪、Gateway 核心 9.392 秒就绪。默认模式再次完整通过，冷启动 10.813 秒、首聊 0.855 秒，临时目录确认删除；opt-in 目录及日志确认存在。两轮 Gateway 重启、Renderer 恢复、精确停止、历史和正常退出均通过。48.227 秒单轮不是持续回归，但其原始现场已被旧默认策略删除，不能补写根因；本轮也没有产品性能改动。</p>
+<p class="evidence">Ace <code>desktop/scripts/smoke-packaged-desktop.mjs</code>。ZCode <code>packages/desktop/src/main/startupTelemetryDelivery.ts:4–53</code>。</p>
+</article>
 </main>
 <section id="build-app-baseline">
 <h3>构建应用分段基线（2026-11-22）</h3>
