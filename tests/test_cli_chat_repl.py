@@ -80,3 +80,19 @@ async def test_repl_dispatches_every_builtin_slash_command(monkeypatch) -> None:
     assert any("[agent]" in line for line in prompt.prompts)
     assert any("未知命令" in line for line in printed)
     assert any("已新建会话" in line for line in printed)
+
+
+@pytest.mark.asyncio
+async def test_repl_plan_without_manager_and_exit_alias(monkeypatch) -> None:
+    prompt = FakePrompt(["/plan", "/exit"])
+    plugins = FakePlugins()
+    printed: list[str] = []
+    monkeypatch.setattr(chat, "PromptSession", lambda: prompt)
+    monkeypatch.setattr(chat, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(chat.console, "print", lambda *args, **_kwargs: printed.append(" ".join(map(str, args))))
+    app = SimpleNamespace(config=SimpleNamespace(has_llm_key=False), plan_manager=None, plugins=plugins)
+    await chat._repl(app, SimpleNamespace(owner="local", workspace_id="default"), session_id="cli_edge")
+
+    assert any("Plan 模式不可用" in line for line in printed)
+    assert plugins.commands == []
+    assert len(prompt.prompts) == 2
