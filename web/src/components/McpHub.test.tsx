@@ -14,7 +14,16 @@ const apiMock = vi.hoisted(() => ({
   probeMcpServer: vi.fn(),
 }));
 
-vi.mock("../api", () => ({ api: apiMock }));
+vi.mock("../api", () => {
+  class ApiError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.status = status;
+    }
+  }
+  return { api: apiMock, ApiError };
+});
 
 let host: HTMLElement;
 let root: Root;
@@ -129,6 +138,14 @@ it("shows failure before connected when a server reports both", async () => {
   await render();
   expect(host.textContent).toContain("失败");
   expect(host.textContent).not.toContain("已连接");
+});
+
+it("hides management actions when the server list is forbidden", async () => {
+  const { ApiError } = await import("../api");
+  apiMock.mcpServers.mockRejectedValue(new ApiError("需要管理员权限", 403, "/api/mcp/servers"));
+  await render();
+  expect(host.textContent).toContain("需要管理员权限");
+  expect([...host.querySelectorAll("button")].some((button) => button.textContent === "添加服务")).toBe(false);
 });
 
 it("shows a load error without claiming the MCP list is empty", async () => {

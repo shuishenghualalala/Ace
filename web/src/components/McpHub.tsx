@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, type McpServerRow, type McpTransport } from "../api";
+import { api, ApiError, type McpServerRow, type McpTransport } from "../api";
 
 type TransportChoice = "stdio" | "http" | "sse";
 
@@ -85,6 +85,7 @@ export default function McpHub() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [errorStatus, setErrorStatus] = useState(0);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editing, setEditing] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
@@ -102,8 +103,10 @@ export default function McpHub() {
       const result = await api.mcpServers();
       setServers(result.servers ?? []);
       setError("");
+      setErrorStatus(0);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "无法加载 MCP 服务");
+      setErrorStatus(cause instanceof ApiError ? cause.status : 0);
     } finally {
       if (!silent) setLoading(false);
     }
@@ -302,16 +305,20 @@ export default function McpHub() {
           <p className="hub__subtitle">管理 HTTP/SSE 与本地 stdio 服务，连接状态保存在当前 Gateway。</p>
         </div>
         <div className="hub__header-right">
-          <div className="hub__search">
-            <input
-              aria-label="搜索 MCP 服务"
-              placeholder="搜索 MCP 服务"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-          <button className="hub-btn" type="button" onClick={() => void load(true)} disabled={loading}>刷新</button>
-          <button className="hub-btn hub-btn--primary" type="button" onClick={openAdd}>添加服务</button>
+          {errorStatus !== 403 && (
+            <>
+              <div className="hub__search">
+                <input
+                  aria-label="搜索 MCP 服务"
+                  placeholder="搜索 MCP 服务"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </div>
+              <button className="hub-btn" type="button" onClick={() => void load(true)} disabled={loading}>刷新</button>
+              <button className="hub-btn hub-btn--primary" type="button" onClick={openAdd}>添加服务</button>
+            </>
+          )}
         </div>
       </div>
 
