@@ -8,6 +8,7 @@
 
 import {
   backendApi,
+  type BackendConfig,
   type ModelOption,
   type ModelPayload,
   type PlatformConfigResponse,
@@ -410,19 +411,31 @@ function setModelProtocol(provider?: string): void {
 
 const CUSTOM_VENDOR_OPENAI = 'custom:openai';
 const CUSTOM_VENDOR_ANTHROPIC = 'custom:anthropic';
+const EXISTING_VENDOR = 'existing:provider';
 const CUSTOM_MODEL_VALUE = '__custom';
+const DEFAULT_MAX_TOKENS = 32768;
 
-/** null = 尚未加载；[] = 加载失败（静默回退为纯手填表单）。 */
+interface ModelFormDraft {
+  model: ModelOption | undefined;
+  changed: boolean;
+  saving: boolean;
+}
+
+let modelFormDraft: ModelFormDraft | null = null;
 let vendorCatalogCache: VendorProfileOption[] | null = null;
+let vendorCatalogRequest: Promise<boolean> | null = null;
 
-async function loadVendorCatalog(): Promise<void> {
-  if (vendorCatalogCache !== null) return;
-  try {
-    const resp = await backendApi.configVendors();
-    vendorCatalogCache = Array.isArray(resp?.vendors) ? resp.vendors : [];
-  } catch {
-    vendorCatalogCache = [];
-  }
+function loadVendorCatalog(): Promise<boolean> {
+  if (vendorCatalogCache !== null) return Promise.resolve(true);
+  vendorCatalogRequest ??= backendApi.configVendors()
+    .then(({ vendors }) => {
+      if (!Array.isArray(vendors)) return false;
+      vendorCatalogCache = vendors;
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => { vendorCatalogRequest = null; });
+  return vendorCatalogRequest;
 }
 
 /** 测试注入厂商目录（null 恢复未加载状态）。 */
@@ -443,23 +456,50 @@ function selectedVendorProfile(): VendorProfileOption | null {
   return (vendorCatalogCache ?? []).find((vendor) => vendor.id === value) ?? null;
 }
 
-function populateVendorSelect(): void {
+function populateVendorSelect(existingProvider?: string): void {
   const select = vendorSelectEl();
   if (!select) return;
-  select.replaceChildren();
-  for (const vendor of vendorCatalogCache ?? []) {
-    const opt = document.createElement('option');
-    opt.value = vendor.id;
-    opt.textContent = vendor.name;
-    select.appendChild(opt);
+  const options = (vendorCatalogCache ?? []).map(({ id, name }) => ({ value: id, label: name }));
+  if (existingProvider) options.push({ value: EXISTING_VENDOR, label: existingProvider });
+  options.push(
+    { value: CUSTOM_VENDOR_OPENAI, label: '自定义（OpenAI 兼容）' },
+    { value: CUSTOM_VENDOR_ANTHROPIC, label: '自定义（Anthropic）' },
+  );
+  select.replaceChildren(...options.map(({ value, label }) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }));
+}
+
+function showModelVendorFeedback(message: string, canRetry = false): void {
+  const feedback = document.getElementById('cfg-model-vendor-feedback');
+  const status = document.getElementById('cfg-model-vendor-status');
+  const retry = document.getElementById('cfg-model-vendor-retry');
+  if (status) status.textContent = message;
+  if (retry) retry.hidden = !canRetry;
+  if (feedback) feedback.hidden = !message;
+}
+
+async function refreshModelFormVendors(draft: ModelFormDraft): Promise<void> {
+  showModelVendorFeedback('正在加载供应商目录…');
+  const loaded = await loadVendorCatalog();
+  if (modelFormDraft !== draft) return;
+
+  showModelVendorFeedback(loaded ? '' : '供应商目录加载失败，可重试或手动配置。', !loaded);
+  if (!loaded) return;
+
+  const select = vendorSelectEl();
+  if (!select) return;
+  if (!draft.changed && !draft.saving) {
+    fillModelForm(draft.model);
+    return;
   }
-  const customOpenai = document.createElement('option');
-  customOpenai.value = CUSTOM_VENDOR_OPENAI;
-  customOpenai.textContent = '自定义（OpenAI 兼容）';
-  const customAnthropic = document.createElement('option');
-  customAnthropic.value = CUSTOM_VENDOR_ANTHROPIC;
-  customAnthropic.textContent = '自定义（Anthropic）';
-  select.append(customOpenai, customAnthropic);
+
+  const selection = select.value;
+  populateVendorSelect(selection === EXISTING_VENDOR ? draft.model?.provider : undefined);
+  select.value = selection;
 }
 
 function populateVendorModelSelect(vendor: VendorProfileOption): void {
@@ -486,7 +526,7 @@ function selectedVendorModel(): VendorProfileOption['models'][number] | null {
   return vendor.models.find((model) => model.id === select.value) ?? null;
 }
 
-/** 按当前模型选择同步字段显隐：目录模型隐藏上下文窗口/能力（自动取值），自定义模型恢复手填。 */
+/** 按模型选择填充目录参数和能力默认值。 */
 function applyVendorModelSelection(): void {
   const vendor = selectedVendorProfile();
   if (!vendor) return;
@@ -495,127 +535,86 @@ function applyVendorModelSelection(): void {
   const meta = selectedVendorModel();
   const customModel = !meta;
   if (select) select.hidden = false;
-  if (input) {
-    input.hidden = !customModel;
-    if (!customModel && select) input.value = select.value;
-  }
+  if (input) input.hidden = !customModel;
   const contextWindowField = document.getElementById('cfg-model-context-window-wrap');
   if (contextWindowField) contextWindowField.hidden = !customModel;
   const maxTokensField = document.getElementById('cfg-model-max-tokens-wrap');
   if (maxTokensField) maxTokensField.hidden = !customModel;
-  const capabilitiesField = document.getElementById('cfg-model-capabilities-wrap');
-  if (capabilitiesField) capabilitiesField.hidden = !customModel;
+  const maxTokensInput = maxTokensInputEl();
+  if (maxTokensInput) maxTokensInput.disabled = !customModel;
   if (customModel) {
     fillContextWindowSelect(null);
-    const maxTokensInput = maxTokensInputEl();
     if (maxTokensInput && !maxTokensInput.value.trim()) maxTokensInput.value = String(DEFAULT_MAX_TOKENS);
   }
   if (meta?.context_window) fillContextWindowSelect(meta.context_window);
-  if (meta) setModelCapabilities(meta.vision ? ['text', 'tools', 'vision'] : ['text', 'tools']);
-  // 新增时模型 ID 未填，用目录模型 id 兜底，减少手填
-  const idInput = document.getElementById('cfg-model-id') as HTMLInputElement | null;
-  if (meta && idInput && !idInput.disabled && !idInput.value.trim()) idInput.value = meta.id;
+  const saved = modelFormDraft?.model;
+  const savedCapabilities = meta && saved?.provider === vendor.id && saved.model === meta.id
+    ? saved.capabilities
+    : undefined;
+  setModelCapabilities(savedCapabilities ?? (meta?.vision ? ['text', 'tools', 'vision'] : undefined));
+  updateSuggestedModelId(meta?.id ?? '');
 }
 
-/** 切换厂商：厂商模式自动填充 Base URL 并隐藏协议/派生字段；自定义模式恢复完整手填表单。 */
-const DEFAULT_MAX_TOKENS = 32768;
+function updateSuggestedModelId(modelId: string): void {
+  const input = document.querySelector<HTMLInputElement>('#cfg-model-id');
+  if (!input || input.disabled) return;
+  if (input.value.trim() && input.value !== input.dataset.suggestedId) return;
+
+  input.value = modelId;
+  input.dataset.suggestedId = modelId;
+}
 
 function maxTokensInputEl(): HTMLInputElement | null {
   return document.getElementById('cfg-model-max-tokens') as HTMLInputElement | null;
 }
 
-function applyVendorSelection(): void {
+function applyVendorSelection(modelId?: string): void {
   const select = vendorSelectEl();
   if (!select) return;
   const vendor = selectedVendorProfile();
-  const vendorMode = !!vendor;
   const protocolWrap = document.getElementById('cfg-model-protocol-wrap');
-  if (protocolWrap) protocolWrap.hidden = vendorMode;
-  const baseUrlInput = document.getElementById('cfg-model-base-url') as HTMLInputElement | null;
+  if (protocolWrap) protocolWrap.hidden = !!vendor || select.value === EXISTING_VENDOR;
+  const baseUrlInput = document.querySelector<HTMLInputElement>('#cfg-model-base-url');
   if (baseUrlInput) {
-    baseUrlInput.readOnly = vendorMode;
+    if (!vendor && baseUrlInput.readOnly) baseUrlInput.value = '';
+    baseUrlInput.readOnly = !!vendor;
     if (vendor) baseUrlInput.value = vendor.base_url;
   }
+  const label = document.querySelector<HTMLLabelElement>('#cfg-model-model-label');
+  if (label) label.htmlFor = vendor ? 'cfg-model-model-select' : 'cfg-model-model';
   const modelSelect = modelSelectEl();
-  const modelInput = document.getElementById('cfg-model-model') as HTMLInputElement | null;
+  const modelInput = document.getElementById('cfg-model-model');
   if (!vendor) {
     setModelProtocol(select.value === CUSTOM_VENDOR_ANTHROPIC ? 'anthropic' : 'openai');
     if (modelSelect) modelSelect.hidden = true;
     if (modelInput) modelInput.hidden = false;
-    const contextWindowField = document.getElementById('cfg-model-context-window-wrap');
-    if (contextWindowField) contextWindowField.hidden = false;
-    const maxTokensField = document.getElementById('cfg-model-max-tokens-wrap');
-    if (maxTokensField) maxTokensField.hidden = false;
-    const capabilitiesField = document.getElementById('cfg-model-capabilities-wrap');
-    if (capabilitiesField) capabilitiesField.hidden = false;
+    for (const id of ['cfg-model-context-window-wrap', 'cfg-model-max-tokens-wrap']) {
+      const field = document.getElementById(id);
+      if (field) field.hidden = false;
+    }
+    const maxTokensInput = maxTokensInputEl();
+    if (maxTokensInput) maxTokensInput.disabled = false;
+    setModelCapabilities();
+    updateSuggestedModelId('');
     return;
   }
   populateVendorModelSelect(vendor);
+  if (modelId && modelSelect) {
+    modelSelect.value = vendor.models.some((model) => model.id === modelId) ? modelId : CUSTOM_MODEL_VALUE;
+  }
   applyVendorModelSelection();
 }
 
-const MODEL_CAPABILITIES = [
-  { id: 'text', label: '文本' },
-  { id: 'tools', label: '工具调用' },
-  { id: 'vision', label: '视觉（网页截图）' },
-] as const;
-
-function ensureModelCapabilitiesField(): HTMLElement | null {
-  const existing = document.getElementById('cfg-model-capabilities-wrap');
-  if (existing) return existing;
-  const contextWindow = document.getElementById('cfg-model-context-window-wrap');
-  const form = document.getElementById('cfg-model-form');
-  if (!form) return null;
-
-  const field = document.createElement('div');
-  field.id = 'cfg-model-capabilities-wrap';
-  field.className = 'channel-connect-field';
-
-  const head = document.createElement('div');
-  head.className = 'channel-connect-field-head';
-  const label = document.createElement('span');
-  label.className = 'channel-connect-label';
-  label.textContent = '模型能力';
-  const hint = document.createElement('span');
-  hint.className = 'channel-connect-hint channel-connect-hint--inline';
-  hint.textContent = '只有真实支持图片输入的模型才应勾选视觉；未勾选时仍可使用 DOM 浏览。';
-  head.append(label, hint);
-  field.appendChild(head);
-
-  const choices = document.createElement('div');
-  choices.className = 'model-protocol-choice';
-  for (const capability of MODEL_CAPABILITIES) {
-    const item = document.createElement('label');
-    item.className = 'model-protocol-choice__item';
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.name = 'cfg-model-capability';
-    input.value = capability.id;
-    const text = document.createElement('span');
-    text.textContent = capability.label;
-    item.append(input, text);
-    choices.appendChild(item);
-  }
-  field.appendChild(choices);
-
-  if (contextWindow?.parentElement === form) {
-    form.insertBefore(field, contextWindow);
-  } else {
-    form.appendChild(field);
-  }
-  return field;
-}
-
 function selectedModelCapabilities(): string[] {
-  return Array.from(document.querySelectorAll<HTMLInputElement>('input[name="cfg-model-capability"]:checked'))
-    .map((input) => input.value)
-    .filter((value) => MODEL_CAPABILITIES.some((item) => item.id === value));
+  return Array.from(
+    document.querySelectorAll<HTMLInputElement>('#cfg-model-form input[name="cfg-model-capability"]:checked'),
+    (input) => input.value,
+  );
 }
 
-function setModelCapabilities(capabilities?: string[]): void {
-  ensureModelCapabilitiesField();
-  const selected = new Set(capabilities?.length ? capabilities : ['text', 'tools']);
-  document.querySelectorAll<HTMLInputElement>('input[name="cfg-model-capability"]').forEach((input) => {
+function setModelCapabilities(capabilities: string[] = ['text', 'tools']): void {
+  const selected = new Set(capabilities);
+  document.querySelectorAll<HTMLInputElement>('#cfg-model-form input[name="cfg-model-capability"]').forEach((input) => {
     input.checked = selected.has(input.value);
   });
 }
@@ -637,123 +636,65 @@ export function platformStatusText(p: PlatformRow): string {
 }
 
 export function readModelForm(): ModelPayload {
-  ensureModelCapabilitiesField();
   const value = (id: string): string => (document.getElementById(id) as HTMLInputElement | null)?.value.trim() ?? '';
   const modelId = value('cfg-model-id');
   const cwRaw = (document.getElementById('cfg-model-context-window') as HTMLSelectElement | null)?.value;
   const vendor = selectedVendorProfile();
   const meta = selectedVendorModel();
   const apiModel = meta?.id ?? (value('cfg-model-model') || modelId);
+  const apiKey = value('cfg-model-api-key');
+  const existing = modelFormDraft?.model;
+  const existingProvider = vendorSelectEl()?.value === EXISTING_VENDOR ? existing?.provider : undefined;
   return {
     id: modelId,
-    name: modelId,
+    ...(existing ? {} : { name: modelId }),
     model: apiModel,
-    provider: vendor ? vendor.id : selectedModelProtocol(),
-    base_url: vendor ? vendor.base_url : value('cfg-model-base-url'),
-    api_key: value('cfg-model-api-key'),
+    provider: vendor?.id ?? existingProvider ?? selectedModelProtocol(),
+    base_url: value('cfg-model-base-url'),
+    ...(apiKey ? { api_key: apiKey } : {}),
     context_window: meta?.context_window || Number(cwRaw) || 256000,
     max_tokens: meta ? (meta.max_tokens ?? null) : (Number(value('cfg-model-max-tokens')) || DEFAULT_MAX_TOKENS),
-    loaded: true,
-    capabilities: meta
-      ? (meta.vision ? ['text', 'tools', 'vision'] : ['text', 'tools'])
-      : selectedModelCapabilities(),
+    loaded: existing?.loaded ?? true,
+    capabilities: selectedModelCapabilities(),
   };
 }
 
 function fillModelForm(model?: ModelOption): void {
-  ensureModelCapabilitiesField();
   const set = (id: string, value: string): void => {
     const input = document.getElementById(id) as HTMLInputElement | null;
     if (input) input.value = value;
   };
-  const setReadonly = (id: string, readonly: boolean): void => {
-    const input = document.getElementById(id) as HTMLInputElement | null;
-    if (input) input.readOnly = readonly;
-  };
-  const setHidden = (id: string, hidden: boolean): void => {
-    const el = document.getElementById(id);
-    if (el) el.hidden = hidden;
-  };
-  // 可编辑性由后端下发（内置模型仅管理员可编辑）；缺省按 builtin 推导。
-  const modelEditable = model ? (model.editable ?? !model.builtin) : true;
-  const builtinReadonly = !modelEditable;
-  populateVendorSelect();
-  set('cfg-model-id', model?.id ?? '');
-  set('cfg-model-api-key', '');
-  setReadonly('cfg-model-id', !!model);
-  document.querySelectorAll<HTMLInputElement>('input[name="cfg-model-protocol"]').forEach((input) => {
-    input.disabled = builtinReadonly;
-  });
-  const idInput = document.getElementById('cfg-model-id') as HTMLInputElement | null;
-  if (idInput) idInput.disabled = !!model;
-  const vendorSelect = vendorSelectEl();
-  if (vendorSelect) vendorSelect.disabled = builtinReadonly;
-
-  // 不可编辑模型（内置且后端未开放编辑）：保持只读形态，隐藏厂商与连接字段。
-  if (model && !modelEditable) {
-    set('cfg-model-model', model.model ?? '');
-    set('cfg-model-base-url', '');
-    setModelProtocol(model.provider ?? 'openai');
-    fillContextWindowSelect(model.context_window);
-    setModelCapabilities(model.capabilities);
-    setReadonly('cfg-model-model', builtinReadonly);
-    setReadonly('cfg-model-base-url', builtinReadonly);
-    setHidden('cfg-model-vendor-wrap', true);
-    setHidden('cfg-model-base-url-wrap', true);
-    setHidden('cfg-model-api-key-wrap', true);
-    setHidden('cfg-model-protocol-wrap', true);
-    setHidden('cfg-model-context-window-wrap', true);
-    setHidden('cfg-model-max-tokens-wrap', true);
-    setHidden('cfg-model-capabilities-wrap', true);
-    const modelSelect = modelSelectEl();
-    if (modelSelect) modelSelect.hidden = true;
-    const modelInput = document.getElementById('cfg-model-model') as HTMLInputElement | null;
-    if (modelInput) modelInput.hidden = false;
-    return;
-  }
-
-  setHidden('cfg-model-vendor-wrap', false);
-  setHidden('cfg-model-base-url-wrap', false);
-  setHidden('cfg-model-api-key-wrap', false);
-  setReadonly('cfg-model-model', false);
-
-  // 厂商回填：provider 命中目录 → 厂商模式；新增默认选第一个厂商；其余落自定义。
   const providerId = (model?.provider ?? '').trim().toLowerCase();
   const matchedVendor = (vendorCatalogCache ?? []).find((vendor) => vendor.id === providerId);
-  if (vendorSelect) {
-    vendorSelect.value = matchedVendor
-      ? matchedVendor.id
-      : !model
-        ? ((vendorCatalogCache ?? [])[0]?.id ?? CUSTOM_VENDOR_OPENAI)
-        : providerId === 'anthropic'
-          ? CUSTOM_VENDOR_ANTHROPIC
-          : CUSTOM_VENDOR_OPENAI;
-  }
-  applyVendorSelection();
+  const existingProvider = !matchedVendor && providerId && providerId !== 'openai' && providerId !== 'anthropic'
+    ? model?.provider
+    : undefined;
 
-  const effectiveVendor = selectedVendorProfile();
-  if (effectiveVendor) {
-    // 厂商模式：接口模型名命中目录直接选中（元数据自动生效），否则走「自定义模型…」手填。
-    const modelSelect = modelSelectEl();
-    const inCatalog = !!model && effectiveVendor.models.some((item) => item.id === model.model);
-    if (modelSelect && model) modelSelect.value = inCatalog ? model.model : CUSTOM_MODEL_VALUE;
-    set('cfg-model-max-tokens', String(model?.max_tokens ?? ''));
-    applyVendorModelSelection();
-    if (!inCatalog && model) {
-      set('cfg-model-model', model.model);
-      fillContextWindowSelect(model.context_window);
-      set('cfg-model-max-tokens', String(model.max_tokens ?? DEFAULT_MAX_TOKENS));
-      setModelCapabilities(model.capabilities);
-    }
-    return;
+  populateVendorSelect(existingProvider);
+  set('cfg-model-id', model?.id ?? '');
+  const idInput = document.querySelector<HTMLInputElement>('#cfg-model-id');
+  if (idInput) {
+    idInput.disabled = !!model;
+    delete idInput.dataset.suggestedId;
   }
-
-  // 自定义模式：完整手填表单（行为与厂商目录引入前一致）。
   set('cfg-model-model', model?.model ?? '');
-  set('cfg-model-base-url', model?.base_url ?? '');
-  fillContextWindowSelect(model?.context_window);
+  set('cfg-model-base-url', '');
   set('cfg-model-max-tokens', String(model?.max_tokens ?? DEFAULT_MAX_TOKENS));
-  setModelCapabilities(model?.capabilities);
+
+  const vendorSelect = vendorSelectEl();
+  if (vendorSelect) {
+    if (matchedVendor) vendorSelect.value = matchedVendor.id;
+    else if (existingProvider) vendorSelect.value = EXISTING_VENDOR;
+    else if (model) vendorSelect.value = providerId === 'anthropic' ? CUSTOM_VENDOR_ANTHROPIC : CUSTOM_VENDOR_OPENAI;
+    else vendorSelect.value = vendorCatalogCache?.[0]?.id ?? CUSTOM_VENDOR_OPENAI;
+  }
+
+  applyVendorSelection(model?.model);
+  if (model?.base_url) set('cfg-model-base-url', model.base_url);
+  if (!selectedVendorModel()) {
+    fillContextWindowSelect(model?.context_window);
+    setModelCapabilities(model?.capabilities);
+  }
 }
 
 /** 填充上下文窗口下拉：标准档位选中，非标准值动态加 option 承接（避免丢值）。 */
@@ -771,88 +712,114 @@ function fillContextWindowSelect(contextWindow?: number | null): void {
   select.value = String(cw);
 }
 
+function showModelFormError(message: string): void {
+  const error = document.getElementById('cfg-model-error');
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
+}
+
 function closeModelConfigModal(): void {
+  if (modelFormDraft?.saving) return;
+  modelFormDraft = null;
   const overlay = $('#model-connect-overlay') as HTMLElement | null;
   if (overlay) overlay.hidden = true;
+  const apiKey = document.querySelector<HTMLInputElement>('#cfg-model-api-key');
+  if (apiKey) apiKey.value = '';
 }
 
 /** 打开模型配置弹层（新增或编辑）。不可编辑的内置模型不允许打开。 */
 export function openModelConfigModal(model?: ModelOption): void {
-  if (model && !(model.editable ?? !model.builtin)) return;
+  if (modelFormDraft?.saving || (model && !(model.editable ?? !model.builtin))) return;
   const overlay = $('#model-connect-overlay') as HTMLElement | null;
   if (!overlay) return;
   bindModelFormOnce();
+  const draft: ModelFormDraft = { model, changed: false, saving: false };
+  modelFormDraft = draft;
   fillModelForm(model);
+  const apiKey = document.querySelector<HTMLInputElement>('#cfg-model-api-key');
+  if (apiKey) apiKey.value = '';
+  showModelFormError('');
   const title = document.getElementById('model-connect-title');
   const desc = document.getElementById('model-connect-desc');
-  const deleteBtn = document.getElementById('cfg-model-delete') as HTMLButtonElement | null;
-  const rawName = model?.name || model?.id || '';
-  if (title) title.textContent = model ? `编辑：${rawName}` : '新增模型';
+  const deleteBtn = document.getElementById('cfg-model-delete');
+  if (title) title.textContent = model ? `编辑：${model.name || model.id}` : '新增模型';
   if (desc) {
     desc.textContent = model
-      ? '修改后保存；编辑时 API Key 留空则保留原值。'
-      : '选择厂商与模型，填写 API Key 后保存。';
+      ? '编辑时 API Key 留空会保留已保存的密钥。'
+      : '选择供应商与模型，填写 API Key 后保存。';
   }
   if (deleteBtn) deleteBtn.hidden = !model;
   overlay.hidden = false;
+
+  showModelVendorFeedback('');
+  if (vendorCatalogCache === null && vendorSelectEl()) void refreshModelFormVendors(draft);
+}
+
+function setModelFormSaving(form: HTMLFormElement, saving: boolean): void {
+  form.inert = saving;
+  for (const id of ['cfg-model-save', 'cfg-model-delete', 'model-connect-close']) {
+    const button = document.querySelector<HTMLButtonElement>(`#${id}`);
+    if (button) button.disabled = saving;
+  }
+  const save = document.getElementById('cfg-model-save');
+  if (save) save.textContent = saving ? '保存中…' : '保存';
+}
+
+async function saveModelForm(form: HTMLFormElement): Promise<void> {
+  const draft = modelFormDraft;
+  if (!draft || draft.saving) return;
+
+  const payload = readModelForm();
+  const id = payload.id;
+  if (!id) return showModelFormError('请填写模型 ID');
+  if (!payload.model) return showModelFormError('请填写接口模型名');
+  if (!payload.capabilities?.includes('text')) return showModelFormError('对话模型必须支持文本能力');
+  if (!payload.base_url) return showModelFormError('请填写 Base URL');
+  if (!payload.api_key && !draft.model?.has_key) return showModelFormError('请填写 API Key');
+
+  showModelFormError('');
+  draft.saving = true;
+  setModelFormSaving(form, true);
+  let saved: BackendConfig;
+  try {
+    saved = draft.model
+      ? await backendApi.updateModel(draft.model.id, payload)
+      : await backendApi.createModel(payload);
+  } catch (error) {
+    showModelFormError(`模型保存失败：${(error as Error).message}`);
+    return;
+  } finally {
+    draft.saving = false;
+    setModelFormSaving(form, false);
+  }
+
+  closeModelConfigModal();
+  await loadConfig(saved);
+  void renderConfigModels();
+  notify(draft.model ? '模型配置已更新' : '模型配置已新增');
 }
 
 function bindModelFormOnce(): void {
   const form = document.getElementById('cfg-model-form') as HTMLFormElement | null;
   if (!form || form.dataset.bound === '1') return;
   form.dataset.bound = '1';
-  vendorSelectEl()?.addEventListener('change', applyVendorSelection);
+  vendorSelectEl()?.addEventListener('change', () => applyVendorSelection());
   modelSelectEl()?.addEventListener('change', applyVendorModelSelection);
+  document.getElementById('cfg-model-id')?.addEventListener('input', (event) => {
+    delete (event.currentTarget as HTMLInputElement).dataset.suggestedId;
+  });
+  document.getElementById('cfg-model-vendor-retry')?.addEventListener('click', () => {
+    if (modelFormDraft) void refreshModelFormVendors(modelFormDraft);
+  });
+  const markChanged = (): void => {
+    if (modelFormDraft) modelFormDraft.changed = true;
+  };
+  form.addEventListener('input', markChanged);
+  form.addEventListener('change', markChanged);
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    void (async (): Promise<void> => {
-      const payload = readModelForm();
-      const id = String(payload.id || '').trim();
-      const apiModel = String(payload.model || '').trim();
-      if (!id) {
-        notify('请填写模型 ID');
-        return;
-      }
-      if (!apiModel) {
-        notify('请填写接口模型名');
-        return;
-      }
-      if (!payload.capabilities?.includes('text')) {
-        notify('对话模型必须支持文本能力');
-        return;
-      }
-      const editing = (document.getElementById('cfg-model-id') as HTMLInputElement | null)?.disabled;
-      const editingModel = editing ? (state.config?.model_profiles ?? state.config?.models ?? []).find((m) => m.id === id) : undefined;
-      if (editingModel && !(editingModel.editable ?? !editingModel.builtin)) {
-        notify('内置模型仅管理员可查看');
-        return;
-      }
-      const baseUrlVisible = !(document.getElementById('cfg-model-base-url-wrap') as HTMLElement | null)?.hidden;
-      if (baseUrlVisible && !payload.base_url) {
-        notify('请填写 Base URL');
-        return;
-      }
-      if (!editing && !payload.api_key) {
-        notify('请填写 API Key');
-        return;
-      }
-      if (editing && !editingModel?.has_key && !payload.api_key) {
-        notify('请填写 API Key');
-        return;
-      }
-      try {
-        state.config = editing
-          ? await backendApi.updateModel(id, payload)
-          : await backendApi.createModel(payload);
-        await loadConfig();
-        await renderConfigModels();
-        closeModelConfigModal();
-        fillModelForm();
-        notify(editing ? '模型配置已更新' : '模型配置已新增');
-      } catch (error) {
-        notify(`模型保存失败：${(error as Error).message}`);
-      }
-    })();
+    void saveModelForm(form);
   });
 }
 

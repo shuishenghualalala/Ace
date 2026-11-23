@@ -130,7 +130,7 @@ class ModelProfile:
         """返回给前端的非敏感信息。"""
         return {
             "id": self.id,
-            "name": self.label,
+            "name": model_profile_display_name(self),
             "model": self.model,
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
@@ -162,11 +162,13 @@ def is_placeholder_model_profile(profile: ModelProfile | None) -> bool:
 
 def model_profile_display_name(profile: ModelProfile) -> str:
     """Return a public label that never presents the legacy template as a model."""
+    placeholder_label = "默认模型（未配置）"
     if is_placeholder_model_profile(profile):
-        return "默认模型（未配置）"
-    if profile.id == "default" and str(profile.name or "").strip().lower() == "default":
+        return placeholder_label
+    name = profile.label.strip()
+    if profile.id == "default" and name.lower() in {"default", placeholder_label}:
         return str(profile.model or "").strip() or "默认模型"
-    return profile.name
+    return profile.label
 
 
 def is_owner_overridable_model_profile(profile: ModelProfile | None) -> bool:
@@ -679,13 +681,9 @@ class Config:
                 continue
             if is_placeholder_model_profile(profile) and profile.id != active_id:
                 continue
-            data = profile.public_dict()
-            data["name"] = model_profile_display_name(profile)
-            options.append(data)
+            options.append(profile.public_dict())
         if not options and active_id in profiles:
-            fallback = profiles[active_id].public_dict()
-            fallback["name"] = model_profile_display_name(profiles[active_id])
-            options = [fallback]
+            options = [profiles[active_id].public_dict()]
         return options
 
     def owner_visible_model_profiles(

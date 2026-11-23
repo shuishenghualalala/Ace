@@ -3,19 +3,21 @@
  *
  * 模型表单的「厂商选择」联动：
  *   - 厂商模式：Base URL 只读自动填充、接口模型名走目录下拉、
- *     context_window / capabilities 取目录元数据、provider 提交厂商 id
+ *     context_window 取目录元数据、provider 提交厂商 id，模型能力支持用户覆盖
  *   - 自定义模式：恢复手填表单，provider 提交协议名（openai/anthropic）
- *   - 目录未加载（加载失败）：静默回退为纯手填表单
+ *   - 目录加载失败：支持重试，也可继续手填
  *   - 编辑回填：provider 命中目录反选厂商与模型，未命中落自定义
  */
-import { beforeEach, describe, expect, it } from 'vitest';
-import { __resetAllStoresForTest } from '../../src/ui/stores/stores';
+import { readFileSync } from 'node:fs';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { backendApi, type BackendConfig, type ModelOption, type VendorProfileOption } from '../../src/ui/backend-client';
+import { __resetAllStoresForTest, configStore } from '../../src/ui/stores/stores';
 import {
   __setVendorCatalogForTest,
   openModelConfigModal,
   readModelForm,
+  renderConfigModels,
 } from '../../src/ui/features/config-panes';
-import type { VendorProfileOption } from '../../src/ui/backend-client';
 
 const VENDORS: VendorProfileOption[] = [
   {
@@ -45,34 +47,38 @@ function el<T extends HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
 }
 
+const desktopHtml = readFileSync('assets/index.html', 'utf8');
+
+function changeVendor(id: string): void {
+  const select = el<HTMLSelectElement>('cfg-model-vendor');
+  select.value = id;
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function configWith(profile: ModelOption): BackendConfig & { ok: boolean; profile: ModelOption } {
+  return {
+    ok: true,
+    profile,
+    model: profile.model,
+    has_key: profile.has_key,
+    base_url: profile.base_url ?? '',
+    active_model_id: profile.id,
+    models: [profile],
+  };
+}
+
+const savedModel: ModelOption = {
+  id: 'deepseek-v4-flash', name: '我的 DeepSeek', model: 'deepseek-v4-flash', provider: 'deepseek',
+  base_url: 'https://api.deepseek.com', loaded: true, has_key: true, max_tokens: 384_000,
+};
+
 beforeEach(() => {
+  vi.restoreAllMocks();
   __resetAllStoresForTest();
   __setVendorCatalogForTest(VENDORS);
-  document.body.innerHTML = `
-    <div id="model-connect-overlay" hidden></div>
-    <form id="cfg-model-form">
-      <div id="cfg-model-vendor-wrap"><select id="cfg-model-vendor"></select></div>
-      <input id="cfg-model-id" />
-      <select id="cfg-model-model-select" hidden></select>
-      <input id="cfg-model-model" />
-      <div id="cfg-model-protocol-wrap">
-        <input type="radio" name="cfg-model-protocol" value="openai" checked />
-        <input type="radio" name="cfg-model-protocol" value="anthropic" />
-      </div>
-      <div id="cfg-model-base-url-wrap"><input id="cfg-model-base-url" /></div>
-      <div id="cfg-model-api-key-wrap"><input id="cfg-model-api-key" /></div>
-      <div id="cfg-model-context-window-wrap">
-        <select id="cfg-model-context-window">
-          <option value="128000">128k</option>
-          <option value="256000" selected>256k（默认）</option>
-          <option value="1000000">1M</option>
-        </select>
-      </div>
-      <div id="cfg-model-max-tokens-wrap"><input id="cfg-model-max-tokens" type="number" /></div>
-    </form>
-  `;
-  // happy-dom 不总尊重 parse-time selected attribute，显式设默认值模拟浏览器
-  el<HTMLSelectElement>('cfg-model-context-window').value = '256000';
+  const template = document.createElement('template');
+  template.innerHTML = desktopHtml;
+  document.body.replaceChildren(template.content.querySelector('#model-connect-overlay')!);
 });
 
 describe('厂商模式', () => {
@@ -91,6 +97,7 @@ describe('厂商模式', () => {
     expect(modelSelect.hidden).toBe(false);
     expect(Array.from(modelSelect.options).map((o) => o.value)).toContain('deepseek-v4-flash');
     expect(el<HTMLElement>('cfg-model-context-window-wrap').hidden).toBe(true);
+    expect(el('cfg-model-capabilities-wrap').hidden).toBe(false);
 
     modelSelect.value = 'deepseek-v4-flash-vision-exp';
     modelSelect.dispatchEvent(new Event('change'));
@@ -131,6 +138,25 @@ describe('厂商模式', () => {
     openModelConfigModal();
     expect(el<HTMLInputElement>('cfg-model-id').value).toBe('deepseek-v4-flash');
   });
+  it('切换供应商和推荐模型会更新自动 ID，并保留手填 ID', () => {
+    openModelConfigModal();
+    changeVendor('kimi-coding');
+    const id = el<HTMLInputElement>('cfg-model-id');
+    expect(id.value).toBe('kimi-for-coding');
+    expect(readModelForm().base_url).toBe('https://api.kimi.com/coding');
+
+    changeVendor('deepseek');
+    const model = el<HTMLSelectElement>('cfg-model-model-select');
+    model.value = 'deepseek-v4-flash-vision-exp';
+    model.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(id.value).toBe('deepseek-v4-flash-vision-exp');
+
+    id.value = 'my-model';
+    id.dispatchEvent(new Event('input', { bubbles: true }));
+    changeVendor('kimi-coding');
+    expect(id.value).toBe('my-model');
+  });
+
 });
 
 describe('自定义模式', () => {
@@ -208,5 +234,137 @@ describe('目录加载失败回退', () => {
     ]);
     expect(el<HTMLElement>('cfg-model-protocol-wrap').hidden).toBe(false);
     expect(el<HTMLInputElement>('cfg-model-base-url').readOnly).toBe(false);
+  });
+});
+
+describe('目录请求与重试', () => {
+  it('弹窗与设置页共享请求，加载成功后显示推荐模型', async () => {
+    __setVendorCatalogForTest(null);
+    configStore.set({ config: configWith(savedModel) });
+    const pane = document.createElement('section');
+    pane.id = 'settings-pane-model';
+    document.body.append(pane);
+    const fetchCatalog = vi.spyOn(backendApi, 'configVendors').mockResolvedValue({ vendors: VENDORS });
+
+    const rendering = renderConfigModels();
+    openModelConfigModal();
+    await rendering;
+    expect(fetchCatalog).toHaveBeenCalledTimes(1);
+    expect(el<HTMLSelectElement>('cfg-model-vendor').value).toBe('deepseek');
+    expect(el<HTMLSelectElement>('cfg-model-model-select').value).toBe('deepseek-v4-flash');
+  });
+
+  it('失败后可重试，并保持已填写的自定义配置', async () => {
+    __setVendorCatalogForTest(null);
+    const fetchCatalog = vi.spyOn(backendApi, 'configVendors')
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValueOnce({ vendors: VENDORS });
+    openModelConfigModal();
+    const retry = el<HTMLButtonElement>('cfg-model-vendor-retry');
+    await vi.waitFor(() => expect(retry.hidden).toBe(false));
+    expect(el('cfg-model-vendor-status').textContent).toContain('加载失败');
+    const base = el<HTMLInputElement>('cfg-model-base-url');
+    base.value = 'https://example.test/v1';
+    base.dispatchEvent(new Event('input', { bubbles: true }));
+
+    retry.click();
+    await vi.waitFor(() => expect(el('cfg-model-vendor-status').textContent).toBe(''));
+    expect(fetchCatalog).toHaveBeenCalledTimes(2);
+    expect(base.value).toBe('https://example.test/v1');
+    expect(el<HTMLSelectElement>('cfg-model-vendor').value).toBe('custom:openai');
+
+    changeVendor('kimi-coding');
+    expect(readModelForm()).toMatchObject({ provider: 'kimi-coding', model: 'kimi-for-coding' });
+  });
+
+  it('目录加载失败时保留已有配置的供应商和端点', async () => {
+    __setVendorCatalogForTest(null);
+    vi.spyOn(backendApi, 'configVendors').mockRejectedValue(new Error('offline'));
+    const existing = { ...savedModel, base_url: 'https://example.test/v1' };
+    openModelConfigModal(existing);
+
+    await vi.waitFor(() => expect(el('cfg-model-vendor-retry').hidden).toBe(false));
+    expect(readModelForm()).toMatchObject({
+      provider: existing.provider, base_url: existing.base_url, model: existing.model,
+    });
+  });
+});
+
+describe('保存模型', () => {
+  it('保存自定义模型的默认输出长度，并直接使用保存响应更新配置', async () => {
+    __setVendorCatalogForTest([]);
+    const profile = { ...savedModel, id: 'custom-model', model: 'custom-model', provider: 'openai', max_tokens: 32768 };
+    const post = vi.spyOn(backendApi, 'createModel').mockResolvedValue(configWith(profile));
+    const getConfig = vi.spyOn(backendApi, 'config');
+    openModelConfigModal();
+    el<HTMLInputElement>('cfg-model-id').value = profile.id;
+    el<HTMLInputElement>('cfg-model-base-url').value = profile.base_url!;
+    el<HTMLInputElement>('cfg-model-api-key').value = 'test-key';
+    el<HTMLButtonElement>('cfg-model-save').click();
+
+    expect(post).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      id: profile.id, max_tokens: 32768, api_key: 'test-key',
+    }));
+    await vi.waitFor(() => expect(el('model-connect-overlay').hidden).toBe(true));
+    expect(configStore.get().config?.models).toEqual([profile]);
+    expect(getConfig).not.toHaveBeenCalled();
+    expect(el<HTMLInputElement>('cfg-model-api-key').value).toBe('');
+  });
+
+  it('首次配置默认模型即可修改能力，保存后重新打开会回填', async () => {
+    const placeholder: ModelOption = {
+      id: 'default', name: '默认模型（未配置）', model: 'your-model-name', provider: 'openai',
+      base_url: 'https://api.example.com/v1', has_key: false, loaded: true, builtin: true, editable: true,
+    };
+    const configured = { ...savedModel, id: 'default', name: savedModel.model, capabilities: ['text', 'vision'] };
+    const put = vi.spyOn(backendApi, 'updateModel').mockResolvedValue(configWith(configured));
+    openModelConfigModal(placeholder);
+    changeVendor('deepseek');
+
+    const group = el('cfg-model-capabilities-wrap');
+    const tools = group.querySelector<HTMLInputElement>('input[value="tools"]')!;
+    const vision = group.querySelector<HTMLInputElement>('input[value="vision"]')!;
+    expect(group.hidden).toBe(false);
+    expect(vision.checked).toBe(false);
+    vision.click();
+    tools.click();
+    el<HTMLInputElement>('cfg-model-api-key').value = 'test-key';
+    el<HTMLButtonElement>('cfg-model-save').click();
+
+    expect(put).toHaveBeenCalledExactlyOnceWith('default', expect.objectContaining({
+      capabilities: ['text', 'vision'], model: savedModel.model,
+    }));
+    expect(put.mock.calls[0]?.[1]).not.toHaveProperty('name');
+    await vi.waitFor(() => expect(el('model-connect-overlay').hidden).toBe(true));
+
+    openModelConfigModal(configStore.get().config!.models[0]!);
+    expect(vision.checked).toBe(true);
+    expect(tools.checked).toBe(false);
+    expect(el('model-connect-title').textContent).toBe('编辑：deepseek-v4-flash');
+  });
+
+  it('编辑目录模型时保留已有密钥，失败后可用原表单重试', async () => {
+    const put = vi.spyOn(backendApi, 'updateModel')
+      .mockRejectedValueOnce(new Error('配置写入失败'))
+      .mockResolvedValueOnce(configWith(savedModel));
+    openModelConfigModal(savedModel);
+    const maxTokens = el<HTMLInputElement>('cfg-model-max-tokens');
+    const save = el<HTMLButtonElement>('cfg-model-save');
+    expect(maxTokens.disabled).toBe(true);
+    save.click();
+    expect(save.disabled).toBe(true);
+    await vi.waitFor(() => expect(el('cfg-model-error').textContent).toContain('配置写入失败'));
+    expect(el('model-connect-overlay').hidden).toBe(false);
+    expect(el<HTMLInputElement>('cfg-model-id').value).toBe(savedModel.id);
+    expect(save.disabled).toBe(false);
+
+    save.click();
+    await vi.waitFor(() => expect(el('model-connect-overlay').hidden).toBe(true));
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls[1]?.[1]).not.toHaveProperty('api_key');
+    expect(put.mock.calls[1]?.[1]).not.toHaveProperty('name');
+    expect(put).toHaveBeenLastCalledWith(savedModel.id, expect.objectContaining({
+      max_tokens: savedModel.max_tokens,
+    }));
   });
 });

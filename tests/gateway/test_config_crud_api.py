@@ -19,7 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from crew.app import build_app
 from crew.core.types import Message, ToolCall
 from crew.gateway.server import create_app
-from crew.state.config import load_config
+from crew.state.config import ModelProfile, load_config
 from crew.state.credentials import read_stored_key
 from crew.state.home import owner_path_segment
 
@@ -545,6 +545,47 @@ async def test_config_marks_default_profile_owner_editable(api, auth_headers):
     assert item["name"] == "默认模型（未配置）"
     assert item["builtin"] is True
     assert item["editable"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_name", [False, True])
+async def test_configured_default_uses_model_name_and_persists_capabilities(
+    api, tmp_path: Path, auth_headers, legacy_name: bool,
+):
+    api.state.crew.config.model_profiles["default"] = ModelProfile(
+        id="default", name="Default", model="your-model-name",
+        base_url="https://api.example.com/v1", builtin=True,
+    )
+    payload = {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "api_key": "test-default-key",
+        "capabilities": ["text", "vision"],
+    }
+    if legacy_name:
+        payload["name"] = "默认模型（未配置）"
+
+    transport = ASGITransport(app=api)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=auth_headers) as client:
+        saved = await client.put("/api/config/models/default", json=payload)
+        reloaded = await client.get("/api/config")
+
+    assert saved.status_code == 200, saved.text
+    assert reloaded.status_code == 200, reloaded.text
+    for profile in (
+        saved.json()["profile"],
+        next(profile for profile in reloaded.json()["model_profiles"] if profile["id"] == "default"),
+        next(profile for profile in reloaded.json()["models"] if profile["id"] == "default"),
+    ):
+        assert profile["name"] == "deepseek-v4-flash"
+        assert profile["capabilities"] == ["text", "vision"]
+        assert profile["vision"] is True
+
+    overlay = yaml.safe_load(_owner_overlay_path(tmp_path).read_text(encoding="utf-8"))
+    stored = overlay["llm"]["models"]["default"]
+    assert stored["name"] == ("默认模型（未配置）" if legacy_name else "Default")
+    assert stored["capabilities"] == ["text", "vision"]
 
 
 @pytest.mark.asyncio

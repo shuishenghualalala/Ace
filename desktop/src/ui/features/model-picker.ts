@@ -3,7 +3,7 @@
  * openModelSelectPopover 为通用模型选择浮层：主对话 Composer 与 Wiki 右栏 Composer 共用。
  */
 
-import { backendApi } from '../backend-client';
+import { backendApi, type BackendConfig } from '../backend-client';
 import { setRuntimeStyle } from '../components/runtime-style';
 import { $, $$, escapeHtml, state } from '../state';
 import {
@@ -311,9 +311,9 @@ export function bindModelPicker(): void {
   });
 }
 
-export async function loadConfig(): Promise<void> {
+export async function loadConfig(config?: BackendConfig): Promise<void> {
   try {
-    state.config = await backendApi.config();
+    state.config = config ?? await backendApi.config();
     state.configModel = resolveComposerModelLabel();
     syncModelUi();
     syncExternalAgentsFeatureUi();

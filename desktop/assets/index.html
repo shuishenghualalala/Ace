@@ -156,6 +156,10 @@
                   <span class="channel-connect-hint channel-connect-hint--inline">选择厂商后自动填充 Base URL 与模型列表；选「自定义」则手动填写</span>
                 </div>
                 <select class="channel-connect-input" id="cfg-model-vendor"></select>
+                <div id="cfg-model-vendor-feedback" hidden>
+                  <span id="cfg-model-vendor-status" role="status"></span>
+                  <button class="mw-button mw-button--secondary mw-button--small" id="cfg-model-vendor-retry" type="button" hidden>重试</button>
+                </div>
               </div>
               <div class="channel-connect-field">
                 <div class="channel-connect-field-head">
@@ -165,9 +169,29 @@
                 <input class="channel-connect-input" id="cfg-model-id" placeholder="例如 minimax" />
               </div>
               <div class="channel-connect-field">
-                <label class="channel-connect-label" for="cfg-model-model">接口模型名 <span class="channel-connect-required">*</span></label>
+                <label class="channel-connect-label" id="cfg-model-model-label" for="cfg-model-model">接口模型名 <span class="channel-connect-required">*</span></label>
                 <select class="channel-connect-input" id="cfg-model-model-select" hidden></select>
-                <input class="channel-connect-input" id="cfg-model-model" placeholder="例如 gpt-4o-mini 或 minimax/minimax-latest" />
+                <input class="channel-connect-input" id="cfg-model-model" aria-label="手动填写接口模型名" placeholder="例如 gpt-4o-mini 或 minimax/minimax-latest" />
+              </div>
+              <div class="channel-connect-field" id="cfg-model-capabilities-wrap" role="group" aria-labelledby="cfg-model-capabilities-label" aria-describedby="cfg-model-capabilities-hint">
+                <div class="channel-connect-field-head">
+                  <span class="channel-connect-label" id="cfg-model-capabilities-label">模型能力</span>
+                  <span class="channel-connect-hint channel-connect-hint--inline" id="cfg-model-capabilities-hint">仅在模型支持图片输入时勾选视觉。</span>
+                </div>
+                <div class="model-protocol-choice">
+                  <label class="model-protocol-choice__item">
+                    <input type="checkbox" name="cfg-model-capability" value="text" checked />
+                    <span>文本</span>
+                  </label>
+                  <label class="model-protocol-choice__item">
+                    <input type="checkbox" name="cfg-model-capability" value="tools" checked />
+                    <span>工具调用</span>
+                  </label>
+                  <label class="model-protocol-choice__item">
+                    <input type="checkbox" name="cfg-model-capability" value="vision" />
+                    <span>视觉（网页截图）</span>
+                  </label>
+                </div>
               </div>
               <div class="channel-connect-field" id="cfg-model-protocol-wrap" hidden>
                 <span class="channel-connect-label">API 协议</span>
@@ -208,12 +232,13 @@
                   <label class="channel-connect-label" for="cfg-model-max-tokens">最大输出 token</label>
                   <span class="channel-connect-hint channel-connect-hint--inline">单次回复的最大输出长度，默认 32768</span>
                 </div>
-                <input class="channel-connect-input" id="cfg-model-max-tokens" type="number" min="1" step="1024" placeholder="32768" />
+                <input class="channel-connect-input" id="cfg-model-max-tokens" type="number" min="1" step="1" placeholder="32768" />
               </div>
             </form>
+            <p class="channel-connect-hint" id="cfg-model-error" role="alert" hidden></p>
             <div class="channel-connect-actions model-connect-actions">
               <button type="button" class="channel-connect-btn channel-connect-btn--danger" id="cfg-model-delete" hidden>删除模型</button>
-              <button type="submit" class="channel-connect-btn channel-connect-btn--primary" form="cfg-model-form">保存</button>
+              <button type="submit" class="channel-connect-btn channel-connect-btn--primary" id="cfg-model-save" form="cfg-model-form">保存</button>
             </div>
           </div>
         </div>

@@ -119,6 +119,8 @@ api_key_env: DEEPSEEK_API_KEY</code></pre>
   <table>
     <thead><tr><th>日期</th><th>变更</th><th>影响面</th></tr></thead>
     <tbody>
+      <tr><td>2026-11-23</td><td>首次配置和编辑都可直接勾选模型能力。推荐模型提供默认值，保存时以表单勾选项为准。</td><td>desktop 模型表单</td></tr>
+      <tr><td>2026-11-23</td><td>修复模型表单提交和目录加载。供应商模板支持失败重试，保存后以 Gateway 返回的配置更新桌面界面。</td><td>desktop 模型管理</td></tr>
       <tr><td>2026-09-03</td><td>厂商目录对前端开放：新增 <code>vendor_public_dict()</code> 公开视图（id/name/protocol/base_url/模型清单及 context_window、max_tokens、reasoning、vision 标记，不含 compat 与密钥），Gateway 新增只读 <code>GET /api/config/vendors</code>；桌面端模型配置弹层据此提供厂商下拉与自动填充，设置页模型列表按厂商分组。</td><td>vendors.py、gateway 配置路由（新增只读端点）；装配与协议层无改动</td></tr>
       <tr><td>2026-09-03</td><td>与 owner 统一化合并后，厂商装配的 key 解析链按 owner 作用域收口（凭证库按 owner 隔离，owner 私有 key 写 owner overlay <code>.env</code>，全局/内置模型走共享层）；<code>update_model</code> 内置模型（builtin）重定向全局作用域后，key 写入/读取作用域保持一致（修复合并整合点，见 <code>crew/app.py</code> 归置后 owner 注释）。</td><td>app 装配与模型 CRUD 的 key 作用域；厂商档案与 Provider 协议层无改动</td></tr>
       <tr><td>2026-09-02</td><td>新增厂商档案注册表 <code>vendors.py</code>（9 家厂商 + 模型目录 + compat 开关）；<code>openai_provider</code> 按 compat 注入思考参数、reasoning 字段别名、DeepSeek reasoning_content 回传，移除"URL/模型名含 deepseek"字符串嗅探；<code>app.py</code> 装配支持 <code>provider: &lt;厂商id&gt;</code>（base_url / 环境变量 key / vision 档案默认值）；新增 <code>tests/test_vendor_profiles.py</code>（40 例）与 <code>tests/test_model_binding_providers.py</code>（5 例，覆盖会话绑定 / wiki / 团队的 provider 组装链路）。</td><td>providers、app 装配、LLMProvider.reasoning_mode 取值扩展（向后兼容）；custom/存量配置行为不变（DeepSeek 端点经档案兜底识别后行为等价）</td></tr>
@@ -127,8 +129,12 @@ api_key_env: DEEPSEEK_API_KEY</code></pre>
     </tbody>
   </table>
 
-  <h2>桌面设置中的模型分组</h2>
+  <h2>桌面设置中的模型目录与保存</h2>
   <p>模型设置同时读取 <code>/api/config</code> 的模型列表和 <code>/api/config/vendors</code> 的厂商目录。目录内的厂商按目录位置排序并展示厂商名称，未收录的具名厂商按其标识分组。使用通用 OpenAI、Anthropic 协议或未声明厂商的配置放入末尾的「自定义」组。目录为空或仅收录部分厂商时，分组优先级也保持一致，同组内保留后端配置顺序。</p>
+
+  <p>模型配置弹窗共享厂商目录的在途请求，成功后缓存目录。目录加载失败时，弹窗保留手动配置入口和重试按钮。重试加载完成后，空白表单自动选中首个模板，已修改的表单保留当前输入。选择厂商后，用模板填写 Base URL 和推荐模型清单。目录模型使用档案里的上下文窗口和最大输出。选择不同模型时，自动生成的配置 ID 跟随模型，手动填写的 ID 保持原值。</p>
+  <p>模型名称下方始终展示文本、工具调用和视觉选项。选中推荐模型时按目录预选，新选的自定义模型默认启用文本与工具调用。打开已有模型时回填保存的能力。提交读取当前勾选项并写入 <code>capabilities</code>，由配置层据此判定是否允许图片输入。</p>
+  <p>最大输出 token 可填写任意正整数。目录模型的最大输出由档案提供，对应输入禁用。新增和编辑分别提交到 <code>POST /api/config/models</code> 与 <code>PUT /api/config/models/{model_id}</code>，编辑时空白 API Key 会省略该字段。Gateway 负责账号作用域的配置与凭据持久化，桌面端接收保存响应后更新配置列表和聊天模型选择器。写入失败时，弹窗保留当前输入并展示错误。</p>
 
   <h2>本次更新：Provider 协议边界（2026-09-23）</h2>
   <p>OpenAI 与 Anthropic 在协议转换完成、真正发送请求的边界分别捕获脱敏后的实际 request；同步和流式路径对称记录 response、首事件/首文本与结束状态。executor 只记录逻辑调用与重试，不再重复生成 provider request/response 载荷。</p>
