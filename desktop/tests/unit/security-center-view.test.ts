@@ -263,6 +263,25 @@ describe('Security Center view', () => {
     expect(view.element.querySelector('[data-security-action="install"]')).toBeNull();
   });
 
+  it('shows the gateway detail when the native runtime is unavailable', () => {
+    const view = createSecurityCenterView(makeHandlers());
+    view.update({
+      loading: false,
+      error: '',
+      workspaceId: 'workspace-a',
+      capabilities: {
+        ...capabilities,
+        helper_present: false,
+        status: 'unavailable',
+        detail: '未找到本机防护运行组件。开发态请先构建并 staging 原生运行组件。',
+      },
+      rules: [],
+      audits: [],
+    });
+
+    expect(view.element.textContent).toContain('开发态请先构建并 staging 原生运行组件。');
+  });
+
   it('locks the Windows setup action while the operation is in progress', () => {
     const view = createSecurityCenterView(makeHandlers());
     view.update({

@@ -1,0 +1,18 @@
+{
+  "schema": 2,
+  "runtime_version": "0.1.0",
+  "platform": "win32",
+  "arch": "x64",
+  "generated_by": "desktop/scripts/prepare-security-runtime.mjs",
+  "binary_name": "ace-security-runtime.exe",
+  "binary_sha256": "0804aa7bba87c7927b70f76e6b507ee4460f7c0d21afea164329d37b0342e37b",
+  "files": [
+    {
+      "name": "ace-security-runtime.exe",
+      "sha256": "0804aa7bba87c7927b70f76e6b507ee4460f7c0d21afea164329d37b0342e37b",
+      "size": 2866688
+    }
+  ],
+  "source_hash": "d8aa11c0c07e8afeedc92a1603b8696c42f7e951921745de6a8941fc99eaecf0",
+  "source_files": 36
+}

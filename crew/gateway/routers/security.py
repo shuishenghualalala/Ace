@@ -341,6 +341,28 @@ class _WindowsAclRecovery:
         return "windows_acl_recovery"
 
 
+def _runtime_unavailable_detail(*, stale: bool) -> str:
+    """Return actionable copy for a missing or stale native helper.
+
+    A packaged build ships a verified runtime, so reinstalling is the only
+    remedy. A source checkout instead needs the matching platform prebuilt or
+    a local staging build; a reinstall hint would send developers to the wrong
+    place.
+    """
+    bundled = os.environ.get("ACE_SECURITY_RUNTIME_BUNDLED_ONLY") == "1"
+    if stale:
+        return (
+            "应用的本机防护组件与当前版本不一致，请更新或重新安装 Ace。"
+            if bundled
+            else "本机防护运行组件与 Rust 源码不一致，请重新构建并 staging 原生运行组件。"
+        )
+    return (
+        "应用的本机防护组件缺失或版本不匹配，请更新或重新安装 Ace。"
+        if bundled
+        else "未找到本机防护运行组件。开发态请先构建并 staging 原生运行组件。"
+    )
+
+
 async def probe_security_capabilities(*, workspace_network_access: bool) -> dict[str, object]:
     from crew.security.launch import packaged_runtime_argv
 
@@ -352,9 +374,9 @@ async def probe_security_capabilities(*, workspace_network_access: bool) -> dict
     network = False
     direct_network = False
     local_binding = False
-    detail = "native security runtime 未随包安装"
+    detail = _runtime_unavailable_detail(stale=False)
     if helper_present and stale:
-        detail = "native security runtime 与当前源码不一致"
+        detail = _runtime_unavailable_detail(stale=True)
     elif filesystem:
         helper_argv = packaged_runtime_argv()
         network_probe = await _probe_runtime(

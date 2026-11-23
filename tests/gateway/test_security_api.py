@@ -1129,6 +1129,18 @@ async def test_capabilities_probe_rejects_runtime_startup_failure(api, tmp_path,
     assert response.json()["managed_network"] is False
 
 
+def test_runtime_unavailable_detail_distinguishes_source_checkout(monkeypatch):
+    from crew.gateway.routers import security as security_router
+
+    monkeypatch.delenv("ACE_SECURITY_RUNTIME_BUNDLED_ONLY", raising=False)
+    assert "开发态" in security_router._runtime_unavailable_detail(stale=False)
+    assert "Rust 源码" in security_router._runtime_unavailable_detail(stale=True)
+
+    monkeypatch.setenv("ACE_SECURITY_RUNTIME_BUNDLED_ONLY", "1")
+    assert "重新安装 Ace" in security_router._runtime_unavailable_detail(stale=False)
+    assert "重新安装 Ace" in security_router._runtime_unavailable_detail(stale=True)
+
+
 def test_proof_one_time_nonce_rejects_replay(tmp_path, monkeypatch):
     """H-19: a verified Desktop proof is consumed; the same proof cannot be replayed
     within its TTL even for an identical request."""

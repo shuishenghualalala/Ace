@@ -157,7 +157,7 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
     description = !capabilities ? '请重新检测。'
       : !platformName ? '当前设备尚未提供原生防护。'
       : capabilities.helper_present === false || capabilities.runtime_stale === true
-        ? '应用的本机防护组件缺失或版本不匹配，请更新或重新安装 Ace。'
+        ? capabilities.detail || '应用的本机防护组件缺失或版本不匹配，请更新或重新安装 Ace。'
         : '本机防护自检未通过。';
     tone = 'warning';
   }

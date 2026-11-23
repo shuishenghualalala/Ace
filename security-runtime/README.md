@@ -240,10 +240,17 @@ npm run dev --prefix desktop
 security-runtime/prebuilt/
 ├── darwin-arm64/
 │   ├── ace-security-runtime       # Apple Silicon Mach-O
-│   └── runtime-manifest.json      # 平台、架构、二进制与源码摘要
+│   ├── runtime-manifest.json      # 平台、架构、二进制与源码摘要
+│   └── security-runtime.env
+├── win32-x64/
+│   ├── ace-security-runtime.exe   # Windows x64 PE
+│   ├── runtime-manifest.json
+│   └── security-runtime.env
 ├── darwin-x64/                    # Intel Mac 可按相同结构扩展
 └── linux-x64/                     # Linux 可按相同结构扩展
 ```
+
+当前仓库提交了 `darwin-arm64` 与 `win32-x64`；其他平台按同一结构补充后即可直接使用。新增或更新预编译产物时，用 `desktop/scripts/prepare-security-runtime.mjs --source-root security-runtime` 生成 manifest，保证 `source_hash` 与当前源码一致。
 
 旧版 `security-runtime/bin/` 不再进入运行时候选，避免过期的跨平台二进制被误加载。开发态只使用当前平台的 `prebuilt/<platform>-<arch>` 或本机 staging；正式产物在对应平台的发布 runner 上重新构建和测试，配置证书时再签名。
 

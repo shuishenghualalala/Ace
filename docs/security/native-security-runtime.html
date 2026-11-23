@@ -682,9 +682,10 @@ helper 响应
     <ol>
       <li><code>ACE_SECURITY_RUNTIME</code> 指定的绝对路径；</li>
       <li><code>desktop/security-runtime-bin</code> 本机 staging；</li>
-      <li><code>security-runtime/prebuilt/&lt;platform&gt;-&lt;arch&gt;</code> 仓库预编译目录；</li>
-      <li>旧版兼容目录 <code>security-runtime/bin</code>。</li>
+      <li><code>security-runtime/prebuilt/&lt;platform&gt;-&lt;arch&gt;</code> 仓库预编译目录。</li>
     </ol>
+
+    <p>仓库已提交 <code>darwin-arm64</code> 与 <code>win32-x64</code>。旧版 <code>security-runtime/bin</code> 不再参与运行时候选，它的一份 manifest 无法表达多个平台目标，容易被误加载。</p>
 
     <p>manifest 存在时必须匹配 schema、平台、架构、文件名和二进制 SHA-256。源码树中的预编译产物还记录 <code>source_hash</code>：Rust 源码、测试、Cargo.toml 或 Cargo.lock 变化但未重建时，安全中心报告 runtime stale，不把旧二进制声明为可用防护。</p>
 
