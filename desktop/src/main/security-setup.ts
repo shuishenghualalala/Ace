@@ -362,7 +362,6 @@ export function publishWindowsSandboxSetup(
 
 interface WindowsSandboxStartup {
   platform: string;
-  packaged: boolean;
   visible: boolean;
   ci: boolean;
 }
@@ -403,11 +402,12 @@ export function createWindowsSandboxSetupCoordinator(
     return promise;
   }
 
+  /** Prepare on the first visible window; source and packaged launches share the flow. */
   function startAutomatically(
     launch: WindowsSandboxStartup,
     resolveLocation: () => WindowsSandboxLocation | undefined,
   ): Promise<SecuritySetupResult> | undefined {
-    if (automaticAttempted || launch.platform !== 'win32' || !launch.packaged || !launch.visible || launch.ci) return;
+    if (automaticAttempted || launch.platform !== 'win32' || !launch.visible || launch.ci) return;
     automaticAttempted = true;
     const location = resolveLocation();
     return location ? run('install', location.runtimePath, location.stateDir, true) : undefined;

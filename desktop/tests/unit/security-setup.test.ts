@@ -155,7 +155,7 @@ describe('Windows security setup elevation', () => {
     }) as unknown as typeof spawn;
     const provision = (runtimePath: string, targetStateDir: string, _spawnProcess: typeof spawn, options: { automatic: boolean }) =>
       provisionInstalledWindowsSandbox(runtimePath, targetStateDir, spawnProcess, options);
-    const launch = { platform: 'win32', packaged: true, visible: true, ci: false };
+    const launch = { platform: 'win32', visible: true, ci: false };
     const location = () => ({ runtimePath: runtime, stateDir });
 
     try {
@@ -239,14 +239,14 @@ describe('Windows security setup elevation', () => {
 describe('Windows sandbox setup coordinator', () => {
   const runtimePath = 'C:\\Program Files\\Crew\\ace-security-runtime.exe';
   const stateDir = 'C:\\Users\\A\\AppData\\Roaming\\Crew\\security';
-  const visibleWindows = { platform: 'win32', packaged: true, visible: true, ci: false };
+  // Source and packaged launches share this shape; setup must not require app.isPackaged.
+  const visibleWindows = { platform: 'win32', visible: true, ci: false };
   const ready = { ok: true, exitCode: 0 };
   const location = () => ({ runtimePath, stateDir });
 
   it.each([
     { platform: 'darwin' },
     { platform: 'linux' },
-    { packaged: false },
     { ci: true },
   ])('does not inspect the runtime or provision for an ineligible launch (%j)', async (condition) => {
     const provision = vi.fn(async () => ready);
@@ -258,6 +258,17 @@ describe('Windows sandbox setup coordinator', () => {
 
     await expect(coordinator.startAutomatically(visibleWindows, locate)).resolves.toEqual(ready);
     expect(provision).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, undefined, { automatic: true });
+  });
+
+  it('skips provisioning when no verified runtime is available', () => {
+    const provision = vi.fn(async () => ready);
+    const locate = vi.fn(() => undefined);
+    const coordinator = createWindowsSandboxSetupCoordinator(provision);
+
+    expect(coordinator.startAutomatically(visibleWindows, locate)).toBeUndefined();
+    expect(locate).toHaveBeenCalledTimes(1);
+    expect(provision).not.toHaveBeenCalled();
+    expect(coordinator.startAutomatically(visibleWindows, locate)).toBeUndefined();
   });
 
   it('defers checking a hidden window until it is opened and checks only once', async () => {

@@ -1439,12 +1439,11 @@ function createWindow(previous?: BrowserWindow): void {
       if (!currentWindow()) return;
       const setup = windowsSandboxSetup.startAutomatically({
         platform: process.platform,
-        packaged: app.isPackaged,
         visible: windowShowRequested && win.isVisible() && !win.isMinimized(),
         ci: Boolean(process.env['CI']),
       }, () => {
         const { ACE_SECURITY_RUNTIME: runtimePath, ACE_SECURITY_STATE_DIR: stateDir } =
-          packagedSecurityRuntimeEnv({ bundledOnly: true });
+          packagedSecurityRuntimeEnv({ bundledOnly: app.isPackaged });
         return runtimePath ? { runtimePath, stateDir } : undefined;
       });
       if (setup && windowsSandboxSetupDirectory) {

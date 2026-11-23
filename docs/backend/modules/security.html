@@ -462,7 +462,7 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
         <tr><td>离线隔离</td><td>独立 network namespace</td><td>offline 账户的 WFP 规则</td><td>不生成 network-outbound allow</td></tr>
         <tr><td>在线路径</td><td>namespace 内 loopback → Unix socket → host proxy</td><td>online 账户仅能到固定 loopback proxy</td><td>仅能到本次随机 loopback proxy 端口</td></tr>
         <tr><td>进程清理</td><td>PID namespace、进程组、die-with-parent</td><td>Job Object kill-on-close</td><td>独立进程组与信号清理</td></tr>
-        <tr><td>首次使用</td><td>随包或系统提供 bubblewrap，内核须允许所需 namespace</td><td>交互式安装和直接启动发行版均自动检查。首次缺少身份时由 Windows 显示 UAC</td><td>系统 Seatbelt 自检通过后直接使用，无需管理员权限</td></tr>
+        <tr><td>首次使用</td><td>随包或系统提供 bubblewrap，内核须允许所需 namespace</td><td>交互式安装、打包发行版与开发态均自动检查。首次缺少身份时由 Windows 显示 UAC</td><td>系统 Seatbelt 自检通过后直接使用，无需管理员权限</td></tr>
       </tbody>
     </table>
 
@@ -470,9 +470,9 @@ NativeRuntimeClient ──spawn──► ace-security-runtime ──spawn──�
     <p>Linux 的 workspace-write profile 把宿主根目录 <code>ro-bind</code> 为只读，再覆盖工作空间与临时目录的可写 bind，最后施加项目元数据与 Ace 私有路径限制。子进程使用独立 user、PID namespace、受控 <code>/proc</code>、<code>no_new_privs</code> 和 seccomp。离线或代理模式另外使用独立 network namespace。WSL1 缺少所需 namespace 能力，因此直接拒绝。</p>
 
     <h4>2.6.2 Windows：低权限身份 + ACL + WFP + Job</h4>
-    <p>发行版在用户首次打开可见主窗口时自动检查随包组件和当前用户的沙箱身份。正式安装器已做过初始化时，此处只复用有效身份。直接启动的独立用户目录若仍缺少身份，使用与安装器相同的 Windows 授权与复查路径。隐藏登录自启期间不做准备。用户随后从托盘或再次启动应用打开窗口时，沿用同一套检查；同一进程内重复显示窗口不会再触发。CI 跳过自动准备。</p>
+    <p>打包发行版与开发态在用户首次打开可见主窗口时自动检查可用的原生组件和当前用户的沙箱身份；打包态使用随包组件，开发态使用 <code>security-runtime/prebuilt/&lt;platform&gt;-&lt;arch&gt;</code> 或本机 staging，没有可用组件时跳过。正式安装器已做过初始化时，此处只复用有效身份。直接启动的独立用户目录若仍缺少身份，使用与安装器相同的 Windows 授权与复查路径。隐藏登录自启期间不做准备。用户随后从托盘或再次启动应用打开窗口时，沿用同一套检查；同一进程内重复显示窗口不会再触发。CI 跳过自动准备。</p>
 
-    <p>Windows 发行版的安全设置、自动准备与随桌面启动的 Gateway 使用同一份经清单校验的随包组件。Gateway 启动时按 Windows 的大小写规则移除继承的组件路径、状态目录与准备状态，再传入本次桌面选择。校验失败时，安全中心报告组件不可用，受管命令返回 <code>sandbox_unavailable</code>。独立开发入口仍可配置组件路径。</p>
+    <p>Windows 发行版的安全设置、自动准备与随桌面启动的 Gateway 使用同一份经清单校验的随包组件；开发态的自动准备和 Gateway 使用同一份经清单校验的 prebuilt 或 staging 组件。Gateway 启动时按 Windows 的大小写规则移除继承的组件路径、状态目录与准备状态，再传入本次桌面选择。校验失败时，安全中心报告组件不可用，受管命令返回 <code>sandbox_unavailable</code>。独立开发入口仍可配置组件路径。</p>
     <p>安装器与可见窗口自动准备先执行原生就绪检查。Windows 返回取消管理员确认时，桌面记录暂缓。提权进程使用另一 Windows 账号时，原生组件在接触沙箱状态前返回专用退出码 4，桌面单独记住这次结果。其他未分类的准备失败也会写入重试暂缓标记。后续自动准备仍先检查真实防护状态；未就绪且已有标记时，不再重复发起管理员确认。安全中心的显式操作忽略暂缓标记，可重新运行准备。原生检查通过后清除所有标记。标记只控制自动准备，不参与命令准入；命令能否运行仍由原生运行时检查。</p>
     <p>就绪探针同时检查离线、代理和直连沙箱账号。Native Runtime 通过 <code>NetUserGetInfo</code> 读取本地账号标记；账号缺失、被禁用或密码过期时，能力探针和命令启动均失败关闭。准备检查把需要管理员处置的本地账号状态以专用退出码 5 返回。安全中心显示管理员检查状态和重新检测入口，不显示会自动改写账户的安装动作；桌面启动也不会重复提权。管理员恢复账号后可重新验证；应用不会自行启用被禁用的账号或清除系统策略。</p>
     <p>当前身份按启动 Ace 的 Windows 用户建置。首次建置要求该账号具备管理员权限。标准用户用另一管理员的凭据确认时，原生组件拒绝，因为状态和访问控制属于启动的 Windows 用户。准备过且自检通过的用户日常无需手动启动防护。</p>
@@ -730,6 +730,7 @@ helper 响应
       <tr><td>2026-11-20</td><td>打包态运行组件强制使用 Desktop 校验过的随包 helper 和 manifest；缺失时失败关闭，不再回退源码树候选。</td><td>Windows、macOS、Linux 打包 Gateway 与安全执行边界</td></tr>
       <tr><td>2026-11-22</td><td>Windows 沙箱就绪检查增加本地账号状态核验；账号缺失、禁用或密码过期时，能力与命令准入失败关闭，启动不会重复提权或自动改账号。</td><td>Windows Native Runtime、沙箱能力探针与桌面准备状态</td></tr>
       <tr><td>2026-11-23</td><td>提交 Windows x64 预编译运行组件；开发态缺少组件时提示本地构建并 staging，安全中心直接展示 Gateway 的能力说明。</td><td>Windows 开发态、安全中心提示与预编译分发</td></tr>
+      <tr><td>2026-11-23</td><td>开发态首次可见窗口也自动执行 Windows 防护检查；没有可用运行组件时跳过，不再要求打包态。</td><td>桌面 Windows 沙箱自动准备</td></tr>
     </tbody>
   </table>
 
