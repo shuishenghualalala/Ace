@@ -859,6 +859,12 @@
 <p><strong>验收</strong> 传输错误用例断言 403 保留 status；McpHub 等价行为已在 Web 验证；Desktop TypeScript、MCP 表单 5 项通过。</p>
 <p class="evidence">Ace <code>desktop/src/ui/api/transport.ts</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/transport-error.test.ts</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="desktop-browser-mock-drift">
+<h3>Desktop 浏览器 mock 与宿主接口漂移（共享工作树）</h3>
+<p>共享工作树当前 Desktop 全量：212 个文件通过、1 个文件失败，共 91 项失败；全部集中在 <code>browser-host.test.ts</code>，首个根因是 <code>BrowserHost.ensureOwner</code> 调用 <code>engine.setCapturePresentationFallback</code>，测试的 <code>PlaywrightEngine</code> mock 尚未提供该方法。该漂移来自另一进程未提交的 browser-host/engine 改动，与本轮 MCP 403 和 Provider 边界无关。</p>
+<p><strong>结论</strong> 未修改其测试或实现；待其接口/mock 同步后重跑。MCP Web/Desktop 与 CLI 定向用例仍通过。</p>
+<p class="evidence">Ace <code>desktop/src/main/browser-host.ts</code>、<code>desktop/tests/unit/browser-host.test.ts</code>、<code>desktop/src/main/browser/playwright-engine.ts</code>。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
