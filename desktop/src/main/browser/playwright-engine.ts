@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import type { DownloadItem, WebContentsView } from 'electron';
+import type { CaptureWindowPresentation } from './capture-window-presentation';
 import type {
   ChildSessionLifecycleHook,
   InputCommandLeaseHook,
@@ -82,9 +83,20 @@ export class PlaywrightEngine {
   private readonly dialogWaiters = new WeakMap<object, Array<(dialog: Dialog) => void>>();
   /** BrowserHost session coordinator learns about Playwright-only modal states. */
   private modalStateHook: ModalStateHook | null = null;
+  private capturePresentationFallback: (
+    (view: WebContentsView) => CaptureWindowPresentation | undefined
+  ) = () => undefined;
 
   constructor() {
-    this.transport.setCapturePresentationHook((view) => this.host.startCapturePresentation(view));
+    this.transport.setCapturePresentationHook((view) => (
+      this.host.startCapturePresentation(view) ?? this.capturePresentationFallback(view)
+    ));
+  }
+
+  setCapturePresentationFallback(
+    fallback: (view: WebContentsView) => CaptureWindowPresentation | undefined,
+  ): void {
+    this.capturePresentationFallback = fallback;
   }
 
   /**

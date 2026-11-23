@@ -292,6 +292,14 @@ describe('PlaywrightEngine', () => {
       .rejects.toThrow('capture failed');
     expect(release).toHaveBeenCalledTimes(2);
     expect(mocks.startCapturePresentation).toHaveBeenCalledTimes(2);
+
+    const fallbackRelease = vi.fn();
+    const fallback = vi.fn(() => ({ release: fallbackRelease }));
+    mocks.startCapturePresentation.mockReturnValue(undefined);
+    engine.setCapturePresentationFallback(fallback);
+    await transport.dispatch('Page.captureScreenshot', {}, 'pw-tab-1');
+    expect(fallback).toHaveBeenCalledWith(view);
+    expect(fallbackRelease).toHaveBeenCalledOnce();
     await engine.dispose();
   });
 });

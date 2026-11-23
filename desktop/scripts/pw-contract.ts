@@ -3295,6 +3295,84 @@ app.whenReady().then(async () => {
     }
   });
 
+  await check('BrowserHost 隐藏面板的公开 Page 截图契约', async () => {
+    const ownerDigest = createHash('sha256').update('pw-contract-hidden-panel-capture').digest('hex');
+    const runtimeKey = `crew_${ownerDigest.slice(0, 12)}`;
+    const sessionId = 'pw-hidden-panel-session';
+    const sessionHash = createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
+    const tabLabel = `s${sessionHash}-1`;
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'crew-pw-hidden-panel-'));
+    const profile = path.join(
+      tempRoot, 'accounts', `acct_${ownerDigest.slice(0, 16)}`, 'browser', 'profile',
+    );
+    await mkdir(profile, { recursive: true });
+    const panelWindow = new BrowserWindow({
+      show: false,
+      width: 1100,
+      height: 800,
+      webPreferences: { sandbox: true },
+    });
+    const host = new BrowserHost(() => panelWindow);
+    try {
+      const created = await host.handleRpc({
+        runtime_key: runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: profile,
+          proxy_url: policyProxyURL,
+          command: 'tab',
+          args: [
+            'new', '--label', tabLabel,
+            new URL('/host-output-parity', topOriginURL).href,
+          ],
+          mutating: true,
+          command_timeout_ms: 15_000,
+        },
+      }) as { data?: { targetId?: string } };
+      const targetId = String(created.data?.targetId ?? '');
+      if (!targetId) throw new Error('隐藏面板契约未创建 tab');
+      host.setPanel({
+        runtimeKey,
+        sessionId,
+        tabLabel,
+        mode: 'ai',
+        bounds: { x: 0, y: 0, width: 800, height: 600 },
+        visible: true,
+      });
+      const response = await contractDeadline(host.handleRpc({
+        runtime_key: runtimeKey,
+        method: 'execute',
+        params: {
+          profile_dir: profile,
+          proxy_url: policyProxyURL,
+          target_id: targetId,
+          command: 'run_code_unsafe',
+          args: [`async page => {
+            const image = await page.screenshot({ timeout: 3000 });
+            return image.length;
+          }`],
+          mutating: true,
+          command_timeout_ms: 5_000,
+        },
+      }), 10_000, 'hidden-panel public Page screenshot') as {
+        data?: { result?: string };
+      };
+      const bytes = Number(response.data?.result ?? 0);
+      if (bytes < 1000) throw new Error(`隐藏面板公开截图无效: ${bytes}`);
+      if (panelWindow.isVisible() || panelWindow.getOpacity() !== 1) {
+        throw new Error('隐藏面板截图后未恢复窗口状态');
+      }
+      return `hidden panel public Page screenshot ${bytes} bytes；window restored`;
+    } finally {
+      try {
+        await contractDeadline(host.dispose(), 5_000, 'hidden-panel host dispose');
+      } finally {
+        if (!panelWindow.isDestroyed()) panelWindow.destroy();
+        await cleanupContractRoot(tempRoot);
+      }
+    }
+  });
+
   await check('BrowserHost run_code timeout 撤销、恢复与并发归因契约', async () => {
     const identity = (name: string): {
       runtimeKey: string;

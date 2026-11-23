@@ -155,8 +155,9 @@ browserScopedForwarding=false
 
 当前 `AutomationHost` 已实现条件 2、3，`PlaywrightEngine` 实现条件 1，并在 AI/human
 切换时可逆开关焦点模拟。Engine 还向 CDP transport 注入按 view 的展示租约，因此直接
-公开 `Page.screenshot` 与 Host 截图共用同一产帧边界。view 在隐藏宿主与可见面板之间移动时，
-真实契约已验证 debugger、targetId 和页面状态保持。
+公开 `Page.screenshot` 与 Host 截图共用同一产帧边界。AutomationHost 未挂载当前 view 时，
+BrowserHost 只在该 view 确属当前面板标签的情况下回退到面板窗口，不猜测其它窗口。
+view 在隐藏宿主与可见面板之间移动时，真实契约已验证 debugger、targetId 和页面状态保持。
 
 不要“优化”掉三条件中的任意一条，也不要用 `force:true` 掩盖后台 actionability
 失败。后者会退回旧手写 CDP 的不可靠语义。

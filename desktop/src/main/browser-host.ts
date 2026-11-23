@@ -1789,6 +1789,10 @@ export class BrowserHost extends EventEmitter {
       lifecycle: 'active',
       engine: new PlaywrightEngine(),
     };
+    owner.engine.setCapturePresentationFallback((view) => {
+      if (this.panel?.tab.view !== view) return undefined;
+      return startCaptureWindowPresentation(this.panel.window);
+    });
     owner.engine.setInputCommandLeaseHook(({ view }) => {
       if (view.webContents.isDestroyed()) {
         throw new BrowserHostError('标签页已停止，拒绝发送自动化输入', {
