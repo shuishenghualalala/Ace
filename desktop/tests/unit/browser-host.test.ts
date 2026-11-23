@@ -1031,6 +1031,8 @@ vi.mock('../../src/main/browser/playwright-engine', () => {
       return undefined;
     }
 
+    setCapturePresentationFallback(): void {}
+
     async pageForView(view: any): Promise<unknown> {
       let page = this.pages.get(view);
       if (page) return page;
