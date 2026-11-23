@@ -987,6 +987,7 @@ cd web && npm run build
   <h2>输入框的斜杠命令与技能</h2>
   <p>当输入框只有开头的斜杠词时，Composer 在输入框下方分组显示「命令」和「技能」。命令由当前面板提供的回调决定，无需等待技能目录。输入前缀缩小候选，方向键移动选择，Enter 或 Tab 选中，Escape 关闭并保留输入。选择技能后焦点留在输入框。</p>
   <p><code>/plan</code> 和 <code>/craft</code> 使用既有模式切换；<code>/new</code> 在主聊天使用当前工作空间的新建入口。选中命令或直接提交完整命令不会产生聊天请求。技能候选来自 <code>GET /api/skills</code>，选择只填入 <code>/slug</code> 与一个空格，保留后续输入和正常提交。带附件、编辑草稿或场景的输入仍走原消息路径，不拦截为命令。</p>
+  <p>已有可保存历史的内置主会话还提供 <code>/side</code>/<code>/btw</code> 打开独立侧边聊天，以及 <code>/goal [目标]</code> 打开会话目标编辑器；<code>/goal</code> 后的文本按目标内容保留换行和空白，不进入主对话发送路径。侧边聊天、目标编辑器和 Plan 模式互不替换主会话，命令本身不产生聊天回合。</p>
 </section>
 <section id="side-chat">
   <h2>侧边聊天</h2>
