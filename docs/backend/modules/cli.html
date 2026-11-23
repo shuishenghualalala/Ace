@@ -107,6 +107,20 @@ printf '继续这次工作' | crew run</code></pre>
   <p><code>-c</code>/<code>--continue</code> 在相同账号和工作空间中按最近更新时间选取第一份有消息的会话；置顶不改变最近判定，只创建未使用的空会话会被跳过。没有可续接内容时以退出码 1 结束且不创建新会话。<code>--continue</code> 不能与 <code>--session-id</code> 同时使用。非交互 <code>crew run --continue</code> 使用同一解析规则，把新问题追加到该会话，不生成第二个会话。</p>
   <p><code>crew run</code> 的消息可用位置参数、<code>-p</code>/<code>--prompt</code> 或非 TTY stdin 提供，三者只能选一个；stdin 读取后去掉首尾空白，空输入以退出码 1 结束，超过 1,000,000 字符同样拒绝。交互终端未提供消息时直接报错，不会阻塞等待输入。</p>
 
+  <h3 id="chat-slash">3.1.1 交互内斜杠命令</h3>
+  <p><code>crew chat</code> 在 REPL 内处理以下命令；命令大小写不敏感，未知命令转交已启用插件。插件异常或 Plan/待办/压缩后端失败只在当前命令显示原因，不终止 REPL。</p>
+  <table>
+    <thead><tr><th>命令</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td><code>/help</code></td><td>显示命令帮助。</td></tr>
+      <tr><td><code>/new</code></td><td>清理旧会话 Plan 状态并创建新的 CLI 会话 ID；清理失败不阻止新会话。</td></tr>
+      <tr><td><code>/team</code> / <code>/agent</code></td><td>切换后续回合的 Team 或单 Agent 模式。</td></tr>
+      <tr><td><code>/plan</code></td><td>为当前会话进入 Plan 模式；未装配 <code>plan_manager</code> 或进入失败时提示原因。</td></tr>
+      <tr><td><code>/todo</code></td><td>读取当前会话任务清单及状态标记。</td></tr>
+      <tr><td><code>/compact</code></td><td>在回合间立即压缩当前会话上下文；失败不退出 REPL。</td></tr>
+      <tr><td><code>/quit</code> / <code>/exit</code></td><td>退出 REPL。</td></tr>
+    </tbody>
+  </table>
   <h3 id="skill-market-sources">3.2 本地技能市场目录</h3>
   <pre><code>crew skill source add &lt;绝对目录或 HTTPS 清单 URL&gt; --label 团队技能
 crew skill source list
