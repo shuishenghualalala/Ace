@@ -619,13 +619,14 @@ function bindMcpFormOnce(): void {
         return;
       }
       try {
+        const manual = payload.auto_connect === false;
         if (editing) {
           await backendApi.updateMcpServer(nameInput!.value.trim(), payload);
-          notify('MCP 服务已更新');
+          notify(manual ? 'MCP 服务已更新，未自动连接' : 'MCP 服务已更新');
         } else {
           payload.name = nameInput!.value.trim();
           await backendApi.createMcpServer(payload);
-          notify('MCP 服务已新增，正在后台连接…');
+          notify(manual ? 'MCP 服务已新增，未自动连接' : 'MCP 服务已新增，正在后台连接…');
         }
         await renderMcpServers();
         closeMcpServerModal();
