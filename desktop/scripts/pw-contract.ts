@@ -52,16 +52,28 @@ import type { Dialog, Page } from '../src/main/browser/playwright-compat';
 app.on('window-all-closed', () => undefined);
 
 async function cleanupContractRoot(root: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
-    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await Promise.race([
+      rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error('profile cleanup deadline exceeded'));
+        }, 5_000);
+      }),
+    ]);
   } catch (error) {
     // Electron retains persistent Session databases until the process exits.
     // Windows cannot unlink those open files; the ephemeral runner owns them.
     const code = (error as NodeJS.ErrnoException).code;
-    if (process.platform !== 'win32' || !['EBUSY', 'EPERM'].includes(code ?? '')) {
+    if (process.platform !== 'win32' || (!timedOut && !['EBUSY', 'EPERM'].includes(code ?? ''))) {
       throw error;
     }
     console.log(`Deferred locked Electron profile cleanup until process exit: ${root}`);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
