@@ -841,6 +841,12 @@
 <p><strong>结论</strong> 需要在 macOS arm64 上重建运行时并重新生成 manifest（同时更新源码哈希、二进制 SHA 与文件数）；Windows 不能生成可信的 darwin 预构建。未修改 manifest 或伪造二进制，避免发布证据失真。</p>
 <p class="evidence">Ace <code>security-runtime/prebuilt/darwin-arm64/runtime-manifest.json</code>、<code>scripts/write_security_runtime_evidence.py</code>、<code>tests/security/test_release_security_workflows.py</code>。</p>
 </article>
+<article id="web-mcp-forbidden-actions">
+<h3>Web MCP 403 时隐藏管理入口</h3>
+<p>MCP API 现在要求管理员；非管理员打开 MCP 页时，旧界面仍显示搜索、刷新与「添加服务」，点击后必然 403。现在根据 <code>ApiError.status</code> 区分权限失败：403 时只保留错误提示并隐藏这三个入口；其他加载失败仍保留入口，便于 Gateway 恢复后重试。</p>
+<p><strong>验收</strong> McpHub 11 项通过，403 用例断言无「添加服务」，普通加载失败仍可重试；TypeScript 通过。真实权限仍由 Gateway 管理员校验决定。</p>
+<p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
