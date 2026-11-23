@@ -853,6 +853,12 @@
 <p><strong>验收</strong> add/update 手动连接用例断言文本包含“未自动连接”；定向用例、Ruff 通过。</p>
 <p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts</code> 的 CLI 参数入口。</p>
 </article>
+<article id="desktop-mcp-forbidden-actions">
+<h3>Desktop MCP 403 时隐藏添加入口</h3>
+<p>Desktop 的 HTTP 错误原先只保留 message，丢失状态码；MCP 列表 403 时仍显示「添加服务」。现在 <code>readJsonResponse</code> 在错误对象上保留 <code>status</code>，MCP 设置页在 403 时隐藏主操作按钮，成功刷新后恢复；其他错误仍保留入口以便重试。</p>
+<p><strong>验收</strong> 传输错误用例断言 403 保留 status；McpHub 等价行为已在 Web 验证；Desktop TypeScript、MCP 表单 5 项通过。</p>
+<p class="evidence">Ace <code>desktop/src/ui/api/transport.ts</code>、<code>desktop/src/ui/features/settings-mcp.ts</code>、<code>desktop/tests/unit/transport-error.test.ts</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>

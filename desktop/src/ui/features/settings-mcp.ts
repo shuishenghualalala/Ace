@@ -359,6 +359,7 @@ function bindCuaCardOnce(): void {
 export async function renderMcpServers(): Promise<void> {
   const view = ensureMcpIntegrationView();
   if (!view) return;
+  const primary = view.trailing.querySelector<HTMLButtonElement>('button');
   view.update({ state: 'loading', message: '正在加载 MCP 服务…', items: [] });
 
   let servers: McpServerRow[] = [];
@@ -367,6 +368,7 @@ export async function renderMcpServers(): Promise<void> {
     servers = resp.servers ?? [];
   } catch (error) {
     lastMcpServers = [];
+    if (primary) primary.hidden = (error as { status?: number }).status === 403;
     view.update({
       state: 'error',
       message: `无法加载 MCP 服务：${(error as Error).message}`,
@@ -375,6 +377,7 @@ export async function renderMcpServers(): Promise<void> {
     return;
   }
 
+  if (primary) primary.hidden = false;
   lastMcpServers = servers;
   if (servers.length === 0) {
     view.update({

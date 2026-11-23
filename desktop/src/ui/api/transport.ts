@@ -237,7 +237,10 @@ export async function readJsonResponse<T>(res: Response, path: string): Promise<
     } catch {
       // 非 JSON 错误体保留 HTTP 状态即可，避免把 HTML 泄露到界面。
     }
-    throw new Error(message);
+    const failure = new Error(message) as Error & { status?: number; body?: string };
+    failure.status = res.status;
+    failure.body = text;
+    throw failure;
   }
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.toLowerCase().includes('application/json')) {
