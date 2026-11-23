@@ -43,6 +43,12 @@ class FakePlugins:
         return None
 
 
+class FailingPlugins(FakePlugins):
+    async def run_plugin_command(self, text: str, **_kwargs):
+        self.commands.append(text)
+        raise RuntimeError("boom")
+
+
 @pytest.mark.asyncio
 async def test_repl_dispatches_every_builtin_slash_command(monkeypatch) -> None:
     prompt = FakePrompt(["/help", "/new", "/team", "/agent", "/plan", "/todo", "/compact", "/unknown", "/quit"])
@@ -96,6 +102,24 @@ async def test_repl_plan_without_manager_and_exit_alias(monkeypatch) -> None:
 
     assert any("Plan 模式不可用" in line for line in printed)
     assert plugins.commands == []
+    assert len(prompt.prompts) == 2
+
+
+@pytest.mark.asyncio
+async def test_repl_survives_a_failing_plugin_command(monkeypatch) -> None:
+    prompt = FakePrompt(["/broken", "/quit"])
+    printed: list[str] = []
+    monkeypatch.setattr(chat, "PromptSession", lambda: prompt)
+    monkeypatch.setattr(chat, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(chat.console, "print", lambda *args, **_kwargs: printed.append(" ".join(map(str, args))))
+    app = SimpleNamespace(
+        config=SimpleNamespace(has_llm_key=False),
+        plan_manager=None,
+        plugins=FailingPlugins(),
+    )
+    await chat._repl(app, SimpleNamespace(owner="local", workspace_id="default"), session_id="cli_plugin")
+
+    assert any("插件命令失败: boom" in line for line in printed)
     assert len(prompt.prompts) == 2
 
 

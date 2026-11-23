@@ -170,12 +170,16 @@ async def _repl(app: Any, ctx: CliContext, *, session_id: str | None = None) -> 
             elif cmd == "/compact":
                 await _compact_context(app, session_id, ctx.owner)
             else:
-                result = await app.plugins.run_plugin_command(
-                    text,
-                    session_id=session_id,
-                    owner_account_id=ctx.owner,
-                    channel="cli",
-                )
+                try:
+                    result = await app.plugins.run_plugin_command(
+                        text,
+                        session_id=session_id,
+                        owner_account_id=ctx.owner,
+                        channel="cli",
+                    )
+                except Exception as exc:  # noqa: BLE001 - plugin failure must not end the REPL
+                    console.print(f"[red]插件命令失败: {exc}[/red]")
+                    continue
                 if result is None:
                     console.print(f"[red]未知命令: {text}[/red]")
                 elif result:
