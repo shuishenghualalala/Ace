@@ -49,6 +49,14 @@ class FailingPlugins(FakePlugins):
         raise RuntimeError("boom")
 
 
+class FailingPlan:
+    def reset(self, session_id: str, *, owner_account_id: str) -> None:
+        raise RuntimeError("reset failed")
+
+    def enter(self, session_id: str, *, owner_account_id: str) -> None:
+        raise RuntimeError("enter failed")
+
+
 @pytest.mark.asyncio
 async def test_repl_dispatches_every_builtin_slash_command(monkeypatch) -> None:
     prompt = FakePrompt(["/help", "/new", "/team", "/agent", "/plan", "/todo", "/compact", "/unknown", "/quit"])
@@ -121,6 +129,32 @@ async def test_repl_survives_a_failing_plugin_command(monkeypatch) -> None:
 
     assert any("插件命令失败: boom" in line for line in printed)
     assert len(prompt.prompts) == 2
+
+
+@pytest.mark.asyncio
+async def test_repl_survives_command_backend_failures(monkeypatch) -> None:
+    prompt = FakePrompt(["/new", "/plan", "/todo", "/compact", "/quit"])
+    printed: list[str] = []
+    monkeypatch.setattr(chat, "PromptSession", lambda: prompt)
+    monkeypatch.setattr(chat, "patch_stdout", lambda: nullcontext())
+    monkeypatch.setattr(chat.console, "print", lambda *args, **_kwargs: printed.append(" ".join(map(str, args))))
+    monkeypatch.setattr(chat, "_print_todos", lambda *_args: (_ for _ in ()).throw(RuntimeError("todos failed")))
+    async def failing_compact(*_args):
+        raise RuntimeError("compact failed")
+    monkeypatch.setattr(chat, "_compact_context", failing_compact)
+    app = SimpleNamespace(
+        config=SimpleNamespace(has_llm_key=False),
+        plan_manager=FailingPlan(),
+        plugins=FakePlugins(),
+    )
+    await chat._repl(app, SimpleNamespace(owner="local", workspace_id="default"), session_id="cli_fail")
+
+    assert any("旧会话 Plan 状态清理失败: reset failed" in line for line in printed)
+    assert any("已新建会话" in line for line in printed)
+    assert any("进入 Plan 模式失败: enter failed" in line for line in printed)
+    assert any("读取任务清单失败: todos failed" in line for line in printed)
+    assert any("压缩上下文失败: compact failed" in line for line in printed)
+    assert len(prompt.prompts) == 5
 
 
 @pytest.mark.asyncio

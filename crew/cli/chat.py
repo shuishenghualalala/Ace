@@ -146,7 +146,10 @@ async def _repl(app: Any, ctx: CliContext, *, session_id: str | None = None) -> 
                 console.print(HELP)
             elif cmd == "/new":
                 if app.plan_manager is not None:
-                    app.plan_manager.reset(session_id, owner_account_id=ctx.owner)
+                    try:
+                        app.plan_manager.reset(session_id, owner_account_id=ctx.owner)
+                    except Exception as exc:  # noqa: BLE001 - a stale Plan must not block a new session
+                        console.print(f"[yellow]旧会话 Plan 状态清理失败: {exc}[/yellow]")
                 session_id = f"cli_{uuid.uuid4().hex[:8]}"
                 console.print("[green]已新建会话。[/green]")
                 console.print("当前会话 ID：", session_id, markup=False)
@@ -160,15 +163,25 @@ async def _repl(app: Any, ctx: CliContext, *, session_id: str | None = None) -> 
                 if app.plan_manager is None:
                     console.print("[red]Plan 模式不可用（未装配 plan_manager）。[/red]")
                 else:
-                    app.plan_manager.enter(session_id, owner_account_id=ctx.owner)
-                    console.print(
-                        "[bold yellow]已进入 Plan 模式（只读）。[/bold yellow] "
-                        "描述你的需求，我会探索代码、写出计划，再请你确认后执行。"
-                    )
+                    try:
+                        app.plan_manager.enter(session_id, owner_account_id=ctx.owner)
+                    except Exception as exc:  # noqa: BLE001 - keep the REPL usable on Plan setup failure
+                        console.print(f"[red]进入 Plan 模式失败: {exc}[/red]")
+                    else:
+                        console.print(
+                            "[bold yellow]已进入 Plan 模式（只读）。[/bold yellow] "
+                            "描述你的需求，我会探索代码、写出计划，再请你确认后执行。"
+                        )
             elif cmd == "/todo":
-                _print_todos(app, session_id, ctx.owner)
+                try:
+                    _print_todos(app, session_id, ctx.owner)
+                except Exception as exc:  # noqa: BLE001 - task store failure must not end the REPL
+                    console.print(f"[red]读取任务清单失败: {exc}[/red]")
             elif cmd == "/compact":
-                await _compact_context(app, session_id, ctx.owner)
+                try:
+                    await _compact_context(app, session_id, ctx.owner)
+                except Exception as exc:  # noqa: BLE001 - compaction failure must not end the REPL
+                    console.print(f"[red]压缩上下文失败: {exc}[/red]")
             else:
                 try:
                     result = await app.plugins.run_plugin_command(
