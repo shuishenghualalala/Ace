@@ -194,6 +194,10 @@ async def _ensure_mcp_started(app: Any) -> None:
         await mgr.start(app.registry)
 
 
+def _mcp_connection_suffix(cfg: dict[str, Any]) -> str:
+    return "（已保存，未自动连接；可用 mcp servers reload 启动）" if cfg.get("auto_connect") is False else ""
+
+
 def _mcp_servers_list(args: Any, ctx: CliContext) -> CliResult:
     servers = _mcp_servers_view(ctx.app)
     if not servers:
@@ -292,7 +296,10 @@ async def _mcp_servers_add(args: Any, ctx: CliContext) -> CliResult:
         app.mcp_manager.register_pending(name, cfg)
         if cfg.get("auto_connect") is not False:
             asyncio.create_task(app.mcp_manager.add_server(name, cfg))
-    return CliResult(data={"ok": True, "servers": _mcp_servers_view(app)}, text=f"已添加 MCP server {name}")
+    return CliResult(
+        data={"ok": True, "servers": _mcp_servers_view(app)},
+        text=f"已添加 MCP server {name}" + _mcp_connection_suffix(cfg),
+    )
 
 
 async def _mcp_servers_update(args: Any, ctx: CliContext) -> CliResult:
@@ -334,7 +341,11 @@ async def _mcp_servers_update(args: Any, ctx: CliContext) -> CliResult:
         data["warning"] = warning
     return CliResult(
         data=data,
-        text=f"已更新 MCP server {name}" + ("（旧连接停止失败，配置已保存）" if warning else ""),
+        text=(
+            f"已更新 MCP server {name}"
+            + _mcp_connection_suffix(cfg)
+            + ("（旧连接停止失败，配置已保存）" if warning else "")
+        ),
     )
 
 

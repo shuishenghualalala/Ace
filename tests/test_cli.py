@@ -1182,6 +1182,7 @@ def test_mcp_add_no_auto_connect_saves_without_starting(monkeypatch):
     assert manager.started == []
     assert app.config.mcp_servers["manual"]["auto_connect"] is False
     assert manager.pending[0] == "manual"
+    assert "未自动连接" in result.text
 
 
 def test_mcp_update_preserves_no_auto_connect(monkeypatch):
@@ -1227,6 +1228,7 @@ def test_mcp_update_preserves_no_auto_connect(monkeypatch):
     assert app.config.mcp_servers["swap"]["auto_connect"] is False
     assert manager.removed == ["swap"]
     assert manager.started == []
+    assert "未自动连接" in result.text
 
 
 def test_mcp_update_reports_saved_config_when_stop_fails():

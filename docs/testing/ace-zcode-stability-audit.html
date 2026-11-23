@@ -847,6 +847,12 @@
 <p><strong>验收</strong> McpHub 11 项通过，403 用例断言无「添加服务」，普通加载失败仍可重试；TypeScript 通过。真实权限仍由 Gateway 管理员校验决定。</p>
 <p class="evidence">Ace <code>web/src/components/McpHub.tsx</code>、<code>web/src/components/McpHub.test.tsx</code>、<code>docs/frontend/web-frontend.html</code>。ZCode <code>apps/zcode-cli/packages/bootstrap/src/mcp-config.ts</code> 的端点配置路径。</p>
 </article>
+<article id="cli-mcp-manual-text">
+<h3>CLI MCP 保存结果说明自动连接状态</h3>
+<p><code>mcp servers add/update</code> 使用 <code>--no-auto-connect</code> 时原先只提示“已添加/已更新”，用户可能以为服务已在连接。现在正常文本追加“已保存，未自动连接；可用 mcp servers reload 启动”；update 同时保留旧连接停止失败的 warning。</p>
+<p><strong>验收</strong> add/update 手动连接用例断言文本包含“未自动连接”；定向用例、Ruff 通过。</p>
+<p class="evidence">Ace <code>crew/cli/integration.py</code>、<code>tests/test_cli.py</code>、<code>docs/backend/modules/cli.html</code>。Kimi Code <code>apps/kimi-code/src/cli/commands.ts</code> 的 CLI 参数入口。</p>
+</article>
 <article id="external-marketplace-sources">
 <h3>技能市场源与 MCP 服务地址是不同配置</h3>
 <p>ZCode 的添加插件市场对话框提交来源到插件协议，解析 GitHub、Git、HTTPS 清单或本地 JSON/目录，并在插件存储锁内登记。市场清单可列出包含技能或 MCP 的插件；可直接连接的 MCP 服务由另一张表单管理。普通网页不因此成为市场清单或 MCP 端点。</p>
