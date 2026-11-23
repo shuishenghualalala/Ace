@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 export type SecuritySetupAction = 'install' | 'repair' | 'uninstall';
+export type SecuritySetupConfirmation = (action: SecuritySetupAction) => Promise<boolean>;
 export type SecuritySetupResult = {
   ok: boolean;
   exitCode: number | null;
@@ -284,7 +285,10 @@ export async function provisionInstalledWindowsSandbox(
   runtimePath: string,
   stateDir: string,
   spawnProcess: typeof spawn = spawn,
-  { automatic = false } = {},
+  { automatic = false, confirm }: {
+    automatic?: boolean;
+    confirm?: () => Promise<boolean>;
+  } = {},
 ): Promise<SecuritySetupResult> {
   const verify = () => runSetupCommand({
     executable: runtimePath,
@@ -318,6 +322,10 @@ export async function provisionInstalledWindowsSandbox(
   if (automatic && fs.existsSync(ownerMismatch)) return ownerMismatchSetup();
   if (automatic && fs.existsSync(consent)) return cancelledSetup();
   if (automatic && fs.existsSync(setupFailure)) return deferredSetupFailure();
+  if (confirm && !(await confirm())) {
+    saveSetupDeferral(consent, true);
+    return cancelledSetup();
+  }
   const setup = await runElevatedSecuritySetup(runtimePath, stateDir, 'install', spawnProcess);
   if (setup.code === 'uac_cancelled') saveSetupDeferral(consent, true);
   if (setup.code === 'windows_setup_owner_mismatch') saveSetupDeferral(ownerMismatch, true);
@@ -375,6 +383,7 @@ interface WindowsSandboxLocation {
 export function createWindowsSandboxSetupCoordinator(
   provision = provisionInstalledWindowsSandbox,
   elevate = runElevatedSecuritySetup,
+  confirm?: SecuritySetupConfirmation,
 ) {
   let automaticAttempted = false;
   let active: {
@@ -393,11 +402,15 @@ export function createWindowsSandboxSetupCoordinator(
       }
       return Promise.resolve({ ok: false, exitCode: null, detail: '另一个 Windows 防护操作正在进行' });
     }
-    const promise = Promise.resolve().then(() => (
-      action === 'install'
-        ? provision(runtimePath, stateDir, undefined, { automatic })
-        : elevate(runtimePath, stateDir, action)
-    )).finally(() => { active = undefined; });
+    const promise = (async () => {
+      if (action !== 'install' && confirm && !(await confirm(action))) return cancelledSetup();
+      return action === 'install'
+        ? provision(runtimePath, stateDir, undefined, {
+            automatic,
+            ...(confirm ? { confirm: () => confirm(action) } : {}),
+          })
+        : elevate(runtimePath, stateDir, action);
+    })().finally(() => { active = undefined; });
     active = { action, runtimePath, stateDir, promise };
     return promise;
   }

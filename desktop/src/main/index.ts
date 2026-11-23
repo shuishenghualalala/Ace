@@ -132,6 +132,7 @@ import {
   runElevatedUacEnable,
   securityRuntimePlatformKey,
   windowsPackagedGatewaySecurityEnv,
+  type SecuritySetupAction,
 } from './security-setup';
 import {
   GATEWAY_UPLOAD_MAX_FILE_BYTES,
@@ -384,10 +385,73 @@ const MANAGED_GATEWAY_PORT = Number.isInteger(devGatewayPort) && devGatewayPort 
   ? devGatewayPort
   : 28180;
 const AUTOSTART_ARG = '--autostart';
-const windowsSandboxSetup = createWindowsSandboxSetupCoordinator();
+const windowsSandboxSetup = createWindowsSandboxSetupCoordinator(
+  undefined,
+  undefined,
+  (action) => confirmWindowsSecuritySetup(action),
+);
 const windowsSandboxSetupDirectory = process.platform === 'win32' && app.isPackaged
   ? path.join(app.getPath('userData'), 'crew-sandbox-setup-' + randomBytes(16).toString('hex'))
   : undefined;
+
+function windowsSecuritySetupDialogCopy(action: SecuritySetupAction): {
+  title: string;
+  message: string;
+  detail: string;
+} {
+  if (action === 'repair') {
+    return {
+      title: '修复 Windows 本机防护',
+      message: 'Ace 需要管理员授权来修复沙箱账号和网络规则',
+      detail: [
+        'Windows 将核验并恢复离线、联网和直连账号及其网络隔离规则。',
+        '',
+        '接下来 Windows 会弹出管理员确认，程序名为 ace-security-runtime.exe，它是 Ace 自带的本机防护组件。',
+      ].join('\n'),
+    };
+  }
+  if (action === 'uninstall') {
+    return {
+      title: '移除 Windows 本机防护',
+      message: 'Ace 将删除本机沙箱账号和网络规则',
+      detail: [
+        '移除后，Ace 的受管终端将无法使用沙箱隔离。',
+        '',
+        '接下来 Windows 会弹出管理员确认，程序名为 ace-security-runtime.exe。',
+      ].join('\n'),
+    };
+  }
+  return {
+    title: '设置 Windows 本机防护',
+    message: 'Ace 需要一次管理员授权来完成本机防护设置',
+    detail: [
+      'Windows 将创建 3 个独立的低权限沙箱账号（离线、联网、直连），并安装只作用于这些账号的网络隔离规则。',
+      '',
+      '接下来 Windows 会弹出管理员确认，程序名为 ace-security-runtime.exe。它是 Ace 自带的本机防护组件；未签名安装会显示“未知发布者”，这不影响 Ace 对组件的摘要校验。',
+      '',
+      '此设置只影响 Ace 的受管命令，不会修改个人文件。',
+    ].join('\n'),
+  };
+}
+
+async function confirmWindowsSecuritySetup(action: SecuritySetupAction): Promise<boolean> {
+  const copy = windowsSecuritySetupDialogCopy(action);
+  const options = {
+    type: 'question' as const,
+    title: copy.title,
+    message: copy.message,
+    detail: copy.detail,
+    buttons: ['取消', '继续并授权'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const { response } = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, options)
+    : await dialog.showMessageBox(options);
+  return response === 1;
+}
+
 const RENDERER_LAUNCH_SEARCH = '';
 let gatewayIdentityMode: GatewayIdentityMode = 'local';
 

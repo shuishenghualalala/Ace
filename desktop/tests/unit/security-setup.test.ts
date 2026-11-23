@@ -305,6 +305,44 @@ describe('Windows sandbox setup coordinator', () => {
     expect(elevated).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, 'repair');
   });
 
+  it('asks before an elevated repair and returns a local cancellation', async () => {
+    const provision = vi.fn(async () => ready);
+    const elevated = vi.fn(async () => ready);
+    const confirm = vi.fn(async () => false);
+    const coordinator = createWindowsSandboxSetupCoordinator(provision, elevated, confirm);
+
+    await expect(coordinator.run('repair', runtimePath, stateDir)).resolves.toMatchObject({
+      ok: false,
+      code: 'uac_cancelled',
+    });
+    expect(elevated).not.toHaveBeenCalled();
+
+    confirm.mockResolvedValueOnce(true);
+    await expect(coordinator.run('repair', runtimePath, stateDir)).resolves.toEqual(ready);
+    expect(elevated).toHaveBeenCalledExactlyOnceWith(runtimePath, stateDir, 'repair');
+    expect(confirm).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes the confirmation gate to the install provisioner', async () => {
+    const provision = vi.fn(async (
+      _runtimePath: string,
+      _stateDir: string,
+      _spawn: typeof spawn,
+      options: { automatic?: boolean; confirm?: () => Promise<boolean> },
+    ) => {
+      if (!options.confirm) throw new Error('expected a confirmation gate');
+      return (await options.confirm()) ? ready : { ok: false, exitCode: 1 };
+    });
+    const confirm = vi.fn(async () => false);
+    const coordinator = createWindowsSandboxSetupCoordinator(provision, undefined, confirm);
+
+    await expect(coordinator.run('install', runtimePath, stateDir)).resolves.toMatchObject({ ok: false });
+    expect(confirm).toHaveBeenCalledExactlyOnceWith('install');
+
+    confirm.mockResolvedValueOnce(true);
+    await expect(coordinator.run('install', runtimePath, stateDir)).resolves.toEqual(ready);
+  });
+
   it('keeps cancellation from triggering another automatic attempt and permits an explicit retry', async () => {
     const cancelled = { ok: false, exitCode: 1 };
     const provision = vi.fn<() => Promise<SecuritySetupResult>>()

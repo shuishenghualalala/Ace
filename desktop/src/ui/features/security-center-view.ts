@@ -138,7 +138,7 @@ function renderCapabilitySection(snapshot: SecurityCenterSnapshot): HTMLElement 
     tone = 'warning';
   } else if (setupRequired) {
     label = 'Windows 防护需要设置';
-    description = 'Windows 会请求一次管理员确认。完成后，Ace 自动使用本机防护。';
+    description = 'Windows 会请求一次管理员授权，用于创建本机沙箱账号和网络隔离规则；完成后 Ace 自动使用本机防护。';
     tone = 'warning';
   } else if (ready) {
     label = '本机防护已就绪';
