@@ -235,6 +235,16 @@ describe("Composer slash input", () => {
     expect(input.value).toBe("");
   });
 
+  it("accepts the selected command with Tab", async () => {
+    vi.spyOn(api, "skills").mockResolvedValue([]);
+    const onEnterPlan = vi.fn();
+    const input = await mount({ onEnterPlan });
+    await type(input, "/pl");
+    press(input, "Tab");
+    expect(onEnterPlan).toHaveBeenCalledTimes(1);
+    expect(input.value).toBe("");
+  });
+
   it("exits plan mode through /craft without submitting a chat turn", async () => {
     vi.spyOn(api, "skills").mockResolvedValue([]);
     const onExitPlan = vi.fn();
