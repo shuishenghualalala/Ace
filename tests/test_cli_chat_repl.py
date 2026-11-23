@@ -80,6 +80,7 @@ async def test_repl_dispatches_every_builtin_slash_command(monkeypatch) -> None:
     assert any("[agent]" in line for line in prompt.prompts)
     assert any("未知命令" in line for line in printed)
     assert any("已新建会话" in line for line in printed)
+    assert any("/exit" in line for line in printed)
 
 
 @pytest.mark.asyncio

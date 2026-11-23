@@ -32,7 +32,7 @@ HELP = """[bold]命令[/bold]
   /plan    进入 Plan 模式（只读探索→写计划→审批后执行）
   /compact 立即压缩当前会话上下文（idle 维护窗口；历史原文保留在会话库）
   /todo    查看当前任务清单
-  /quit    退出
+  /quit    退出（也可用 /exit）
 """
 
 
