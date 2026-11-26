@@ -166,6 +166,9 @@
 .mw-hub-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  gap: var(--mw-space-2);
+  flex-wrap: wrap;
 }
 
 /* 注：.mw-chat-template / .mw-master-detail / .mw-settings-template / .mw-board-template /

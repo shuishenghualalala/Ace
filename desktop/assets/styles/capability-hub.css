@@ -8,12 +8,73 @@
 
 .evolution-toggle-row {
   display: inline-flex;
+  min-height: var(--mw-button-height-default);
   align-items: center;
-  gap: var(--mw-space-2);
+  gap: 10px;
+  padding: 0 10px;
+  border: 1px solid var(--mw-border-subtle);
+  border-radius: var(--mw-radius-2);
+  background: var(--mw-bg-subtle);
   color: var(--mw-text-secondary);
   font-size: var(--mw-type-compact-size);
   font-weight: var(--mw-type-label-weight);
   white-space: nowrap;
+}
+
+.plugin-toggle {
+  position: relative;
+  display: inline-flex;
+  width: 30px;
+  height: 18px;
+  flex: 0 0 30px;
+  align-items: center;
+}
+
+.plugin-toggle input {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+}
+
+.plugin-toggle__track {
+  display: flex;
+  width: 30px;
+  height: 18px;
+  align-items: center;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--mw-border-default);
+  transition: background var(--mw-duration-normal) var(--mw-ease-standard);
+}
+
+.plugin-toggle__thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--mw-bg-surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 18%);
+  transition: transform var(--mw-duration-normal) var(--mw-ease-standard);
+}
+
+.plugin-toggle.is-on .plugin-toggle__track {
+  background: var(--mw-action-primary);
+}
+
+.plugin-toggle.is-on .plugin-toggle__thumb {
+  transform: translateX(12px);
+}
+
+.plugin-toggle:focus-within .plugin-toggle__track {
+  outline: 2px solid var(--mw-focus-ring);
+  outline-offset: 2px;
+}
+
+.plugin-toggle.is-pending {
+  opacity: 0.65;
 }
 
 .mw-capability-hub__subview {

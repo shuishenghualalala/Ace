@@ -635,7 +635,7 @@ function syncMarketSourceButton(): void {
   actions.querySelector('[data-market-source-control]')?.remove();
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'mw-button mw-button--secondary mw-button--small';
+  button.className = 'mw-button mw-button--secondary mw-button--default';
   button.dataset.marketSourceControl = '';
   button.textContent = '市场源';
   button.addEventListener('click', () => void openMarketSources());
